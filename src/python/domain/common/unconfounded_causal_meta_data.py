@@ -167,12 +167,6 @@ class UnconfoundedCausalMetaData:
 
     - missingness:
         Choose robust preprocessing (tree-based models, indicator impute) and avoid leakage.
-
-    Libraries to implement these choices:
-      - PyWhy/EconML: DRLearner, NonParamDML (R-Learner), CausalForestDML, DMLOrthoForest, DROrthoForest, ForestDRLearner.
-      - PyWhy/DoWhy: Identification + AIPW/TMLE baselines; assumption scaffolding (if needed).
-      - CausalML (Uber): S/T/X learners, uplift metrics (Qini/AUUC).
-      - grf (R): Generalized random forests / Causal forests with honesty.
     """
     dataset_id: str
     n_rows: int
