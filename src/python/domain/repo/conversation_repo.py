@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Literal, Optional, Union
+from typing import Literal, Union
 from uuid import UUID
 
 # ======================
@@ -41,7 +41,7 @@ class Conversation:
     user_id: UUID
     conversation_id: UUID
     value: str                          # conversation text / summary blob can be json/xml/...
-    title: Optional[str]                # human-friendly title
+    title: str | None                # human-friendly title
     created_at: datetime
     updated_at: datetime
 
@@ -75,7 +75,7 @@ class ConversationRepo(ABC):
         """
 
     @abstractmethod
-    def get_conversation(self, *, user_id: UUID, conversation_id: UUID) -> Optional[Conversation]:
+    def get_conversation(self, *, user_id: UUID, conversation_id: UUID) -> Conversation | None:
         """
         Fetch a conversation by (user_id, conversation_id). Return None if not found.
         """
@@ -91,17 +91,17 @@ class ConversationRepo(ABC):
         self,
         *,
         user_id: UUID,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
+        limit: int | None = None,
+        offset: int | None = None,
         sort: Literal["updated_desc", "updated_asc", "created_desc", "created_asc"] = "updated_desc",
-    ) -> List[Conversation]:
+    ) -> list[Conversation]:
         """
         List conversations for a user with deterministic ordering and optional pagination.
         Default sort: most-recently-updated first.
         """
 
     @abstractmethod
-    def set_conversation_title(self, *, user_id: UUID, conversation_id: UUID, title: Optional[str]) -> Conversation:
+    def set_conversation_title(self, *, user_id: UUID, conversation_id: UUID, title: str | None) -> Conversation:
         """
         Set (or clear if None) the conversation title and bump `updated_at`. Return updated row.
         """
@@ -116,7 +116,7 @@ class ConversationRepo(ABC):
         """
 
     @abstractmethod
-    def get_fact(self, *, user_id: UUID, key: str, scope: Scope) -> Optional[Fact]:
+    def get_fact(self, *, user_id: UUID, key: str, scope: Scope) -> Fact | None:
         """
         Fetch a single fact by (user_id, key, scope). Return None if not found.
         """
@@ -127,11 +127,11 @@ class ConversationRepo(ABC):
         *,
         user_id: UUID,
         scope: Scope,
-        key_prefix: Optional[str] = None,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
+        key_prefix: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
         sort: Literal["key_asc_created_asc", "key_asc_created_desc"] = "key_asc_created_asc",
-    ) -> List[Fact]:
+    ) -> list[Fact]:
         """
         List facts for (user_id, scope), optionally filtered by key prefix and paginated.
         Ordering is deterministic.

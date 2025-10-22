@@ -2,26 +2,26 @@ from __future__ import annotations
 
 import json
 import os
-from threading import RLock
-from typing import Dict, List, Optional, Tuple
-from uuid import UUID
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, Mapping, Dict, cast
+from threading import RLock
+from typing import Any, cast
+from uuid import UUID
 
 from python.domain.repo.conversation_repo import (
-    ConversationRepo,
     Conversation,
+    ConversationRepo,
     Fact,
-    Scope,
     GlobalScope,
     LocalScope,
+    Scope,
 )
 
 # -----------------------------
 # Helpers: scope & serialization
 # -----------------------------
 
-def _scope_key(scope: Scope) -> Tuple[str, Optional[UUID]]:
+def _scope_key(scope: Scope) -> tuple[str, UUID | None]:
     if isinstance(scope, LocalScope):
         return ("local", scope.conversation_id)
     return ("global", None)
@@ -32,13 +32,13 @@ def _dt_to_str(dt: datetime) -> str:
 def _dt_from_str(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
-def _scope_to_dict(scope: Scope) -> Dict[str, str]:
+def _scope_to_dict(scope: Scope) -> dict[str, str]:
     if isinstance(scope, LocalScope):
         return {"kind": "local", "conversation_id": str(scope.conversation_id)}
     return {"kind": "global"}
 
 def _scope_from_dict(d: Mapping[str, Any]) -> Scope:
-    kind = cast(Optional[str], d.get("kind"))
+    kind = cast(str | None, d.get("kind"))
     if kind == "local":
         cid_raw = d.get("conversation_id")
         if not isinstance(cid_raw, str):
@@ -46,7 +46,7 @@ def _scope_from_dict(d: Mapping[str, Any]) -> Scope:
         return LocalScope(conversation_id=UUID(cid_raw))
     return GlobalScope()
 
-def _conv_to_dict(c: Conversation) -> Dict[str, Any]:
+def _conv_to_dict(c: Conversation) -> dict[str, Any]:
     return {
         "user_id": str(c.user_id),
         "conversation_id": str(c.conversation_id),
@@ -60,7 +60,7 @@ def _conv_from_dict(d: Mapping[str, Any]) -> Conversation:
     user_id_str = cast(str, d["user_id"])
     conv_id_str = cast(str, d["conversation_id"])
     value = cast(str, d["value"])
-    title = cast(Optional[str], d.get("title"))
+    title = cast(str | None, d.get("title"))
     created_at_str = cast(str, d["created_at"])
     updated_at_str = cast(str, d["updated_at"])
     return Conversation(
@@ -72,7 +72,7 @@ def _conv_from_dict(d: Mapping[str, Any]) -> Conversation:
         updated_at=_dt_from_str(updated_at_str),
     )
 
-def _fact_to_dict(f: Fact) -> Dict[str, Any]:
+def _fact_to_dict(f: Fact) -> dict[str, Any]:
     return {
         "user_id": str(f.user_id),
         "key": f.key,
@@ -113,8 +113,8 @@ class FileConversationRepo(ConversationRepo):
         self._path: str = path
         self._tmp: str = path + ".tmp"
         self._lock = RLock()
-        self._convs: Dict[Tuple[UUID, UUID], Conversation] = {}
-        self._facts: Dict[Tuple[UUID, str, str, Optional[UUID]], Fact] = {}
+        self._convs: dict[tuple[UUID, UUID], Conversation] = {}
+        self._facts: dict[tuple[UUID, str, str, UUID | None], Fact] = {}
         self._load()
 
     # --- persistence ---
@@ -122,7 +122,7 @@ class FileConversationRepo(ConversationRepo):
     def _load(self) -> None:
         if not os.path.exists(self._path):
             return
-        with open(self._path, "r", encoding="utf-8") as f:
+        with open(self._path, encoding="utf-8") as f:
             data = json.load(f)
 
         self._convs.clear()
@@ -155,7 +155,7 @@ class FileConversationRepo(ConversationRepo):
             self._flush()
             return conv
 
-    def get_conversation(self, *, user_id: UUID, conversation_id: UUID) -> Optional[Conversation]:
+    def get_conversation(self, *, user_id: UUID, conversation_id: UUID) -> Conversation | None:
         with self._lock:
             return self._convs.get((user_id, conversation_id))
 
@@ -172,10 +172,10 @@ class FileConversationRepo(ConversationRepo):
         self,
         *,
         user_id: UUID,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
+        limit: int | None = None,
+        offset: int | None = None,
         sort: str = "updated_desc",  # accepted but ignored (dumb repo)
-    ) -> List[Conversation]:
+    ) -> list[Conversation]:
         with self._lock:
             items = [c for (uid, _), c in self._convs.items() if uid == user_id]
             if offset:
@@ -184,7 +184,7 @@ class FileConversationRepo(ConversationRepo):
                 items = items[:limit]
             return list(items)
 
-    def set_conversation_title(self, *, user_id: UUID, conversation_id: UUID, title: Optional[str]) -> Conversation:
+    def set_conversation_title(self, *, user_id: UUID, conversation_id: UUID, title: str | None) -> Conversation:
         # DUMB: replace the object with identical fields except title; no timestamp changes
         with self._lock:
             k = (user_id, conversation_id)
@@ -212,7 +212,7 @@ class FileConversationRepo(ConversationRepo):
             self._flush()
             return fact
 
-    def get_fact(self, *, user_id: UUID, key: str, scope: Scope) -> Optional[Fact]:
+    def get_fact(self, *, user_id: UUID, key: str, scope: Scope) -> Fact | None:
         with self._lock:
             kind, cid = _scope_key(scope)
             return self._facts.get((user_id, key, kind, cid))
@@ -222,11 +222,11 @@ class FileConversationRepo(ConversationRepo):
         *,
         user_id: UUID,
         scope: Scope,
-        key_prefix: Optional[str] = None,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
+        key_prefix: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
         sort: str = "key_asc_created_asc",  # accepted but ignored (dumb repo)
-    ) -> List[Fact]:
+    ) -> list[Fact]:
         with self._lock:
             kind, cid = _scope_key(scope)
             items = [

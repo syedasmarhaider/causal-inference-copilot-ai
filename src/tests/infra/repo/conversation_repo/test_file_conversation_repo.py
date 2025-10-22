@@ -5,12 +5,11 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 
-from python.infra.repo.conversation_repo.file_conversation_repo import FileConversationRepo
 from python.domain.repo.conversation_repo import (
     Conversation,
     Fact,
@@ -18,8 +17,9 @@ from python.domain.repo.conversation_repo import (
     LocalScope,
     Scope,
 )
+from python.infra.repo.conversation_repo.file_conversation_repo import FileConversationRepo
 
-JsonObj = Dict[str, Any]
+JsonObj = dict[str, Any]
 
 # --------------------------
 # Fixtures & helpers
@@ -37,8 +37,8 @@ def mk_conv(
     user_id: UUID,
     conversation_id: UUID,
     value: str = "v",
-    title: Optional[str] = None,
-    dt: Optional[datetime] = None,
+    title: str | None = None,
+    dt: datetime | None = None,
 ) -> Conversation:
     when = dt or datetime.now()
     return Conversation(
@@ -55,7 +55,7 @@ def mk_fact(
     key: str,
     value: str,
     scope: Scope,
-    dt: Optional[datetime] = None,
+    dt: datetime | None = None,
 ) -> Fact:
     when = dt or datetime.now()
     return Fact(
@@ -68,7 +68,7 @@ def mk_fact(
     )
 
 def read_disk_json(repo_path: Path) -> JsonObj:
-    with open(repo_path, "r", encoding="utf-8") as f:
+    with open(repo_path, encoding="utf-8") as f:
         return json.load(f)
 
 # --------------------------

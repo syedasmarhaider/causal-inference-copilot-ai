@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Dict, List, Optional, Tuple, Union
+
 
 class OutcomeType(Enum):
     CONTINUOUS = auto()
@@ -71,9 +71,9 @@ class TimeSpec:
       - trigger survival variants when appropriate.
     In hospital/EHR settings, this is critical to maintain consistency/SUTVA in practice.
     """
-    index_time_col: Optional[str] = None        # e.g., "admit_time" (anchors windows)
-    treatment_time_col: Optional[str] = None    # when T is assigned; needed for leakage checks
-    outcome_window: Optional[Tuple[str, str]] = None  # e.g., ('index+0d', 'index+30d')
+    index_time_col: str | None = None        # e.g., "admit_time" (anchors windows)
+    treatment_time_col: str | None = None    # when T is assigned; needed for leakage checks
+    outcome_window: tuple[str, str] | None = None  # e.g., ('index+0d', 'index+30d')
 
 
 @dataclass(frozen=True)
@@ -91,9 +91,9 @@ class FeatureInfo:
     name: str
     role: FeatureRole
     dtype: str                                   # pandas dtype (e.g., 'float64', 'int64', 'category', 'datetime64[ns]')
-    description: Optional[str] = None            # human-readable (auditability)
-    allowed_values: Optional[List[Union[str, int, float]]] = None  # validate categoricals; detect rare levels
-    unit: Optional[str] = None                   # for clinician-facing plots/interpretation
+    description: str | None = None            # human-readable (auditability)
+    allowed_values: list[str | int | float] | None = None  # validate categoricals; detect rare levels
+    unit: str | None = None                   # for clinician-facing plots/interpretation
 
 
 @dataclass(frozen=True)
@@ -105,10 +105,10 @@ class OverlapSummary:
     References: AIPW/DR estimators (Robins), DML orthogonality (Chernozhukov et al.).
     Libraries: DoWhy (AIPW/TMLE), EconML (DRLearner, CausalForestDML).
     """
-    propensity_col: Optional[str] = None
-    prop_low: Optional[float] = None             # suggested lower trim (e.g., 0.02)
-    prop_high: Optional[float] = None            # suggested upper trim (e.g., 0.98)
-    tail_fraction: Optional[float] = None        # share outside [prop_low, prop_high]
+    propensity_col: str | None = None
+    prop_low: float | None = None             # suggested lower trim (e.g., 0.02)
+    prop_high: float | None = None            # suggested upper trim (e.g., 0.98)
+    tail_fraction: float | None = None        # share outside [prop_low, prop_high]
 
 
 @dataclass(frozen=True)
@@ -119,8 +119,8 @@ class ClassBalance:
       - For binary outcomes, prevalence affects uplift metric stability (Qini/AUUC).
     Libraries: CausalML (X-Learner, uplift metrics), EconML (XLearner).
     """
-    treatment_probs: Optional[Dict[Union[int, str], float]] = None  # P(T=a)
-    outcome_positive_rate: Optional[float] = None                   # for binary Y
+    treatment_probs: dict[int | str, float] | None = None  # P(T=a)
+    outcome_positive_rate: float | None = None                   # for binary Y
 
 
 @dataclass(frozen=True)
@@ -131,7 +131,7 @@ class MissingnessSummary:
       - Prevent leaky imputations using TimeSpec.
     Practical guidance from tabular ML and causal forests literature (Athey/Wager).
     """
-    fraction_by_feature: Dict[str, float] = field(default_factory=lambda: {})
+    fraction_by_feature: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -176,21 +176,21 @@ class UnconfoundedCausalMetaData:
     outcome_type: OutcomeType
 
     # Column names
-    treatment_cols: List[str]                  # usually ['T']; multi-arm -> one categorical col or encoded
+    treatment_cols: list[str]                  # usually ['T']; multi-arm -> one categorical col or encoded
     outcome_col: str                           # 'Y'
 
     # Feature catalog
-    features: List[FeatureInfo]                # complete schema with roles and dtypes
-    role_index: Dict[FeatureRole, List[str]]   # quick lookup: role -> column names
+    features: list[FeatureInfo]                # complete schema with roles and dtypes
+    role_index: dict[FeatureRole, list[str]]   # quick lookup: role -> column names
 
     # Dtype map speeds encoder decisions and validation
-    pandas_dtypes: Dict[str, str]
+    pandas_dtypes: dict[str, str]
 
     # Optional timing and data-quality summaries (steer learner choice & hyperparams)
-    time_spec: Optional[TimeSpec] = None
-    class_balance: Optional[ClassBalance] = None
-    missingness: Optional[MissingnessSummary] = None
-    overlap: Optional[OverlapSummary] = None
+    time_spec: TimeSpec | None = None
+    class_balance: ClassBalance | None = None
+    missingness: MissingnessSummary | None = None
+    overlap: OverlapSummary | None = None
 
     # Free-form notes (cohort definition, exclusions, ICD code filters, etc.) -> for audit & reproducibility
-    notes: Optional[str] = None
+    notes: str | None = None
