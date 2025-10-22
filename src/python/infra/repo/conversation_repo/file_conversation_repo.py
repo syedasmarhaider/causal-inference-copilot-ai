@@ -189,7 +189,7 @@ class FileConversationRepo(ConversationRepo):
     ) -> list[Conversation]:
         with self._lock:
             items = [c for (uid, _), c in self._convs.items() if uid == user_id]
-            if offset:
+            if offset is not None:
                 items = items[offset:]
             if limit is not None:
                 items = items[:limit]
