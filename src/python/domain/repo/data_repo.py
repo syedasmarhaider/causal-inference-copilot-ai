@@ -11,7 +11,7 @@ class DataRepo(ABC):
         Retrieves data from a CSV source.
 
         :param id: A string identifier for the data source.
-        :param limit: An optional integer to limit the number of columns returned.
+        :param limit: An optional integer to limit the number of rows returned.
         :return: A pandas DataFrame containing the CSV data.
         """
 
