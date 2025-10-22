@@ -1,0 +1,33 @@
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+exclude = '''
+/(
+  \.venv
+| htmlcov
+| dist
+| build
+)/
+'''
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [".venv", "htmlcov", "dist", "build"]
+
+# 👉 Move rules under the 'lint' table (new style)
+[tool.ruff.lint]
+select = [
+  "E", "F",        # pycodestyle/pyflakes
+  "I",             # isort
+  "UP",            # pyupgrade
+  "B",             # bugbear
+  "SIM", "PIE",    # simplicity & best-practices
+]
+ignore = [
+  "E203",          # black-compatible slicing
+  "E501",          # let Black handle line length
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["python"]  # your top-level package under src/
