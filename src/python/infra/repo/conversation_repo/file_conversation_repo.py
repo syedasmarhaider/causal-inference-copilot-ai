@@ -250,7 +250,7 @@ class FileConversationRepo(ConversationRepo):
                 and scid == cid
                 and (key_prefix is None or k.startswith(key_prefix))
             ]
-            if offset:
+            if offset is not None:
                 items = items[offset:]
             if limit is not None:
                 items = items[:limit]
