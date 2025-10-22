@@ -236,10 +236,18 @@ def test_local_scope_is_isolated_by_conversation_id(repo: FileConversationRepo) 
     uid = uuid4()
     cid1, cid2 = uuid4(), uuid4()
 
+    # write into each local scope
+    repo.upsert_fact(fact=mk_fact(uid, "k", "v1", LocalScope(conversation_id=cid1)))
+    repo.upsert_fact(fact=mk_fact(uid, "k", "v2", LocalScope(conversation_id=cid2)))
+
+    # read back per-scope
     fact1 = repo.get_fact(user_id=uid, key="k", scope=LocalScope(conversation_id=cid1))
-    assert fact1 is not None and fact1.value == "v1"
     fact2 = repo.get_fact(user_id=uid, key="k", scope=LocalScope(conversation_id=cid2))
+    assert fact1 is not None and fact1.value == "v1"
     assert fact2 is not None and fact2.value == "v2"
+
+    # negative cross-check: a third convo sees nothing
+    assert repo.get_fact(user_id=uid, key="k", scope=LocalScope(conversation_id=uuid4())) is None
 
 
 def test_list_facts_limit_offset_and_prefix(repo: FileConversationRepo) -> None:
