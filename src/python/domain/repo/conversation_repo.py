@@ -3,10 +3,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Union, Literal, Optional, List
+from typing import List, Literal, Optional, Union
 from uuid import UUID
 
-# --- Scopes ---
+# ======================
+# Scopes (for Facts only)
+# ======================
 
 @dataclass(frozen=True)
 class GlobalScope:
@@ -19,89 +21,105 @@ class LocalScope:
 
 Scope = Union[GlobalScope, LocalScope]
 
+def global_scope() -> GlobalScope:
+    return GlobalScope()
 
-# --- Domain models (conversation_id is carried by scope when local) ---
+def local_scope(conversation_id: UUID) -> LocalScope:
+    return LocalScope(conversation_id=conversation_id)
+
+
+# ======================
+# Domain models
+# ======================
 
 @dataclass(frozen=True)
 class Conversation:
+    """
+    A conversation is keyed by (user_id, conversation_id).
+    NOTE: Conversations do NOT have scope.
+    """
     user_id: UUID
-    value: str                # conversation text / summary blob
-    scope: Scope              # GlobalScope | LocalScope
+    conversation_id: UUID
+    value: str                          # conversation text / summary blob can be json/xml/...
+    title: Optional[str]                # human-friendly title
     created_at: datetime
     updated_at: datetime
 
 @dataclass(frozen=True)
 class Fact:
+    """
+    A fact is a key-value attributed to a user and a Scope (global or local-to-conversation).
+    For LocalScope, the scope carries conversation_id.
+    """
     user_id: UUID
     key: str
     value: str
-    scope: Scope              # GlobalScope | LocalScope (ties to a conversation when local)
+    scope: Scope
     created_at: datetime
     updated_at: datetime
 
 
-# --- Utilities (optional) ---
-
-def is_global(scope: Scope) -> bool:
-    return isinstance(scope, GlobalScope)
-
-def local_scope(conversation_id: UUID) -> LocalScope:
-    return LocalScope(conversation_id=conversation_id)
-
-def global_scope() -> GlobalScope:
-    return GlobalScope()
-
-
-# --- Repository interface (LLM memory) ---
-
-# TODO: no tnx for now but later would add to make it more robust
+# ======================
+# Repository interface
+# ======================
 
 class ConversationRepo(ABC):
-    # Conversations
+    # -------- Conversations (no scope) --------
+
     @abstractmethod
     def upsert_append_conversation(self, *, conv: Conversation) -> Conversation:
         """
-        Insert-or-update a conversation matched by (user_id, scope):
-          - GLOBAL: (user_id, kind='global')
-          - LOCAL : (user_id, kind='local', conversation_id)
-        Implementations may append/merge `value` on upsert.
-        Returns the persisted row.
+        Insert or update a conversation matched by (user_id, conversation_id).
+        On update, append/merge `value` (implementation-defined; commonly newline-append)
+        and update `updated_at`. Return the persisted row.
         """
-        raise NotImplementedError
 
     @abstractmethod
-    def get_conversation(self, *, user_id: UUID, scope: Scope) -> Optional[Conversation]:
+    def get_conversation(self, *, user_id: UUID, conversation_id: UUID) -> Optional[Conversation]:
         """
-        Fetch a single conversation by (user_id, scope).
-        Returns None if not found.
+        Fetch a conversation by (user_id, conversation_id). Return None if not found.
         """
-        raise NotImplementedError
 
     @abstractmethod
-    def delete_conversation(self, *, user_id: UUID, scope: Scope) -> int:
+    def delete_conversation(self, *, user_id: UUID, conversation_id: UUID) -> int:
         """
-        Delete conversation(s) matched by (user_id, scope).
-        For GLOBAL, at most one row should exist per user.
-        Returns rows affected.
+        Delete a conversation by (user_id, conversation_id). Return rows affected (0 or 1).
         """
-        raise NotImplementedError
 
-    # Facts
+    @abstractmethod
+    def list_conversations(
+        self,
+        *,
+        user_id: UUID,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        sort: Literal["updated_desc", "updated_asc", "created_desc", "created_asc"] = "updated_desc",
+    ) -> List[Conversation]:
+        """
+        List conversations for a user with deterministic ordering and optional pagination.
+        Default sort: most-recently-updated first.
+        """
+
+    @abstractmethod
+    def set_conversation_title(self, *, user_id: UUID, conversation_id: UUID, title: Optional[str]) -> Conversation:
+        """
+        Set (or clear if None) the conversation title and bump `updated_at`. Return updated row.
+        """
+
+    # -------- Facts (scoped) --------
+
     @abstractmethod
     def upsert_fact(self, *, fact: Fact) -> Fact:
         """
         Insert-or-update a fact matched by (user_id, key, scope).
-        Returns the persisted row.
+        On update, overwrite value and bump `updated_at`. Return persisted row.
         """
-        raise NotImplementedError
 
     @abstractmethod
     def get_fact(self, *, user_id: UUID, key: str, scope: Scope) -> Optional[Fact]:
         """
-        Fetch a single fact by (user_id, key, scope).
-        Returns None if not found.
+        Fetch a single fact by (user_id, key, scope). Return None if not found.
         """
-        raise NotImplementedError
 
     @abstractmethod
     def list_facts(
@@ -112,15 +130,15 @@ class ConversationRepo(ABC):
         key_prefix: Optional[str] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
+        sort: Literal["key_asc_created_asc", "key_asc_created_desc"] = "key_asc_created_asc",
     ) -> List[Fact]:
         """
         List facts for (user_id, scope), optionally filtered by key prefix and paginated.
+        Ordering is deterministic.
         """
-        raise NotImplementedError
 
     @abstractmethod
     def delete_fact(self, *, user_id: UUID, key: str, scope: Scope) -> int:
         """
-        Delete a fact by (user_id, key, scope). Returns rows affected.
+        Delete a fact by (user_id, key, scope). Return rows affected (0 or 1).
         """
-        raise NotImplementedError
