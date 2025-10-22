@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from dataclasses import dataclass, field
+from typing import Mapping
+from types import MappingProxyType
 
 
 class OutcomeType(Enum):
@@ -137,8 +140,9 @@ class MissingnessSummary:
       - Prevent leaky imputations using TimeSpec.
     Practical guidance from tabular ML and causal forests literature (Athey/Wager).
     """
-
-    fraction_by_feature: dict[str, float] = field(default_factory=dict)
+    fraction_by_feature: Mapping[str, float] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 @dataclass(frozen=True)

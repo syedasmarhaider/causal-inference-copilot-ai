@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, Union
+from typing import Literal
 from uuid import UUID
 
 # ======================
@@ -22,7 +22,7 @@ class LocalScope:
     kind: Literal["local"] = "local"
 
 
-Scope = Union[GlobalScope, LocalScope]
+Scope = GlobalScope | LocalScope
 
 
 def global_scope() -> GlobalScope:

@@ -14,7 +14,9 @@ exclude = '''
 line-length = 100
 target-version = "py311"
 exclude = [".venv", "htmlcov", "dist", "build"]
-# Enable common, fast rulesets
+
+# 👉 Move rules under the 'lint' table (new style)
+[tool.ruff.lint]
 select = [
   "E", "F",        # pycodestyle/pyflakes
   "I",             # isort
@@ -24,7 +26,8 @@ select = [
 ]
 ignore = [
   "E203",          # black-compatible slicing
+  "E501",          # let Black handle line length
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["python"]  
+known-first-party = ["python"]  # your top-level package under src/
