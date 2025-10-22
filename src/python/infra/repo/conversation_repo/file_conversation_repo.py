@@ -21,21 +21,26 @@ from python.domain.repo.conversation_repo import (
 # Helpers: scope & serialization
 # -----------------------------
 
+
 def _scope_key(scope: Scope) -> tuple[str, UUID | None]:
     if isinstance(scope, LocalScope):
         return ("local", scope.conversation_id)
     return ("global", None)
 
+
 def _dt_to_str(dt: datetime) -> str:
     return dt.isoformat()
 
+
 def _dt_from_str(s: str) -> datetime:
     return datetime.fromisoformat(s)
+
 
 def _scope_to_dict(scope: Scope) -> dict[str, str]:
     if isinstance(scope, LocalScope):
         return {"kind": "local", "conversation_id": str(scope.conversation_id)}
     return {"kind": "global"}
+
 
 def _scope_from_dict(d: Mapping[str, Any]) -> Scope:
     kind = cast(str | None, d.get("kind"))
@@ -46,6 +51,7 @@ def _scope_from_dict(d: Mapping[str, Any]) -> Scope:
         return LocalScope(conversation_id=UUID(cid_raw))
     return GlobalScope()
 
+
 def _conv_to_dict(c: Conversation) -> dict[str, Any]:
     return {
         "user_id": str(c.user_id),
@@ -55,6 +61,7 @@ def _conv_to_dict(c: Conversation) -> dict[str, Any]:
         "created_at": _dt_to_str(c.created_at),
         "updated_at": _dt_to_str(c.updated_at),
     }
+
 
 def _conv_from_dict(d: Mapping[str, Any]) -> Conversation:
     user_id_str = cast(str, d["user_id"])
@@ -72,6 +79,7 @@ def _conv_from_dict(d: Mapping[str, Any]) -> Conversation:
         updated_at=_dt_from_str(updated_at_str),
     )
 
+
 def _fact_to_dict(f: Fact) -> dict[str, Any]:
     return {
         "user_id": str(f.user_id),
@@ -81,6 +89,7 @@ def _fact_to_dict(f: Fact) -> dict[str, Any]:
         "created_at": _dt_to_str(f.created_at),
         "updated_at": _dt_to_str(f.updated_at),
     }
+
 
 def _fact_from_dict(d: Mapping[str, Any]) -> Fact:
     user_id_str = cast(str, d["user_id"])
@@ -98,9 +107,11 @@ def _fact_from_dict(d: Mapping[str, Any]) -> Fact:
         updated_at=_dt_from_str(updated_at_str),
     )
 
+
 # -----------------------------
 # Dumb file-backed repository
 # -----------------------------
+
 
 class FileConversationRepo(ConversationRepo):
     """
@@ -184,7 +195,9 @@ class FileConversationRepo(ConversationRepo):
                 items = items[:limit]
             return list(items)
 
-    def set_conversation_title(self, *, user_id: UUID, conversation_id: UUID, title: str | None) -> Conversation:
+    def set_conversation_title(
+        self, *, user_id: UUID, conversation_id: UUID, title: str | None
+    ) -> Conversation:
         # DUMB: replace the object with identical fields except title; no timestamp changes
         with self._lock:
             k = (user_id, conversation_id)
@@ -230,8 +243,11 @@ class FileConversationRepo(ConversationRepo):
         with self._lock:
             kind, cid = _scope_key(scope)
             items = [
-                f for (uid, k, knd, scid), f in self._facts.items()
-                if uid == user_id and knd == kind and scid == cid
+                f
+                for (uid, k, knd, scid), f in self._facts.items()
+                if uid == user_id
+                and knd == kind
+                and scid == cid
                 and (key_prefix is None or k.startswith(key_prefix))
             ]
             if offset:

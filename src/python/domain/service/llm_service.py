@@ -10,12 +10,15 @@ JSONScalar: TypeAlias = str | int | float | bool | None
 JSONValue: TypeAlias = JSONScalar | Sequence["JSONValue"] | Mapping[str, "JSONValue"]
 ProviderExtra: TypeAlias = Mapping[str, JSONValue]
 
+
 def _empty_extra() -> dict[str, JSONValue]:
     # Typed empty dict so Pylance doesn’t complain about default_factory=dict
     return {}
 
+
 # ===== Domain types =====
 Role = Literal["system", "user", "assistant", "tool"]
+
 
 @dataclass(frozen=True)
 class ChatMessage:
@@ -23,17 +26,20 @@ class ChatMessage:
     content: str
     name: str | None = None
 
+
 @dataclass(frozen=True)
 class Usage:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
 
+
 @dataclass(frozen=True)
 class ToolCall:
     id: str | None
-    type: str                      # e.g., "function"
+    type: str  # e.g., "function"
     arguments: Mapping[str, JSONValue]
+
 
 @dataclass(frozen=True)
 class LLMResponse:
@@ -42,7 +48,8 @@ class LLMResponse:
     finish_reason: str | None = None
     usage: Usage = Usage()
     tool_calls: list[ToolCall] | None = None
-    raw: object | None = None   # provider-specific payload (opaque)
+    raw: object | None = None  # provider-specific payload (opaque)
+
 
 @dataclass(frozen=True)
 class LLMConfig:
@@ -54,12 +61,13 @@ class LLMConfig:
     system_prompt: str | None = None
     extra: ProviderExtra = field(default_factory=_empty_extra)
 
+
 # ===== Interfaces (ABCs) =====
+
 
 class LLMService(ABC):
     @abstractmethod
-    def generate(self, *, config: LLMConfig, history: Sequence[ChatMessage]) -> LLMResponse:
-        ...
+    def generate(self, *, config: LLMConfig, history: Sequence[ChatMessage]) -> LLMResponse: ...
 
-class ProviderNotFound(Exception):
-    ...
+
+class ProviderNotFound(Exception): ...

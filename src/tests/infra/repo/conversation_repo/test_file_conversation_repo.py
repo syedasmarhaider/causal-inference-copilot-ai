@@ -25,13 +25,16 @@ JsonObj = dict[str, Any]
 # Fixtures & helpers
 # --------------------------
 
+
 @pytest.fixture
 def repo_path(tmp_path: Path) -> Path:
     return tmp_path / "conversations.json"
 
+
 @pytest.fixture
 def repo(repo_path: Path) -> FileConversationRepo:
     return FileConversationRepo(str(repo_path))
+
 
 def mk_conv(
     user_id: UUID,
@@ -50,6 +53,7 @@ def mk_conv(
         updated_at=when,
     )
 
+
 def mk_fact(
     user_id: UUID,
     key: str,
@@ -67,29 +71,37 @@ def mk_fact(
         updated_at=when,
     )
 
+
 def read_disk_json(repo_path: Path) -> JsonObj:
     with open(repo_path, encoding="utf-8") as f:
         return json.load(f)
 
+
 # --------------------------
 # Basic load / empty file cases
 # --------------------------
+
 
 def test_load_when_file_absent(repo_path: Path) -> None:
     # No file present; constructor should not crash and repo is empty
     r = FileConversationRepo(str(repo_path))
     assert r.list_conversations(user_id=uuid4()) == []
 
+
 def test_constructor_raises_on_invalid_json(repo_path: Path) -> None:
     repo_path.write_text("{not-json", encoding="utf-8")
     with pytest.raises(json.JSONDecodeError):
         FileConversationRepo(str(repo_path))
 
+
 # --------------------------
 # Conversations CRUD & persistence
 # --------------------------
 
-def test_upsert_get_conversation_persists_roundtrip(repo_path: Path, repo: FileConversationRepo) -> None:
+
+def test_upsert_get_conversation_persists_roundtrip(
+    repo_path: Path, repo: FileConversationRepo
+) -> None:
     uid = uuid4()
     cid = uuid4()
     now = datetime.now().replace(microsecond=0)
@@ -118,6 +130,7 @@ def test_upsert_get_conversation_persists_roundtrip(repo_path: Path, repo: FileC
     assert roundtrip.created_at == now
     assert roundtrip.updated_at == now
 
+
 def test_set_conversation_title_updates_only_title(repo: FileConversationRepo) -> None:
     uid, cid = uuid4(), uuid4()
     t0 = datetime.now()
@@ -129,11 +142,15 @@ def test_set_conversation_title_updates_only_title(repo: FileConversationRepo) -
     assert updated.created_at == t0  # unchanged
     assert updated.updated_at == t0  # unchanged
 
+
 def test_set_conversation_title_missing_raises(repo: FileConversationRepo) -> None:
     with pytest.raises(KeyError):
         repo.set_conversation_title(user_id=uuid4(), conversation_id=uuid4(), title="x")
 
-def test_delete_conversation_counts_and_persists(repo_path: Path, repo: FileConversationRepo) -> None:
+
+def test_delete_conversation_counts_and_persists(
+    repo_path: Path, repo: FileConversationRepo
+) -> None:
     uid, cid = uuid4(), uuid4()
     repo.upsert_append_conversation(conv=mk_conv(uid, cid))
     assert repo.delete_conversation(user_id=uid, conversation_id=cid) == 1
@@ -143,6 +160,7 @@ def test_delete_conversation_counts_and_persists(repo_path: Path, repo: FileConv
     data = read_disk_json(repo_path)
     assert isinstance(data.get("conversations"), list)
     assert len(data.get("conversations", [])) == 0
+
 
 def test_list_conversations_limit_offset(repo: FileConversationRepo) -> None:
     uid = uuid4()
@@ -162,12 +180,15 @@ def test_list_conversations_limit_offset(repo: FileConversationRepo) -> None:
     lo_items = repo.list_conversations(user_id=uid, offset=1, limit=3)
     assert len(lo_items) == 3
 
+
 def test_get_missing_conversation_returns_none(repo: FileConversationRepo) -> None:
     assert repo.get_conversation(user_id=uuid4(), conversation_id=uuid4()) is None
+
 
 # --------------------------
 # Facts CRUD & scoping
 # --------------------------
+
 
 def test_upsert_get_list_delete_fact_global_and_local(repo: FileConversationRepo) -> None:
     uid = uuid4()
@@ -184,31 +205,42 @@ def test_upsert_get_list_delete_fact_global_and_local(repo: FileConversationRepo
     got_g = repo.get_fact(user_id=uid, key="pref.theme", scope=GlobalScope())
     assert got_g is not None and got_g.value == "dark"
 
-    got_l = repo.get_fact(user_id=uid, key="pref.theme", scope=LocalScope(conversation_id=local_cid))
+    got_l = repo.get_fact(
+        user_id=uid, key="pref.theme", scope=LocalScope(conversation_id=local_cid)
+    )
     assert got_l is not None and got_l.value == "light"
 
     # list_facts with key_prefix
     all_local = repo.list_facts(user_id=uid, scope=LocalScope(conversation_id=local_cid))
     assert {f.key for f in all_local} == {"pref.theme", "session.token"}
 
-    only_pref = repo.list_facts(user_id=uid, scope=LocalScope(conversation_id=local_cid), key_prefix="pref.")
+    only_pref = repo.list_facts(
+        user_id=uid, scope=LocalScope(conversation_id=local_cid), key_prefix="pref."
+    )
     assert {f.key for f in only_pref} == {"pref.theme"}
 
     # delete_fact counts
-    assert repo.delete_fact(user_id=uid, key="pref.theme", scope=LocalScope(conversation_id=local_cid)) == 1
-    assert repo.delete_fact(user_id=uid, key="pref.theme", scope=LocalScope(conversation_id=local_cid)) == 0
+    assert (
+        repo.delete_fact(user_id=uid, key="pref.theme", scope=LocalScope(conversation_id=local_cid))
+        == 1
+    )
+    assert (
+        repo.delete_fact(user_id=uid, key="pref.theme", scope=LocalScope(conversation_id=local_cid))
+        == 0
+    )
     # Global fact still present
     assert repo.get_fact(user_id=uid, key="pref.theme", scope=GlobalScope()) is not None
+
 
 def test_local_scope_is_isolated_by_conversation_id(repo: FileConversationRepo) -> None:
     uid = uuid4()
     cid1, cid2 = uuid4(), uuid4()
 
-  
     fact1 = repo.get_fact(user_id=uid, key="k", scope=LocalScope(conversation_id=cid1))
     assert fact1 is not None and fact1.value == "v1"
     fact2 = repo.get_fact(user_id=uid, key="k", scope=LocalScope(conversation_id=cid2))
     assert fact2 is not None and fact2.value == "v2"
+
 
 def test_list_facts_limit_offset_and_prefix(repo: FileConversationRepo) -> None:
     uid, cid = uuid4(), uuid4()
@@ -221,17 +253,23 @@ def test_list_facts_limit_offset_and_prefix(repo: FileConversationRepo) -> None:
     assert len(repo.list_facts(user_id=uid, scope=scope, offset=3)) == 2
     assert len(repo.list_facts(user_id=uid, scope=scope, key_prefix="pref.1")) == 1
 
+
 def test_get_missing_fact_returns_none(repo: FileConversationRepo) -> None:
     assert repo.get_fact(user_id=uuid4(), key="nope", scope=GlobalScope()) is None
 
+
 def test_delete_missing_fact_returns_zero(repo: FileConversationRepo) -> None:
     assert repo.delete_fact(user_id=uuid4(), key="nope", scope=GlobalScope()) == 0
+
 
 # --------------------------
 # Atomic flush behavior
 # --------------------------
 
-def test_flush_is_atomic_when_replace_fails(monkeypatch: pytest.MonkeyPatch, repo_path: Path) -> None:
+
+def test_flush_is_atomic_when_replace_fails(
+    monkeypatch: pytest.MonkeyPatch, repo_path: Path
+) -> None:
     """
     If os.replace fails, ensure the original file stays intact (not corrupted).
     """
@@ -265,9 +303,11 @@ def test_flush_is_atomic_when_replace_fails(monkeypatch: pytest.MonkeyPatch, rep
     data = read_disk_json(repo_path)
     assert "facts" in data and any(f["key"] == "k2" for f in data["facts"])
 
+
 # --------------------------
 # Concurrency / thread safety
 # --------------------------
+
 
 def test_concurrent_upserts_are_thread_safe(repo_path: Path) -> None:
     r = FileConversationRepo(str(repo_path))
@@ -300,9 +340,11 @@ def test_concurrent_upserts_are_thread_safe(repo_path: Path) -> None:
     data = read_disk_json(repo_path)
     assert isinstance(data.get("facts"), list)
 
+
 # --------------------------
 # Edge cases on parameters
 # --------------------------
+
 
 def test_list_facts_prefix_empty_means_all(repo: FileConversationRepo) -> None:
     uid, cid = uuid4(), uuid4()
@@ -313,6 +355,7 @@ def test_list_facts_prefix_empty_means_all(repo: FileConversationRepo) -> None:
     # key_prefix="" should behave like "no filter"
     items = repo.list_facts(user_id=uid, scope=scope, key_prefix="")
     assert {f.key for f in items} == {"a", "b"}
+
 
 def test_list_offsets_do_not_break_on_zero(repo: FileConversationRepo) -> None:
     uid = uuid4()
