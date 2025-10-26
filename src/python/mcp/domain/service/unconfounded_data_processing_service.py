@@ -12,7 +12,7 @@ class UnconfoundedDataProcessingService(ABC):
     Interface for the unconfounded causal pipeline.
     All methods are keyword-only to keep call sites explicit.
     """
-
+ 
     @abstractmethod
     def getMetaData(
         self,
