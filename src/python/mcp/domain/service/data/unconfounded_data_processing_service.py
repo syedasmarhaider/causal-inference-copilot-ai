@@ -32,10 +32,10 @@ class UnconfoundedDataProcessingService(ABC):
     def validateData(
         self,
         *,
-        meta: UnconfoundedCausalMetaData,
+        dataset_id: str | None = None,
     ) -> ValidationReport:
         """
-        Validate the current dataset against the provided metadata.
+        Validate the current dataset
 
         Parameters
         ----------
