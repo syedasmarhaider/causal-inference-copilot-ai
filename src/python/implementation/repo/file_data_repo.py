@@ -9,7 +9,7 @@ import json
 
 import pandas as _pd  # real import
 
-from domain.repo.data_repo import DataRepo
+from python.domain.repo.data_repo import DataRepo
 
 # Treat pandas as Any so member access doesn't become "Unknown"
 pd = cast(Any, _pd)

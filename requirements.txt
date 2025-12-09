@@ -4,3 +4,4 @@ pandas-stubs
 fastmcp
 langgraph
 google-generativeai
+python-dotenv
