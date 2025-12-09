@@ -2,3 +2,5 @@ pandas
 pytest
 pandas-stubs
 fastmcp
+langgraph
+google-generativeai
