@@ -51,5 +51,9 @@ test: dev-tools
 test-quick: dev-tools
 	@$(PYBIN)/pytest -c pytest.ini -q
 
+.PHONY: run_cli
+run_cli:
+	@$(PYBIN)/python -m python.adapters.cli
+
 clean:
 	@rm -rf $(VENV) .pytest_cache .ruff_cache .coverage coverage.xml htmlcov __pycache__ **/__pycache__
