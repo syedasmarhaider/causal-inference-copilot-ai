@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import  Optional, TypedDict
 from uuid import UUID
 
-from python.workflows.nodes.load_dataset import JSONDict
+from python.workflows.utils.types import JSONDict
 
 class DatasetState(TypedDict, total=False):
     path: Optional[str]                    # path to CSV

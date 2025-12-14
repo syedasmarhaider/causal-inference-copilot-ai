@@ -1,12 +1,13 @@
 # src/python/workflows/state/control_state.py
 from __future__ import annotations
 
-from typing import Any, Literal, TypeAlias, TypedDict
+from typing import Literal, TypedDict
 from uuid import UUID
 
-JSONDict: TypeAlias = dict[str, Any]
+from python.workflows.utils.types import JSONDict  
 
-Stage: TypeAlias = Literal[
+Stage = Literal[
+    "GET_FILE",
     "LOAD_DATASET",
     "PROPOSE_METADATA",
     "CONFIRM_METADATA",
@@ -17,9 +18,9 @@ Stage: TypeAlias = Literal[
     "DONE",
 ]
 
-Status: TypeAlias = Literal["OK", "ERROR", "PENDING"]
+Status = Literal["OK", "ERROR", "PENDING"]
 
-Outcome: TypeAlias = Literal[
+Outcome = Literal[
     "NOT_RUN_YET",
     "IN_PROGRESS",
     "DONE",
@@ -29,7 +30,7 @@ Outcome: TypeAlias = Literal[
     "ABORTED",
 ]
 
-Need: TypeAlias = Literal[
+Need = Literal[
     "NONE",
     "DATASET_PATH",
     "TREATMENT_OUTCOME",
@@ -39,15 +40,12 @@ Need: TypeAlias = Literal[
     "EFFECT_PLAN_CONFIRMATION",
 ]
 
-
 class ControlState(TypedDict):
     conversation_id: UUID
     status: Status
     stage: Stage
-
     outcome: Outcome
     need: Need
-
     interrupt_type: str | None
     last_error: JSONDict | None
     node_message: str

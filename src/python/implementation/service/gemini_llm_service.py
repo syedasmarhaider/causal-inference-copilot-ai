@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from functools import lru_cache
 from typing import Any, cast
 import os
 
@@ -35,9 +34,11 @@ class GeminiLLMService(LLMService):
     def __init__(
         self,
         *,
-        api_key: str,
         default_model: str = "gemini-1.5-pro-latest",
     ) -> None:
+        api_key = os.environ.get(GEMINI_API_KEY_ENV)
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is not set.")
         genai.configure(api_key=api_key)
         self._default_model = default_model
 
@@ -245,15 +246,3 @@ class GeminiLLMService(LLMService):
             tool_calls=tool_calls,
             raw=response,
         )
-
-
-@lru_cache
-def get_llm_service() -> LLMService:
-    """
-    Simple factory for GeminiLLMService, cached so you can import and reuse it
-    from nodes / routers without wiring a separate dependency module.
-    """
-    api_key = os.getenv(GEMINI_API_KEY_ENV)
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY env var is required for GeminiLLMService")
-    return GeminiLLMService(api_key=api_key)

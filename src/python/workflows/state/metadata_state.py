@@ -2,11 +2,13 @@
 from typing import TypedDict
 
 from typing import Optional, List
-from python.workflows.nodes.load_dataset import JSONDict
+from python.workflows.utils.types import JSONDict
 class MetadataState(TypedDict, total=False):
     treatment_hint: Optional[str]
     outcome_hint: Optional[str]
-    
+
+    covariate_hint: Optional[str]        # V
+
     controls_hint: List[str]            # W
     effect_modifiers_hint: List[str]    # X
 

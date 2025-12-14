@@ -1,7 +1,6 @@
-# src/python/workflows/nodes/confirm_metadata.py
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Sequence, cast
+from typing import Any, Callable, List, Sequence, cast
 import json
 import re
 
@@ -12,17 +11,16 @@ from python.workflows.state.conversation_state import ConversationState
 from python.workflows.state.control_state import ControlState, JSONDict, Need, Outcome, Status
 from python.workflows.state.dataset_state import DatasetState
 from python.workflows.state.metadata_state import MetadataState
+from python.workflows.utils.types import JSONDict
 
-JSONValue = Any
-JSONDictLocal = Dict[str, JSONValue]
+
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _JSON_OBJ_RE = re.compile(r"(\{.*\})", re.DOTALL)
 
 
 def _require_control(state: ConversationState) -> ControlState:
-    # invariant: start node sets this
-    return cast(ControlState, state["control"])  # pyright: ignore[reportUnnecessaryCast, reportTypedDictNotRequiredAccess]
+    return cast(ControlState, state["control"]) # type: ignore
 
 
 def _as_dataset(state: ConversationState) -> DatasetState:
@@ -30,7 +28,7 @@ def _as_dataset(state: ConversationState) -> DatasetState:
 
 
 def _as_metadata(state: ConversationState) -> MetadataState:
-    return cast(MetadataState, state.get("metadata", {})) # pyright: ignore[reportUnnecessaryCast]
+    return cast(MetadataState, state.get("metadata", {})) # type: ignore
 
 
 def _role_from_langchain_msg(m: BaseMessage) -> str:
@@ -46,19 +44,19 @@ def _last_user_text(messages: Sequence[BaseMessage]) -> str | None:
     return None
 
 
-def _extract_json_object(text: str) -> JSONDictLocal:
+def _extract_json_object(text: str) -> JSONDict:
     s = text.strip()
 
     m = _JSON_FENCE_RE.search(s)
     if m:
         obj = json.loads(m.group(1))
         if isinstance(obj, dict):
-            return cast(JSONDictLocal, obj)
+            return cast(JSONDict, obj)
 
     try:
         obj2 = json.loads(s)
         if isinstance(obj2, dict):
-            return cast(JSONDictLocal, obj2)
+            return cast(JSONDict, obj2)
     except Exception:
         pass
 
@@ -66,7 +64,7 @@ def _extract_json_object(text: str) -> JSONDictLocal:
     if m2:
         obj3 = json.loads(m2.group(1))
         if isinstance(obj3, dict):
-            return cast(JSONDictLocal, obj3)
+            return cast(JSONDict, obj3)
 
     raise ValueError("LLM did not return a valid JSON object.")
 
@@ -74,13 +72,13 @@ def _extract_json_object(text: str) -> JSONDictLocal:
 def _columns_from_raw_schema(raw_schema: Any) -> List[str]:
     if not isinstance(raw_schema, dict):
         return []
-    cols = raw_schema.get("columns") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    cols = raw_schema.get("columns") # type: ignore
     if not isinstance(cols, list):
         return []
     out: List[str] = []
-    for c in cols: # pyright: ignore[reportUnknownVariableType]
+    for c in cols: # type: ignore
         if isinstance(c, dict):
-            name = c.get("name") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+            name = c.get("name") # type: ignore
             if isinstance(name, str) and name:
                 out.append(name)
     return out
@@ -93,61 +91,26 @@ def _norm(s: str) -> str:
 def _resolve_column(user_col: str, columns: Sequence[str]) -> str | None:
     if not user_col:
         return None
-
     if user_col in columns:
         return user_col
-
     lowered = {c.lower(): c for c in columns}
     if user_col.lower() in lowered:
         return lowered[user_col.lower()]
-
     normed = {_norm(c): c for c in columns}
-    key = _norm(user_col)
-    return normed.get(key)
+    return normed.get(_norm(user_col))
 
 
-def _parse_optional_str_list(x: Any) -> List[str] | None:
-    """
-    Returns:
-      - None if user didn't specify (null / missing / empty string)
-      - [] if user explicitly said empty list
-      - ["a","b"] if provided
-    Accepts a list or a comma/semicolon-separated string as a robustness fallback.
-    """
-    if x is None:
-        return None
-    if isinstance(x, list):
-        return [str(v).strip() for v in x if str(v).strip() != ""] # type: ignore
-    if isinstance(x, str):
-        s = x.strip()
-        if not s:
-            return None
-        parts = re.split(r"[,\n;]+", s)
-        vals = [p.strip() for p in parts if p.strip()]
-        return vals
-    return None
-
-
-def _dedupe_keep_order(xs: Sequence[str]) -> List[str]:
-    seen: set[str] = set()
+def _default_covariates_all_except_ty(columns: Sequence[str], t: str, y: str) -> List[str]:
+    # minimal safe heuristic: exclude treatment/outcome + obvious identifiers
+    id_like = re.compile(r"(?:^id$|uuid|guid|index|row_id|customer_id|user_id)", re.IGNORECASE)
     out: List[str] = []
-    for x in xs:
-        if x not in seen:
-            out.append(x)
-            seen.add(x)
+    for c in columns:
+        if c == t or c == y:
+            continue
+        if id_like.search(c):
+            continue
+        out.append(c)
     return out
-
-
-def _resolve_columns_list(user_cols: Sequence[str], columns: Sequence[str]) -> tuple[List[str], List[str]]:
-    resolved: List[str] = []
-    unresolved: List[str] = []
-    for raw in user_cols:
-        c = _resolve_column(raw, columns)
-        if c is None:
-            unresolved.append(raw)
-        else:
-            resolved.append(c)
-    return _dedupe_keep_order(resolved), unresolved
 
 
 def make_confirm_metadata_node(
@@ -156,30 +119,13 @@ def make_confirm_metadata_node(
     model_name: str = "gemini-1.5-flash",
     history_window: int = 12,
 ) -> Callable[[ConversationState], ConversationState]:
-    """
-    CONFIRM_METADATA node (T, Y, W, X).
-
-    Extract from user:
-      - treatment_column (T)
-      - outcome_column (Y)
-      - controls_columns (W)          [recommended]
-      - effect_modifier_columns (X)   [optional]
-      - causal_question (optional)
-      - accept (bool)
-
-    Validates all provided columns exist in dataset.raw_schema.
-
-    Does NOT mutate control.stage (router owns transitions).
-    Does NOT emit user-facing messages (presenter owns that).
-    """
-
     def confirm_metadata(state: ConversationState) -> ConversationState:
         control_in = _require_control(state)
         dataset_in = _as_dataset(state)
         metadata_in = _as_metadata(state)
 
         conversation_id = control_in["conversation_id"]
-        stage = control_in["stage"]  # invariant: router owns transitions
+        stage = control_in["stage"]  # router-owned
 
         def mk_control(
             *,
@@ -190,7 +136,7 @@ def make_confirm_metadata_node(
             last_error: JSONDict | None,
             interrupt_type: str | None,
         ) -> ControlState:
-            return {
+            control_out: ControlState = {
                 "conversation_id": conversation_id,
                 "status": status,
                 "stage": stage,
@@ -200,6 +146,7 @@ def make_confirm_metadata_node(
                 "last_error": last_error,
                 "node_message": node_message,
             }
+            return control_out
 
         raw_schema = dataset_in.get("raw_schema")
         columns = _columns_from_raw_schema(raw_schema)
@@ -212,7 +159,7 @@ def make_confirm_metadata_node(
                     need="DATASET_PATH",
                     interrupt_type=None,
                     last_error={"code": "MISSING_SCHEMA", "detail": "dataset.raw_schema missing; run LOAD_DATASET first."},
-                    node_message="Dataset schema is missing. Reload dataset so I can validate T/Y/W/X.",
+                    node_message="Dataset schema missing. Reload dataset so I can validate treatment/outcome/covariates.",
                 ),
             }
 
@@ -224,34 +171,31 @@ def make_confirm_metadata_node(
                 "control": mk_control(
                     status="PENDING",
                     outcome="NEEDS_INPUT",
-                    need="CONFIRM_METADATA",
+                    need="TREATMENT_OUTCOME",
                     interrupt_type="REVIEW_METADATA",
-                    last_error={"code": "NO_USER_INPUT", "detail": "No recent user message found to confirm metadata."},
-                    node_message="Tell me treatment (T), outcome (Y), and (ideally) controls/confounders (W).",
+                    last_error={"code": "NO_USER_INPUT", "detail": "No recent user message to confirm metadata."},
+                    node_message="Tell me the treatment column, outcome column, and (optionally) covariates.",
                 ),
             }
 
         proposed = metadata_in.get("proposed_design")
-        proposed_dict = proposed if isinstance(proposed, dict) else {}
-        proposed_json = json.dumps(proposed_dict, ensure_ascii=False)
+        proposed_json = json.dumps(proposed, ensure_ascii=False) if isinstance(proposed, dict) else "{}"
         cols_json = json.dumps(columns, ensure_ascii=False)
 
-        # --- strict parse prompt ---
         sys = (
             "You are a strict parser for a causal inference copilot.\n"
-            "Extract the user's confirmation/corrections for a causal design.\n\n"
+            "Extract user's confirmation/corrections.\n\n"
             "Return ONLY one JSON object with EXACTLY these keys:\n"
             "{\n"
             '  "accept": boolean,\n'
             '  "treatment_column": string | null,\n'
             '  "outcome_column": string | null,\n'
-            '  "controls_columns": [string] | null,\n'
-            '  "effect_modifier_columns": [string] | null,\n'
+            '  "covariate_strategy": "USER_LIST" | "ALL_EXCEPT_TY" | "NONE" | null,\n'
+            '  "covariate_columns": [string] | null,\n'
             '  "causal_question": string | null\n'
             "}\n"
             "No markdown. No extra keys. No prose.\n"
-            "If user did not specify something, use null.\n"
-            "IMPORTANT: Only use column names from AllowedColumns.\n"
+            "If user says 'use all other columns as controls/covariates', set covariate_strategy=ALL_EXCEPT_TY.\n"
         )
 
         tail = list(prior_msgs)[-history_window:] if isinstance(prior_msgs, list) else []
@@ -263,12 +207,11 @@ def make_confirm_metadata_node(
                     content=str(getattr(m, "content", "")),
                 )
             )
-
         llm_history.append(
             ChatMessage(
                 role="user",
                 content=(
-                    "AllowedColumns (array):\n"
+                    "Allowed dataset columns (array):\n"
                     f"{cols_json}\n\n"
                     "Current proposed design (json):\n"
                     f"{proposed_json}\n\n"
@@ -278,9 +221,9 @@ def make_confirm_metadata_node(
             )
         )
 
-        config = LLMConfig(model=model_name, temperature=0.0, max_tokens=500)
+        config = LLMConfig(model=model_name, temperature=0.0, max_tokens=450)
 
-        parsed: JSONDictLocal
+        parsed: JSONDict
         parse_error: JSONDict | None = None
         try:
             resp = llm.generate(config=config, history=llm_history)
@@ -291,120 +234,61 @@ def make_confirm_metadata_node(
                 "accept": False,
                 "treatment_column": None,
                 "outcome_column": None,
-                "controls_columns": None,
-                "effect_modifier_columns": None,
+                "covariate_strategy": None,
+                "covariate_columns": None,
                 "causal_question": None,
             }
 
         accept = bool(parsed.get("accept", False))
         t_raw = parsed.get("treatment_column")
         y_raw = parsed.get("outcome_column")
-        w_raw = parsed.get("controls_columns")
-        x_raw = parsed.get("effect_modifier_columns")
+        cov_strategy = parsed.get("covariate_strategy")
+        cov_cols_raw = parsed.get("covariate_columns")
         q_raw = parsed.get("causal_question")
 
         t = _resolve_column(str(t_raw), columns) if isinstance(t_raw, str) else None
         y = _resolve_column(str(y_raw), columns) if isinstance(y_raw, str) else None
         q = str(q_raw).strip() if isinstance(q_raw, str) and q_raw.strip() else None
 
-        # --- required: T and Y ---
         if not t or not y:
-            detail: JSONDict = {
-                "code": "MISSING_OR_INVALID_T_Y",
-                "detail": {
-                    "parsed": {"treatment_column": t_raw, "outcome_column": y_raw},
-                    "available_columns_count": len(columns),
-                },
-            }
-            outcome: Outcome = "RETRYABLE_ERROR" if parse_error is not None else "NEEDS_INPUT"
-            last_error: JSONDict | None = parse_error or detail
             return {
                 **state,
                 "control": mk_control(
                     status="PENDING",
-                    outcome=outcome,
+                    outcome="RETRYABLE_ERROR" if parse_error else "NEEDS_INPUT",
                     need="TREATMENT_OUTCOME",
                     interrupt_type="REVIEW_METADATA",
-                    last_error=last_error,
-                    node_message="I still need valid treatment (T) and outcome (Y) column names from your dataset.",
+                    last_error=parse_error
+                    or {
+                        "code": "MISSING_OR_INVALID_TY",
+                        "detail": {"parsed_treatment": t_raw, "parsed_outcome": y_raw},
+                    },
+                    node_message="I need valid treatment and outcome column names (copy-paste them from the schema).",
                 ),
                 "metadata": {**metadata_in, "user_accepts": False},
             }
 
-        w_list = _parse_optional_str_list(w_raw)
-        x_list = _parse_optional_str_list(x_raw)
+        covariates: List[str] = []
+        cov_strategy_s = str(cov_strategy) if isinstance(cov_strategy, str) else "USER_LIST"
 
-        proposed_w = proposed_dict.get("controls_candidates")
-        proposed_x = proposed_dict.get("effect_modifier_candidates")
-
-        proposed_w_list = [str(v) for v in proposed_w] if isinstance(proposed_w, list) else [] # type: ignore
-        proposed_x_list = [str(v) for v in proposed_x] if isinstance(proposed_x, list) else [] # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType]
-
-        w_source: str
-        x_source: str
-
-        if w_list is None:
-            w_source = "proposal"
-            w_resolved, _ = _resolve_columns_list(proposed_w_list, columns)
+        if cov_strategy_s == "NONE":
+            covariates = []
+        elif cov_strategy_s == "ALL_EXCEPT_TY":
+            covariates = _default_covariates_all_except_ty(columns, t=t, y=y)
         else:
-            w_source = "user"
-            w_resolved, w_unresolved = _resolve_columns_list(w_list, columns)
-            if w_list and not w_resolved:
-                # user tried to provide W but none matched -> ask again
-                detail = {
-                    "code": "INVALID_CONTROLS",
-                    "detail": {"parsed": w_list, "unresolved": w_unresolved, "available_columns_count": len(columns)},
-                }
-                outcome = "RETRYABLE_ERROR" if parse_error is not None else "NEEDS_INPUT"
-                return {
-                    **state,
-                    "control": mk_control(
-                        status="PENDING",
-                        outcome=outcome,
-                        need="CONFIRM_METADATA",
-                        interrupt_type="REVIEW_METADATA",
-                        last_error=parse_error or detail,
-                        node_message="Your controls/confounders (W) didn’t match dataset columns. Please copy-paste column names.",
-                    ),
-                    "metadata": {**metadata_in, "user_accepts": False},
-                }
+            if isinstance(cov_cols_raw, list):
+                for v in cov_cols_raw: # type: ignore
+                    if isinstance(v, str):
+                        resolved = _resolve_column(v, columns)
+                        if resolved and resolved not in covariates and resolved not in (t, y):
+                            covariates.append(resolved)
 
-        if x_list is None:
-            x_source = "proposal"
-            x_resolved, _ = _resolve_columns_list(proposed_x_list, columns)
-        else:
-            x_source = "user"
-            x_resolved, x_unresolved = _resolve_columns_list(x_list, columns)
-            if x_list and not x_resolved:
-                detail = {
-                    "code": "INVALID_EFFECT_MODIFIERS",
-                    "detail": {"parsed": x_list, "unresolved": x_unresolved, "available_columns_count": len(columns)},
-                }
-                outcome = "RETRYABLE_ERROR" if parse_error is not None else "NEEDS_INPUT"
-                return {
-                    **state,
-                    "control": mk_control(
-                        status="PENDING",
-                        outcome=outcome,
-                        need="CONFIRM_METADATA",
-                        interrupt_type="REVIEW_METADATA",
-                        last_error=parse_error or detail,
-                        node_message="Your effect modifier columns (X) didn’t match dataset columns. Please copy-paste column names.",
-                    ),
-                    "metadata": {**metadata_in, "user_accepts": False},
-                }
-
-        # sanity: W/X should not include T/Y
-        w_resolved = [c for c in w_resolved if c not in (t, y)]
-        x_resolved = [c for c in x_resolved if c not in (t, y)]
-
-        final_design: JSONDictLocal = {
+        final_design: JSONDict = {
             "treatment": {"column": t},
             "outcome": {"column": y},
-            "controls": {"columns": w_resolved, "source": w_source},            # W
-            "effect_modifiers": {"columns": x_resolved, "source": x_source},    # X
+            "covariates": {"columns": covariates, "strategy": cov_strategy_s},
             "causal_question": q,
-            "accepted_by_user": accept,
+            "accepted": accept,
         }
 
         metadata_out: MetadataState = {
@@ -412,10 +296,28 @@ def make_confirm_metadata_node(
             "final_design": final_design,
             "treatment_hint": t,
             "outcome_hint": y,
-            "controls_hint": w_resolved,       
-            "effect_modifiers_hint": x_resolved,  
-            "user_accepts": True,                 
+            "covariate_hint": covariates[0] if covariates else "",
+            "user_accepts": True,
         }
+
+        # If covariates are empty, you may still proceed, but it’s scientifically risky.
+        # So: keep OK/DONE but set need=COVARIATES if you want to force the user to decide.
+        if not covariates and cov_strategy_s != "NONE":
+            return {
+                **state,
+                "control": mk_control(
+                    status="PENDING",
+                    outcome="DONE",
+                    need="COVARIATES",
+                    interrupt_type="REVIEW_METADATA",
+                    last_error=None,
+                    node_message=(
+                        "Treatment/outcome confirmed. Next: confirm covariates (confounders/controls). "
+                        "You can list them, or say 'use all other columns'."
+                    ),
+                ),
+                "metadata": metadata_out,
+            }
 
         return {
             **state,
@@ -424,8 +326,8 @@ def make_confirm_metadata_node(
                 outcome="DONE",
                 need="NONE",
                 interrupt_type=None,
-                last_error=parse_error,  # keep if you want observability; or drop it
-                node_message="Confirmed causal design (T/Y/W/X). Ready to move to estimator selection.",
+                last_error=parse_error,
+                node_message="Confirmed treatment/outcome/covariates. Ready for estimator selection.",
             ),
             "metadata": metadata_out,
         }

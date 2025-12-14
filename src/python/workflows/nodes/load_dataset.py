@@ -1,16 +1,14 @@
 # src/python/workflows/nodes/load_dataset.py
 from __future__ import annotations
 
-from typing import Any, Callable, Dict
+from typing import Callable
 from uuid import UUID
 
 from python.domain.repo.data_repo import DataRepo
 from python.workflows.state.conversation_state import ConversationState
 from python.workflows.state.control_state import ControlState, JSONDict, Need, Outcome, Status
 from python.workflows.state.dataset_state import DatasetState
-
-JSONValue = Any
-JSONDictLocal = Dict[str, JSONValue]
+from python.workflows.utils.types import JSONDict
 
 
 def _require_control(state: ConversationState) -> ControlState:
@@ -115,10 +113,10 @@ def make_load_dataset_node(data_repo: DataRepo) -> Callable[[ConversationState],
 
         # 5) minimal schema + summary (you said OK to keep this lightweight)
         n_rows, n_cols = df.shape
-        raw_schema: JSONDictLocal = {
+        raw_schema: JSONDict = {
             "columns": [{"name": col, "dtype": str(dtype)} for col, dtype in df.dtypes.items()]
         }
-        summary: JSONDictLocal = {"n_rows": int(n_rows), "n_cols": int(n_cols)}
+        summary: JSONDict = {"n_rows": int(n_rows), "n_cols": int(n_cols)}
 
         return {
             **state,
