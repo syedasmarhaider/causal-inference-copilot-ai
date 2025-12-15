@@ -1,22 +1,22 @@
 # src/python/workflows/nodes/load_dataset.py
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, cast
 from uuid import UUID
 
 from python.domain.repo.data_repo import DataRepo
 from python.workflows.state.conversation_state import ConversationState
-from python.workflows.state.control_state import ControlState, JSONDict, Need, Outcome, Status
+from python.workflows.state.control_state import ControlState, Need, Status
 from python.workflows.state.dataset_state import DatasetState
 from python.workflows.utils.types import JSONDict
 
 
 def _require_control(state: ConversationState) -> ControlState:
-    return state["control"]  # type: ignore[typeddict-item]
+    return cast(ControlState, state["control"])  # type: ignore
 
 
 def _as_dataset(state: ConversationState) -> DatasetState:
-    return state.get("dataset", {}) 
+    return cast(DatasetState, state.get("dataset", {}))  # type: ignore
 
 
 def make_load_dataset_node(data_repo: DataRepo) -> Callable[[ConversationState], ConversationState]:
@@ -25,58 +25,65 @@ def make_load_dataset_node(data_repo: DataRepo) -> Callable[[ConversationState],
         dataset_in = _as_dataset(state)
 
         conversation_id: UUID = control_in["conversation_id"]
-        stage = control_in["stage"] 
+        stage = control_in["stage"]  # should be "LOAD_DATASET"
 
         def mk_control(
             *,
             status: Status,
-            outcome: Outcome,
             need: Need,
             node_message: str,
             last_error: JSONDict | None,
-            interrupt_type: str | None = None,
         ) -> ControlState:
-            return {
-                "conversation_id": conversation_id,
-                "status": status,
-                "stage": stage,
-                "outcome": outcome,
-                "need": need,
-                "interrupt_type": interrupt_type,
-                "last_error": last_error,
-                "node_message": node_message,
-            }
+            return cast(
+                ControlState,
+                {
+                    **control_in,
+                    "conversation_id": conversation_id,
+                    "stage": stage,
+                    "status": status,
+                    "need": need,
+                    "last_error": last_error,
+                    "node_message": node_message,
+                },
+            )
 
         dataset_path = dataset_in.get("path")
 
-        if not isinstance(dataset_path, str) or not dataset_path:
+        # LOAD_DATASET assumes GET_FILE validated the path.
+        # If it's missing/invalid here, it's a fatal pipeline state -> ABORTED.
+        if not isinstance(dataset_path, str) or not dataset_path.strip():
             return {
                 **state,
                 "control": mk_control(
-                    status="PENDING",
-                    outcome="NEEDS_INPUT",
-                    need="DATASET_PATH",
-                    last_error={"code": "NO_DATASET_PATH", "detail": "dataset.path is missing or empty."},
-                    node_message="Provide a CSV path so I can load the dataset.",
+                    status="ABORTED",
+                    need="PRESENT",
+                    last_error={"code": "MISSING_DATASET_PATH", "detail": "dataset.path missing at LOAD_DATASET."},
+                    node_message=(
+                        "Fatal: dataset path is missing at LOAD_DATASET.\n"
+                        "Returning to GET_FILE to collect a valid CSV path."
+                    ),
                 ),
-                "dataset": {**dataset_in, "load_error": "NO_DATASET_PATH"},
+                "dataset": {**dataset_in, "load_error": "MISSING_DATASET_PATH"},
             }
 
-        # 2) trivial .csv check only
+        dataset_path = dataset_path.strip()
+
         if not dataset_path.lower().endswith(".csv"):
             return {
                 **state,
                 "control": mk_control(
-                    status="PENDING",
-                    outcome="NEEDS_INPUT",
-                    need="DATASET_PATH",
-                    last_error={"code": "INVALID_FORMAT", "detail": f"Path {dataset_path!r} is not a .csv file."},
-                    node_message="Dataset path must end with .csv.",
+                    status="ABORTED",
+                    need="PRESENT",
+                    last_error={"code": "INVALID_DATASET_FORMAT", "detail": f"Path {dataset_path!r} not .csv"},
+                    node_message=(
+                        f"Fatal: dataset path is not a .csv file: `{dataset_path}`.\n"
+                        "Returning to GET_FILE to collect a valid CSV path."
+                    ),
                 ),
-                "dataset": {**dataset_in, "path": dataset_path, "load_error": "INVALID_FORMAT"},
+                "dataset": {**dataset_in, "path": dataset_path, "load_error": "INVALID_DATASET_FORMAT"},
             }
 
-        # 3) register
+        # Register dataset (repo will handle existence/readability/permissions; failures are fatal here)
         try:
             dataset_id = data_repo.register_csv_dataset(
                 conversation_id=conversation_id,
@@ -86,46 +93,62 @@ def make_load_dataset_node(data_repo: DataRepo) -> Callable[[ConversationState],
             return {
                 **state,
                 "control": mk_control(
-                    status="ERROR",
-                    outcome="FAILED",
-                    need="NONE",
+                    status="ABORTED",
+                    need="PRESENT",
                     last_error={"code": "REGISTER_DATASET_ERROR", "detail": str(e)},
-                    node_message="Failed to register dataset in repository.",
+                    node_message=(
+                        "Fatal: failed to register dataset in repository.\n"
+                        "Returning to GET_FILE to re-collect a valid path."
+                    ),
                 ),
                 "dataset": {**dataset_in, "path": dataset_path, "load_error": "REGISTER_DATASET_ERROR"},
             }
 
-        # 4) load (repo is responsible for file/CSV parse errors)
+        # Load dataset (CSV parsing issues, encoding problems, etc. => fatal here)
         try:
             df = data_repo.get_csv_data(dataset_id)
         except Exception as e:
             return {
                 **state,
                 "control": mk_control(
-                    status="ERROR",
-                    outcome="FAILED",
-                    need="NONE",
+                    status="ABORTED",
+                    need="PRESENT",
                     last_error={"code": "DATA_LOAD_ERROR", "detail": str(e)},
-                    node_message="Failed to load dataset from repository.",
+                    node_message=(
+                        "Fatal: failed to load/parse the CSV.\n"
+                        "Returning to GET_FILE to re-collect a valid path."
+                    ),
                 ),
                 "dataset": {**dataset_in, "id": dataset_id, "path": dataset_path, "load_error": "DATA_LOAD_ERROR"},
             }
 
-        # 5) minimal schema + summary (you said OK to keep this lightweight)
+        # Minimal schema + summary
         n_rows, n_cols = df.shape
         raw_schema: JSONDict = {
             "columns": [{"name": col, "dtype": str(dtype)} for col, dtype in df.dtypes.items()]
         }
-        summary: JSONDict = {"n_rows": int(n_rows), "n_cols": int(n_cols)}
+        summary: JSONDict = {
+            "n_rows": int(n_rows),
+            "n_cols": int(n_cols),
+        }
+
+        # small readable preview (no heavy printing)
+        cols_preview = [c["name"] for c in raw_schema.get("columns", [])[:10]]  # type: ignore
+        preview_str = ", ".join(cols_preview) + (" ..." if n_cols > 10 else "")
 
         return {
             **state,
             "control": mk_control(
-                status="OK",
-                outcome="DONE",
-                need="NONE",
+                status="DONE",
+                need="PRESENT",
                 last_error=None,
-                node_message="Dataset loaded. Next step is to propose treatment/outcome candidates.",
+                node_message=(
+                    f"✅ Dataset loaded.\n"
+                    f"- Rows: {n_rows}\n"
+                    f"- Columns: {n_cols}\n"
+                    f"- First columns: {preview_str}\n"
+                    "Data has been loaded successfully. Thanks!"
+                ),
             ),
             "dataset": {
                 **dataset_in,

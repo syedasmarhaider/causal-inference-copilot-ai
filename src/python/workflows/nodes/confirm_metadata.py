@@ -1,3 +1,4 @@
+# src/python/workflows/nodes/confirm_metadata.py
 from __future__ import annotations
 
 from typing import Any, Callable, List, Sequence, cast
@@ -8,11 +9,10 @@ from langchain_core.messages import BaseMessage
 
 from python.domain.service.llm_service import LLMService, LLMConfig, ChatMessage
 from python.workflows.state.conversation_state import ConversationState
-from python.workflows.state.control_state import ControlState, JSONDict, Need, Outcome, Status
+from python.workflows.state.control_state import ControlState, Need, Status
 from python.workflows.state.dataset_state import DatasetState
 from python.workflows.state.metadata_state import MetadataState
-from python.workflows.utils.types import JSONDict
-
+from python.workflows.utils.types import DEFAULT_MODEL_GEMNI, JSONDict
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
@@ -20,15 +20,15 @@ _JSON_OBJ_RE = re.compile(r"(\{.*\})", re.DOTALL)
 
 
 def _require_control(state: ConversationState) -> ControlState:
-    return cast(ControlState, state["control"]) # type: ignore
+    return cast(ControlState, state["control"])  # type: ignore
 
 
 def _as_dataset(state: ConversationState) -> DatasetState:
-    return cast(DatasetState, state.get("dataset", {})) # type: ignore
+    return cast(DatasetState, state.get("dataset", {}))  # type: ignore
 
 
 def _as_metadata(state: ConversationState) -> MetadataState:
-    return cast(MetadataState, state.get("metadata", {})) # type: ignore
+    return cast(MetadataState, state.get("metadata", {}))  # type: ignore
 
 
 def _role_from_langchain_msg(m: BaseMessage) -> str:
@@ -101,7 +101,6 @@ def _resolve_column(user_col: str, columns: Sequence[str]) -> str | None:
 
 
 def _default_covariates_all_except_ty(columns: Sequence[str], t: str, y: str) -> List[str]:
-    # minimal safe heuristic: exclude treatment/outcome + obvious identifiers
     id_like = re.compile(r"(?:^id$|uuid|guid|index|row_id|customer_id|user_id)", re.IGNORECASE)
     out: List[str] = []
     for c in columns:
@@ -116,37 +115,46 @@ def _default_covariates_all_except_ty(columns: Sequence[str], t: str, y: str) ->
 def make_confirm_metadata_node(
     llm: LLMService,
     *,
-    model_name: str = "gemini-1.5-flash",
     history_window: int = 12,
+    force_covariates_decision: bool = True,
 ) -> Callable[[ConversationState], ConversationState]:
+    """
+    CONFIRM_METADATA stage.
+
+    - Reads the latest human message and parses:
+      treatment, outcome, covariates (list / all-other-columns / none), optional causal question.
+    - Validates column names against dataset schema.
+    - If missing/invalid -> need=PRESENT_AND_USER_INPUT
+    - If dataset schema missing -> status=ABORTED (router should bounce to LOAD_DATASET)
+    """
+
     def confirm_metadata(state: ConversationState) -> ConversationState:
         control_in = _require_control(state)
         dataset_in = _as_dataset(state)
         metadata_in = _as_metadata(state)
 
         conversation_id = control_in["conversation_id"]
-        stage = control_in["stage"]  # router-owned
+        stage = control_in["stage"]  # should be "CONFIRM_METADATA"
 
         def mk_control(
             *,
             status: Status,
-            outcome: Outcome,
             need: Need,
             node_message: str,
             last_error: JSONDict | None,
-            interrupt_type: str | None,
         ) -> ControlState:
-            control_out: ControlState = {
-                "conversation_id": conversation_id,
-                "status": status,
-                "stage": stage,
-                "outcome": outcome,
-                "need": need,
-                "interrupt_type": interrupt_type,
-                "last_error": last_error,
-                "node_message": node_message,
-            }
-            return control_out
+            return cast(
+                ControlState,
+                {
+                    **control_in,
+                    "conversation_id": conversation_id,
+                    "stage": stage,
+                    "status": status,
+                    "need": need,
+                    "last_error": last_error,
+                    "node_message": node_message,
+                },
+            )
 
         raw_schema = dataset_in.get("raw_schema")
         columns = _columns_from_raw_schema(raw_schema)
@@ -154,27 +162,46 @@ def make_confirm_metadata_node(
             return {
                 **state,
                 "control": mk_control(
-                    status="PENDING",
-                    outcome="NEEDS_INPUT",
-                    need="DATASET_PATH",
-                    interrupt_type=None,
+                    status="ABORTED",
+                    need="PRESENT",
                     last_error={"code": "MISSING_SCHEMA", "detail": "dataset.raw_schema missing; run LOAD_DATASET first."},
-                    node_message="Dataset schema missing. Reload dataset so I can validate treatment/outcome/covariates.",
+                    node_message="Fatal: dataset schema missing. Returning to LOAD_DATASET.",
                 ),
             }
 
         prior_msgs: Sequence[BaseMessage] = cast(Sequence[BaseMessage], state.get("messages", []))
         user_text = _last_user_text(prior_msgs)
         if not user_text:
+            # We don't have a user answer yet.
+            proposed = metadata_in.get("proposed_design")
+            proposed_txt = ""
+            if isinstance(proposed, dict):
+                tcs = proposed.get("treatment_candidates", [])
+                ycs = proposed.get("outcome_candidates", [])
+                wcs = proposed.get("controls_candidates", [])
+                proposed_txt = (
+                    f"Proposed candidates:\n"
+                    f"- treatment: {tcs[:5]}\n"
+                    f"- outcome: {ycs[:5]}\n"
+                    f"- controls: {wcs[:8]}\n\n"
+                )
+
+            cols_preview = ", ".join(columns[:15]) + (" ..." if len(columns) > 15 else "")
             return {
                 **state,
                 "control": mk_control(
                     status="PENDING",
-                    outcome="NEEDS_INPUT",
-                    need="TREATMENT_OUTCOME",
-                    interrupt_type="REVIEW_METADATA",
-                    last_error={"code": "NO_USER_INPUT", "detail": "No recent user message to confirm metadata."},
-                    node_message="Tell me the treatment column, outcome column, and (optionally) covariates.",
+                    need="PRESENT_AND_USER_INPUT",
+                    last_error={"code": "NO_USER_INPUT", "detail": "No user message to confirm metadata."},
+                    node_message=(
+                        f"{proposed_txt}"
+                        "Reply with:\n"
+                        "- treatment=<column>\n"
+                        "- outcome=<column>\n"
+                        "- covariates=<comma-separated columns> OR say 'all other columns' OR 'none'\n"
+                        "- optional: question=<your causal question>\n\n"
+                        f"Columns preview: {cols_preview}"
+                    ),
                 ),
             }
 
@@ -195,7 +222,10 @@ def make_confirm_metadata_node(
             '  "causal_question": string | null\n'
             "}\n"
             "No markdown. No extra keys. No prose.\n"
-            "If user says 'use all other columns as controls/covariates', set covariate_strategy=ALL_EXCEPT_TY.\n"
+            "Rules:\n"
+            "- Only choose columns from AllowedColumns.\n"
+            "- If user says 'use all other columns as controls/covariates', set covariate_strategy=ALL_EXCEPT_TY.\n"
+            "- If user says 'no controls/covariates', set covariate_strategy=NONE.\n"
         )
 
         tail = list(prior_msgs)[-history_window:] if isinstance(prior_msgs, list) else []
@@ -207,11 +237,12 @@ def make_confirm_metadata_node(
                     content=str(getattr(m, "content", "")),
                 )
             )
+
         llm_history.append(
             ChatMessage(
                 role="user",
                 content=(
-                    "Allowed dataset columns (array):\n"
+                    "AllowedColumns (JSON array):\n"
                     f"{cols_json}\n\n"
                     "Current proposed design (json):\n"
                     f"{proposed_json}\n\n"
@@ -221,7 +252,7 @@ def make_confirm_metadata_node(
             )
         )
 
-        config = LLMConfig(model=model_name, temperature=0.0, max_tokens=450)
+        config = LLMConfig(model=DEFAULT_MODEL_GEMNI, temperature=1.0)
 
         parsed: JSONDict
         parse_error: JSONDict | None = None
@@ -251,19 +282,22 @@ def make_confirm_metadata_node(
         q = str(q_raw).strip() if isinstance(q_raw, str) and q_raw.strip() else None
 
         if not t or not y:
+            cols_preview = ", ".join(columns[:20]) + (" ..." if len(columns) > 20 else "")
             return {
                 **state,
                 "control": mk_control(
-                    status="PENDING",
-                    outcome="RETRYABLE_ERROR" if parse_error else "NEEDS_INPUT",
-                    need="TREATMENT_OUTCOME",
-                    interrupt_type="REVIEW_METADATA",
+                    status="RETRYABLE_ERROR" if parse_error else "PENDING",
+                    need="PRESENT_AND_USER_INPUT",
                     last_error=parse_error
                     or {
                         "code": "MISSING_OR_INVALID_TY",
                         "detail": {"parsed_treatment": t_raw, "parsed_outcome": y_raw},
                     },
-                    node_message="I need valid treatment and outcome column names (copy-paste them from the schema).",
+                    node_message=(
+                        "I need valid treatment and outcome column names.\n"
+                        "Reply like: treatment=<col>, outcome=<col>, covariates=<...>\n"
+                        f"Columns preview: {cols_preview}"
+                    ),
                 ),
                 "metadata": {**metadata_in, "user_accepts": False},
             }
@@ -277,11 +311,35 @@ def make_confirm_metadata_node(
             covariates = _default_covariates_all_except_ty(columns, t=t, y=y)
         else:
             if isinstance(cov_cols_raw, list):
-                for v in cov_cols_raw: # type: ignore
+                for v in cov_cols_raw: # pyright: ignore[reportUnknownVariableType]
                     if isinstance(v, str):
                         resolved = _resolve_column(v, columns)
                         if resolved and resolved not in covariates and resolved not in (t, y):
                             covariates.append(resolved)
+
+        # If user didn't explicitly choose NONE, and covariates ended up empty, force a decision (optional).
+        if force_covariates_decision and not covariates and cov_strategy_s != "NONE":
+            return {
+                **state,
+                "control": mk_control(
+                    status="PENDING",
+                    need="PRESENT_AND_USER_INPUT",
+                    last_error={"code": "MISSING_COVARIATES", "detail": "No covariates resolved from user input."},
+                    node_message=(
+                        "Treatment/outcome are valid.\n"
+                        "Now decide covariates:\n"
+                        "- list them (comma-separated), OR\n"
+                        "- say 'all other columns', OR\n"
+                        "- say 'none'\n"
+                    ),
+                ),
+                "metadata": {
+                    **metadata_in,
+                    "treatment_hint": t,
+                    "outcome_hint": y,
+                    "user_accepts": False,
+                },
+            }
 
         final_design: JSONDict = {
             "treatment": {"column": t},
@@ -291,43 +349,33 @@ def make_confirm_metadata_node(
             "accepted": accept,
         }
 
-        metadata_out: MetadataState = {
-            **metadata_in,
-            "final_design": final_design,
-            "treatment_hint": t,
-            "outcome_hint": y,
-            "covariate_hint": covariates[0] if covariates else "",
-            "user_accepts": True,
-        }
+        metadata_out: MetadataState = cast(
+            MetadataState,
+            {
+                **metadata_in,
+                "final_design": final_design,
+                "treatment_hint": t,
+                "outcome_hint": y,
+                "covariate_hint": covariates[0] if covariates else "",
+                "user_accepts": True,
+            },
+        )
 
-        # If covariates are empty, you may still proceed, but it’s scientifically risky.
-        # So: keep OK/DONE but set need=COVARIATES if you want to force the user to decide.
-        if not covariates and cov_strategy_s != "NONE":
-            return {
-                **state,
-                "control": mk_control(
-                    status="PENDING",
-                    outcome="DONE",
-                    need="COVARIATES",
-                    interrupt_type="REVIEW_METADATA",
-                    last_error=None,
-                    node_message=(
-                        "Treatment/outcome confirmed. Next: confirm covariates (confounders/controls). "
-                        "You can list them, or say 'use all other columns'."
-                    ),
-                ),
-                "metadata": metadata_out,
-            }
-
+        # DONE -> orchestrator advances to SELECT_ESTIMATOR
         return {
             **state,
             "control": mk_control(
-                status="OK",
-                outcome="DONE",
-                need="NONE",
-                interrupt_type=None,
+                status="DONE",
+                need="PRESENT",
                 last_error=parse_error,
-                node_message="Confirmed treatment/outcome/covariates. Ready for estimator selection.",
+                node_message=(
+                    "✅ Confirmed metadata.\n"
+                    f"- treatment: {t}\n"
+                    f"- outcome: {y}\n"
+                    f"- covariates: {covariates[:12]}{' ...' if len(covariates) > 12 else ''}\n"
+                    + (f"- question: {q}\n" if q else "")
+                    + ""
+                ),
             ),
             "metadata": metadata_out,
         }

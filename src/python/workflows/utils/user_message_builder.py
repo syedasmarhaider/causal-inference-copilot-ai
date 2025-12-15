@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 
 from python.domain.service.llm_service import LLMService, LLMConfig, ChatMessage
 from python.workflows.state.conversation_state import ConversationState
+from python.workflows.utils.types import DEFAULT_MODEL_GEMNI
 
 JSONDict = Dict[str, Any]
 
@@ -121,7 +122,7 @@ def build_user_message_with_llm(
     llm: LLMService,
     state: ConversationState,
     *,
-    model_name: str = "gemini-1.5-flash",
+    model_name: str = DEFAULT_MODEL_GEMNI,
     history_window: int = 12,
     max_error_detail_chars: int = 1200,
 ) -> AIMessage:
@@ -200,7 +201,7 @@ def build_user_message_with_llm(
     )
     history.append(ChatMessage(role="user", content=user_prompt))
 
-    config = LLMConfig(model=model_name, temperature=0.2, max_tokens=520)
+    config = LLMConfig(model=model_name, temperature=1.0)
 
     try:
         resp = llm.generate(config=config, history=history)

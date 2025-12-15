@@ -34,7 +34,7 @@ class GeminiLLMService(LLMService):
     def __init__(
         self,
         *,
-        default_model: str = "gemini-1.5-pro-latest",
+        default_model: str = "gemini-2.5-flash",
     ) -> None:
         api_key = os.environ.get(GEMINI_API_KEY_ENV)
         if not api_key:

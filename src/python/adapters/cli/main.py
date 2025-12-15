@@ -1,20 +1,25 @@
+# src/python/adapters/cli/main.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol
+from pathlib import Path
+from typing import Any, Optional, Protocol, cast
 from uuid import UUID, uuid4
 
-from langchain_core.messages import HumanMessage, BaseMessage
-
-from python.implementation.repo.file_data_repo import FileDataRepo
-from python.implementation.service.gemini_llm_service import GeminiLLMService
-from python.workflows.state.conversation_state import ConversationState
-from python.workflows.state.control_state import ControlState
-from python.workflows.graph.graph import build_copilot_app
+from langchain_core.messages import BaseMessage, HumanMessage
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import LLMService
+from python.implementation.repo.file_data_repo import FileDataRepo
+from python.implementation.service.gemini_llm_service import GeminiLLMService
+from python.workflows.graph.graph import build_copilot_app
+from python.workflows.state.conversation_state import ConversationState
+from python.workflows.state.control_state import ControlState
 
+
+# -----------------------------
+# State storage (swap later)
+# -----------------------------
 
 class StateStore(Protocol):
     def load(self, conversation_id: UUID) -> ConversationState: ...
@@ -32,73 +37,119 @@ class InMemoryStateStore:
         self._by_id[conversation_id] = state
 
 
+# -----------------------------
+# Bootstrap state
+# -----------------------------
+
+DEFAULT_DATASET_PATH = Path("./data/486f4975-6cd9-4261-a122-e6b0fc46462d/data.csv").resolve()
+
 def new_state(conversation_id: UUID) -> ConversationState:
     control: ControlState = {
         "conversation_id": conversation_id,
         "status": "PENDING",
         "stage": "LOAD_DATASET",
-        "outcome": "NOT_RUN_YET",
-        "need": "DATASET_PATH",
-        "interrupt_type": None,
+        "need": "NONE",
         "last_error": None,
-        "node_message": "Paste a path to a .csv file to begin.",
+        "node_message": f"Bootstrapped dataset path: {DEFAULT_DATASET_PATH}",
+        # optional field in your TypedDict; safe to omit or include:
+        "pending_stage": None,
     }
     return {
         "control": control,
-        "dataset": {},
+        "dataset": {"path": str(DEFAULT_DATASET_PATH)},
         "metadata": {},
         "messages": [],
     }
 
 
-def _last_ai_text(messages: list[BaseMessage]) -> Optional[str]:
-    for m in reversed(messages):
+# -----------------------------
+# Helpers
+# -----------------------------
+
+def _ai_texts_since(messages: list[BaseMessage], start_idx: int) -> list[str]:
+    out: list[str] = []
+    for m in messages[start_idx:]:
         if getattr(m, "type", None) == "ai":
             txt = str(getattr(m, "content", "")).strip()
             if txt:
-                return txt
-    return None
+                out.append(txt)
+    return out
 
 
-def _apply_console_input(state: ConversationState, user_text: str) -> ConversationState:
-    # If we're waiting for dataset path, treat raw input as path unless it's a command.
-    control = state["control"]
-    if control["stage"] == "LOAD_DATASET" and control["need"] == "DATASET_PATH":
-        if user_text.lower().startswith("/load "):
-            path = user_text.split(" ", 1)[1].strip()
-            return {**state, "dataset": {**state.get("dataset", {}), "path": path}}
-        # heuristic: plain path
-        if user_text.strip().lower().endswith(".csv"):
-            return {**state, "dataset": {**state.get("dataset", {}), "path": user_text.strip()}}
-    return state
+@dataclass
+class TurnResult:
+    outputs: list[str]
+    stage: str
+    status: str
+    need: str
 
 
-@dataclass(frozen=True)
-class ConsoleCopilot:
+@dataclass
+class CopilotEngine:
+    """
+    Transport-agnostic runner.
+    CLI calls it; later REST handler can call the same methods.
+    """
     app: Any
     store: StateStore
+    max_safety_invokes: int = 3  # with END-on-PRESENT graph, 1 is enough; this is guardrail only.
 
-    def step(self, conversation_id: UUID, user_text: str) -> str:
+    def _invoke_once(self, conversation_id: UUID) -> TurnResult:
         state = self.store.load(conversation_id)
 
-        # commands
-        if user_text.strip() == "/state":
-            c = state["control"]
-            return f"(stage={c['stage']}, status={c['status']}, outcome={c['outcome']}, need={c['need']})"
-        if user_text.strip() == "/help":
-            return "Commands: /help, /state, /exit, /load <path.csv>"
+        before_msgs = cast(list[BaseMessage], state.get("messages", []))
+        before_len = len(before_msgs)
 
-        # attach user message + update dataset.path if needed
-        state = _apply_console_input(state, user_text)
-        state = {**state, "messages": [*state.get("messages", []), HumanMessage(content=user_text)]}
+        state2: ConversationState = self.app.invoke(state)
+        self.store.save(conversation_id, state2)
 
-        # run one graph turn (graph itself will auto-advance until it needs input)
-        new_state: ConversationState = self.app.invoke(state)
+        after_msgs = cast(list[BaseMessage], state2.get("messages", []))
+        outs = _ai_texts_since(after_msgs, before_len)
 
-        self.store.save(conversation_id, new_state)
+        c = cast(ControlState, state2["control"])
+        return TurnResult(
+            outputs=outs,
+            stage=str(c.get("stage")),
+            status=str(c.get("status")),
+            need=str(c.get("need") or "NONE"),
+        )
 
-        msg = _last_ai_text(list(new_state.get("messages", [])))
-        return msg or str(new_state["control"].get("node_message") or "OK")
+    def kick(self, conversation_id: UUID) -> TurnResult:
+        # No user input; just run until boundary (should stop at PRESENT or NEEDS_INPUT)
+        last: TurnResult | None = None
+        for _ in range(self.max_safety_invokes):
+            last = self._invoke_once(conversation_id)
+            # boundary reached if we produced output or we need input
+            if last.outputs or last.need == "NEEDS_INPUT":
+                return last
+        return last or TurnResult(outputs=["(no output)"], stage="?", status="?", need="?")
+
+    def run_turn(self, conversation_id: UUID, user_text: str) -> TurnResult:
+        state = self.store.load(conversation_id)
+
+        # append human message
+        msgs = [*cast(list[BaseMessage], state.get("messages", [])), HumanMessage(content=user_text)]
+        state2: ConversationState = {**state, "messages": msgs}
+        self.store.save(conversation_id, state2)
+
+        # run until boundary
+        last: TurnResult | None = None
+        for _ in range(self.max_safety_invokes):
+            last = self._invoke_once(conversation_id)
+            if last.outputs or last.need == "NEEDS_INPUT":
+                return last
+        return last or TurnResult(outputs=["(no output)"], stage="?", status="?", need="?")
+
+
+# -----------------------------
+# Wiring
+# -----------------------------
+
+def _wire_data_repo() -> DataRepo:
+    return FileDataRepo(root_dir=Path(".local_data_repo"))
+
+def _wire_llm() -> LLMService:
+    return GeminiLLMService()
 
 
 def run_console(*, data_repo: DataRepo, llm: LLMService) -> None:
@@ -107,12 +158,14 @@ def run_console(*, data_repo: DataRepo, llm: LLMService) -> None:
 
     conversation_id = uuid4()
     store.save(conversation_id, new_state(conversation_id))
-
-    copilot = ConsoleCopilot(app=app, store=store)
+    engine = CopilotEngine(app=app, store=store)
 
     print("Causal Copilot (console). Type /help. Type /exit to quit.\n")
-    # kick: run once with empty input to get first assistant message if your graph/presenter does that
-    # (optional) otherwise we just wait for user.
+
+    res = engine.kick(conversation_id)
+    for msg in res.outputs:
+        print(msg)
+        print()
 
     while True:
         try:
@@ -124,25 +177,21 @@ def run_console(*, data_repo: DataRepo, llm: LLMService) -> None:
         if user_text == "/exit":
             print("bye")
             return
-
+        if user_text == "/help":
+            print("Commands: /help, /state, /exit\n")
+            continue
+        if user_text == "/state":
+            s = store.load(conversation_id)
+            c = cast(ControlState, s["control"])
+            print(f"(stage={c['stage']}, status={c['status']}, need={c['need']})\n")
+            continue
         if not user_text:
             continue
 
-        out = copilot.step(conversation_id, user_text)
-        print(out)
+        res = engine.run_turn(conversation_id, user_text)
+        print("\n\n".join(res.outputs) if res.outputs else "(no output)")
         print()
 
 
-def _wire_data_repo() -> DataRepo:
-     return FileDataRepo(root_dir="./data")
-
-
-def _wire_llm() -> LLMService:
-
-    return GeminiLLMService()
-
-
 if __name__ == "__main__":
-    data_repo = _wire_data_repo()
-    llm = _wire_llm()
-    run_console(data_repo=data_repo, llm=llm)
+    run_console(data_repo=_wire_data_repo(), llm=_wire_llm())

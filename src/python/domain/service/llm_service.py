@@ -54,7 +54,7 @@ class LLMResponse:
 @dataclass(frozen=True)
 class LLMConfig:
     model: str
-    temperature: float = 0.2
+    temperature: float = 0.5
     max_tokens: int | None = None
     top_p: float | None = None
     stop: list[str] | None = None
