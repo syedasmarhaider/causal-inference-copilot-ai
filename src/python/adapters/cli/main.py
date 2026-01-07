@@ -1,25 +1,23 @@
-# src/python/adapters/cli/main.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Protocol, cast
+from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import LLMService
+from python.domain.service.mcp_client import McpClient
 from python.implementation.repo.file_data_repo import FileDataRepo
 from python.implementation.service.gemini_llm_service import GeminiLLMService
-from python.workflows.graph.graph import build_copilot_app
+from python.implementation.service.http_mcp_client import HttpMcpClient
+
+from python.workflows.graph.static_state_router import build_simple_copilot_app
 from python.workflows.state.conversation_state import ConversationState
 from python.workflows.state.control_state import ControlState
 
-
-# -----------------------------
-# State storage (swap later)
-# -----------------------------
 
 class StateStore(Protocol):
     def load(self, conversation_id: UUID) -> ConversationState: ...
@@ -37,23 +35,22 @@ class InMemoryStateStore:
         self._by_id[conversation_id] = state
 
 
-# -----------------------------
-# Bootstrap state
-# -----------------------------
-
 DEFAULT_DATASET_PATH = Path("./data/486f4975-6cd9-4261-a122-e6b0fc46462d/data.csv").resolve()
+
 
 def new_state(conversation_id: UUID) -> ConversationState:
     control: ControlState = {
         "conversation_id": conversation_id,
+        "stage": "GET_FILE",
         "status": "PENDING",
-        "stage": "LOAD_DATASET",
-        "need": "NONE",
+        "post_action": "NONE",
+        "awaiting_user": False,  # ✅ IMPORTANT
+        "post_failure_suggested_stage": None,
         "last_error": None,
-        "node_message": f"Bootstrapped dataset path: {DEFAULT_DATASET_PATH}",
-        # optional field in your TypedDict; safe to omit or include:
+        "node_message": "",
         "pending_stage": None,
     }
+
     return {
         "control": control,
         "dataset": {"path": str(DEFAULT_DATASET_PATH)},
@@ -61,10 +58,6 @@ def new_state(conversation_id: UUID) -> ConversationState:
         "messages": [],
     }
 
-
-# -----------------------------
-# Helpers
-# -----------------------------
 
 def _ai_texts_since(messages: list[BaseMessage], start_idx: int) -> list[str]:
     out: list[str] = []
@@ -81,22 +74,17 @@ class TurnResult:
     outputs: list[str]
     stage: str
     status: str
-    need: str
+    post_action: str
 
 
 @dataclass
 class CopilotEngine:
-    """
-    Transport-agnostic runner.
-    CLI calls it; later REST handler can call the same methods.
-    """
     app: Any
     store: StateStore
-    max_safety_invokes: int = 3  # with END-on-PRESENT graph, 1 is enough; this is guardrail only.
+    max_safety_invokes: int = 4  # app.invoke already loops internally; keep small
 
     def _invoke_once(self, conversation_id: UUID) -> TurnResult:
         state = self.store.load(conversation_id)
-
         before_msgs = cast(list[BaseMessage], state.get("messages", []))
         before_len = len(before_msgs)
 
@@ -111,53 +99,49 @@ class CopilotEngine:
             outputs=outs,
             stage=str(c.get("stage")),
             status=str(c.get("status")),
-            need=str(c.get("need") or "NONE"),
+            post_action=str(c.get("post_action") or "NONE"),
         )
 
     def kick(self, conversation_id: UUID) -> TurnResult:
-        # No user input; just run until boundary (should stop at PRESENT or NEEDS_INPUT)
         last: TurnResult | None = None
         for _ in range(self.max_safety_invokes):
             last = self._invoke_once(conversation_id)
-            # boundary reached if we produced output or we need input
-            if last.outputs or last.need == "NEEDS_INPUT":
+            if last.outputs:
                 return last
-        return last or TurnResult(outputs=["(no output)"], stage="?", status="?", need="?")
+        return last or TurnResult(outputs=["(no output)"], stage="?", status="?", post_action="?")
 
     def run_turn(self, conversation_id: UUID, user_text: str) -> TurnResult:
         state = self.store.load(conversation_id)
-
-        # append human message
         msgs = [*cast(list[BaseMessage], state.get("messages", [])), HumanMessage(content=user_text)]
-        state2: ConversationState = {**state, "messages": msgs}
-        self.store.save(conversation_id, state2)
+        self.store.save(conversation_id, {**state, "messages": msgs})
 
-        # run until boundary
         last: TurnResult | None = None
         for _ in range(self.max_safety_invokes):
             last = self._invoke_once(conversation_id)
-            if last.outputs or last.need == "NEEDS_INPUT":
+            if last.outputs:
                 return last
-        return last or TurnResult(outputs=["(no output)"], stage="?", status="?", need="?")
+        return last or TurnResult(outputs=["(no output)"], stage="?", status="?", post_action="?")
 
-
-# -----------------------------
-# Wiring
-# -----------------------------
 
 def _wire_data_repo() -> DataRepo:
     return FileDataRepo(root_dir=Path(".local_data_repo"))
+
 
 def _wire_llm() -> LLMService:
     return GeminiLLMService()
 
 
-def run_console(*, data_repo: DataRepo, llm: LLMService) -> None:
-    app = build_copilot_app(data_repo=data_repo, llm=llm)
-    store = InMemoryStateStore()
+def _wire_mcp() -> McpClient:
+    return HttpMcpClient(endpoint="http://127.0.0.1:8765/mcp")
 
+
+def run_console(*, data_repo: DataRepo, llm: LLMService, mcp_client: McpClient) -> None:
+    app = build_simple_copilot_app(data_repo=data_repo, llm=llm, mcp_client=mcp_client)
+
+    store = InMemoryStateStore()
     conversation_id = uuid4()
     store.save(conversation_id, new_state(conversation_id))
+
     engine = CopilotEngine(app=app, store=store)
 
     print("Causal Copilot (console). Type /help. Type /exit to quit.\n")
@@ -183,7 +167,7 @@ def run_console(*, data_repo: DataRepo, llm: LLMService) -> None:
         if user_text == "/state":
             s = store.load(conversation_id)
             c = cast(ControlState, s["control"])
-            print(f"(stage={c['stage']}, status={c['status']}, need={c['need']})\n")
+            print(f"(stage={c['stage']}, status={c['status']}, post_action={c.get('post_action','NONE')}, awaiting_user={c.get('awaiting_user', False)})\n")
             continue
         if not user_text:
             continue
@@ -194,4 +178,4 @@ def run_console(*, data_repo: DataRepo, llm: LLMService) -> None:
 
 
 if __name__ == "__main__":
-    run_console(data_repo=_wire_data_repo(), llm=_wire_llm())
+    run_console(data_repo=_wire_data_repo(), llm=_wire_llm(), mcp_client=_wire_mcp())

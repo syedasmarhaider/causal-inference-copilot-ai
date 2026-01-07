@@ -1,4 +1,3 @@
-# src/python/workflows/nodes/load_dataset.py
 from __future__ import annotations
 
 from typing import Callable, cast
@@ -6,7 +5,7 @@ from uuid import UUID
 
 from python.domain.repo.data_repo import DataRepo
 from python.workflows.state.conversation_state import ConversationState
-from python.workflows.state.control_state import ControlState, Need, Status
+from python.workflows.state.control_state import ControlState, Status, Stage, NEED_STAGE, ACTION
 from python.workflows.state.dataset_state import DatasetState
 from python.workflows.utils.types import JSONDict
 
@@ -25,27 +24,35 @@ def make_load_dataset_node(data_repo: DataRepo) -> Callable[[ConversationState],
         dataset_in = _as_dataset(state)
 
         conversation_id: UUID = control_in["conversation_id"]
-        stage = control_in["stage"]  # should be "LOAD_DATASET"
+        stage: Stage = control_in["stage"]  # expected: "LOAD_DATASET"
 
         def mk_control(
             *,
             status: Status,
-            need: Need,
+            post_action: ACTION,
+            post_failure_suggested_stage: NEED_STAGE | None,
             node_message: str,
             last_error: JSONDict | None,
+            pending_stage: Stage | None = None,
         ) -> ControlState:
-            return cast(
+            # NOTE: Orchestrator decides next stage on non-failure.
+            # post_failure_suggested_stage is only meaningful when status == "ABORTED".
+            base: ControlState = cast(
                 ControlState,
                 {
                     **control_in,
                     "conversation_id": conversation_id,
                     "stage": stage,
                     "status": status,
-                    "need": need,
+                    "post_action": post_action,
+                    "post_failure_suggested_stage": post_failure_suggested_stage,
                     "last_error": last_error,
                     "node_message": node_message,
                 },
             )
+            # pending_stage is NotRequired, but setting it explicitly keeps state predictable.
+            base["pending_stage"] = pending_stage
+            return base
 
         dataset_path = dataset_in.get("path")
 
@@ -56,11 +63,12 @@ def make_load_dataset_node(data_repo: DataRepo) -> Callable[[ConversationState],
                 **state,
                 "control": mk_control(
                     status="ABORTED",
-                    need="PRESENT",
+                    post_action="PRESENT",
+                    post_failure_suggested_stage="GET_FILE",
                     last_error={"code": "MISSING_DATASET_PATH", "detail": "dataset.path missing at LOAD_DATASET."},
                     node_message=(
                         "Fatal: dataset path is missing at LOAD_DATASET.\n"
-                        "Returning to GET_FILE to collect a valid CSV path."
+                        "Suggested recovery: go back to GET_FILE to collect a valid CSV path."
                     ),
                 ),
                 "dataset": {**dataset_in, "load_error": "MISSING_DATASET_PATH"},
@@ -73,17 +81,18 @@ def make_load_dataset_node(data_repo: DataRepo) -> Callable[[ConversationState],
                 **state,
                 "control": mk_control(
                     status="ABORTED",
-                    need="PRESENT",
+                    post_action="PRESENT",
+                    post_failure_suggested_stage="GET_FILE",
                     last_error={"code": "INVALID_DATASET_FORMAT", "detail": f"Path {dataset_path!r} not .csv"},
                     node_message=(
                         f"Fatal: dataset path is not a .csv file: `{dataset_path}`.\n"
-                        "Returning to GET_FILE to collect a valid CSV path."
+                        "Suggested recovery: go back to GET_FILE to collect a valid CSV path."
                     ),
                 ),
                 "dataset": {**dataset_in, "path": dataset_path, "load_error": "INVALID_DATASET_FORMAT"},
             }
 
-        # Register dataset (repo will handle existence/readability/permissions; failures are fatal here)
+        # Register dataset (repo handles existence/readability/permissions)
         try:
             dataset_id = data_repo.register_csv_dataset(
                 conversation_id=conversation_id,
@@ -94,17 +103,18 @@ def make_load_dataset_node(data_repo: DataRepo) -> Callable[[ConversationState],
                 **state,
                 "control": mk_control(
                     status="ABORTED",
-                    need="PRESENT",
+                    post_action="PRESENT",
+                    post_failure_suggested_stage="GET_FILE",
                     last_error={"code": "REGISTER_DATASET_ERROR", "detail": str(e)},
                     node_message=(
                         "Fatal: failed to register dataset in repository.\n"
-                        "Returning to GET_FILE to re-collect a valid path."
+                        "Suggested recovery: go back to GET_FILE to re-collect a valid path."
                     ),
                 ),
                 "dataset": {**dataset_in, "path": dataset_path, "load_error": "REGISTER_DATASET_ERROR"},
             }
 
-        # Load dataset (CSV parsing issues, encoding problems, etc. => fatal here)
+        # Load dataset (CSV parsing issues, encoding problems, etc.)
         try:
             df = data_repo.get_csv_data(dataset_id)
         except Exception as e:
@@ -112,11 +122,12 @@ def make_load_dataset_node(data_repo: DataRepo) -> Callable[[ConversationState],
                 **state,
                 "control": mk_control(
                     status="ABORTED",
-                    need="PRESENT",
+                    post_action="PRESENT",
+                    post_failure_suggested_stage="GET_FILE",
                     last_error={"code": "DATA_LOAD_ERROR", "detail": str(e)},
                     node_message=(
                         "Fatal: failed to load/parse the CSV.\n"
-                        "Returning to GET_FILE to re-collect a valid path."
+                        "Suggested recovery: go back to GET_FILE to re-collect a valid path."
                     ),
                 ),
                 "dataset": {**dataset_in, "id": dataset_id, "path": dataset_path, "load_error": "DATA_LOAD_ERROR"},
@@ -127,12 +138,8 @@ def make_load_dataset_node(data_repo: DataRepo) -> Callable[[ConversationState],
         raw_schema: JSONDict = {
             "columns": [{"name": col, "dtype": str(dtype)} for col, dtype in df.dtypes.items()]
         }
-        summary: JSONDict = {
-            "n_rows": int(n_rows),
-            "n_cols": int(n_cols),
-        }
+        summary: JSONDict = {"n_rows": int(n_rows), "n_cols": int(n_cols)}
 
-        # small readable preview (no heavy printing)
         cols_preview = [c["name"] for c in raw_schema.get("columns", [])[:10]]  # type: ignore
         preview_str = ", ".join(cols_preview) + (" ..." if n_cols > 10 else "")
 
@@ -140,14 +147,14 @@ def make_load_dataset_node(data_repo: DataRepo) -> Callable[[ConversationState],
             **state,
             "control": mk_control(
                 status="DONE",
-                need="PRESENT",
+                post_action="PRESENT",
+                post_failure_suggested_stage=None,
                 last_error=None,
                 node_message=(
-                    f"✅ Dataset loaded.\n"
+                    "✅ Dataset loaded.\n"
                     f"- Rows: {n_rows}\n"
                     f"- Columns: {n_cols}\n"
                     f"- First columns: {preview_str}\n"
-                    "Data has been loaded successfully. Thanks!"
                 ),
             ),
             "dataset": {
