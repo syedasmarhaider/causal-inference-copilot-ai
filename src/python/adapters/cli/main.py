@@ -1,128 +1,122 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
 
-from langchain_core.messages import BaseMessage, HumanMessage
-
+from python.domain.models.workflow_response import WorkflowResponse
+from python.domain.repo.conversation_repo import ConversationRepo
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import LLMService
 from python.domain.service.mcp_client import McpClient
+
+from python.workflows.state.conversation_state import ConversationState
+from python.workflows.state.control_state import ControlState
+
 from python.implementation.repo.file_data_repo import FileDataRepo
 from python.implementation.service.gemini_llm_service import GeminiLLMService
 from python.implementation.service.http_mcp_client import HttpMcpClient
 
-from python.workflows.graph.static_state_router import build_simple_copilot_app
-from python.workflows.state.conversation_state import ConversationState
-from python.workflows.state.control_state import ControlState
+from python.workflows.graph.simple_flow_entry import SimpleWorkflow, new_conversation_state
+from python.workflows.graph.simple_flow_router import build_simple_copilot_app
+
+log = logging.getLogger(__name__)
+
+DEFAULT_DATASET_PATH = Path(
+    "./data/486f4975-6cd9-4261-a122-e6b0fc46462d/data.csv"
+).resolve()
 
 
-class StateStore(Protocol):
-    def load(self, conversation_id: UUID) -> ConversationState: ...
-    def save(self, conversation_id: UUID, state: ConversationState) -> None: ...
-
-
-class InMemoryStateStore:
+# =============================================================================
+# In-memory repo for CLI
+# =============================================================================
+class InMemoryConversationRepo(ConversationRepo):
     def __init__(self) -> None:
-        self._by_id: dict[UUID, ConversationState] = {}
+        self._store: dict[tuple[UUID, UUID], ConversationState] = {}
 
-    def load(self, conversation_id: UUID) -> ConversationState:
-        return self._by_id[conversation_id]
+    def load(self, *, user_id: UUID, conversation_id: UUID) -> ConversationState | None:
+        return self._store.get((user_id, conversation_id))
 
-    def save(self, conversation_id: UUID, state: ConversationState) -> None:
-        self._by_id[conversation_id] = state
-
-
-DEFAULT_DATASET_PATH = Path("./data/486f4975-6cd9-4261-a122-e6b0fc46462d/data.csv").resolve()
+    def save(self, *, user_id: UUID, conversation_id: UUID, state: ConversationState) -> None:
+        self._store[(user_id, conversation_id)] = state
 
 
-def new_state(conversation_id: UUID) -> ConversationState:
-    control: ControlState = {
-        "conversation_id": conversation_id,
-        "stage": "GET_FILE",
-        "status": "PENDING",
-        "post_action": "NONE",
-        "awaiting_user": False,  # ✅ IMPORTANT
-        "post_failure_suggested_stage": None,
-        "last_error": None,
-        "node_message": "",
-        "pending_stage": None,
-    }
-
-    return {
-        "control": control,
-        "dataset": {"path": str(DEFAULT_DATASET_PATH)},
-        "metadata": {},
-        "messages": [],
-    }
-
-
-def _ai_texts_since(messages: list[BaseMessage], start_idx: int) -> list[str]:
-    out: list[str] = []
-    for m in messages[start_idx:]:
-        if getattr(m, "type", None) == "ai":
-            txt = str(getattr(m, "content", "")).strip()
-            if txt:
-                out.append(txt)
-    return out
-
-
-@dataclass
-class TurnResult:
+# =============================================================================
+# Drain adapter (keeps calling invoke(None) until stop)
+# =============================================================================
+@dataclass(frozen=True)
+class DrainResult:
     outputs: list[str]
+    needs_input: bool
     stage: str
     status: str
     post_action: str
 
 
-@dataclass
-class CopilotEngine:
-    app: Any
-    store: StateStore
-    max_safety_invokes: int = 4  # app.invoke already loops internally; keep small
+class ConsoleAdapter:
+    def __init__(self, *, workflow: SimpleWorkflow, repo: ConversationRepo) -> None:
+        self._workflow = workflow
+        self._repo = repo
 
-    def _invoke_once(self, conversation_id: UUID) -> TurnResult:
-        state = self.store.load(conversation_id)
-        before_msgs = cast(list[BaseMessage], state.get("messages", []))
-        before_len = len(before_msgs)
-
-        state2: ConversationState = self.app.invoke(state)
-        self.store.save(conversation_id, state2)
-
-        after_msgs = cast(list[BaseMessage], state2.get("messages", []))
-        outs = _ai_texts_since(after_msgs, before_len)
-
-        c = cast(ControlState, state2["control"])
-        return TurnResult(
-            outputs=outs,
-            stage=str(c.get("stage")),
-            status=str(c.get("status")),
-            post_action=str(c.get("post_action") or "NONE"),
+    def snapshot(self, *, user_id: UUID, conversation_id: UUID) -> tuple[str, str, str]:
+        s = self._repo.load(user_id=user_id, conversation_id=conversation_id)
+        if s is None:
+            return ("?", "?", "?")
+        c: ControlState = s["control"]
+        return (
+            str(c.get("stage", "?")),
+            str(c.get("status", "?")),
+            str(c.get("post_action", "NONE")),
         )
 
-    def kick(self, conversation_id: UUID) -> TurnResult:
-        last: TurnResult | None = None
-        for _ in range(self.max_safety_invokes):
-            last = self._invoke_once(conversation_id)
-            if last.outputs:
-                return last
-        return last or TurnResult(outputs=["(no output)"], stage="?", status="?", post_action="?")
+    def drain(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        user_text: str | None,
+        max_drains: int = 16,
+    ) -> DrainResult:
+        outputs: list[str] = []
+        last: WorkflowResponse | None = None
 
-    def run_turn(self, conversation_id: UUID, user_text: str) -> TurnResult:
-        state = self.store.load(conversation_id)
-        msgs = [*cast(list[BaseMessage], state.get("messages", [])), HumanMessage(content=user_text)]
-        self.store.save(conversation_id, {**state, "messages": msgs})
+        for i in range(max_drains):
+            before = self.snapshot(user_id=user_id, conversation_id=conversation_id)
 
-        last: TurnResult | None = None
-        for _ in range(self.max_safety_invokes):
-            last = self._invoke_once(conversation_id)
-            if last.outputs:
-                return last
-        return last or TurnResult(outputs=["(no output)"], stage="?", status="?", post_action="?")
+            txt = user_text if i == 0 else None
+            last = self._workflow.invoke(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                user_text=txt,
+            )
+
+            t = (last.text or "").strip()
+            if t:
+                outputs.append(t)
+
+            if last.needs_input:
+                break
+
+            after = self.snapshot(user_id=user_id, conversation_id=conversation_id)
+
+            # Stop draining if nothing new and no control-plane progress.
+            if not t and after == before:
+                break
+
+        stg, st, pa = self.snapshot(user_id=user_id, conversation_id=conversation_id)
+        return DrainResult(
+            outputs=outputs,
+            needs_input=bool(last.needs_input) if last else False,
+            stage=stg,
+            status=st,
+            post_action=pa,
+        )
 
 
+# =============================================================================
+# Dependency wiring
+# =============================================================================
 def _wire_data_repo() -> DataRepo:
     return FileDataRepo(root_dir=Path(".local_data_repo"))
 
@@ -135,19 +129,36 @@ def _wire_mcp() -> McpClient:
     return HttpMcpClient(endpoint="http://127.0.0.1:8765/mcp")
 
 
+# =============================================================================
+# Main console loop
+# =============================================================================
 def run_console(*, data_repo: DataRepo, llm: LLMService, mcp_client: McpClient) -> None:
-    app = build_simple_copilot_app(data_repo=data_repo, llm=llm, mcp_client=mcp_client)
+    logging.basicConfig(level=logging.INFO)
 
-    store = InMemoryStateStore()
+    repo = InMemoryConversationRepo()
+
+    workflow = build_simple_copilot_app(
+        repo=repo,
+        data_repo=data_repo,
+        llm=llm,
+        mcp_client=mcp_client,
+    )
+
+    adapter = ConsoleAdapter(workflow=workflow, repo=repo)
+
+    user_id = uuid4()
     conversation_id = uuid4()
-    store.save(conversation_id, new_state(conversation_id))
 
-    engine = CopilotEngine(app=app, store=store)
+    # Optional seed: pre-set dataset path so GET_FILE can skip asking
+    seed = new_conversation_state(conversation_id)
+    seed["dataset"]["path"] = str(DEFAULT_DATASET_PATH)
+    repo.save(user_id=user_id, conversation_id=conversation_id, state=seed)
 
     print("Causal Copilot (console). Type /help. Type /exit to quit.\n")
 
-    res = engine.kick(conversation_id)
-    for msg in res.outputs:
+    # Kick once (no user text) to let workflow emit first prompt if any
+    kick = adapter.drain(user_id=user_id, conversation_id=conversation_id, user_text=None)
+    for msg in kick.outputs:
         print(msg)
         print()
 
@@ -165,15 +176,14 @@ def run_console(*, data_repo: DataRepo, llm: LLMService, mcp_client: McpClient) 
             print("Commands: /help, /state, /exit\n")
             continue
         if user_text == "/state":
-            s = store.load(conversation_id)
-            c = cast(ControlState, s["control"])
-            print(f"(stage={c['stage']}, status={c['status']}, post_action={c.get('post_action','NONE')}, awaiting_user={c.get('awaiting_user', False)})\n")
+            stg, st, pa = adapter.snapshot(user_id=user_id, conversation_id=conversation_id)
+            print(f"(stage={stg}, status={st}, post_action={pa})\n")
             continue
         if not user_text:
             continue
 
-        res = engine.run_turn(conversation_id, user_text)
-        print("\n\n".join(res.outputs) if res.outputs else "(no output)")
+        turn = adapter.drain(user_id=user_id, conversation_id=conversation_id, user_text=user_text)
+        print("\n\n".join(turn.outputs) if turn.outputs else "(no output)")
         print()
 
 

@@ -95,13 +95,13 @@ def _last_human_msg_idx(messages: Sequence[BaseMessage]) -> int:
 def _columns_from_raw_schema(raw_schema: Any) -> List[str]:
     if not isinstance(raw_schema, dict):
         return []
-    cols = raw_schema.get("columns")
+    cols = raw_schema.get("columns") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
     if not isinstance(cols, list):
         return []
     out: List[str] = []
-    for c in cols:
+    for c in cols: # pyright: ignore[reportUnknownVariableType]
         if isinstance(c, dict):
-            name = c.get("name")
+            name = c.get("name") # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
             if isinstance(name, str) and name:
                 out.append(name)
     return out
@@ -1009,16 +1009,16 @@ def make_propose_and_confirm_metadata(
 
         # ---- metadata init (stable defaults)
         warnings = metadata_in.get("warnings")
-        warnings = warnings if isinstance(warnings, list) else []
+        warnings = warnings if isinstance(warnings, list) else [] # pyright: ignore[reportUnnecessaryIsInstance]
 
         proposed = metadata_in.get("proposed_design")
         draft = metadata_in.get("draft")
         final_design = metadata_in.get("final_design")
 
         last_idx_seen = metadata_in.get("last_user_msg_idx", -1)
-        last_idx_seen = last_idx_seen if isinstance(last_idx_seen, int) else -1
+        last_idx_seen = last_idx_seen if isinstance(last_idx_seen, int) else -1 # pyright: ignore[reportUnnecessaryIsInstance]
 
-        if not isinstance(draft, dict):
+        if not isinstance(draft, dict): # pyright: ignore[reportUnnecessaryIsInstance]
             draft = _default_draft()
 
         # ---- PROPOSE_METADATA
@@ -1041,7 +1041,7 @@ def make_propose_and_confirm_metadata(
             else:
                 err = None
 
-            if not isinstance(draft, dict) or not draft:
+            if not isinstance(draft, dict) or not draft: # pyright: ignore[reportUnnecessaryIsInstance]
                 draft = _default_draft()
 
             msg = (
@@ -1126,7 +1126,7 @@ def make_propose_and_confirm_metadata(
             if not any_new_human:
                 metadata_out: MetadataState = {
                     "proposed_design": cast(Any, proposed),
-                    "draft": cast(Any, _draft_from_final(final_design)),
+                    "draft": cast(Any, _draft_from_final(final_design)), # pyright: ignore[reportArgumentType]
                     "final_design": cast(Any, final_design),
                     "last_user_msg_idx": last_idx_seen,
                     "canonical_metadata": metadata_in.get("canonical_metadata"),
@@ -1139,13 +1139,13 @@ def make_propose_and_confirm_metadata(
                         post_action="PRESENT",
                         post_failure_suggested_stage=None,
                         last_error=None,
-                        node_message=_render_final_message(final_design),
+                        node_message=_render_final_message(final_design), # pyright: ignore[reportArgumentType]
                     ),
                     "metadata": metadata_out,
                 }
 
             # Reopen for edits
-            draft = _draft_from_final(final_design)
+            draft = _draft_from_final(final_design) # pyright: ignore[reportArgumentType]
             final_design = None
 
         # Apply all new human messages since last_idx_seen

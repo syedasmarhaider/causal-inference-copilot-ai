@@ -10,7 +10,7 @@ from langchain_core.messages import BaseMessage
 
 from python.domain.service.llm_service import LLMService
 from python.workflows.state.conversation_state import ConversationState
-from python.workflows.state.control_state import ControlState, Need
+from python.workflows.state.control_state import ControlState, ACTION
 from python.workflows.utils.types import DEFAULT_MODEL_GEMNI, JSONDict
 from python.workflows.utils.user_message_builder import build_user_message_with_llm
 
@@ -40,7 +40,7 @@ def make_present_user_message_node(
 ) -> Callable[[ConversationState], ConversationState]:
     def present(state: ConversationState) -> ConversationState:
         c = _control(state)
-        need: Need = c["need"]
+        action: ACTION = c["need"] # pyright: ignore[reportUnknownVariableType, reportGeneralTypeIssues]
 
         stage = str(c.get("stage") or "")
         conversation_id = str(c.get("conversation_id") or "")
@@ -89,21 +89,21 @@ def make_present_user_message_node(
         prior: List[BaseMessage] = cast(List[BaseMessage], state.get("messages", [])) # pyright: ignore[reportUnnecessaryCast]
         out_messages: List[BaseMessage] = [*prior, ai]
 
-        # ---- need transition semantics ----
-        if need == "PRESENT_AND_USER_INPUT":
-            next_need: Need = "NEEDS_INPUT"
-        elif need == "PRESENT":
-            next_need = "NONE"
+        # ---- action transition semantics ----
+        if action == "PRESENT_AND_USER_INPUT":
+            next_action: ACTION = "NEEDS_INPUT"
+        elif action == "PRESENT":
+            next_action = "NONE"
         else:
             # if PRESENT was called unexpectedly, do not destroy state
-            next_need = need
+            next_action = action # pyright: ignore[reportUnknownVariableType]
 
         # clear node_message to prevent re-present loop
         c2: ControlState = cast(
             ControlState,
             {
                 **c,
-                "need": next_need,
+                "post_action": next_action,
                 "node_message": "",
             },
         )

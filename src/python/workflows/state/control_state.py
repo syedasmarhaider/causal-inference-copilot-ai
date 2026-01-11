@@ -5,32 +5,26 @@ from uuid import UUID
 
 from python.workflows.utils.types import JSONDict
 
-
 Stage = Literal[
     "GET_FILE",
     "LOAD_DATASET",
     "PROPOSE_METADATA",
     "CONFIRM_METADATA",
-    "VALIDATE_BACKDOOR",
     "DONE",
 ]
-
 Status = Literal[
     "PENDING",
     "DONE",
     "RETRYABLE_ERROR",
     "ABORTED",
 ]
-
 ACTION = Literal[
     "NONE",
     "PRESENT",
     "NEEDS_INPUT",
     "PRESENT_AND_USER_INPUT",
 ]
-
 NEED_STAGE = Stage
-
 
 class ControlState(TypedDict):
     """
@@ -50,10 +44,8 @@ class ControlState(TypedDict):
     last_error: JSONDict | None
     node_message: str
 
-    # Router can set this to override _NEXT_STAGE without changing stage immediately.
     pending_stage: NotRequired[Stage | None]
 
-    # ✅ latch set by PRESENT when we asked for user input; cleared when a human message arrives
     awaiting_user: NotRequired[bool]
 
 

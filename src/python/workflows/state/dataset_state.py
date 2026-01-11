@@ -16,7 +16,6 @@ class DatasetState(TypedDict, total=False):
     raw_schema: Optional[JSONDict]
     summary: Optional[JSONDict]
     load_error: Optional[str]
-
     # If you use it in GET_FILE to prevent re-parsing old messages
     get_file_last_user_msg_idx: Optional[int]
 
