@@ -11,7 +11,7 @@ from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import LLMService
 from python.domain.service.mcp_client import McpClient
 
-from python.workflows.state.conversation_state import ConversationState
+from python.implementation.repo.inmemory_conversation_repo import InMemoryConversationRepo
 from python.workflows.state.control_state import ControlState
 
 from python.implementation.repo.file_data_repo import FileDataRepo
@@ -26,20 +26,6 @@ log = logging.getLogger(__name__)
 DEFAULT_DATASET_PATH = Path(
     "./data/486f4975-6cd9-4261-a122-e6b0fc46462d/data.csv"
 ).resolve()
-
-
-# =============================================================================
-# In-memory repo for CLI
-# =============================================================================
-class InMemoryConversationRepo(ConversationRepo):
-    def __init__(self) -> None:
-        self._store: dict[tuple[UUID, UUID], ConversationState] = {}
-
-    def load(self, *, user_id: UUID, conversation_id: UUID) -> ConversationState | None:
-        return self._store.get((user_id, conversation_id))
-
-    def save(self, *, user_id: UUID, conversation_id: UUID, state: ConversationState) -> None:
-        self._store[(user_id, conversation_id)] = state
 
 
 # =============================================================================
@@ -168,17 +154,7 @@ def run_console(*, data_repo: DataRepo, llm: LLMService, mcp_client: McpClient) 
         except (EOFError, KeyboardInterrupt):
             print("\nbye")
             return
-
-        if user_text == "/exit":
-            print("bye")
-            return
-        if user_text == "/help":
-            print("Commands: /help, /state, /exit\n")
-            continue
-        if user_text == "/state":
-            stg, st, pa = adapter.snapshot(user_id=user_id, conversation_id=conversation_id)
-            print(f"(stage={stg}, status={st}, post_action={pa})\n")
-            continue
+        
         if not user_text:
             continue
 
