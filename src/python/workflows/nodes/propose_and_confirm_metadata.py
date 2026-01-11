@@ -55,9 +55,9 @@ _ADD_REMOVE_RE = re.compile(
 Delta = Dict[str, Any]
 
 
-# -----------------------------
+# =============================================================================
 # State adapters
-# -----------------------------
+# =============================================================================
 def _require_control(state: ConversationState) -> ControlState:
     return cast(ControlState, state["control"])  # type: ignore
 
@@ -89,19 +89,19 @@ def _last_human_msg_idx(messages: Sequence[BaseMessage]) -> int:
     return last
 
 
-# -----------------------------
+# =============================================================================
 # Column utilities (robust matching)
-# -----------------------------
+# =============================================================================
 def _columns_from_raw_schema(raw_schema: Any) -> List[str]:
     if not isinstance(raw_schema, dict):
         return []
-    cols = raw_schema.get("columns") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    cols = raw_schema.get("columns")  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
     if not isinstance(cols, list):
         return []
     out: List[str] = []
-    for c in cols: # pyright: ignore[reportUnknownVariableType]
+    for c in cols:  # pyright: ignore[reportUnknownVariableType]
         if isinstance(c, dict):
-            name = c.get("name") # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            name = c.get("name")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
             if isinstance(name, str) and name:
                 out.append(name)
     return out
@@ -131,9 +131,9 @@ def _suggest_columns(bad: str, columns: Sequence[str], *, k: int = 5) -> List[st
     return difflib.get_close_matches(bad, list(columns), n=k, cutoff=0.55)
 
 
-# -----------------------------
+# =============================================================================
 # JSON extraction / repair
-# -----------------------------
+# =============================================================================
 def _extract_json_object(text: str) -> JSONDict:
     """
     Robustly extract a JSON object from:
@@ -207,9 +207,9 @@ def _repair_json_with_llm(
     return _extract_json_object(resp.content)
 
 
-# -----------------------------
+# =============================================================================
 # Proposal (LLM) + normalization
-# -----------------------------
+# =============================================================================
 def _default_proposal() -> Dict[str, Any]:
     return {
         "dataset_summary": "",
@@ -232,10 +232,10 @@ def _normalize_str_list(x: Any) -> List[str]:
     if not isinstance(x, list):
         return []
     out: List[str] = []
-    for v in x: # pyright: ignore[reportUnknownVariableType]
+    for v in x:  # pyright: ignore[reportUnknownVariableType]
         if v is None:
             continue
-        s = str(v).strip() # pyright: ignore[reportUnknownArgumentType]
+        s = str(v).strip()  # pyright: ignore[reportUnknownArgumentType]
         if s and s not in out:
             out.append(s)
     return out
@@ -379,9 +379,9 @@ def _propose_design_once(
     return _sanitize_proposal(obj, columns), None
 
 
-# -----------------------------
+# =============================================================================
 # Draft defaults / conversions
-# -----------------------------
+# =============================================================================
 def _default_draft() -> Dict[str, Any]:
     return {
         "treatment": None,
@@ -423,9 +423,9 @@ def _iter_new_humans(messages: Sequence[BaseMessage], last_idx_seen: int) -> Ite
                 yield i, txt
 
 
-# -----------------------------
+# =============================================================================
 # Delta parsing (heuristic first, LLM as fallback)
-# -----------------------------
+# =============================================================================
 def _heuristic_delta(user_text: str, proposed: Dict[str, Any]) -> Delta:
     """
     Cheap deterministic parsing for common patterns.
@@ -581,7 +581,7 @@ def _llm_delta(
         resp = llm.generate(config=cfg, history=history)
         raw_out = resp.content
         obj = _extract_json_object(resp.content)
-        return cast(Delta, obj), None # pyright: ignore[reportUnnecessaryCast]
+        return cast(Delta, obj), None  # pyright: ignore[reportUnnecessaryCast]
     except Exception as e:
         try:
             repaired = _repair_json_with_llm(
@@ -607,7 +607,7 @@ def _llm_delta(
                     "use_suggested_modifiers",
                 ],
             )
-            return cast(Delta, repaired), { # pyright: ignore[reportUnnecessaryCast]
+            return cast(Delta, repaired), {  # pyright: ignore[reportUnnecessaryCast]
                 "code": "LLM_METADATA_DELTA_REPAIRED",
                 "detail": str(e),
                 "raw_llm_output": (str(raw_out)[:1500] if raw_out else None),
@@ -655,9 +655,9 @@ def _delta_is_meaningful(d: Delta) -> bool:
     )
 
 
-# -----------------------------
+# =============================================================================
 # Apply delta (robust semantics)
-# -----------------------------
+# =============================================================================
 def _default_covariates_all_except_ty(columns: Sequence[str], t: str, y: str) -> List[str]:
     id_like = re.compile(r"(?:^id$|uuid|guid|index|row_id|customer_id|user_id)", re.IGNORECASE)
     out: List[str] = []
@@ -839,10 +839,16 @@ def _apply_delta(
     return draft, err
 
 
-# -----------------------------
-# Prompt rendering (targeted & resilient)
-# -----------------------------
-def _render_prompt(columns: Sequence[str], proposed: Dict[str, Any], draft: Dict[str, Any], *, last_error: JSONDict | None) -> str:
+# =============================================================================
+# Prompt rendering (deterministic fallback)
+# =============================================================================
+def _render_prompt(
+    columns: Sequence[str],
+    proposed: Dict[str, Any],
+    draft: Dict[str, Any],
+    *,
+    last_error: JSONDict | None,
+) -> str:
     cols_preview = ", ".join(list(columns)[:18]) + (" ..." if len(columns) > 18 else "")
 
     t = draft.get("treatment")
@@ -913,9 +919,126 @@ def _render_final_message(final_design: Dict[str, Any]) -> str:
     return msg
 
 
-# -----------------------------
+# =============================================================================
+# Node-level presenter (LLM) — used ONLY at PRESENT boundary
+# =============================================================================
+_METADATA_NODE_SYSTEM_PROMPT = (
+    "You are the user-facing voice of the metadata intake node in a causal inference copilot.\n"
+    "You will get recent conversation + a compact state snapshot + a node-provided draft message.\n\n"
+    "Write EXACTLY ONE message to the user.\n"
+    "Rules:\n"
+    "- Be concise, concrete, and actionable.\n"
+    "- Do NOT mention internal field names, JSON, or implementation details.\n"
+    "- If there is an error: explain it simply and state the next step.\n"
+    "- If the user needs to pick columns: show a short helpful list of column names.\n"
+    "- If the design is complete but not accepted: ask for explicit confirmation ('ok').\n"
+    "- Prefer bullet points over long paragraphs.\n"
+)
+
+def _compact_list(x: Any, n: int) -> List[str]:
+    if not isinstance(x, list):
+        return []
+    out: List[str] = []
+    for v in x[:n]:  # pyright: ignore[reportUnknownVariableType]
+        s = str(v).strip()  # pyright: ignore[reportUnknownArgumentType]
+        if s:
+            out.append(s)
+    return out
+
+def _compact_proposed_for_prompt(proposed: Any) -> Dict[str, Any]:
+    if not isinstance(proposed, dict):
+        return {}
+    return {
+        "treatment_candidates": _compact_list(proposed.get("treatment_candidates"), 8),
+        "outcome_candidates": _compact_list(proposed.get("outcome_candidates"), 8),
+        "controls_candidates": _compact_list(proposed.get("controls_candidates"), 12),
+        "effect_modifier_candidates": _compact_list(proposed.get("effect_modifier_candidates"), 12),
+        "questions_for_user": _compact_list(proposed.get("questions_for_user"), 6),
+    }
+
+def _build_metadata_node_message(
+    llm: LLMService,
+    *,
+    state: ConversationState,
+    fallback: str,
+    intent: str,
+    model_name: str,
+    temperature: float = 0.4,
+    history_window: int = 10,
+    max_error_chars: int = 1200,
+) -> str:
+    """
+    Presentation layer for this node:
+      - Call ONLY when the node is about to PRESENT.
+      - Never raises; returns fallback on failures.
+      - Produces exactly one user-facing string.
+    """
+    try:
+        control = cast(Dict[str, Any], state.get("control", {}))
+        dataset = cast(Dict[str, Any], state.get("dataset", {}))
+        metadata = cast(Dict[str, Any], state.get("metadata", {}))
+
+        last_error = control.get("last_error")
+        if isinstance(last_error, dict):
+            last_error = {
+                "code": last_error.get("code"),
+                "detail": str(last_error.get("detail", ""))[:max_error_chars],
+            }
+
+        cols = _columns_from_raw_schema(dataset.get("raw_schema"))
+
+        payload: Dict[str, Any] = {
+            "intent": intent,
+            "stage": control.get("stage"),
+            "post_action": control.get("post_action"),
+            "status": control.get("status"),
+            "last_error": last_error,
+            "dataset": {
+                "path": dataset.get("path"),
+                "id": str(dataset.get("id")) if dataset.get("id") is not None else None,
+                "summary": dataset.get("summary"),
+                "columns_preview": cols[:24],
+            },
+            "proposed_preview": _compact_proposed_for_prompt(metadata.get("proposed_design")),
+            "draft": metadata.get("draft"),
+            "final_design": metadata.get("final_design"),
+            "node_default_message": fallback[:2000],
+        }
+
+        prior: Sequence[BaseMessage] = cast(Sequence[BaseMessage], state.get("messages", []))
+        tail = list(prior)[-history_window:] if isinstance(prior, list) else []
+
+        history: List[ChatMessage] = [ChatMessage(role="system", content=_METADATA_NODE_SYSTEM_PROMPT)]
+        for m in tail:
+            history.append(
+                ChatMessage(
+                    role=cast(Any, _role_from_langchain_msg(m)),
+                    content=str(getattr(m, "content", "")),
+                )
+            )
+
+        user_prompt = (
+            "You are a causal inference copilot.\n"
+            "A workflow node is about to present a message to the user.\n\n"
+            "Node draft/default message:\n"
+            f"{fallback.strip()}\n\n"
+            "State snapshot:\n"
+            f"{json.dumps(payload, ensure_ascii=False)}\n\n"
+            "Follow the rules and write EXACTLY ONE final user-facing message."
+        )
+        history.append(ChatMessage(role="user", content=user_prompt))
+
+        cfg = LLMConfig(model=model_name, temperature=temperature)
+        resp = llm.generate(config=cfg, history=history)
+        txt = resp.content.strip()
+        return txt if txt else fallback
+    except Exception:
+        return fallback
+
+
+# =============================================================================
 # Node
-# -----------------------------
+# =============================================================================
 def make_propose_and_confirm_metadata(
     llm: LLMService,
     data_repo: DataRepo,
@@ -931,10 +1054,9 @@ def make_propose_and_confirm_metadata(
       - PROPOSE_METADATA: generate proposed_design once and prompt user for inputs.
       - CONFIRM_METADATA: apply deltas from user messages until design is complete AND accepted.
 
-    ControlState semantics (new):
-      - post_action: what UI/runtime should do next
-      - post_failure_suggested_stage: only meaningful on ABORTED
-      - orchestrator decides next stage on non-failure (optionally using status + stage transition rules)
+    ControlState semantics:
+      - post_action drives UI/runtime behavior
+      - post_failure_suggested_stage is only meaningful on ABORTED
     """
 
     def node(state: ConversationState) -> ConversationState:
@@ -954,7 +1076,6 @@ def make_propose_and_confirm_metadata(
             last_error: JSONDict | None,
             pending_stage: Stage | None = None,
         ) -> ControlState:
-            # Keep control updates minimal: mutate only required fields + what this node owns.
             out: ControlState = cast(
                 ControlState,
                 {
@@ -968,7 +1089,6 @@ def make_propose_and_confirm_metadata(
                     "node_message": node_message,
                 },
             )
-            # Optional but makes state predictable for downstream consumers.
             out["pending_stage"] = pending_stage
             return out
 
@@ -978,6 +1098,24 @@ def make_propose_and_confirm_metadata(
         summary = dataset_in.get("summary")
 
         if not isinstance(dataset_id, UUID) or not isinstance(raw_schema, dict) or not isinstance(summary, dict):
+            fallback = "Dataset is not loaded yet. Please load the dataset first."
+            tmp_control = mk_control(
+                status="ABORTED",
+                post_action="PRESENT",
+                post_failure_suggested_stage="LOAD_DATASET",
+                last_error={
+                    "code": "MISSING_DATASET",
+                    "detail": "dataset.id/raw_schema/summary missing; run LOAD_DATASET first.",
+                },
+                node_message=fallback,
+            )
+            msg = _build_metadata_node_message(
+                llm,
+                state={**state, "control": tmp_control},
+                fallback=fallback,
+                intent="metadata_fatal_missing_dataset",
+                model_name=model_name,
+            )
             return {
                 **state,
                 "control": mk_control(
@@ -988,12 +1126,27 @@ def make_propose_and_confirm_metadata(
                         "code": "MISSING_DATASET",
                         "detail": "dataset.id/raw_schema/summary missing; run LOAD_DATASET first.",
                     },
-                    node_message="Fatal: dataset not loaded. Suggested recovery: LOAD_DATASET.",
+                    node_message=msg,
                 ),
             }
 
         columns = _columns_from_raw_schema(raw_schema)
         if not columns:
+            fallback = "Dataset schema looks empty. Please reload the dataset."
+            tmp_control = mk_control(
+                status="ABORTED",
+                post_action="PRESENT",
+                post_failure_suggested_stage="LOAD_DATASET",
+                last_error={"code": "MISSING_SCHEMA", "detail": "dataset.raw_schema has no columns."},
+                node_message=fallback,
+            )
+            msg = _build_metadata_node_message(
+                llm,
+                state={**state, "control": tmp_control},
+                fallback=fallback,
+                intent="metadata_fatal_missing_schema",
+                model_name=model_name,
+            )
             return {
                 **state,
                 "control": mk_control(
@@ -1001,7 +1154,7 @@ def make_propose_and_confirm_metadata(
                     post_action="PRESENT",
                     post_failure_suggested_stage="LOAD_DATASET",
                     last_error={"code": "MISSING_SCHEMA", "detail": "dataset.raw_schema has no columns."},
-                    node_message="Fatal: dataset schema missing/empty. Suggested recovery: LOAD_DATASET.",
+                    node_message=msg,
                 ),
             }
 
@@ -1009,16 +1162,16 @@ def make_propose_and_confirm_metadata(
 
         # ---- metadata init (stable defaults)
         warnings = metadata_in.get("warnings")
-        warnings = warnings if isinstance(warnings, list) else [] # pyright: ignore[reportUnnecessaryIsInstance]
+        warnings = warnings if isinstance(warnings, list) else []
 
         proposed = metadata_in.get("proposed_design")
         draft = metadata_in.get("draft")
         final_design = metadata_in.get("final_design")
 
         last_idx_seen = metadata_in.get("last_user_msg_idx", -1)
-        last_idx_seen = last_idx_seen if isinstance(last_idx_seen, int) else -1 # pyright: ignore[reportUnnecessaryIsInstance]
+        last_idx_seen = last_idx_seen if isinstance(last_idx_seen, int) else -1
 
-        if not isinstance(draft, dict): # pyright: ignore[reportUnnecessaryIsInstance]
+        if not isinstance(draft, dict):
             draft = _default_draft()
 
         # ---- PROPOSE_METADATA
@@ -1041,10 +1194,10 @@ def make_propose_and_confirm_metadata(
             else:
                 err = None
 
-            if not isinstance(draft, dict) or not draft: # pyright: ignore[reportUnnecessaryIsInstance]
+            if not isinstance(draft, dict) or not draft:
                 draft = _default_draft()
 
-            msg = (
+            fallback = (
                 "🧠 Draft causal design proposal (auto)\n"
                 f"- rows={summary.get('n_rows')} cols={summary.get('n_cols')}\n\n"
                 f"Treatment candidates: {cast(List[str], proposed.get('treatment_candidates', []))[:8]}\n"
@@ -1072,6 +1225,21 @@ def make_propose_and_confirm_metadata(
                 "warnings": warnings,
             }
 
+            tmp_control = mk_control(
+                status="DONE",
+                post_action="PRESENT_AND_USER_INPUT",
+                post_failure_suggested_stage=None,
+                last_error=err,
+                node_message=fallback,
+            )
+            msg = _build_metadata_node_message(
+                llm,
+                state={**state, "control": tmp_control, "metadata": metadata_out},
+                fallback=fallback,
+                intent="metadata_propose",
+                model_name=model_name,
+            )
+
             return {
                 **state,
                 "control": mk_control(
@@ -1086,6 +1254,21 @@ def make_propose_and_confirm_metadata(
 
         # ---- only CONFIRM_METADATA supported beyond this point
         if stage != "CONFIRM_METADATA":
+            fallback = f"Metadata node was called in an unexpected stage: {stage}"
+            tmp_control = mk_control(
+                status="ABORTED",
+                post_action="PRESENT",
+                post_failure_suggested_stage=None,
+                last_error={"code": "WRONG_STAGE", "detail": f"metadata_intake called in stage={stage}"},
+                node_message=fallback,
+            )
+            msg = _build_metadata_node_message(
+                llm,
+                state={**state, "control": tmp_control},
+                fallback=fallback,
+                intent="metadata_fatal_wrong_stage",
+                model_name=model_name,
+            )
             return {
                 **state,
                 "control": mk_control(
@@ -1093,7 +1276,7 @@ def make_propose_and_confirm_metadata(
                     post_action="PRESENT",
                     post_failure_suggested_stage=None,
                     last_error={"code": "WRONG_STAGE", "detail": f"metadata_intake called in stage={stage}"},
-                    node_message="Fatal: metadata intake node called in the wrong stage.",
+                    node_message=msg,
                 ),
             }
 
@@ -1126,12 +1309,27 @@ def make_propose_and_confirm_metadata(
             if not any_new_human:
                 metadata_out: MetadataState = {
                     "proposed_design": cast(Any, proposed),
-                    "draft": cast(Any, _draft_from_final(final_design)), # pyright: ignore[reportArgumentType]
+                    "draft": cast(Any, _draft_from_final(final_design)),  # pyright: ignore[reportArgumentType]
                     "final_design": cast(Any, final_design),
                     "last_user_msg_idx": last_idx_seen,
                     "canonical_metadata": metadata_in.get("canonical_metadata"),
                     "warnings": warnings,
                 }
+                fallback = _render_final_message(final_design)  # pyright: ignore[reportArgumentType]
+                tmp_control = mk_control(
+                    status="DONE",
+                    post_action="PRESENT",
+                    post_failure_suggested_stage=None,
+                    last_error=None,
+                    node_message=fallback,
+                )
+                msg = _build_metadata_node_message(
+                    llm,
+                    state={**state, "control": tmp_control, "metadata": metadata_out},
+                    fallback=fallback,
+                    intent="metadata_final_repeat",
+                    model_name=model_name,
+                )
                 return {
                     **state,
                     "control": mk_control(
@@ -1139,13 +1337,13 @@ def make_propose_and_confirm_metadata(
                         post_action="PRESENT",
                         post_failure_suggested_stage=None,
                         last_error=None,
-                        node_message=_render_final_message(final_design), # pyright: ignore[reportArgumentType]
+                        node_message=msg,
                     ),
                     "metadata": metadata_out,
                 }
 
             # Reopen for edits
-            draft = _draft_from_final(final_design) # pyright: ignore[reportArgumentType]
+            draft = _draft_from_final(final_design)  # pyright: ignore[reportArgumentType]
             final_design = None
 
         # Apply all new human messages since last_idx_seen
@@ -1201,7 +1399,12 @@ def make_propose_and_confirm_metadata(
         user_accepted = bool(draft.get("accept", False))
 
         if not can_finalize or not user_accepted:
-            prompt = _render_prompt(columns, cast(Dict[str, Any], proposed), cast(Dict[str, Any], draft), last_error=last_error)
+            fallback = _render_prompt(
+                columns,
+                cast(Dict[str, Any], proposed),
+                cast(Dict[str, Any], draft),
+                last_error=last_error,
+            )
 
             metadata_out: MetadataState = {
                 "proposed_design": cast(Any, proposed),
@@ -1212,6 +1415,21 @@ def make_propose_and_confirm_metadata(
                 "warnings": warnings,
             }
 
+            tmp_control = mk_control(
+                status="PENDING",
+                post_action="PRESENT_AND_USER_INPUT",
+                post_failure_suggested_stage=None,
+                last_error=last_error,
+                node_message=fallback,
+            )
+            msg = _build_metadata_node_message(
+                llm,
+                state={**state, "control": tmp_control, "metadata": metadata_out},
+                fallback=fallback,
+                intent="metadata_confirm",
+                model_name=model_name,
+            )
+
             return {
                 **state,
                 "control": mk_control(
@@ -1219,7 +1437,7 @@ def make_propose_and_confirm_metadata(
                     post_action="PRESENT_AND_USER_INPUT",
                     post_failure_suggested_stage=None,
                     last_error=last_error,
-                    node_message=prompt,
+                    node_message=msg,
                 ),
                 "metadata": metadata_out,
             }
@@ -1244,6 +1462,22 @@ def make_propose_and_confirm_metadata(
             "warnings": warnings,
         }
 
+        fallback = _render_final_message(final_design_out)
+        tmp_control = mk_control(
+            status="DONE",
+            post_action="PRESENT",
+            post_failure_suggested_stage=None,
+            last_error=last_error,
+            node_message=fallback,
+        )
+        msg = _build_metadata_node_message(
+            llm,
+            state={**state, "control": tmp_control, "metadata": metadata_out_final},
+            fallback=fallback,
+            intent="metadata_final",
+            model_name=model_name,
+        )
+
         return {
             **state,
             "control": mk_control(
@@ -1251,7 +1485,7 @@ def make_propose_and_confirm_metadata(
                 post_action="PRESENT",
                 post_failure_suggested_stage=None,
                 last_error=last_error,
-                node_message=_render_final_message(final_design_out),
+                node_message=msg,
             ),
             "metadata": metadata_out_final,
         }
