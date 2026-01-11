@@ -1,142 +1,199 @@
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
-from typing import Callable, Final, Mapping
+from typing import  Final, Mapping, Sequence, Tuple, cast
+
+from langchain_core.messages import BaseMessage
+
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
+from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
+from python.workflows.state.control_state import ControlState, Stage, Status
 
 
-from python.domain.repo.conversation_repo import ConversationRepo
-from python.domain.repo.data_repo import DataRepo
-from python.domain.service.llm_service import LLMService
-from python.domain.service.mcp_client import McpClient
+_JSON_FENCE_RE: Final[re.Pattern[str]] = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 
-from python.workflows.graph.simple_flow_entry import SimpleWorkflow, WorkflowConfig
-from python.workflows.state.conversation_state import ConversationState
-from python.workflows.state.control_state import ControlState, Stage
+_NEXT_STAGE: Final[Mapping[Stage, Stage]] = {
+    "GET_FILE": "LOAD_DATASET",
+    "LOAD_DATASET": "PROPOSE_AND_CONFIRM_METADATA",
+    "PROPOSE_AND_CONFIRM_METADATA": "DONE",
+    "DONE": "DONE",
+}
 
-from python.workflows.nodes.get_file import make_get_file_node
-from python.workflows.nodes.load_dataset import make_load_dataset_node
-from python.workflows.nodes.propose_and_confirm_metadata import make_propose_and_confirm_metadata
-
-from python.workflows.utils.user_message_builder import build_user_message_with_llm
-
-NodeFn = Callable[[ConversationState], ConversationState]
-
-
-# =============================================================================
-# Static routes
-# =============================================================================
-@dataclass(frozen=True)
-class RouteSpec:
-    nxt: Stage
-    prv: Stage
-
-
-DEFAULT_ROUTES: Final[dict[Stage, RouteSpec]] = {
-    "GET_FILE": RouteSpec(nxt="LOAD_DATASET", prv="GET_FILE"),
-    "LOAD_DATASET": RouteSpec(nxt="PROPOSE_METADATA", prv="GET_FILE"),
-    "PROPOSE_METADATA": RouteSpec(nxt="CONFIRM_METADATA", prv="LOAD_DATASET"),
-    "CONFIRM_METADATA": RouteSpec(nxt="DONE", prv="PROPOSE_METADATA"),
-    "DONE": RouteSpec(nxt="DONE", prv="CONFIRM_METADATA"),
+_STAGE_DOC: Final[Mapping[Stage, str]] = {
+    "GET_FILE": "Obtain/confirm a local CSV path (exists, readable, endswith .csv). Writes dataset.path.",
+    "LOAD_DATASET": "Load CSV from dataset.path. Writes dataset.summary/raw_schema (and maybe dataset.id).",
+    "PROPOSE_AND_CONFIRM_METADATA": "Propose+confirm metadata: treatment/outcome/controls/covariates/etc.",
+    "DONE": "Workflow complete.",
 }
 
 
-def _done_node() -> NodeFn:
-    """
-    Final stage node.
+def _noop_node(state: ConversationState) -> ConversationState:
+    return state
 
-    Runner behavior:
-      - sees node_message/post_action,
-      - emits ONE AIMessage,
-      - clears node_message,
-      - keeps stage/status consistent with cfg.
-    """
-    def _fn(state: ConversationState) -> ConversationState:
-        c: ControlState = state["control"]
 
-        node_msg = c.get("node_message") or "Done."
-        c2: ControlState = {
-            **c,
-            "stage": "DONE",
-            "status": "DONE",
-            "post_action": "PRESENT",
-            "node_message": node_msg,
-            "pending_stage": None,
+def _require_control(state: ConversationState) -> ControlState:
+    c = state.get("control")
+    if not isinstance(c, dict): # pyright: ignore[reportUnnecessaryIsInstance]
+        raise ValueError("ConversationState.control must exist and be a dict")
+    return  c
+
+
+def _parse_json_object_strict(text: str) -> dict: # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]
+    s = (text or "").strip()
+    if not s:
+        raise ValueError("Empty LLM response")
+
+    m = _JSON_FENCE_RE.search(s)
+    if m:
+        s = m.group(1).strip()
+
+    obj = json.loads(s)
+    if not isinstance(obj, dict):
+        raise ValueError("LLM JSON root must be an object")
+    return obj # pyright: ignore[reportUnknownVariableType]
+
+
+def _last_human_text(messages: Sequence[BaseMessage]) -> str:
+    for m in reversed(list(messages)):
+        if getattr(m, "type", None) == "human":
+            return str(getattr(m, "content", "") or "").strip()
+        name = m.__class__.__name__.lower()
+        if "human" in name or "user" in name:
+            return str(getattr(m, "content", "") or "").strip()
+    return ""
+
+
+def _last_ai_text(messages: Sequence[BaseMessage]) -> str:
+    for m in reversed(list(messages)):
+        if getattr(m, "type", None) == "ai":
+            return str(getattr(m, "content", "") or "").strip()
+        name = m.__class__.__name__.lower()
+        if "ai" in name or "assistant" in name:
+            return str(getattr(m, "content", "") or "").strip()
+    return ""
+
+
+@dataclass(frozen=True)
+class WorkflowRouter:
+    """
+    Router holds ONLY llm.
+
+    Nodes mapping is provided at route-time:
+      router.route(state, nodes)
+
+    Routing rules:
+      - PENDING  -> run current_stage
+      - DONE     -> advance to next stage (set PENDING), run it
+      - ABORTED  -> LLM chooses recovery stage, set PENDING, run it
+    """
+
+    llm: LLMService
+    model_name: str
+    nodes: Mapping[Stage, CallableNodeFunc]
+
+    def route(
+        self,
+        state: ConversationState,
+    ) -> Tuple[CallableNodeFunc, ConversationState]:
+        control = _require_control(state)
+
+        stage: Stage = control["current_stage"]
+        status: Status = control["current_stage_status"]
+
+        if status == "PENDING":
+            return self._node_for(stage, self.nodes), state # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+
+        if status == "DONE":
+            next_stage = _NEXT_STAGE.get(stage, "DONE")
+            next_state = self._advance(state, next_stage)
+            return self._node_for(next_stage, self.nodes), next_state # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+
+        if status == "ABORTED":
+            recovered_stage = self._llm_choose_recovery_stage(state)
+            next_state = self._advance(state, recovered_stage)
+            return self._node_for(recovered_stage, self.nodes), next_state # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+
+        raise ValueError(f"Unknown control.current_stage_status: {status!r}")
+
+    def _node_for(self, stage: Stage, nodes: Mapping[Stage, CallableNodeFunc]) -> CallableNodeFunc:
+        if stage == "DONE":
+            return _noop_node
+        fn = nodes.get(stage)
+        if fn is None:
+            raise ValueError(f"No node registered for stage={stage!r}")
+        return fn
+
+    def _advance(self, state: ConversationState, next_stage: Stage) -> ConversationState:
+        control = _require_control(state)
+
+        # Keep it minimal and deterministic: reset to run the next stage.
+        new_control: ControlState = {
+            **control,
+            "current_stage": next_stage,
+            "current_stage_status": "PENDING",
+            "action_required": "NONE",
+            "node_message": None,
         }
-        return {**state, "control": c2}
+        return {**state, "control": new_control}
 
-    return _fn
+    def _llm_choose_recovery_stage(self, state: ConversationState) -> Stage:
+        """
+        Strict LLM contract:
+          { "next_stage": "<Stage>", "why": "<short>" }
 
+        If LLM fails or returns invalid => raise ValueError.
+        """
+        control = _require_control(state)
+        dataset = state.get("dataset", {})
+        metadata = state.get("metadata", {})
+        messages = cast(Sequence[BaseMessage], state.get("messages", []))
 
-# =============================================================================
-# Builders
-# =============================================================================
-def build_default_nodes(
-    *,
-    data_repo: DataRepo,
-    llm: LLMService,
-    mcp_client: McpClient,  # kept for signature stability / future nodes
-) -> dict[Stage, NodeFn]:
-    _ = mcp_client  # reserved (future)
+        snapshot = { # pyright: ignore[reportUnknownVariableType]
+            "control": control,
+            "dataset": dataset if isinstance(dataset, dict) else {}, # pyright: ignore[reportUnnecessaryIsInstance]
+            "metadata": metadata if isinstance(metadata, dict) else {}, # pyright: ignore[reportUnnecessaryIsInstance]
+            "last_user_message": _last_human_text(messages),
+            "last_assistant_message": _last_ai_text(messages),
+            "stages": dict(_STAGE_DOC),
+            "instructions": (
+                "Pick the earliest stage that can safely recover.\n"
+                "- Missing/invalid dataset path => GET_FILE\n"
+                "- dataset.path present but schema/summary missing => LOAD_DATASET\n"
+                "- dataset loaded but metadata incomplete/not accepted => PROPOSE_AND_CONFIRM_METADATA\n"
+                "- everything done => DONE"
+            ),
+        }
 
-    meta_node = make_propose_and_confirm_metadata(llm=llm, data_repo=data_repo)
+        system = (
+            "You are a workflow recovery router.\n"
+            "Return ONLY one JSON object with EXACTLY keys:\n"
+            '{ "next_stage": string, "why": string }\n'
+            f"- next_stage MUST be one of: {list(_STAGE_DOC.keys())}\n"
+            "- No markdown. No extra keys."
+        )
+        
+        config = LLMConfig(
+            model=self.model_name,
+            temperature=0.0,
+        )
+        
+        history = [
+            ChatMessage(role="system", content=system),
+            ChatMessage(role="user", content=json.dumps(snapshot, ensure_ascii=False)),
+        ]
 
-    return {
-        "GET_FILE": make_get_file_node(llm),
-        "LOAD_DATASET": make_load_dataset_node(data_repo),
-        "PROPOSE_METADATA": meta_node,
-        "CONFIRM_METADATA": meta_node,
-        "DONE": _done_node(),
-    }
+        resp = self.llm.generate(config=config, history=history)
+        obj = _parse_json_object_strict(cast(object, resp).content)  # type: ignore[attr-defined]
+        if set(obj.keys()) != {"next_stage", "why"}: # pyright: ignore[reportUnknownArgumentType]
+            raise ValueError("Router LLM must return exactly: {next_stage, why}")
 
+        ns = obj.get("next_stage") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+        if not isinstance(ns, str):
+            raise ValueError("Router LLM returned non-string next_stage")
 
-def build_workflow_config(
-    *,
-    routes: Mapping[Stage, RouteSpec] = DEFAULT_ROUTES,
-    max_internal_steps: int = 32,
-) -> WorkflowConfig:
-    next_stage: dict[Stage, Stage] = {}
-    prev_stage: dict[Stage, Stage] = {}
-    valid_stages: set[Stage] = set()
+        if ns not in _STAGE_DOC:
+            raise ValueError(f"Router LLM returned invalid stage: {ns!r}")
 
-    for stg, spec in routes.items():
-        next_stage[stg] = spec.nxt
-        prev_stage[stg] = spec.prv
-        valid_stages.add(stg)
-
-    return WorkflowConfig(
-        next_stage=next_stage,
-        prev_stage=prev_stage,
-        valid_stages=valid_stages,
-        max_internal_steps=max_internal_steps,
-    )
-
-
-def build_simple_workflow(
-    *,
-    repo: ConversationRepo,
-    data_repo: DataRepo,
-    llm: LLMService,
-    mcp_client: McpClient,
-) -> SimpleWorkflow:
-    nodes = build_default_nodes(data_repo=data_repo, llm=llm, mcp_client=mcp_client)
-    cfg = build_workflow_config()
-
-    def enhance(state: ConversationState) -> str:
-            return build_user_message_with_llm(llm=llm, state=state)
-
-    return SimpleWorkflow(repo=repo, nodes=nodes, cfg=cfg, enhance=enhance)
-
-
-def build_simple_copilot_app(
-    *,
-    repo: ConversationRepo,
-    data_repo: DataRepo,
-    llm: LLMService,
-    mcp_client: McpClient,
-) -> SimpleWorkflow:
-    return build_simple_workflow(
-        repo=repo,
-        data_repo=data_repo,
-        llm=llm,
-        mcp_client=mcp_client,
-    )
+        return  ns

@@ -18,14 +18,3 @@ class DatasetState(TypedDict, total=False):
     load_error: Optional[str]
     # If you use it in GET_FILE to prevent re-parsing old messages
     get_file_last_user_msg_idx: Optional[int]
-
-
-def empty_dataset_state(path: Optional[str] = None) -> DatasetState:
-    return {
-        "path": path,
-        "id": None,
-        "raw_schema": None,
-        "summary": None,
-        "load_error": None,
-        "get_file_last_user_msg_idx": -1,
-    }

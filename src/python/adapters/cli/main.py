@@ -5,31 +5,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from python.domain.models.workflow_response import WorkflowResponse
 from python.domain.repo.conversation_repo import ConversationRepo
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import LLMService
 from python.domain.service.mcp_client import McpClient
 
 from python.implementation.repo.inmemory_conversation_repo import InMemoryConversationRepo
-from python.workflows.state.control_state import ControlState
-
 from python.implementation.repo.file_data_repo import FileDataRepo
 from python.implementation.service.gemini_llm_service import GeminiLLMService
 from python.implementation.service.http_mcp_client import HttpMcpClient
 
-from python.workflows.graph.simple_flow_entry import SimpleWorkflow, new_conversation_state
-from python.workflows.graph.simple_flow_router import build_simple_copilot_app
+from python.workflows.graph.simple_flow_entry import SimpleWorkflow, WorkflowConfig
+
 
 log = logging.getLogger(__name__)
 
-DEFAULT_DATASET_PATH = Path(
-    "./data/486f4975-6cd9-4261-a122-e6b0fc46462d/data.csv"
-).resolve()
-
 
 # =============================================================================
-# Drain adapter (keeps calling invoke(None) until stop)
+# Adapter: calls workflow.invoke() repeatedly with user_text only on first call,
+# until we need user input OR nothing changes.
+# (invoke itself is still exactly 1 node execution per call)
 # =============================================================================
 @dataclass(frozen=True)
 class DrainResult:
@@ -37,7 +32,6 @@ class DrainResult:
     needs_input: bool
     stage: str
     status: str
-    post_action: str
 
 
 class ConsoleAdapter:
@@ -45,16 +39,13 @@ class ConsoleAdapter:
         self._workflow = workflow
         self._repo = repo
 
-    def snapshot(self, *, user_id: UUID, conversation_id: UUID) -> tuple[str, str, str]:
+    def _snapshot(self, *, user_id: UUID, conversation_id: UUID) -> tuple[str, str]:
         s = self._repo.load(user_id=user_id, conversation_id=conversation_id)
-        if s is None:
-            return ("?", "?", "?")
-        c: ControlState = s["control"]
-        return (
-            str(c.get("stage", "?")),
-            str(c.get("status", "?")),
-            str(c.get("post_action", "NONE")),
-        )
+        if not isinstance(s, dict):
+            return ("?", "?")
+        c = s.get("control")
+        # new control keys
+        return (str(c.get("current_stage", "?")), str(c.get("current_stage_status", "?")))
 
     def drain(
         self,
@@ -62,90 +53,88 @@ class ConsoleAdapter:
         user_id: UUID,
         conversation_id: UUID,
         user_text: str | None,
-        max_drains: int = 16,
+        max_steps: int = 16,
     ) -> DrainResult:
         outputs: list[str] = []
-        last: WorkflowResponse | None = None
 
-        for i in range(max_drains):
-            before = self.snapshot(user_id=user_id, conversation_id=conversation_id)
+        needs_input = False
+        last_stage = "?"
+        last_status = "?"
+
+        for i in range(max_steps):
+            before_stage, before_status = self._snapshot(user_id=user_id, conversation_id=conversation_id)
 
             txt = user_text if i == 0 else None
-            last = self._workflow.invoke(
+            resp = self._workflow.invoke(
                 user_id=user_id,
                 conversation_id=conversation_id,
                 user_text=txt,
             )
 
-            t = (last.text or "").strip()
-            if t:
-                outputs.append(t)
+            msg = (resp.node_message or "").strip()
+            if msg:
+                outputs.append(msg)
 
-            if last.needs_input:
+            needs_input = bool(resp.needs_input)
+            last_stage = str(resp.current_stage)
+            last_status = str(resp.current_stage_status)
+
+            if needs_input:
                 break
 
-            after = self.snapshot(user_id=user_id, conversation_id=conversation_id)
+            after_stage, after_status = self._snapshot(user_id=user_id, conversation_id=conversation_id)
 
-            # Stop draining if nothing new and no control-plane progress.
-            if not t and after == before:
+            # Stop if no message AND no control-plane progress.
+            if not msg and (after_stage, after_status) == (before_stage, before_status):
                 break
 
-        stg, st, pa = self.snapshot(user_id=user_id, conversation_id=conversation_id)
         return DrainResult(
             outputs=outputs,
-            needs_input=bool(last.needs_input) if last else False,
-            stage=stg,
-            status=st,
-            post_action=pa,
+            needs_input=needs_input,
+            stage=last_stage,
+            status=last_status,
         )
 
 
 # =============================================================================
-# Dependency wiring
+# Wiring (no DB; in-memory conversation repo)
 # =============================================================================
-def _wire_data_repo() -> DataRepo:
+def wire_repo() -> ConversationRepo:
+    return InMemoryConversationRepo()
+
+
+def wire_data_repo() -> DataRepo:
+    # file-based dataset access; not a DB
     return FileDataRepo(root_dir=Path(".local_data_repo"))
 
 
-def _wire_llm() -> LLMService:
+def wire_llm() -> LLMService:
     return GeminiLLMService()
 
 
-def _wire_mcp() -> McpClient:
+def wire_mcp() -> McpClient:
     return HttpMcpClient(endpoint="http://127.0.0.1:8765/mcp")
 
 
 # =============================================================================
-# Main console loop
+# Main console
 # =============================================================================
-def run_console(*, data_repo: DataRepo, llm: LLMService, mcp_client: McpClient) -> None:
+def run_console(*, repo: ConversationRepo, data_repo: DataRepo, llm: LLMService, mcp: McpClient) -> None:
     logging.basicConfig(level=logging.INFO)
 
-    repo = InMemoryConversationRepo()
-
-    workflow = build_simple_copilot_app(
-        repo=repo,
-        data_repo=data_repo,
-        llm=llm,
-        mcp_client=mcp_client,
-    )
-
+    cfg = WorkflowConfig(data_repo=data_repo, llm=llm, mcp=mcp)
+    workflow = SimpleWorkflow(repo=repo, cfg=cfg)
     adapter = ConsoleAdapter(workflow=workflow, repo=repo)
 
     user_id = uuid4()
     conversation_id = uuid4()
 
-    # Optional seed: pre-set dataset path so GET_FILE can skip asking
-    seed = new_conversation_state(conversation_id)
-    seed["dataset"]["path"] = str(DEFAULT_DATASET_PATH)
-    repo.save(user_id=user_id, conversation_id=conversation_id, state=seed)
+    print("Causal Copilot (console). Commands: /help, /exit, /new\n")
 
-    print("Causal Copilot (console). Type /help. Type /exit to quit.\n")
-
-    # Kick once (no user text) to let workflow emit first prompt if any
+    # Kick: let the workflow run until it needs user input (or stops progressing)
     kick = adapter.drain(user_id=user_id, conversation_id=conversation_id, user_text=None)
-    for msg in kick.outputs:
-        print(msg)
+    for out in kick.outputs:
+        print(out)
         print()
 
     while True:
@@ -154,8 +143,30 @@ def run_console(*, data_repo: DataRepo, llm: LLMService, mcp_client: McpClient) 
         except (EOFError, KeyboardInterrupt):
             print("\nbye")
             return
-        
+
         if not user_text:
+            continue
+
+        if user_text in {"/exit", "exit", "quit"}:
+            print("bye")
+            return
+
+        if user_text == "/help":
+            print(
+                "Commands:\n"
+                "  /help  show this help\n"
+                "  /exit  quit\n"
+                "  /new   start a new conversation\n"
+            )
+            continue
+
+        if user_text == "/new":
+            conversation_id = uuid4()
+            print("(new conversation)\n")
+            kick2 = adapter.drain(user_id=user_id, conversation_id=conversation_id, user_text=None)
+            for out in kick2.outputs:
+                print(out)
+                print()
             continue
 
         turn = adapter.drain(user_id=user_id, conversation_id=conversation_id, user_text=user_text)
@@ -164,4 +175,9 @@ def run_console(*, data_repo: DataRepo, llm: LLMService, mcp_client: McpClient) 
 
 
 if __name__ == "__main__":
-    run_console(data_repo=_wire_data_repo(), llm=_wire_llm(), mcp_client=_wire_mcp())
+    run_console(
+        repo=wire_repo(),
+        data_repo=wire_data_repo(),
+        llm=wire_llm(),
+        mcp=wire_mcp(),
+    )

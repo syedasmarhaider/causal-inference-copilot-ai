@@ -1,88 +1,53 @@
 from __future__ import annotations
 
-from typing import List, Literal, NotRequired, Optional, TypedDict
-
-from python.workflows.utils.types import JSONDict
-
+from typing import Any, Dict, List, Literal, TypedDict
 
 CovariateStrategy = Literal["USER_LIST", "ALL_EXCEPT_TY", "NONE"]
 
-
-class ProposedDesign(TypedDict):
-    dataset_summary: str
-    treatment_candidates: List[str]
-    outcome_candidates: List[str]
-    controls_candidates: List[str]
-    effect_modifier_candidates: List[str]
-    effect_examples: List[str]
-    questions_for_user: List[str]
-
-
-class DraftDesign(TypedDict):
-    treatment: Optional[str]
-    outcome: Optional[str]
-
-    covariate_strategy: Optional[CovariateStrategy]
-    covariates: List[str]
-
-    effect_modifiers: List[str]
-    causal_question: Optional[str]
-
-    accept: bool
-
-
-class FinalDesign(TypedDict):
-    treatment: str
-    outcome: str
-
-    covariate_strategy: CovariateStrategy
-    covariates: List[str]
-
-    effect_modifiers: List[str]
-    causal_question: Optional[str]
-
-    accepted: bool
-
+MetadataField = Literal[
+    "dataset_summary",
+    "treatment",
+    "outcome",
+    "covariate_strategy",
+    "covariates",
+    "controls",
+    "effect_modifiers",
+    "causal_question",
+]
 
 class MetadataState(TypedDict):
-    """
-    Metadata is always shape-complete:
-    - draft always exists (so new_state() is valid)
-    - proposed_design/final_design can be None depending on stage.
-    """
-    proposed_design: ProposedDesign | None
-    draft: DraftDesign
-    final_design: FinalDesign | None
+    treatment: str
+    outcome: str
+    covariate_strategy: CovariateStrategy
+    
+    controls: List[str]
+    covariates: List[str]
 
-    last_user_msg_idx: int
-    canonical_metadata: dict[str, object] | None
-    warnings: list[JSONDict]
+    effect_modifiers: List[str]
+    causal_question: str
 
-    # Optional validation fields (owned by VALIDATE stage/node)
-    validation_report: NotRequired[dict[str, object] | None]
-    validation_passed: NotRequired[bool | None]
+    accepted: bool
+    
+    dataset_summary: str
+    
+    locked_fields: List[MetadataField] 
+    notes: List[str]                  
+    warnings: List[str]              
+    provenance: Dict[str, Any]        
 
-
-def default_draft() -> DraftDesign:
+def empty_metadata() -> MetadataState:
     return {
-        "treatment": None,
-        "outcome": None,
-        "covariate_strategy": None,
+        "treatment": "",
+        "outcome": "",
+        "covariate_strategy": "NONE",
+        "controls": [],
         "covariates": [],
         "effect_modifiers": [],
-        "causal_question": None,
-        "accept": False,
-    }
-
-
-def empty_metadata_state() -> MetadataState:
-    return {
-        "proposed_design": None,
-        "draft": default_draft(),
-        "final_design": None,
-        "last_user_msg_idx": -1,
-        "canonical_metadata": None,
+        "causal_question": "",
+        "accepted": False,
+        "dataset_summary": "",
+        "locked_fields": [],
+        "notes": [],
         "warnings": [],
-        "validation_report": None,
-        "validation_passed": None,
+        "provenance": {},
     }

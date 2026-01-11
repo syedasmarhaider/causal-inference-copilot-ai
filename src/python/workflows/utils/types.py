@@ -6,3 +6,4 @@ DEFAULT_MODEL_GEMNI: str = "gemini-2.5-flash"
 
 JSONValue: TypeAlias = Any
 JSONDict: TypeAlias = Dict[str, JSONValue]
+

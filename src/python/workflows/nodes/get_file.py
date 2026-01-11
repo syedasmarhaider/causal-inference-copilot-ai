@@ -4,154 +4,129 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, Sequence, Tuple, cast
-from uuid import UUID
+from typing import Any,  Dict,  Sequence, Tuple, cast
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage
 
-from python.domain.service.llm_service import LLMService
-from python.workflows.utils.node_llm_message import build_node_message_with_llm
-from python.workflows.state.conversation_state import ConversationState
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
+from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
 from python.workflows.state.control_state import ACTION, NEED_STAGE, ControlState, Stage, Status
 from python.workflows.state.dataset_state import DatasetState
 from python.workflows.utils.types import DEFAULT_MODEL_GEMNI, JSONDict
 
-JSONValue = Any
-JSONDictLocal = Dict[str, JSONValue]
-
-_CSV_PATH_RE = re.compile(
-    r"""(?xi)
-    (?:^|[\s:=])
-    (?P<q>["']?)
-    (?P<p>
-        (?:[a-zA-Z]:[\\/]|/|~\/|\.\.?\/)   # windows drive, /, ~/, ./, ../
-        [^\n\r"']*?\.csv                  # anything up to .csv
-    )
-    (?P=q)
-    (?:$|[\s,.;])
-    """
-)
+JSONDictLocal = Dict[str, Any]
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 
-GET_FILE_PROMPT = (
-    "You are the GET_FILE node of a causal inference copilot.\n"
-    "You receive a compact internal state snapshot as JSON.\n\n"
-    "Write EXACTLY ONE message to the user.\n"
-    "- Be direct, and actionable.\n"
-    "- Do NOT reveal internal JSON, field names, or implementation details.\n"
-    "- If intent == 'ASK_PATH': ask the user to paste a local CSV path that exists.\n"
-    "- If intent == 'PATH_INVALID': explain the problem simply (if an error code exists) and ask again.\n"
-    "- If intent == 'PATH_ACCEPTED': confirm the path is accepted and say you'll load it next.\n\n"
-    "When asking for a path, include 2-3 examples:\n"
-    "- /path/to/data.csv\n"
-    "- ./data/my.csv\n"
-    "- C:\\\\data\\\\file.csv\n"
-)
 
+# -----------------------------
+# LLM prompts (delegate everything user-facing)
+# -----------------------------
+
+GET_FILE_EXTRACT_PROMPT = """
+You extract a LOCAL CSV file path from the user's message.
+
+Return ONLY one JSON object with EXACTLY:
+{ "dataset_path": string | null }
+
+Rules:
+- If the user did not provide a local path, return null.
+- Trim surrounding quotes/spaces.
+- Only return a path that ends with ".csv" (case-insensitive), otherwise null.
+- Do NOT include any other keys. No markdown.
+""".strip()
+
+GET_FILE_MESSAGE_PROMPT = """
+You are the GET_FILE node of a causal inference copilot.
+
+You receive a compact internal snapshot as JSON (includes validation results).
+Write EXACTLY ONE message to the user.
+
+Rules:
+- Be comprehensive and actionable.
+- Do NOT reveal internal JSON, field names, or implementation details.
+- If validation.ok == true: confirm the path is accepted and say you'll load it next.
+- If validation.ok == false:
+  - If validation.code == "NO_PATH": ask the user to paste a local CSV path that exists.
+  - Otherwise: explain the problem simply (based on validation.code) and ask for a valid existing CSV path again.
+- When asking for a path, include 2–3 examples:
+  - /path/to/data.csv
+  - ./data/my.csv
+  - C:\\data\\file.csv
+
+Output ONLY the message text. No markdown fences.
+""".strip()
+
+
+# -----------------------------
+# Minimal state helpers
+# -----------------------------
 
 def _require_control(state: ConversationState) -> ControlState:
     return cast(ControlState, state["control"])  # type: ignore
 
 
 def _as_dataset(state: ConversationState) -> DatasetState:
-    return cast(DatasetState, state.get("dataset", {}))  # type: ignore
+    ds = state.get("dataset", {})
+    return  ds 
 
 
-def _iter_new_humans(messages: Sequence[BaseMessage], last_idx_seen: int) -> Iterator[Tuple[int, str]]:
+def _append_final_ai_message(state: ConversationState, content: str) -> None:
+    """
+    Append ONLY the final user-facing message. Never append LLM prompt/system payloads.
+    """
+    msgs = state.get("messages")
+    msgs.append(
+        AIMessage(
+            content=content,
+            additional_kwargs={"source": "node", "stage": "GET_FILE"},
+        )
+    )
+
+
+def _last_new_human_message(
+    messages: Sequence[BaseMessage],
+    last_idx_seen: int,
+) -> Tuple[int, str] | None:
     start = max(-1, int(last_idx_seen))
-    for i in range(start + 1, len(messages)):
+    for i in range(len(messages) - 1, start, -1):
         m = messages[i]
         if getattr(m, "type", None) == "human":
-            txt = str(getattr(m, "content", "")).strip()
+            txt = str(getattr(m, "content", "") or "").strip()
             if txt:
-                yield i, txt
+                return i, txt
+    return None
 
 
-def _extract_json_object(text: str) -> JSONDictLocal:
+# -----------------------------
+# JSON parsing (strict)
+# -----------------------------
+
+def _parse_json_object_strict(text: str) -> JSONDictLocal:
     s = (text or "").strip()
+    if not s:
+        raise ValueError("Empty LLM response")
 
     m = _JSON_FENCE_RE.search(s)
     if m:
-        try:
-            obj = json.loads(m.group(1).strip())
-            if isinstance(obj, dict):
-                return cast(JSONDictLocal, obj)
-        except Exception:
-            pass
+        s = m.group(1).strip()
 
-    try:
-        obj2 = json.loads(s)
-        if isinstance(obj2, dict):
-            return cast(JSONDictLocal, obj2)
-    except Exception:
-        pass
-
-    dec = json.JSONDecoder()
-    for i, ch in enumerate(s):
-        if ch != "{":
-            continue
-        try:
-            obj3, _end = dec.raw_decode(s[i:])
-            if isinstance(obj3, dict):
-                return cast(JSONDictLocal, obj3)
-        except Exception:
-            continue
-
-    raise ValueError("No valid JSON object found.")
+    obj = json.loads(s)
+    if not isinstance(obj, dict):
+        raise ValueError("LLM JSON root must be an object")
+    return cast(JSONDictLocal, obj)
 
 
-def _regex_extract_csv_path(user_text: str) -> str | None:
-    m = _CSV_PATH_RE.search(user_text or "")
-    if not m:
-        return None
-    p = (m.group("p") or "").strip()
-    if not p:
-        return None
-    return p if p.lower().endswith(".csv") else None
-
-
-def _llm_extract_csv_path(
-    llm: LLMService,
-    *,
-    user_text: str,
-    model_name: str,
-) -> tuple[str | None, JSONDict | None]:
-    sys = (
-        "Extract a local CSV file path from the user's message.\n"
-        "Return ONLY one JSON object with EXACTLY:\n"
-        '{ "dataset_path": string | null }\n'
-        "Rules:\n"
-        "- If the user did not provide a path, return null.\n"
-        "- Trim surrounding quotes/spaces.\n"
-        "- Only return a path that ends with .csv (case-insensitive). Otherwise null.\n"
-        "No markdown. No extra keys."
-    )
-    try:
-        resp = llm.generate(
-            config={"model": model_name, "temperature": 0.0},  # type: ignore[arg-type]
-            history=[
-                {"role": "system", "content": sys},  # type: ignore[list-item]
-                {"role": "user", "content": user_text},  # type: ignore[list-item]
-            ],
-        )
-        obj = _extract_json_object(resp.content)
-        p = obj.get("dataset_path")
-        if isinstance(p, str):
-            p2 = p.strip().strip('"').strip("'").strip()
-            if p2 and p2.lower().endswith(".csv"):
-                return p2, None
-        return None, None
-    except Exception as e:
-        return None, {"code": "LLM_PATH_PARSE_FAILED", "detail": str(e)}
-
+# -----------------------------
+# File path normalization + validation (deterministic)
+# -----------------------------
 
 def _normalize_path(p: str) -> str:
     p0 = (p or "").strip().strip('"').strip("'").strip()
     p1 = os.path.expandvars(p0)
     path = Path(p1).expanduser()
     if not path.is_absolute():
-        path = (Path.cwd() / path)
+        path = Path.cwd() / path
     try:
         path = path.resolve(strict=False)
     except Exception:
@@ -159,7 +134,7 @@ def _normalize_path(p: str) -> str:
     return str(path)
 
 
-def _validate_csv_path(p: str) -> tuple[bool, JSONDict | None]:
+def _validate_csv_path(p: str) -> Tuple[bool, JSONDict | None]:
     try:
         path = Path(p)
     except Exception as e:
@@ -184,220 +159,233 @@ def _validate_csv_path(p: str) -> tuple[bool, JSONDict | None]:
         if path.stat().st_size == 0:
             return False, {"code": "EMPTY_FILE", "detail": f"CSV file is empty: {p!r}"}
     except Exception:
+        # non-fatal; keep going
         pass
 
     return True, None
 
 
+# -----------------------------
+# LLM calls (strict, no fallback)
+# -----------------------------
+
+def _llm_extract_csv_path_strict(
+    llm: LLMService,
+    *,
+    model_name: str,
+    user_text: str,
+) -> str | None:
+    config: LLMConfig = LLMConfig(
+        model=model_name,
+        temperature=0.0,
+    )
+    history: Sequence[ChatMessage] = [
+        ChatMessage(role="system", content=GET_FILE_EXTRACT_PROMPT),
+        ChatMessage(role="user", content=user_text),
+    ]
+    resp = llm.generate(config=config, history=history)
+    obj = _parse_json_object_strict(cast(Any, resp).content)
+    if set(obj.keys()) != {"dataset_path"}:
+        raise ValueError("Extractor must return exactly: { 'dataset_path': ... }")
+
+    p = obj.get("dataset_path")
+    if p is None:
+        return None
+    if isinstance(p, str):
+        p2 = p.strip().strip('"').strip("'").strip()
+        if p2 and p2.lower().endswith(".csv"):
+            return p2
+        return None
+    raise ValueError("Extractor returned non-string/non-null dataset_path")
+
+
+def _llm_write_node_message_strict(
+    llm: LLMService,
+    *,
+    model_name: str,
+    snapshot: JSONDict,
+) -> str:
+    config: LLMConfig = LLMConfig(
+        model=model_name,
+        temperature=0.0,
+    )
+    history: Sequence[ChatMessage] = [
+        ChatMessage(role="system", content=GET_FILE_MESSAGE_PROMPT),
+        ChatMessage(role="user", content=json.dumps(snapshot, ensure_ascii=False)),
+    ]
+    resp = llm.generate(config=config, history=history)
+    if not resp.content:
+        raise ValueError("Node message LLM returned empty message")
+    return resp.content
+
+
+# -----------------------------
+# Control builder (new schema)
+# -----------------------------
+
+def _mk_control(
+    *,
+    current_stage: Stage,
+    current_stage_status: Status,
+    action_required: ACTION,
+    post_failure_suggested_stage: NEED_STAGE | None,
+    node_message: str,
+) -> ControlState:
+    return cast(
+        ControlState,
+        {
+            "current_stage": current_stage,
+            "current_stage_status": current_stage_status,
+            "action_required": action_required,
+            "post_failure_suggested_stage": post_failure_suggested_stage,
+            "node_message": node_message,
+        },
+    )
+
+
+# -----------------------------
+# Node (delegate nearly everything to LLM)
+# -----------------------------
+
 def make_get_file_node(
     llm: LLMService,
     *,
     model_name: str = DEFAULT_MODEL_GEMNI,
-) -> Callable[[ConversationState], ConversationState]:
+    append_ai_message: bool = True,
+) -> CallableNodeFunc:
     """
-    GET_FILE stage:
-      - parse path (regex first, optional LLM fallback)
-      - normalize + validate
-      - when it needs to PRESENT, generate the user message via LLM and store it in control.node_message
+    GET_FILE node:
+    - LLM extracts candidate dataset_path from the newest unprocessed human message (no regex heuristics).
+    - Node normalizes + validates path deterministically (exists/readable/etc).
+    - LLM writes the user-facing message from validation outcome.
+    - No fallbacks: if LLM is down/invalid => mark ABORTED and raise.
     """
 
     def node(state: ConversationState) -> ConversationState:
-        control_in = _require_control(state)
+        _ = _require_control(state)  # must exist
         dataset_in = _as_dataset(state)
 
-        conversation_id: UUID = control_in["conversation_id"]
-        stage: Stage = control_in["stage"]  # expected "GET_FILE"
-
-        def mk_control(
-            *,
-            status: Status,
-            post_action: ACTION,
-            post_failure_suggested_stage: NEED_STAGE | None,
-            node_message: str,
-            last_error: JSONDict | None,
-            pending_stage: Stage | None = None,
-        ) -> ControlState:
-            out: ControlState = cast(
-                ControlState,
-                {
-                    **control_in,
-                    "conversation_id": conversation_id,
-                    "stage": stage,
-                    "status": status,
-                    "post_action": post_action,
-                    "post_failure_suggested_stage": post_failure_suggested_stage,
-                    "last_error": last_error,
-                    "node_message": node_message,
-                },
-            )
-            out["pending_stage"] = pending_stage
-            return out
-
-        messages: Sequence[BaseMessage] = cast(Sequence[BaseMessage], state.get("messages", []))
+        messages = cast(Sequence[BaseMessage], state.get("messages", []))
 
         last_idx_seen = dataset_in.get("get_file_last_user_msg_idx", -1)
         last_idx_seen = last_idx_seen if isinstance(last_idx_seen, int) else -1
 
-        # Helper: finalize state with an LLM-written node_message
-        def finalize_with_llm(
-            *,
-            state_base: ConversationState,
-            intent: str,
-            fallback: str,
-        ) -> ConversationState:
-            msg = build_node_message_with_llm(
-                llm,
-                state=state_base,
-                system_prompt=GET_FILE_PROMPT,
-                intent=intent,
-                model_name=model_name,
-                temperature=0.4,
-                history_window=10,
-                fallback=fallback,
-            )
-            c0 = cast(ControlState, state_base["control"]) # pyright: ignore[reportUnnecessaryCast]
-            c1: ControlState = {**c0, "node_message": msg}
-            return {**state_base, "control": c1}
+        newest = _last_new_human_message(messages, last_idx_seen)
+        user_idx, user_text = newest if newest else (-1, "")
 
-        # If we already have a path and there are no new human messages, validate and proceed.
-        existing_path = dataset_in.get("path")
-        any_new_human = any(True for _i, _txt in _iter_new_humans(messages, last_idx_seen))
-
-        if isinstance(existing_path, str) and existing_path.strip() and not any_new_human:
-            normalized = _normalize_path(existing_path)
-            ok, err = _validate_csv_path(normalized)
-            if ok:
-                base_state: ConversationState = {
-                    **state,
-                    "dataset": {**dataset_in, "path": normalized, "load_error": None},
-                    "control": mk_control(
-                        status="DONE",
-                        post_action="PRESENT",
-                        post_failure_suggested_stage=None,
-                        last_error=None,
-                        node_message="",
-                        pending_stage="LOAD_DATASET",
-                    ),
-                }
-                return finalize_with_llm(
-                    state_base=base_state,
-                    intent="PATH_ACCEPTED",
-                    fallback="✅ CSV path accepted. I’ll load the dataset next.",
+        # 1) LLM extracts path (or null). If no new message, treat as no path.
+        try:
+            extracted_path = None
+            if user_text:
+                extracted_path = _llm_extract_csv_path_strict(
+                    llm,
+                    model_name=model_name,
+                    user_text=user_text,
                 )
-
-            base_state2: ConversationState = {
-                **state,
-                "dataset": {
-                    **dataset_in,
-                    "path": normalized,
-                    "load_error": (err.get("code") if isinstance(err, dict) else "INVALID_PATH"),
-                },
-                "control": mk_control(
-                    status="PENDING",
-                    post_action="PRESENT_AND_USER_INPUT",
-                    post_failure_suggested_stage=None,
-                    last_error=err,
-                    node_message="",
-                    pending_stage=None,
-                ),
-            }
-            return finalize_with_llm(
-                state_base=base_state2,
-                intent="PATH_INVALID",
-                fallback=(
-                    "⚠️ I can’t read that CSV path. Please paste a valid existing path ending with .csv.\n"
-                    "Examples: /path/to/data.csv, ./data/my.csv, C:\\data\\file.csv"
-                ),
+        except Exception as e:
+            state["control"] = _mk_control(
+                current_stage="GET_FILE",
+                current_stage_status="ABORTED",
+                action_required="NEEDS_INPUT",
+                post_failure_suggested_stage="GET_FILE",
+                node_message="",
             )
+            raise ValueError(f"GET_FILE: LLM path extraction failed: {e}") from e
 
-        # Consume new human messages; choose the first valid path encountered.
-        last_error: JSONDict | None = None
-        newest_idx_seen = last_idx_seen
+        # 2) Validate (deterministic)
+        normalized_path: str | None = None
+        ok = False
+        err: JSONDict | None = None
 
-        candidate_path: str | None = None
-        candidate_err: JSONDict | None = None
+        if extracted_path is None:
+            ok = False
+            err = {"code": "NO_PATH", "detail": "No CSV path found in user message."}
+        else:
+            normalized_path = _normalize_path(extracted_path)
+            ok, err = _validate_csv_path(normalized_path)
 
-        for idx, user_text in _iter_new_humans(messages, last_idx_seen):
-            newest_idx_seen = max(newest_idx_seen, idx)
+        # 3) Update dataset + control routing (deterministic)
+        newest_seen = last_idx_seen
+        if user_idx >= 0:
+            newest_seen = max(newest_seen, user_idx)
 
-            parsed = _regex_extract_csv_path(user_text)
-
-            llm_err: JSONDict | None = None
-            if parsed is None:
-                if ".csv" in user_text.lower() or "csv" in user_text.lower() or "/" in user_text or "\\" in user_text:
-                    parsed, llm_err = _llm_extract_csv_path(llm, user_text=user_text, model_name=model_name)
-
-            if parsed is None:
-                if llm_err:
-                    last_error = llm_err
-                continue
-
-            normalized = _normalize_path(parsed)
-            ok, err = _validate_csv_path(normalized)
-            if ok:
-                candidate_path = normalized
-                candidate_err = None
-                break
-            else:
-                candidate_path = normalized
-                candidate_err = err
-                last_error = err
-
-        if candidate_path and candidate_err is None:
+        if ok:
             dataset_out: DatasetState = {
                 **dataset_in,
-                "path": candidate_path,
+                "path": cast(str, normalized_path),
                 "load_error": None,
-                "get_file_last_user_msg_idx": newest_idx_seen,
+                "get_file_last_user_msg_idx": newest_seen,
             }
-            base_state3: ConversationState = {
+            base_state: ConversationState = {
                 **state,
                 "dataset": dataset_out,
-                "control": mk_control(
-                    status="DONE",
-                    post_action="PRESENT",
+                "control": _mk_control(
+                    current_stage="LOAD_DATASET",
+                    current_stage_status="PENDING",
+                    action_required="NONE",
                     post_failure_suggested_stage=None,
-                    last_error=None,
                     node_message="",
-                    pending_stage="LOAD_DATASET",
                 ),
             }
-            return finalize_with_llm(
-                state_base=base_state3,
-                intent="PATH_ACCEPTED",
-                fallback="✅ CSV path accepted. I’ll load the dataset next.",
+        else:
+            dataset_out2: DatasetState = {
+                **dataset_in,
+                "path": normalized_path or dataset_in.get("path"),
+                "load_error": (err.get("code") if isinstance(err, dict) else "PATH_INVALID"),
+                "get_file_last_user_msg_idx": newest_seen,
+            }
+            # Keep details internal for the LLM message (prompt says “if an error code exists”)
+            if isinstance(err, dict) and err.get("detail") is not None:
+                dataset_out2 = cast(DatasetState, {**dataset_out2, "load_error_detail": str(err["detail"])})
+
+            base_state = {
+                **state,
+                "dataset": dataset_out2,
+                "control": _mk_control(
+                    current_stage="GET_FILE",
+                    current_stage_status="PENDING",
+                    action_required="NEEDS_INPUT",
+                    post_failure_suggested_stage=None,
+                    node_message="",
+                ),
+            }
+
+        # 4) LLM writes user-facing node message (strict, no fallback)
+        snapshot: JSONDict = {
+            "node": "GET_FILE",
+            "user_message_present": bool(user_text),
+            "extracted_path": extracted_path,
+            "normalized_path": normalized_path,
+            "validation": {
+                "ok": ok,
+                "code": (err.get("code") if isinstance(err, dict) else None),
+                "detail": (err.get("detail") if isinstance(err, dict) else None),
+            },
+        }
+
+        try:
+            node_msg = _llm_write_node_message_strict(
+                llm,
+                model_name=model_name,
+                snapshot=snapshot,
             )
-
-        # Still no valid path: ask user.
-        dataset_out2: DatasetState = {
-            **dataset_in,
-            "path": candidate_path or dataset_in.get("path"),
-            "load_error": (candidate_err.get("code") if isinstance(candidate_err, dict) else dataset_in.get("load_error")),
-            "get_file_last_user_msg_idx": newest_idx_seen,
-        }
-
-        base_state4: ConversationState = {
-            **state,
-            "dataset": dataset_out2,
-            "control": mk_control(
-                status="PENDING",
-                post_action="PRESENT_AND_USER_INPUT",
-                post_failure_suggested_stage=None,
-                last_error=last_error,
+        except Exception as e:
+            base_state["control"] = _mk_control(
+                current_stage="GET_FILE",
+                current_stage_status="ABORTED",
+                action_required="NEEDS_INPUT",
+                post_failure_suggested_stage="GET_FILE",
                 node_message="",
-                pending_stage=None,
-            ),
-        }
-        return finalize_with_llm(
-            state_base=base_state4,
-            intent="ASK_PATH",
-            fallback=(
-                "Paste the full path to your CSV file (must exist and end with .csv).\n"
-                "Examples:\n"
-                "- /path/to/data.csv\n"
-                "- ./data/my.csv\n"
-                "- C:\\data\\file.csv"
-            ),
-        )
+            )
+            raise ValueError(f"GET_FILE: LLM message generation failed: {e}") from e
+
+        # commit message
+        c0 =  base_state["control"]
+        base_state["control"] = cast(ControlState, {**c0, "node_message": node_msg})
+
+        if append_ai_message:
+            _append_final_ai_message(base_state, node_msg)
+
+        return base_state
 
     return node

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from typing import Callable, cast
+import inspect
+import logging
+from typing import Any, Sequence, cast
 from uuid import UUID
 
 from python.domain.repo.data_repo import DataRepo
-from python.domain.service.llm_service import LLMService
-from python.workflows.utils.node_llm_message import build_node_message_with_llm
-from python.workflows.state.conversation_state import ConversationState
-from python.workflows.state.control_state import ACTION, NEED_STAGE, ControlState, Stage, Status
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
+from python.workflows.state.control_state import ACTION, ControlState, Stage, Status
+from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
 from python.workflows.state.dataset_state import DatasetState
-from python.workflows.utils.types import DEFAULT_MODEL_GEMNI, JSONDict
+from python.workflows.utils.types import DEFAULT_MODEL_GEMNI
+
+log = logging.getLogger(__name__)
 
 
 def _require_control(state: ConversationState) -> ControlState:
@@ -17,7 +20,10 @@ def _require_control(state: ConversationState) -> ControlState:
 
 
 def _as_dataset(state: ConversationState) -> DatasetState:
-    return cast(DatasetState, state.get("dataset", {}))  # type: ignore
+    ds = state.get("dataset", {})
+    if not isinstance(ds, dict): # pyright: ignore[reportUnnecessaryIsInstance]
+        return cast(DatasetState, {})  # type: ignore
+    return cast(DatasetState, ds)  # type: ignore
 
 
 LOAD_DATASET_PROMPT = (
@@ -43,162 +49,144 @@ def make_load_dataset_node(
     llm: LLMService,
     *,
     model_name: str = DEFAULT_MODEL_GEMNI,
-) -> Callable[[ConversationState], ConversationState]:
+) -> CallableNodeFunc:
+    """
+    LOAD_DATASET node (updated for new ControlState):
+      - Writes control.current_stage/current_stage_status/action_required/post_failure_suggested_stage/node_message
+      - Writes dataset.id/path/raw_schema/summary/load_error
+      - Uses build_node_message_with_llm() to generate user-facing node_message
+    """
+
+    def mk_control(
+        *,
+        current_stage: Stage,
+        current_stage_status: Status,
+        action_required: ACTION,
+        node_message: str = "",
+    ) -> ControlState:
+        return cast(
+            ControlState,
+            {
+                "current_stage": current_stage,
+                "current_stage_status": current_stage_status,
+                "action_required": action_required,
+                "node_message": node_message,
+            },
+        )
+
+    def finalize_with_llm(
+        *,
+        base_state: ConversationState,
+        intent: str,
+        data: str | None = None,
+    ) -> ConversationState:
+        config = LLMConfig(
+            model=model_name,
+            temperature=0.0,
+        )
+        
+        history: Sequence[ChatMessage] = [
+        ChatMessage(role="system", content=LOAD_DATASET_PROMPT),
+        ChatMessage(role="user", content=f"""
+           Here is the current internal state snapshot (JSON):
+                {base_state}
+           Your intent is: {intent}
+           Please write the user-facing message accordingly.
+           Here are some additional data you can use: {data if data is not None else None}
+        """)
+      ]
+
+        resp = llm.generate(config=config, history=history)
+        msg = resp.content
+
+        c0 =  base_state["control"] 
+        c1: ControlState = {**c0, "node_message": msg}
+        return {**base_state, "control": c1}
+
     def load_dataset(state: ConversationState) -> ConversationState:
-        control_in = _require_control(state)
+        control_in = _require_control(state) # pyright: ignore[reportUnusedVariable]
         dataset_in = _as_dataset(state)
-
-        conversation_id: UUID = control_in["conversation_id"]
-        stage: Stage = control_in["stage"]  # expected: "LOAD_DATASET"
-
-        def mk_control(
-            *,
-            status: Status,
-            post_action: ACTION,
-            post_failure_suggested_stage: NEED_STAGE | None,
-            last_error: JSONDict | None,
-            pending_stage: Stage | None = None,
-        ) -> ControlState:
-            base: ControlState = cast(
-                ControlState,
-                {
-                    **control_in,
-                    "conversation_id": conversation_id,
-                    "stage": stage,
-                    "status": status,
-                    "post_action": post_action,
-                    "post_failure_suggested_stage": post_failure_suggested_stage,
-                    "last_error": last_error,
-                    # node_message filled later via LLM (when presenting)
-                    "node_message": "",
-                },
-            )
-            base["pending_stage"] = pending_stage
-            return base
-
-        def finalize_with_llm(
-            *,
-            base_state: ConversationState,
-            intent: str,
-            fallback: str,
-        ) -> ConversationState:
-            """
-            If we're about to PRESENT, let this node generate its own user-facing message.
-            """
-            msg = build_node_message_with_llm(
-                llm,
-                state=base_state,
-                system_prompt=LOAD_DATASET_PROMPT,
-                intent=intent,
-                model_name=model_name,
-                temperature=0.4,
-                history_window=10,
-                fallback=fallback,
-            )
-            c0 = cast(ControlState, base_state["control"]) # pyright: ignore[reportUnnecessaryCast]
-            c1: ControlState = {**c0, "node_message": msg}
-            return {**base_state, "control": c1}
 
         dataset_path = dataset_in.get("path")
 
-        # LOAD_DATASET assumes GET_FILE validated the path.
+        # If path missing => user must provide it => go back to GET_FILE
         if not isinstance(dataset_path, str) or not dataset_path.strip():
-            base_state = { # pyright: ignore[reportUnknownVariableType]
+            base_state: ConversationState = {
                 **state,
                 "control": mk_control(
-                    status="ABORTED",
-                    post_action="PRESENT",
-                    post_failure_suggested_stage="GET_FILE",
-                    last_error={"code": "MISSING_DATASET_PATH", "detail": "dataset.path missing at LOAD_DATASET."},
+                    current_stage="GET_FILE",
+                    current_stage_status="PENDING",
+                    action_required="NEEDS_INPUT",
                 ),
                 "dataset": {**dataset_in, "load_error": "MISSING_DATASET_PATH"},
             }
             return finalize_with_llm(
-                base_state=base_state, # pyright: ignore[reportArgumentType]
+                base_state=base_state,
                 intent="MISSING_PATH",
-                fallback=(
-                    "I don't have a CSV path to load yet. Please paste the path to your dataset CSV.\n"
-                    "Examples: /path/to/data.csv, ./data/my.csv, C:\\data\\file.csv"
-                ),
             )
 
         dataset_path = dataset_path.strip()
 
         if not dataset_path.lower().endswith(".csv"):
-            base_state = { # pyright: ignore[reportUnknownVariableType]
+            base_state = {
                 **state,
                 "control": mk_control(
-                    status="ABORTED",
-                    post_action="PRESENT",
-                    post_failure_suggested_stage="GET_FILE",
-                    last_error={"code": "INVALID_DATASET_FORMAT", "detail": f"Path {dataset_path!r} not .csv"},
+                    current_stage="GET_FILE",
+                    current_stage_status="PENDING",
+                    action_required="NEEDS_INPUT",
                 ),
                 "dataset": {**dataset_in, "path": dataset_path, "load_error": "INVALID_DATASET_FORMAT"},
             }
             return finalize_with_llm(
-                base_state=base_state, # pyright: ignore[reportArgumentType]
+                base_state=base_state,
                 intent="NOT_CSV",
-                fallback=(
-                    f"That path doesn’t look like a CSV file: {dataset_path!r}. "
-                    "Please provide a path ending with .csv."
-                ),
             )
 
         # Register dataset
         try:
-            dataset_id = data_repo.register_csv_dataset(
-                conversation_id=conversation_id,
-                dataset_path=dataset_path,
-            )
+            dataset_id: UUID = _register_csv_dataset_uuid(data_repo, state=state, dataset_path=dataset_path)
         except Exception as e:
-            base_state = { # pyright: ignore[reportUnknownVariableType]
+            base_state = {
                 **state,
                 "control": mk_control(
-                    status="ABORTED",
-                    post_action="PRESENT",
-                    post_failure_suggested_stage="GET_FILE",
-                    last_error={"code": "REGISTER_DATASET_ERROR", "detail": str(e)},
+                    current_stage="LOAD_DATASET",
+                    current_stage_status="ABORTED",
+                    action_required="NEEDS_INPUT",
                 ),
-                "dataset": {**dataset_in, "path": dataset_path, "load_error": "REGISTER_DATASET_ERROR"},
+                "dataset": {**dataset_in, "path": dataset_path, "load_error": f"REGISTER_DATASET_ERROR: {e}"},
             }
             return finalize_with_llm(
-                base_state=base_state, # pyright: ignore[reportArgumentType]
+                base_state=base_state,
                 intent="REGISTER_FAILED",
-                fallback=(
-                    "I couldn't register that dataset path. Please try another valid CSV path.\n"
-                    "Examples: /path/to/data.csv, ./data/my.csv, C:\\data\\file.csv"
-                ),
             )
 
         # Load dataset
         try:
             df = data_repo.get_csv_data(dataset_id)
         except Exception as e:
-            base_state = { # pyright: ignore[reportUnknownVariableType]
+            base_state = {
                 **state,
                 "control": mk_control(
-                    status="ABORTED",
-                    post_action="PRESENT",
-                    post_failure_suggested_stage="GET_FILE",
-                    last_error={"code": "DATA_LOAD_ERROR", "detail": str(e)},
+                    current_stage="LOAD_DATASET",
+                    current_stage_status="ABORTED",
+                    action_required="NEEDS_INPUT",
                 ),
-                "dataset": {**dataset_in, "id": dataset_id, "path": dataset_path, "load_error": "DATA_LOAD_ERROR"},
+                "dataset": {
+                    **dataset_in,
+                    "id": dataset_id,
+                    "path": dataset_path,
+                    "load_error": f"DATA_LOAD_ERROR: {e}",
+                },
             }
             return finalize_with_llm(
-                base_state=base_state, # pyright: ignore[reportArgumentType]
+                base_state=base_state,
                 intent="PARSE_FAILED",
-                fallback=(
-                    "I couldn't parse that file as a CSV (encoding/delimiter/format issue). "
-                    "Please provide another CSV path (or re-export the file as CSV)."
-                ),
             )
 
-        # Minimal schema + summary (deterministic)
+        # Deterministic schema + summary
         n_rows, n_cols = df.shape
-        raw_schema: JSONDict = {
-            "columns": [{"name": col, "dtype": str(dtype)} for col, dtype in df.dtypes.items()]
-        }
-        summary: JSONDict = {"n_rows": int(n_rows), "n_cols": int(n_cols)}
+        raw_schema = {"columns": [{"name": col, "dtype": str(dtype)} for col, dtype in df.dtypes.items()]} # pyright: ignore[reportUnknownVariableType]
+        summary = {"n_rows": int(n_rows), "n_cols": int(n_cols)}
 
         dataset_out: DatasetState = {
             **dataset_in,
@@ -213,27 +201,89 @@ def make_load_dataset_node(
             **state,
             "dataset": dataset_out,
             "control": mk_control(
-                status="DONE",
-                post_action="PRESENT",
-                post_failure_suggested_stage=None,
-                last_error=None,
-                pending_stage=None,
+                current_stage="LOAD_DATASET",
+                current_stage_status="DONE",
+                action_required="NONE",
             ),
         }
 
-        # Fallback uses deterministic preview in case LLM fails.
-        cols_preview = [c["name"] for c in cast(list[dict[str, object]], raw_schema.get("columns", []))[:10]]
+        cols_preview = [c["name"] for c in cast(list[dict[str, Any]], raw_schema.get("columns", []))[:10]] # pyright: ignore[reportUnknownMemberType]
         preview_str = ", ".join([str(x) for x in cols_preview]) + (" ..." if int(n_cols) > 10 else "")
+        data = f"The dataset has {n_rows} rows and {n_cols} columns. Column names include: {preview_str}."
 
         return finalize_with_llm(
             base_state=base_state_ok,
             intent="LOADED_OK",
-            fallback=(
-                "✅ Dataset loaded.\n"
-                f"- Rows: {int(n_rows)}\n"
-                f"- Columns: {int(n_cols)}\n"
-                f"- First columns: {preview_str}"
-            ),
+            data=data,
         )
 
     return load_dataset
+
+
+# -----------------------------------------------------------------------------
+# Helpers: robust, but *typed* UUID for get_csv_data(...)
+# -----------------------------------------------------------------------------
+
+def _register_csv_dataset_uuid(data_repo: DataRepo, *, state: ConversationState, dataset_path: str) -> UUID:
+    """
+    Calls DataRepo.register_csv_dataset with whichever signature it supports
+    and coerces return into UUID for downstream typing.
+
+    Supported parameter names:
+      - dataset_path / path
+      - conversation_id (optional)
+    """
+    fn = getattr(data_repo, "register_csv_dataset")
+    sig = inspect.signature(fn)
+    params = sig.parameters
+
+    # Prefer keyword calls to avoid positional mistakes
+    if "conversation_id" in params and ("dataset_path" in params or "path" in params):
+        cid = _find_conversation_id(state)
+        if "dataset_path" in params:
+            res = fn(conversation_id=cid, dataset_path=dataset_path)  # type: ignore[misc]
+        else:
+            res = fn(conversation_id=cid, path=dataset_path)  # type: ignore[misc]
+        return _coerce_uuid(res)
+
+    if "dataset_path" in params:
+        res = fn(dataset_path=dataset_path)  # type: ignore[misc]
+        return _coerce_uuid(res)
+
+    if "path" in params:
+        res = fn(path=dataset_path)  # type: ignore[misc]
+        return _coerce_uuid(res)
+
+    # last resort: positional (still coerce to UUID)
+    res = fn(dataset_path)  # type: ignore[misc]
+    return _coerce_uuid(res)
+
+
+def _coerce_uuid(x: Any) -> UUID:
+    if isinstance(x, UUID):
+        return x
+    if isinstance(x, str):
+        return UUID(x)
+    raise TypeError(f"register_csv_dataset returned non-UUID/non-str id: {type(x).__name__}")
+
+
+def _find_conversation_id(state: ConversationState) -> UUID:
+    """
+    Only needed if your repo signature still requires conversation_id.
+    Looks in common places. Fail loudly if not found.
+    """
+    cid = state.get("conversation_id")
+    if isinstance(cid, UUID):
+        return cid
+    if isinstance(cid, str):
+        return UUID(cid)
+
+    ctrl = state.get("control")
+    if isinstance(ctrl, dict): # pyright: ignore[reportUnnecessaryIsInstance]
+        cid2 = ctrl.get("conversation_id")
+        if isinstance(cid2, UUID):
+            return cid2
+        if isinstance(cid2, str):
+            return UUID(cid2)
+
+    raise ValueError("conversation_id required by DataRepo.register_csv_dataset but not found in state.")
