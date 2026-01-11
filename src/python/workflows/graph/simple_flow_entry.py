@@ -425,7 +425,7 @@ class SimpleWorkflow:
     # Internal runner
     # -------------------------------------------------------------------------
     def _run_until_stop(self, state: ConversationState) -> ConversationState:
-        for step in range(self._cfg.max_internal_steps): # pyright: ignore[reportUnusedVariable]
+        for step in range(self._cfg.max_internal_steps):
             c = _control(state)
             stage = c["stage"]
 
@@ -481,6 +481,7 @@ class SimpleWorkflow:
                 state = {**state2, "control": cast(ControlState, c3)}
                 continue
             
+            _log_state(f"step:{step}:no_progress_stop", state2)
             return state2
 
         log.warning("SimpleWorkflow._run_until_stop hit max_internal_steps=%s", self._cfg.max_internal_steps)
