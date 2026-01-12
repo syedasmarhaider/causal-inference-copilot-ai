@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import  Final, Sequence
 from uuid import UUID, uuid4
 
@@ -18,8 +17,6 @@ from python.workflows.utils.types import DEFAULT_MODEL_GEMNI, JSONDict
 
 log = logging.getLogger(__name__)
 
-_JSON_FENCE_RE: Final[re.Pattern[str]] = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
-
 LOAD_DATASET_MESSAGE_PROMPT: Final[str] = """
 You are the LOAD_DATASET node of a causal inference copilot.
 
@@ -31,7 +28,7 @@ You receive a compact JSON snapshot that includes:
 
 Rules:
 - Do NOT reveal stack traces or internal JSON.
-- If LOADED_OK: confirm loaded and show rows/cols and a short column-name preview.
+- If LOADED_OK: confirm loaded and show rows/cols and column names explanably.
 - If LOAD_FAILED: explain the failure in simple terms and ask the user what to do next.
   (In this prototype, the CSV path is controlled by the app constant, so suggest verifying the file exists
    at the configured path or updating the configured path.)
