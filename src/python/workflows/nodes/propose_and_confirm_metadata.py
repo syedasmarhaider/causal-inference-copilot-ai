@@ -11,6 +11,11 @@ from uuid import UUID
 from langchain_core.messages import AIMessage, BaseMessage
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
+from python.workflows.nodes.prompts.propose_and_confirm_metadata import (
+    compose_node_message_system_prompt,
+    edit_metadata_system_prompt,
+    kickoff_system_prompt,
+)
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
 from python.workflows.state.control_state import ControlState
 from python.workflows.state.metadata_state import MetadataField, MetadataState, empty_metadata
@@ -21,6 +26,7 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 
 _ALLOWED_STRATEGIES = {"USER_LIST", "ALL_EXCEPT_TY", "NONE"}
 
+# IMPORTANT: we use confounders naming (not covariates)
 _ALLOWED_LOCK_FIELDS: set[str] = {
     "dataset_summary",
     "treatment",
@@ -64,21 +70,26 @@ def _run_propose_and_confirm_metadata(
     llm: LLMService,
     model_name: str,
 ) -> ConversationState:
-    """
-    Draft-first UX (no brittle keyword heuristics; no deterministic templates):
-    - LLM #1 edits metadata as strict JSON (with one repair attempt).
-    - Deterministic hardening enforces schema safety + basic validity.
-    - LLM #2 writes the user-facing message naturally using the current draft.
-    """
     control = _require_control(state)
     md_old = _require_metadata(state)
 
-    dataset_cols = _extract_dataset_columns(state.get("dataset"))
+    dataset_cols = _extract_dataset_columns(state.get("dataset")) or []
     now_iso = datetime.now(timezone.utc).isoformat()
     user_text = _last_human_text(cast(Sequence[BaseMessage], state.get("messages", []))).strip()
 
+    # Kickoff
     if not user_text:
-        node_msg = _llm_initial_prompt(llm=llm, model_name=model_name)
+        try:
+            node_msg = _llm_initial_prompt(
+                llm=llm,
+                model_name=model_name,
+                dataset_columns=dataset_cols,
+            )
+        except Exception as e:
+            _abort(control, f"Initial prompt LLM failed: {e}")
+            log.exception("PROPOSE_AND_CONFIRM_METADATA: initial prompt failed")
+            raise ValueError(f"PROPOSE_AND_CONFIRM_METADATA: initial prompt failed: {e}") from e
+
         control["node_message"] = node_msg
         control["current_stage"] = "PROPOSE_AND_CONFIRM_METADATA"
         control["current_stage_status"] = "PENDING"
@@ -86,7 +97,7 @@ def _run_propose_and_confirm_metadata(
         _append_ai_message(state, node_msg, stage="PROPOSE_AND_CONFIRM_METADATA")
         return state
 
-    # ---- LLM #1: strict JSON edit ----
+    # ---- LLM #1: strict JSON metadata edit ----
     try:
         obj1 = _llm_edit_metadata_json(
             llm=llm,
@@ -94,7 +105,7 @@ def _run_propose_and_confirm_metadata(
             temperature=0.0,
             current_metadata=md_old,
             user_text=user_text,
-            dataset_columns=dataset_cols or [],
+            dataset_columns=dataset_cols,
             now_iso=now_iso,
         )
 
@@ -109,7 +120,6 @@ def _run_propose_and_confirm_metadata(
             user_text=user_text,
         )
 
-        # Provenance (deterministic truncation)
         prov_in = md_new.get("provenance")
         provenance: Dict[str, Any] = prov_in if isinstance(prov_in, dict) else {}
         provenance["metadata_llm1_updated_utc"] = now_iso
@@ -119,6 +129,7 @@ def _run_propose_and_confirm_metadata(
         md_new["provenance"] = provenance
 
         state["metadata"] = md_new
+
     except Exception as e:
         _abort(control, f"Metadata update failed: {e}")
         log.exception("PROPOSE_AND_CONFIRM_METADATA: LLM#1 failed")
@@ -126,19 +137,20 @@ def _run_propose_and_confirm_metadata(
 
     md = _require_metadata(state)
 
-    # ---- LLM #2: natural message ----
+    # ---- LLM #2: natural user-facing message ----
     try:
         node_msg = _llm_compose_node_message(
             llm=llm,
             model_name=model_name,
             user_text=user_text,
             metadata=md,
-            dataset_columns=dataset_cols or [],
+            dataset_columns=dataset_cols,
             now_iso=now_iso,
         )
     except Exception as e:
-        log.exception("PROPOSE_AND_CONFIRM_METADATA: LLM#2 failed, using fallback. err=%s", e)
-        node_msg = _compose_plain_human_fallback(metadata=md)
+        _abort(control, f"Message generation failed: {e}")
+        log.exception("PROPOSE_AND_CONFIRM_METADATA: LLM#2 failed")
+        raise ValueError(f"PROPOSE_AND_CONFIRM_METADATA: LLM#2 failed: {e}") from e
 
     control["node_message"] = node_msg
 
@@ -158,26 +170,21 @@ def _run_propose_and_confirm_metadata(
 # =============================================================================
 # LLM calls
 # =============================================================================
-def _llm_initial_prompt(*, llm: LLMService, model_name: str) -> str:
-    system = """
-You are a causal inference copilot. Start a draft conversation.
+def _llm_initial_prompt(
+    *,
+    llm: LLMService,
+    model_name: str,
+    dataset_columns: Optional[List[str]] = None,
+) -> str:
+    cols_preview = (dataset_columns or [])[:25]
 
-Ask the user for ANY of:
-- treatment (exposure)
-- outcome
-- causal question
-- optional confounders to control for
-
-Rules:
-- Sound like a normal person.
-- Do not mention JSON, schemas, nodes/stages, flags, or warnings.
-Return ONLY the message text.
-""".strip()
+    system = kickoff_system_prompt()
+    payload = {"dataset_columns_preview": cols_preview}
 
     cfg = LLMConfig(model=model_name, temperature=0.4)
     history: Sequence[ChatMessage] = [
         ChatMessage(role="system", content=system),
-        ChatMessage(role="user", content=""),
+        ChatMessage(role="user", content=json.dumps(payload, ensure_ascii=False)),
     ]
     resp = llm.generate(config=cfg, history=history)
     msg = (resp.content or "").strip()
@@ -197,53 +204,7 @@ def _llm_edit_metadata_json(
     now_iso: str,
 ) -> Dict[str, Any]:
     schema_json = _metadata_schema_json()
-
-    system = f"""
-You are a deterministic metadata editor for a causal inference copilot (backdoor criteria only).
-
-You receive:
-- current_metadata (already matches schema)
-- dataset_columns (valid column names)
-- user_message (latest user text)
-
-OUTPUT RULES (NON-NEGOTIABLE)
-- Output ONLY one VALID JSON object.
-- No markdown. No commentary.
-- Must match this example schema exactly (keys + nesting):
-{schema_json}
-- Must be parseable by json.loads().
-
-DRAFT-FIRST
-- The user may explore confounders before finalizing treatment/outcome.
-- Fill partial metadata when helpful; do not block on missing fields.
-
-ALLOWED EDITS (unless user explicitly requests otherwise)
-- treatment, outcome, causal_question
-- confounder_strategy, confounders
-- locked_fields, accepted
-- warnings, notes
-(Do not modify other fields unless explicitly requested.)
-
-SEMANTICS
-- If user says "covariates", treat that as "confounders" here.
-- confounder_strategy must be exactly one of: "USER_LIST", "ALL_EXCEPT_TY", "NONE"
-  - If user provides a list -> "USER_LIST"
-  - If user explicitly wants none -> "NONE" and confounders=[]
-- Keep dataset_summary ONE LINE.
-
-LOCKING
-- If user says keep/leave/don't change X -> add X to locked_fields.
-- If user says unlock X / you can change X -> remove X from locked_fields.
-
-ACCEPTANCE
-- Set accepted=true ONLY if the user clearly agrees to proceed with the current draft.
-- Otherwise accepted=false.
-
-WARNINGS
-- warnings ONLY for ambiguity/validation (unknown column name, conflicts, changing locked field).
-
-now_utc: {now_iso}
-""".strip()
+    system = edit_metadata_system_prompt(schema_json=schema_json, now_iso=now_iso)
 
     payload: Dict[str, Any] = {
         "user_message": user_text,
@@ -271,28 +232,7 @@ def _llm_compose_node_message(
     dataset_columns: List[str],
     now_iso: str,
 ) -> str:
-    system = f"""
-You are a causal inference copilot chatting like a normal human.
-
-You receive a JSON payload with:
-- user_message
-- metadata (draft)
-- dataset_columns_preview
-
-Rules:
-- Do NOT mention JSON, schema, nodes/stages, flags, or "warnings" as a label.
-- Be concise and natural (1–4 short paragraphs).
-- Never assume a causal question exists unless metadata.causal_question is non-empty.
-- Always include ONE recap sentence in a human tone that mentions:
-  treatment, outcome, causal_question (or "not set"), and confounders (even if empty).
-- If metadata has warnings, optionally mention at most ONE as a normal note (no heading).
-- If user asks for suggestions and the draft is incomplete, present 2–3 options and ask them to choose.
-- If user is satisfied, acknowledge and say you’ll proceed next.
-- If something is missing, ask for what’s missing in a friendly way.
-- Don’t nag; ask about confounders once if empty and relevant, otherwise allow moving on.
-
-now_utc: {now_iso}
-""".strip()
+    system = compose_node_message_system_prompt(now_iso=now_iso)
 
     payload: Dict[str, Any] = {
         "user_message": user_text,
@@ -398,11 +338,11 @@ def _metadata_schema_json() -> str:
         "metadata": {
             "treatment": "",
             "outcome": "",
-            "causal_question": "",
             "confounder_strategy": "NONE",  # USER_LIST | ALL_EXCEPT_TY | NONE
             "confounders": [],
             "controls": [],
             "effect_modifiers": [],
+            "causal_question": "",
             "accepted": False,
             "dataset_summary": "",
             "locked_fields": [],
@@ -426,17 +366,18 @@ def _harden_metadata(
 ) -> MetadataState:
     """
     Deterministic hardening ONLY:
-    - normalizes strings/lists/bools
-    - enforces enums
-    - enforces locks
-    - validates accepted (T/Y required; USER_LIST requires non-empty confounders)
-    - soft warnings for unknown columns (kept internal; LLM#2 can choose to mention at most one)
+    - shape completeness
+    - single-line strings
+    - enum enforcement
+    - locked fields enforcement
+    - acceptance validity checks (T/Y required, USER_LIST requires non-empty confounders)
+    - soft warnings for unknown columns
     """
     base: MetadataState = empty_metadata()
     base.update(_normalize_legacy_fields(old))  # type: ignore[arg-type]
 
-    merged = dict(_normalize_legacy_fields(new))
-    for k, v in merged.items():
+    incoming = _normalize_legacy_fields(new)
+    for k, v in incoming.items():
         if k in base:
             base[k] = v  # type: ignore[literal-required]
 
@@ -469,7 +410,6 @@ def _harden_metadata(
             return bool(x)
         return False
 
-    # locked_fields: explicit lock/unlock intent only (no other heuristics)
     locked = _clean_locked_fields(base.get("locked_fields"))
     if user_text.strip():
         locked = _apply_lock_intent_from_user_text(locked, user_text)
@@ -496,7 +436,7 @@ def _harden_metadata(
     # Enforce locks by restoring OLD values.
     def restore(field: MetadataField, current: Any) -> Any:
         if field in locked:
-            return old.get(field) if field in old else current
+            return old.get(field) if isinstance(old, dict) else current
         return current
 
     treatment = cast(str, restore("treatment", treatment))
@@ -508,11 +448,11 @@ def _harden_metadata(
     causal_question = cast(str, restore("causal_question", causal_question))
     dataset_summary = cast(str, restore("dataset_summary", dataset_summary))
 
-    # Strategy consistency.
+    # Strategy consistency
     if confounder_strategy == "NONE":
         confounders = []
 
-    # Acceptance validity (pure validation).
+    # Acceptance validity (only validity, no intent heuristics)
     if accepted and (not treatment or not outcome):
         accepted = False
         warnings.append("Cannot accept: treatment/outcome is missing.")
@@ -521,7 +461,7 @@ def _harden_metadata(
         accepted = False
         warnings.append("Cannot accept: confounder_strategy=USER_LIST but confounders is empty.")
 
-    # Soft column checks.
+    # Soft column checks
     if dataset_columns:
         colset = {c.strip() for c in dataset_columns if isinstance(c, str) and c.strip()}
 
@@ -546,11 +486,11 @@ def _harden_metadata(
     out: MetadataState = {
         "treatment": treatment,
         "outcome": outcome,
-        "causal_question": causal_question,
         "confounder_strategy": cast(Any, confounder_strategy),
         "confounders": confounders,
         "controls": controls,
         "effect_modifiers": effect_modifiers,
+        "causal_question": causal_question,
         "accepted": accepted,
         "dataset_summary": dataset_summary,
         "locked_fields": locked,
@@ -563,21 +503,19 @@ def _harden_metadata(
 
 def _normalize_legacy_fields(d: Any) -> Dict[str, Any]:
     """
-    Backwards-compat: if older state used covariate_strategy/covariates, map them to
-    confounder_strategy/confounders so old conversations don't lose info.
+    Back-compat: map older covariate_* keys into confounder_* keys.
+    This prevents losing information if older states exist.
     """
     if not isinstance(d, dict):
         return {}
     out = dict(d)
 
-    # Map old -> new (non-destructive)
     if "confounder_strategy" not in out and "covariate_strategy" in out:
         out["confounder_strategy"] = out.get("covariate_strategy")
     if "confounders" not in out and "covariates" in out:
         out["confounders"] = out.get("covariates")
 
-    # If someone accidentally wrote "confounders" as strategy enum and also had covariates list,
-    # we still prefer explicit keys above. No further guessing here.
+    # If old schema stored locks referencing old names, keep them (cleaner will map them).
     return out
 
 
@@ -594,7 +532,7 @@ def _clean_locked_fields(x: Any) -> List[MetadataField]:
 
     cleaned: List[str] = []
     for it in items:
-        # Back-compat for previously stored lock names
+        # map old -> new
         if it == "covariate_strategy":
             it = "confounder_strategy"
         if it == "covariates":
@@ -607,26 +545,20 @@ def _clean_locked_fields(x: Any) -> List[MetadataField]:
 
 def _apply_lock_intent_from_user_text(locked: List[MetadataField], user_text: str) -> List[MetadataField]:
     """
-    Explicit lock/unlock interpretation only. Also treats "covariates" mention as "confounders".
+    Only explicit lock/unlock intent. Also supports covariates/confounders wording.
     """
     t = (user_text or "").lower()
     locked_set = set(locked)
 
-    # Simple synonym mapping for mentions
-    synonym_map = {
-        "covariates": "confounders",
-        "covariate_strategy": "confounder_strategy",
-        "confounder strategy": "confounder_strategy",
-        "confounders": "confounders",
-    }
-
     def mentions(field: str) -> bool:
+        # direct
         if field in t or field.replace("_", " ") in t:
             return True
-        # synonym hits
-        for k, v in synonym_map.items():
-            if v == field and k in t:
-                return True
+        # synonyms
+        if field == "confounders" and ("covariates" in t or "confounders" in t):
+            return True
+        if field == "confounder_strategy" and ("covariate strategy" in t or "confounder strategy" in t):
+            return True
         return False
 
     if "unlock" in t or "you can change" in t:
@@ -650,20 +582,6 @@ def _dedupe(items: List[str]) -> List[str]:
             seen.add(it)
             out.append(it)
     return out
-
-
-def _compose_plain_human_fallback(*, metadata: MetadataState) -> str:
-    # Emergency only (keeps the system usable if LLM#2 fails).
-    t = (metadata.get("treatment") or "").strip() or "—"
-    y = (metadata.get("outcome") or "").strip() or "—"
-    q = (metadata.get("causal_question") or "").strip() or "not set"
-    confs = metadata.get("confounders") or []
-    conf_str = ", ".join(confs[:8]) + ("…" if len(confs) > 8 else "")
-    conf_str = conf_str if conf_str.strip() else "—"
-
-    if bool(metadata.get("accepted", False)):
-        return f"Alright — I’ll proceed. So far: treatment={t}, outcome={y}, question={q}, confounders={conf_str}."
-    return f"So far: treatment={t}, outcome={y}, question={q}, confounders={conf_str}. What would you like to adjust?"
 
 
 # =============================================================================
@@ -715,7 +633,7 @@ def _last_human_text(messages: Sequence[BaseMessage]) -> str:
 
 
 # =============================================================================
-# Dataset columns (best effort; supports raw_schema formats)
+# Dataset columns (best effort)
 # =============================================================================
 def _extract_dataset_columns(dataset_state: Any) -> Optional[List[str]]:
     if not isinstance(dataset_state, dict):

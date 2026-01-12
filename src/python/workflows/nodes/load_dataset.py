@@ -3,39 +3,20 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import  Final, Sequence
+from typing import  Sequence
 from uuid import UUID, uuid4
 
 from langchain_core.messages import AIMessage
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
+from python.workflows.nodes.prompts.load_dataset import load_dataset_system_prompt
 from python.workflows.state.control_state import ACTION, ControlState, Stage, Status
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
 from python.workflows.state.dataset_state import DatasetState
 from python.workflows.utils.types import DEFAULT_MODEL_GEMNI, JSONDict
 
 log = logging.getLogger(__name__)
-
-LOAD_DATASET_MESSAGE_PROMPT: Final[str] = """
-You are the LOAD_DATASET node of a causal inference copilot.
-
-You receive a compact JSON snapshot that includes:
-- intent: "LOADED_OK" or "LOAD_FAILED"
-- dataset_preview (if loaded): rows, cols, first_columns
-- error (if failed): a short string reason
-- hint: what the user can do next
-
-Rules:
-- Do NOT reveal stack traces or internal JSON.
-- If LOADED_OK: confirm loaded and show rows/cols and column names explanably.
-- If LOAD_FAILED: explain the failure in simple terms and ask the user what to do next.
-  (In this prototype, the CSV path is controlled by the app constant, so suggest verifying the file exists
-   at the configured path or updating the configured path.)
-Return ONLY the message text. No markdown fences.
-""".strip()
-
-
 def _mk_control(
     *,
     current_stage: Stage,
@@ -63,7 +44,7 @@ def _llm_message_strict(
 ) -> str:
     cfg = LLMConfig(model=model_name, temperature=0.5)
     history: Sequence[ChatMessage] = [
-        ChatMessage(role="system", content=LOAD_DATASET_MESSAGE_PROMPT),
+        ChatMessage(role="system", content=load_dataset_system_prompt()),
         ChatMessage(role="user", content=json.dumps(snapshot, ensure_ascii=False)),
     ]
     msg = llm.generate(config=cfg, history=history).content
@@ -80,16 +61,6 @@ def make_load_dataset_node(
     limit: int | None = None,
     append_ai_message: bool = True,
 ) -> CallableNodeFunc:
-    """
-    LOAD_DATASET node for your current prototype:
-
-    - DatasetState has NO path; only dataset.id is relevant.
-    - DataRepo.get_csv_data(...) is the single source of truth (it may use a constant path internally).
-    - NO manual path validation here (repo/pandas errors are caught and surfaced via LLM message).
-    - LLM is responsible for BOTH success and error user-facing messages.
-    - If LLM fails => mark ABORTED and raise.
-    """
-
     def node(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
         dataset: DatasetState = state.get("dataset", {})  # type: ignore[assignment]
         # Ensure dataset_id exists (store it in state so repo can later key on it)
