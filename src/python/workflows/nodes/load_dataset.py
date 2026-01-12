@@ -1,3 +1,4 @@
+# src/python/workflows/nodes/load_dataset.py
 from __future__ import annotations
 
 import json
@@ -15,6 +16,8 @@ from python.workflows.state.dataset_state import DatasetState
 from python.workflows.utils.types import DEFAULT_MODEL_GEMNI, JSONDict
 
 log = logging.getLogger(__name__)
+
+
 def _mk_control(
     *,
     current_stage: Stage,
@@ -29,8 +32,12 @@ def _mk_control(
         "node_message": node_message,
     }
 
+
 def _append_final_ai_message(state: ConversationState, content: str) -> None:
     msgs = state.get("messages")
+    if not isinstance(msgs, list): # pyright: ignore[reportUnnecessaryIsInstance]
+        state["messages"] = []
+        msgs = state["messages"]
     msgs.append(AIMessage(content=content, additional_kwargs={"source": "node", "stage": "LOAD_DATASET"}))
 
 
@@ -41,10 +48,22 @@ def _llm_message_strict(
     snapshot: JSONDict,
 ) -> str:
     cfg = LLMConfig(model=model_name, temperature=0.5)
-    msg = llm.generate(config=cfg, system_prompt=load_dataset_system_prompt(), user_prompt=json.dumps(snapshot, ensure_ascii=False), history=None).content
+    msg = llm.generate(
+        config=cfg,
+        system_prompt=load_dataset_system_prompt(),
+        user_prompt=json.dumps(snapshot, ensure_ascii=False),
+        history=None,
+    ).content
     if not msg:
         raise ValueError("LOAD_DATASET: LLM returned empty node message")
     return msg
+
+
+def _format_columns_block(cols: list[str]) -> str:
+    lines = [f"Columns ({len(cols)}):"]
+    for i, c in enumerate(cols, start=1):
+        lines.append(f"{i}. {c}")
+    return "\n".join(lines)
 
 
 def make_load_dataset_node(
@@ -61,7 +80,6 @@ def make_load_dataset_node(
         if not isinstance(dataset_id, UUID):
             raise ValueError("LOAD_DATASET: dataset.id missing or invalid UUID")
 
-        # ---- Load via DataRepo (no manual validation here) ----
         try:
             df = data_repo.get_csv_data(
                 user_id=user_id,
@@ -151,9 +169,12 @@ def make_load_dataset_node(
             )
             raise ValueError(f"LOAD_DATASET: LLM message generation failed: {llm_e}") from llm_e
 
-        out_state_ok["control"] = {**out_state_ok["control"], "node_message": msg_ok}  # type: ignore[index]
+        columns_block = _format_columns_block(cols)
+        final_msg_ok = f"{columns_block}\n\n{msg_ok}".strip()
+
+        out_state_ok["control"] = {**out_state_ok["control"], "node_message": final_msg_ok}  # type: ignore[index]
         if append_ai_message:
-            _append_final_ai_message(out_state_ok, msg_ok)
+            _append_final_ai_message(out_state_ok, final_msg_ok)
 
         return out_state_ok
 
