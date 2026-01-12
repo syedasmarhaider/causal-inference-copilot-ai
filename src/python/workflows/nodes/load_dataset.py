@@ -1,15 +1,13 @@
-# src/python/workflows/nodes/load_dataset.py
 from __future__ import annotations
 
 import json
 import logging
-from typing import  Sequence
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from langchain_core.messages import AIMessage
 
 from python.domain.repo.data_repo import DataRepo
-from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
+from python.domain.service.llm_service import LLMConfig, LLMService
 from python.workflows.nodes.prompts.load_dataset import load_dataset_system_prompt
 from python.workflows.state.control_state import ACTION, ControlState, Stage, Status
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
@@ -43,11 +41,7 @@ def _llm_message_strict(
     snapshot: JSONDict,
 ) -> str:
     cfg = LLMConfig(model=model_name, temperature=0.5)
-    history: Sequence[ChatMessage] = [
-        ChatMessage(role="system", content=load_dataset_system_prompt()),
-        ChatMessage(role="user", content=json.dumps(snapshot, ensure_ascii=False)),
-    ]
-    msg = llm.generate(config=cfg, history=history).content
+    msg = llm.generate(config=cfg, system_prompt=load_dataset_system_prompt(), user_prompt=json.dumps(snapshot, ensure_ascii=False), history=None).content
     if not msg:
         raise ValueError("LOAD_DATASET: LLM returned empty node message")
     return msg
@@ -63,10 +57,9 @@ def make_load_dataset_node(
 ) -> CallableNodeFunc:
     def node(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
         dataset: DatasetState = state.get("dataset", {})  # type: ignore[assignment]
-        # Ensure dataset_id exists (store it in state so repo can later key on it)
         dataset_id = dataset.get("id")
         if not isinstance(dataset_id, UUID):
-            dataset_id = uuid4()
+            raise ValueError("LOAD_DATASET: dataset.id missing or invalid UUID")
 
         # ---- Load via DataRepo (no manual validation here) ----
         try:
@@ -77,7 +70,6 @@ def make_load_dataset_node(
                 limit=limit,
             )
         except Exception as e:
-            # Prepare state (retryable)
             out_state: ConversationState = {
                 **state,
                 "dataset": {
@@ -95,7 +87,6 @@ def make_load_dataset_node(
                 ),
             }
 
-            # LLM crafts the user-facing error message
             snapshot: JSONDict = {
                 "intent": "LOAD_FAILED",
                 "error": str(e),
@@ -121,7 +112,6 @@ def make_load_dataset_node(
         # ---- Success: write schema + summary deterministically ----
         n_rows, n_cols = df.shape
         cols = [str(c) for c in df.columns.tolist()]
-        first_cols = ", ".join(cols[:10]) + (" ..." if len(cols) > 10 else "")
 
         raw_schema: JSONDict = {
             "columns": [{"name": str(col), "dtype": str(dtype)} for col, dtype in df.dtypes.items()]
@@ -147,7 +137,7 @@ def make_load_dataset_node(
 
         snapshot_ok: JSONDict = {
             "intent": "LOADED_OK",
-            "dataset_preview": {"rows": int(n_rows), "cols": int(n_cols), "first_columns": first_cols},
+            "dataset_preview": {"rows": int(n_rows), "cols": int(n_cols), "columns": cols},
         }
 
         try:

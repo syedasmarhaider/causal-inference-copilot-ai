@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Mapping, TypeGuard
+from typing import Final, Mapping
 from uuid import UUID
 
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -68,67 +68,8 @@ def _new_state() -> ConversationState:
         "metadata": metadata,
         "messages": messages,
     }
-
-
-def _is_conversation_state(x: object) -> TypeGuard[ConversationState]:
-    """
-    Strict enough for prod:
-      - ensures required top-level keys exist with correct container types
-      - ensures ControlState has required keys
-      - ensures metadata has required keys (MetadataState is total=True)
-    No "repair" logic here: either accept as-is or re-init from scratch.
-    """
-    if not isinstance(x, dict):
-        return False
-
-    d = x  # pyright: ignore[reportUnknownVariableType] # already a dict at runtime; keep local var for clarity
-
-    control = d.get("control") # type: ignore
-    dataset = d.get("dataset") # type: ignore
-    metadata = d.get("metadata") # type: ignore
-    messages = d.get("messages") # type: ignore
-
-    if not isinstance(control, dict):
-        return False
-    if not isinstance(dataset, dict):
-        return False
-    if not isinstance(metadata, dict):
-        return False
-    if not isinstance(messages, list):
-        return False
-
-    # ControlState required keys
-    if not isinstance(control.get("current_stage"), str): # type: ignore
-        return False
-    if not isinstance(control.get("current_stage_status"), str): # type: ignore
-        return False
-    if not isinstance(control.get("action_required"), str): # type: ignore
-        return False
-    # node_message may be None or str (TypedDict allows both)
-
-    # MetadataState is total=True in your codebase -> must be shape-complete
-    required_md_keys = (
-        "treatment",
-        "outcome",
-        "covariate_strategy",
-        "controls",
-        "covariates",
-        "effect_modifiers",
-        "causal_question",
-        "accepted",
-        "dataset_summary",
-        "locked_fields",
-        "notes",
-        "warnings",
-        "provenance",
-    )
-    for k in required_md_keys:
-        if k not in metadata:
-            return False
-
-    return True
-
-
+    
+    
 def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
     return {
         "LOAD_DATASET": make_load_dataset_node(cfg.data_repo, cfg.llm, model_name=cfg.model_name),
@@ -171,10 +112,11 @@ class SimpleWorkflow:
         conversation_id: UUID,
         user_text: str | None = None,
     ) -> WorkflowResponse:
-        loaded = self._repo.load(user_id=user_id, conversation_id=conversation_id)
-
-        state: ConversationState = loaded if _is_conversation_state(loaded) else _new_state()
-
+        state = self._repo.load(user_id=user_id, conversation_id=conversation_id)
+        
+        if state is None:
+            state = _new_state()
+ 
         if isinstance(user_text, str):
             txt = user_text.strip()
             if txt:

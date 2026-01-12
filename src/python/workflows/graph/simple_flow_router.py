@@ -8,7 +8,7 @@ from uuid import UUID
 
 from langchain_core.messages import BaseMessage
 
-from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
+from python.domain.service.llm_service import LLMConfig, LLMService
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
 from python.workflows.state.control_state import ControlState, Stage, Status
 
@@ -178,12 +178,7 @@ class WorkflowRouter:
             temperature=0.0,
         )
         
-        history = [
-            ChatMessage(role="system", content=system),
-            ChatMessage(role="user", content=json.dumps(snapshot, ensure_ascii=False)),
-        ]
-
-        resp = self.llm.generate(config=config, history=history)
+        resp = self.llm.generate(config=config, system_prompt=system, user_prompt=json.dumps(snapshot, ensure_ascii=False), history=None)
         obj = _parse_json_object_strict(cast(object, resp).content)  # type: ignore[attr-defined]
         if set(obj.keys()) != {"next_stage", "why"}: # pyright: ignore[reportUnknownArgumentType]
             raise ValueError("Router LLM must return exactly: {next_stage, why}")

@@ -47,49 +47,35 @@ class GeminiLLMService(LLMService):
     def generate(
         self,
         *,
+        system_prompt: str | None,
+        user_prompt: str,
         config: LLMConfig,
-        history: Sequence[ChatMessage],
+        history: Sequence[ChatMessage] | None = None,
     ) -> LLMResponse:
         model_name = config.model or self._default_model
-
-        system_instruction = self._build_system_prompt(config, history)
-        contents = self._build_contents(history)
+        history_content = self._build_contents(history) if history else []
+        history_content.append(
+            {
+                "role": "user",
+                "parts": [{"text": user_prompt}],
+            }
+        )
 
         gen_model = genai.GenerativeModel(
             model_name,
-            system_instruction=system_instruction,
+            system_instruction=system_prompt,
         )
-
+        
         generation_config = self._build_generation_config(config)
-        safety_settings = self._extract_safety_settings(config.extra)
 
         response = gen_model.generate_content(
-            contents,
+            history_content,
             generation_config=generation_config,
-            safety_settings=safety_settings,
         )
 
         return self._to_llm_response(response, model_name)
 
     # ------------- helpers -------------
-
-    @staticmethod
-    def _build_system_prompt(
-        config: LLMConfig,
-        history: Sequence[ChatMessage],
-    ) -> str | None:
-        """
-        Gemini supports a single system_instruction string.
-        - Prefer config.system_prompt if provided.
-        - Otherwise, concatenate all system messages in history.
-        """
-        if config.system_prompt:
-            return config.system_prompt
-
-        system_parts = [m.content for m in history if m.role == "system"]
-        if not system_parts:
-            return None
-        return "\n\n".join(system_parts)
 
     @staticmethod
     def _build_contents(history: Sequence[ChatMessage]) -> list[dict[str, Any]]:
@@ -107,7 +93,7 @@ class GeminiLLMService(LLMService):
 
         for msg in history:
             if msg.role == "system":
-                continue
+                role = "system"
             if msg.role == "user":
                 role = "user"
             elif msg.role == "assistant":
@@ -127,11 +113,6 @@ class GeminiLLMService(LLMService):
 
     @staticmethod
     def _build_generation_config(config: LLMConfig) -> dict[str, Any]:
-        """
-        Map LLMConfig to Gemini generation_config dict.
-        Provider extras:
-          - config.extra["generation_config"] (Mapping) is shallow-merged on top.
-        """
         gen_config: dict[str, Any] = {
             "temperature": config.temperature,
         }
@@ -142,13 +123,7 @@ class GeminiLLMService(LLMService):
             gen_config["top_p"] = config.top_p
         if config.stop:
             gen_config["stop_sequences"] = config.stop
-
-        extra = config.extra
-        if isinstance(extra, Mapping):  # pyright: ignore[reportUnnecessaryIsInstance]
-            gc_extra = extra.get("generation_config")
-            if isinstance(gc_extra, Mapping):
-                gen_config.update(gc_extra)
-
+            
         return gen_config
 
     @staticmethod
