@@ -1,49 +1,58 @@
+# src/python/workflows/state/metadata_state.py
 from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, TypedDict
 
-CovariateStrategy = Literal["USER_LIST", "ALL_EXCEPT_TY", "NONE"]
+ConfounderStrategy = Literal["USER_LIST", "ALL_EXCEPT_TY", "NONE"]
 
 MetadataField = Literal[
     "dataset_summary",
     "treatment",
     "outcome",
-    "covariate_strategy",
-    "covariates",
+    "confounder_strategy",
+    "confounders",
     "controls",
     "effect_modifiers",
     "causal_question",
 ]
 
+
 class MetadataState(TypedDict):
+    # Core causal spec
     treatment: str
     outcome: str
-    covariate_strategy: CovariateStrategy
-    
-    controls: List[str]
-    covariates: List[str]
-
-    effect_modifiers: List[str]
     causal_question: str
 
+    # Backdoor adjustment set (confounders)
+    confounder_strategy: ConfounderStrategy
+    confounders: List[str]
+
+    # Optional extras (still supported)
+    controls: List[str]
+    effect_modifiers: List[str]
+
+    # Workflow state
     accepted: bool
-    
+
+    # Optional dataset context
     dataset_summary: str
-    
-    locked_fields: List[MetadataField] 
-    notes: List[str]                  
-    warnings: List[str]              
-    provenance: Dict[str, Any]        
+
+    # UX helpers
+    locked_fields: List[MetadataField]
+    notes: List[str]
+    warnings: List[str]
+    provenance: Dict[str, Any]
+
 
 def empty_metadata() -> MetadataState:
     return {
         "treatment": "",
         "outcome": "",
-        "covariate_strategy": "NONE",
-        "controls": [],
-        "covariates": [],
-        "effect_modifiers": [],
         "causal_question": "",
+        "confounder_strategy": "NONE",
+        "confounders": [],
+        "controls": [],
+        "effect_modifiers": [],
         "accepted": False,
         "dataset_summary": "",
         "locked_fields": [],
