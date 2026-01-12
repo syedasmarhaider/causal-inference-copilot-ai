@@ -5,6 +5,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Any,  Dict, List, Optional, Sequence, cast
+from uuid import UUID
 
 from langchain_core.messages import AIMessage, BaseMessage
 
@@ -42,7 +43,7 @@ def make_propose_and_confirm_metadata_node(
     model_name: str,
 ) -> CallableNodeFunc:
 
-    def node(state: ConversationState) -> ConversationState:
+    def node(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
         return _run_propose_and_confirm_metadata(
             state=state,
             llm=llm,
@@ -78,14 +79,25 @@ def _run_propose_and_confirm_metadata(
     """
     control = _require_control(state)
     md_old = _require_metadata(state)
+    
+    dataset_cols = _extract_dataset_columns(state.get("dataset"))
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     user_text = _last_human_text(cast(Sequence[BaseMessage], state.get("messages", [])))
     if not user_text.strip():
-        _abort(control, "No user message found for metadata confirmation.")
-        raise ValueError("propose_and_confirm_metadata: no user message found")
+        node_msg = _llm_compose_node_message(
+            llm=llm,
+            model_name=model_name,
+            user_text="LLM this is the first message and it should be a prompt for the user to specify treatment and outcome variables. Give no suggestions or examples, just ask the user to provide the information.",
+            metadata=md_old,
+            dataset_columns=dataset_cols or [],
+            now_iso=datetime.now(timezone.utc).isoformat(),
+        )
+        _append_ai_message(state, node_msg, stage="PROPOSE_AND_CONFIRM_METADATA")
+        state["control"]["action_required"] = "NEEDS_INPUT"
+        control["node_message"] = node_msg
+        return state
 
-    dataset_cols = _extract_dataset_columns(state.get("dataset"))
-    now_iso = datetime.now(timezone.utc).isoformat()
 
     # ---- LLM #1: metadata edit ----
     try:
@@ -125,7 +137,7 @@ def _run_propose_and_confirm_metadata(
 
     # ---- LLM #2: node message ----
     try:
-        raw2 = _llm_compose_node_message(
+        node_msg = _llm_compose_node_message(
             llm=llm,
             model_name=model_name,
             user_text=user_text,
@@ -133,10 +145,6 @@ def _run_propose_and_confirm_metadata(
             dataset_columns=dataset_cols or [],
             now_iso=now_iso,
         )
-        obj2 = _parse_json_object(raw2)
-        node_msg = obj2.get("node_message")
-        if not isinstance(node_msg, str) or not node_msg.strip():
-            raise ValueError("LLM#2 output must contain non-empty string field 'node_message'")
 
         control["node_message"] = node_msg
 
@@ -153,7 +161,7 @@ def _run_propose_and_confirm_metadata(
 
         prov2 = md.get("provenance")
         provenance2: Dict[str, Any] = prov2 
-        provenance2["metadata_llm2_raw"] = raw2[:8000]
+        provenance2["metadata_llm2_raw"] = node_msg
         md["provenance"] = provenance2
         state["metadata"] = md
 
@@ -234,12 +242,7 @@ def _llm_compose_node_message(
     now_iso: str,
 ) -> str:
     system = f"""
-You write a user-facing message for the PROPOSE_AND_CONFIRM_METADATA step.
-
-OUTPUT RULES (non-negotiable):
-- Output ONLY one JSON object with EXACTLY:
-  {{ "node_message": string }}
-- No markdown. No extra keys.
+You write a user-facing message for the PROPOSE_AND_CONFIRM_METADATA step of causal inference copilot for backdoor criteria only for now.
 
 CONTENT RULES:
 - If metadata.accepted == true:
@@ -247,10 +250,11 @@ CONTENT RULES:
   - Mention controls/covariates briefly (if present).
   - Say we will proceed to the next stage.
 - If metadata.accepted == false:
-  - If treatment/outcome missing: ask for them explicitly.
+  - If treatment/outcome missing: ask for them explicitly. Ask for causal question if missing.
   - Else: ask user to either accept or specify what to change.
   - If user asked for suggestions, propose plausible treatment/outcome based on dataset_columns.
 - If warnings exist: mention the most important 1–2 briefly.
+- If user chooses not a good covariate_strategy, gently suggest alternatives.
 
 now_utc: {now_iso}
 """.strip()

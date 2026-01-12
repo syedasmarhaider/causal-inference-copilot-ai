@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from uuid import UUID, uuid4
 
 from python.domain.repo.conversation_repo import ConversationRepo
@@ -105,7 +104,7 @@ def wire_repo() -> ConversationRepo:
 
 def wire_data_repo() -> DataRepo:
     # file-based dataset access; not a DB
-    return FileDataRepo(root_dir=Path(".local_data_repo"))
+    return FileDataRepo()
 
 
 def wire_llm() -> LLMService:

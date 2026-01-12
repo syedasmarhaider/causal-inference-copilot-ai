@@ -4,7 +4,6 @@ from typing import Literal, TypedDict
 
 
 Stage = Literal[
-    "GET_FILE",
     "LOAD_DATASET",
     "PROPOSE_AND_CONFIRM_METADATA",
     "DONE",

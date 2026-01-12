@@ -11,10 +11,9 @@ class DatasetState(TypedDict, total=False):
     total=False because early stages only have `path`,
     later stages enrich with id/schema/summary.
     """
-    path: Optional[str]
     id: Optional[UUID]
     raw_schema: Optional[JSONDict]
     summary: Optional[JSONDict]
     load_error: Optional[str]
     # If you use it in GET_FILE to prevent re-parsing old messages
-    get_file_last_user_msg_idx: Optional[int]
+    get_file_last_user_msg_idx: Optional[int]      

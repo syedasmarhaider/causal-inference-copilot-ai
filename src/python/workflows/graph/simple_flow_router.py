@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from typing import  Final, Mapping, Sequence, Tuple, cast
+from uuid import UUID
 
 from langchain_core.messages import BaseMessage
 
@@ -15,21 +16,19 @@ from python.workflows.state.control_state import ControlState, Stage, Status
 _JSON_FENCE_RE: Final[re.Pattern[str]] = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 
 _NEXT_STAGE: Final[Mapping[Stage, Stage]] = {
-    "GET_FILE": "LOAD_DATASET",
     "LOAD_DATASET": "PROPOSE_AND_CONFIRM_METADATA",
     "PROPOSE_AND_CONFIRM_METADATA": "DONE",
     "DONE": "DONE",
 }
 
 _STAGE_DOC: Final[Mapping[Stage, str]] = {
-    "GET_FILE": "Obtain/confirm a local CSV path (exists, readable, endswith .csv). Writes dataset.path.",
     "LOAD_DATASET": "Load CSV from dataset.path. Writes dataset.summary/raw_schema (and maybe dataset.id).",
     "PROPOSE_AND_CONFIRM_METADATA": "Propose+confirm metadata: treatment/outcome/controls/covariates/etc.",
     "DONE": "Workflow complete.",
 }
 
 
-def _noop_node(state: ConversationState) -> ConversationState:
+def _noop_node(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
     return state
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Callable, TypedDict, List
+from uuid import UUID
 from langchain_core.messages import BaseMessage
 
 from python.workflows.state.control_state import ControlState
@@ -13,4 +14,4 @@ class ConversationState(TypedDict):
     metadata: MetadataState
     messages: List[BaseMessage]
 
-CallableNodeFunc = Callable[[ConversationState], ConversationState]
+CallableNodeFunc = Callable[[UUID,UUID,ConversationState], ConversationState]

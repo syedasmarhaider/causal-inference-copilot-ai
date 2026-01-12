@@ -12,7 +12,6 @@ from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import LLMService
 from python.domain.service.mcp_client import McpClient
 from python.workflows.graph.simple_flow_router import WorkflowRouter
-from python.workflows.nodes.get_file import make_get_file_node
 from python.workflows.nodes.load_dataset import make_load_dataset_node
 from python.workflows.nodes.propose_and_confirm_metadata import make_propose_and_confirm_metadata_node
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
@@ -43,20 +42,20 @@ class WorkflowResponse:
     current_stage_status: Status
 
 
-def _noop(state: ConversationState) -> ConversationState:
+def _noop(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
     return state
 
 
 def _new_state() -> ConversationState:
     control: ControlState = {
-        "current_stage": "GET_FILE",
+        "current_stage": "LOAD_DATASET",
         "current_stage_status": "PENDING",
         "action_required": "NONE",
         "node_message": None,
     }
 
     dataset: DatasetState = {
-        "path": str(DEFAULT_DATASET_PATH),
+        "id": UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
         "load_error": None,
     }
 
@@ -132,7 +131,6 @@ def _is_conversation_state(x: object) -> TypeGuard[ConversationState]:
 
 def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
     return {
-        "GET_FILE": make_get_file_node(cfg.llm, model_name=cfg.model_name),
         "LOAD_DATASET": make_load_dataset_node(cfg.data_repo, cfg.llm, model_name=cfg.model_name),
         "PROPOSE_AND_CONFIRM_METADATA": make_propose_and_confirm_metadata_node(
             llm=cfg.llm,
@@ -151,20 +149,6 @@ def _extract_node_message(control: ControlState) -> str | None:
 
 
 class SimpleWorkflow:
-    """
-    One invoke() == one routing + one node execution.
-
-    - Load state from repo:
-        - None / invalid => re-init from scratch (with DEFAULT_DATASET_PATH seeded)
-        - valid => use as-is (no repair)
-    - Append user_text as HumanMessage (if present)
-    - Router chooses ONE node to run
-    - Run node once
-    - Return node_message + needs_input
-    - Persist updated state
-      - If needs_input=True, clear action_required before persisting (per your rule)
-    """
-
     def __init__(
         self,
         *,
@@ -197,7 +181,7 @@ class SimpleWorkflow:
                 state["messages"].append(HumanMessage(content=txt))
 
         node_fn, routed_state = self._router.route(state)
-        out_state = node_fn(routed_state)
+        out_state = node_fn(user_id, conversation_id, routed_state)
 
         control = out_state["control"]
         node_msg = _extract_node_message(control)
