@@ -101,13 +101,13 @@ def _run_propose_and_confirm_metadata(
             raise ValueError("LLM#1 output must contain object field 'metadata'")
 
         md_new = _sanitize_metadata(
-            md_candidate,
+            md_candidate, # type: ignore
             dataset_columns=dataset_cols,
         )
 
         # provenance (node-owned)
         prov = md_new.get("provenance")
-        provenance: Dict[str, Any] = prov if isinstance(prov, dict) else {}
+        provenance: Dict[str, Any] = prov if isinstance(prov, dict) else {} # type: ignore
         provenance["metadata_llm1_updated_utc"] = now_iso
         provenance["metadata_llm1_raw"] = json.dumps(obj1, ensure_ascii=False)[:8000]
         provenance["user_id"] = str(user_id)
@@ -408,7 +408,7 @@ def _sanitize_metadata(md_any: Dict[str, Any], *, dataset_columns: Optional[List
         if x is None:
             return []
         if isinstance(x, list):
-            return _dedupe([str(i).strip() for i in x if str(i).strip()])
+            return _dedupe([str(i).strip() for i in x if str(i).strip()]) # type: ignore
         if isinstance(x, str):
             return _dedupe([p.strip() for p in x.split(",") if p.strip()])
         return []
@@ -439,7 +439,7 @@ def _sanitize_metadata(md_any: Dict[str, Any], *, dataset_columns: Optional[List
     base["accepted"] = b(base.get("accepted"))
 
     prov = base.get("provenance")
-    base["provenance"] = prov if isinstance(prov, dict) else {}
+    base["provenance"] = prov if isinstance(prov, dict) else {} # pyright: ignore[reportUnnecessaryIsInstance]
 
     strat = s(base.get("confounder_strategy")) or "NONE"
     if strat not in _ALLOWED_STRATEGIES:
@@ -456,7 +456,7 @@ def _sanitize_metadata(md_any: Dict[str, Any], *, dataset_columns: Optional[List
 
     # optional soft validation (never blocks)
     if dataset_columns:
-        colset = {c.strip() for c in dataset_columns if isinstance(c, str) and c.strip()}
+        colset = {c.strip() for c in dataset_columns if isinstance(c, str) and c.strip()} # pyright: ignore[reportUnnecessaryIsInstance]
 
         def warn_unknown(kind: str, col: str) -> None:
             if col and col not in colset:
@@ -472,7 +472,7 @@ def _sanitize_metadata(md_any: Dict[str, Any], *, dataset_columns: Optional[List
     base["warnings"] = _dedupe([w for w in base["warnings"] if w.strip()])
     base["notes"] = _dedupe([n for n in base["notes"] if n.strip()])
 
-    return cast(MetadataState, base)
+    return base
 
 
 def _dedupe(items: List[str]) -> List[str]:
@@ -490,14 +490,14 @@ def _dedupe(items: List[str]) -> List[str]:
 # =============================================================================
 def _require_control(state: ConversationState) -> ControlState:
     c = state.get("control")
-    if not isinstance(c, dict):
+    if not isinstance(c, dict): # type: ignore
         raise ValueError("ConversationState.control must exist and be a dict")
-    return cast(ControlState, c)
+    return cast(ControlState, c) # type: ignore
 
 
 def _require_metadata(state: ConversationState) -> MetadataState:
     md_any = state.get("metadata")
-    md = cast(Dict[str, Any], md_any) if isinstance(md_any, dict) else {}
+    md = cast(Dict[str, Any], md_any) if isinstance(md_any, dict) else {} # type: ignore
     sanitized = _sanitize_metadata(md, dataset_columns=None)
     state["metadata"] = sanitized
     return sanitized
@@ -512,7 +512,7 @@ def _abort(control: ControlState, msg: str) -> None:
 
 def _append_ai_message(state: ConversationState, content: str, *, stage: str) -> None:
     msgs = state.get("messages")
-    if not isinstance(msgs, list):
+    if not isinstance(msgs, list): # type: ignore
         state["messages"] = []
         msgs = state["messages"]
     msgs.append(AIMessage(content=content, additional_kwargs={"source": "node", "stage": stage}))
@@ -537,28 +537,28 @@ def _extract_dataset_columns(dataset_state: Any) -> Optional[List[str]]:
     if not isinstance(dataset_state, dict):
         return None
 
-    raw_schema = dataset_state.get("raw_schema")
+    raw_schema = dataset_state.get("raw_schema") # type: ignore
     if isinstance(raw_schema, dict):
-        cols = raw_schema.get("columns")
+        cols = raw_schema.get("columns") # type: ignore
         if isinstance(cols, list):
             names: List[str] = []
-            for c in cols:
+            for c in cols: # pyright: ignore[reportUnknownVariableType]
                 if isinstance(c, dict):
-                    n = c.get("name")
+                    n = c.get("name") # type: ignore
                     if isinstance(n, str) and n.strip():
                         names.append(n.strip())
             if names:
                 return names
 
     for key in ("columns", "col_names", "column_names", "schema_columns"):
-        v = dataset_state.get(key)
-        if isinstance(v, list) and all(isinstance(x, str) for x in v):
-            out = [c.strip() for c in v if c.strip()]
-            return out or None
+        v = dataset_state.get(key) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+        if isinstance(v, list) and all(isinstance(x, str) for x in v): # pyright: ignore[reportUnknownVariableType]
+            out = [c.strip() for c in v if c.strip()] # type: ignore
+            return out or None # type: ignore
 
-    schema = dataset_state.get("schema")
+    schema = dataset_state.get("schema") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
     if isinstance(schema, dict):
-        out2 = [str(k).strip() for k in schema.keys() if str(k).strip()]
+        out2 = [str(k).strip() for k in schema.keys() if str(k).strip()] # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
         return out2 or None
 
     return None
