@@ -17,7 +17,7 @@ from python.domain.repo.conversation_repo import (
     LocalScope,
     Scope,
 )
-from python.infra.repo.conversation_repo.file_conversation_repo import FileConversationRepo
+from python.implementation.repo.conversation_repo.file_conversation_repo import FileConversationRepo
 
 JsonObj = dict[str, Any]
 

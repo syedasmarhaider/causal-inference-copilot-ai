@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
 # ===== JSON-like value used for provider-specific "extra" knobs =====
@@ -10,10 +10,6 @@ JSONScalar: TypeAlias = str | int | float | bool | None
 JSONValue: TypeAlias = JSONScalar | Sequence["JSONValue"] | Mapping[str, "JSONValue"]
 ProviderExtra: TypeAlias = Mapping[str, JSONValue]
 
-
-def _empty_extra() -> dict[str, JSONValue]:
-    # Typed empty dict so Pylance doesn’t complain about default_factory=dict
-    return {}
 
 
 # ===== Domain types =====
@@ -25,6 +21,7 @@ class ChatMessage:
     role: Role
     content: str
     name: str | None = None
+
 
 
 @dataclass(frozen=True)
@@ -54,12 +51,10 @@ class LLMResponse:
 @dataclass(frozen=True)
 class LLMConfig:
     model: str
-    temperature: float = 0.2
+    temperature: float = 0.5
     max_tokens: int | None = None
     top_p: float | None = None
     stop: list[str] | None = None
-    system_prompt: str | None = None
-    extra: ProviderExtra = field(default_factory=_empty_extra)
 
 
 # ===== Interfaces (ABCs) =====
@@ -67,7 +62,12 @@ class LLMConfig:
 
 class LLMService(ABC):
     @abstractmethod
-    def generate(self, *, config: LLMConfig, history: Sequence[ChatMessage]) -> LLMResponse: ...
+    def generate(self, 
+                 *, 
+                 config: LLMConfig,
+                 system_prompt: str,
+                 user_prompt: str,
+                 history: Sequence[ChatMessage] | None) -> LLMResponse: ...
 
 
 class ProviderNotFound(Exception): ...
