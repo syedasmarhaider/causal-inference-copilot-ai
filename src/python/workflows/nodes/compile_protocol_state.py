@@ -30,6 +30,9 @@ _JSON_OBJ_RE = re.compile(r"\{[\s\S]*\}", re.MULTILINE)
 
 _WRAPPER_KEYS = {"protocol", "ready_for_accept", "user_accepted"}
 
+# For protocol compilation we only need a preview. Validation node should load full data.
+_DEFAULT_PREVIEW_LIMIT = 200
+
 
 def make_compile_protocol_state_node(
     data_repo: DataRepo,
@@ -37,55 +40,79 @@ def make_compile_protocol_state_node(
     *,
     model_name: str,
     message_model_name: Optional[str] = None,
+    preview_limit: int = _DEFAULT_PREVIEW_LIMIT,
 ) -> CallableNodeFunc:
+    """
+    Compiles a ProtocolState using an LLM under a strict JSON contract.
+
+    Key design choices:
+    - Treatment/outcome are HARD-LOCKED from metadata.
+    - Acceptance is decided ONLY by the LLM contract fields:
+        accepted := ready_for_accept AND user_accepted
+      (no explicit accept parsing in code).
+    - Protocol container is NEVER reset destructively:
+      we merge any partial protocol into the template so accepted never "regresses"
+      due to missing keys.
+    - If the compiler returns a protocol with missing required execution fields,
+      we run the same repair prompt with a synthetic "parse_error" describing
+      what is missing (still delegating the fixing to the LLM).
+    """
     msg_model = message_model_name or model_name
 
     def _node(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
-        dataset, meta, err = _require_dataset_and_meta(state)
-        _ensure_protocol_container(state, meta)
+        _ensure_control_container(state)
 
+        dataset, meta, err = _require_dataset_and_meta(state)
         if err:
             return _fatal(state, err)
 
+        _ensure_protocol_container(state, meta)
+
+        # Dataset must be loadable (upstream loader should set load_error)
         load_error = dataset.get("load_error")
         if isinstance(load_error, str) and load_error.strip():
             return _fatal(state, f"Dataset could not be loaded ({load_error}). Please reload and retry.")
-        
+
         dataset_id = dataset.get("id")
         if dataset_id is None:
             return _fatal(state, "Dataset ID is missing. Please reload the dataset.")
-        
+
+        # Preview rows (not full dataset). Validation node will load full data.
         try:
             df = data_repo.get_csv_data(
                 user_id=user_id,
                 conversation_id=conversation_id,
                 dataset_id=dataset_id,
-                limit=50,
+                limit=preview_limit,
             )
         except Exception as e:
             return _fatal(state, f"Failed to load dataset preview: {type(e).__name__}: {e}")
-        
-        
 
+        # Columns: prefer dataset schema; fallback to df.columns for robustness.
         columns = _dataset_columns(dataset)
-        var_dict = _build_variable_dictionary(dataset)
-        preview_rows: List[Dict[str, Any]] = _dataset_preview_rows(df=df)
+        if not columns:
+            columns = _dataset_columns_from_df(df)
 
         if not columns:
             return _fatal(state, "Dataset schema is missing (no columns detected). Please reload the dataset.")
+
+        var_dict = _build_variable_dictionary(dataset)
+        preview_rows: List[Dict[str, Any]] = _dataset_preview_rows(df=df)
 
         treatment = _as_nonempty_str(meta.get("treatment"))
         outcome = _as_nonempty_str(meta.get("outcome"))
         if not treatment or not outcome:
             return _fatal(state, "Missing treatment/outcome in metadata. Please confirm metadata first.")
 
-        # Enforce metadata-locked T/Y always.
-        state["protocol"]["treatment"] = treatment
-        state["protocol"]["outcome"] = outcome
-        state["protocol"] = _normalize_protocol(state["protocol"])
+        # Hard-lock treatment/outcome in protocol.
+        protocol = cast(ProtocolState, state["protocol"])
+        protocol["treatment"] = treatment
+        protocol["outcome"] = outcome
+        protocol = _normalize_protocol(protocol)
+        state["protocol"] = protocol
 
-        # Idempotent lock: once accepted, never regress.
-        if state["protocol"].get("accepted") is True:
+        # Idempotent lock: if already accepted, never regress or call compiler again.
+        if protocol.get("accepted") is True:
             msg = _llm_messenger_with_repair(
                 llm=llm,
                 model_name=msg_model,
@@ -95,7 +122,7 @@ def make_compile_protocol_state_node(
                 variable_dictionary=var_dict,
                 preview_rows=preview_rows,
                 meta=meta,
-                protocol=state["protocol"],
+                protocol=protocol,
                 ready_for_accept=True,
                 user_accepted=True,
                 note=None,
@@ -105,6 +132,7 @@ def make_compile_protocol_state_node(
 
         last_user = _last_human_text(cast(Sequence[BaseMessage], state.get("messages", [])))
 
+        # Provide observed values to help with treated/comparator mapping without extra questions.
         observed = _observed_values_from_preview(
             preview_rows=preview_rows,
             cols=[treatment, outcome],
@@ -119,18 +147,19 @@ def make_compile_protocol_state_node(
             variable_dictionary=var_dict,
             preview_rows=preview_rows,
             meta=meta,
-            current_protocol=state["protocol"],
+            current_protocol=protocol,
             last_user_message=last_user,
             observed_values=observed,
         )
 
         if wrapper is None:
-            # NOT fatal: keep PENDING, ask user to retry; messenger explains parse_error.
-            state["protocol"]["accepted"] = False
-            state["protocol"]["open_questions"] = [
-                "I couldn’t parse the protocol compiler output. Please resend your last message (or reply: accept protocol)."
+            # Not fatal: keep pending, ask user to retry.
+            protocol = cast(ProtocolState, state["protocol"])
+            protocol["accepted"] = False
+            protocol["open_questions"] = [
+                "I couldn’t parse the protocol compiler output. Please resend your last message."
             ]
-            state["protocol"] = _normalize_protocol(state["protocol"])
+            state["protocol"] = _normalize_protocol(protocol)
 
             msg = _llm_messenger_with_repair(
                 llm=llm,
@@ -141,7 +170,7 @@ def make_compile_protocol_state_node(
                 variable_dictionary=var_dict,
                 preview_rows=preview_rows,
                 meta=meta,
-                protocol=state["protocol"],
+                protocol=cast(ProtocolState, state["protocol"]),
                 ready_for_accept=False,
                 user_accepted=False,
                 note={"parse_error": parse_error or "unknown"},
@@ -151,12 +180,13 @@ def make_compile_protocol_state_node(
 
         nxt = _coerce_protocol(wrapper.get("protocol"))
         if nxt is None:
-            # NOT fatal: keep PENDING (compiler violated shape), ask user to retry.
-            state["protocol"]["accepted"] = False
-            state["protocol"]["open_questions"] = [
+            # Not fatal: keep pending, ask user to retry.
+            protocol = cast(ProtocolState, state["protocol"])
+            protocol["accepted"] = False
+            protocol["open_questions"] = [
                 "The compiler returned a protocol with an invalid shape. Please resend your last message."
             ]
-            state["protocol"] = _normalize_protocol(state["protocol"])
+            state["protocol"] = _normalize_protocol(protocol)
 
             msg = _llm_messenger_with_repair(
                 llm=llm,
@@ -167,7 +197,7 @@ def make_compile_protocol_state_node(
                 variable_dictionary=var_dict,
                 preview_rows=preview_rows,
                 meta=meta,
-                protocol=state["protocol"],
+                protocol=cast(ProtocolState, state["protocol"]),
                 ready_for_accept=False,
                 user_accepted=False,
                 note={"parse_error": "invalid protocol shape"},
@@ -175,24 +205,67 @@ def make_compile_protocol_state_node(
             _append_ai(state, msg)
             return _need_input(state, msg)
 
-        # Normalize + re-lock T/Y post-hoc (hard invariant).
+        # Normalize + hard-lock treatment/outcome post-hoc.
         nxt = _normalize_protocol(nxt)
         nxt["treatment"] = treatment
         nxt["outcome"] = outcome
 
-        ready = bool(wrapper.get("ready_for_accept") is True)
+        # If compiler produced an execution-incomplete protocol, delegate fixing back to LLM repair.
+        missing = _missing_required_execution_fields(nxt)
+        if missing:
+            repaired_wrapper, repair_err = _llm_repair_missing_fields(
+                llm=llm,
+                model_name=model_name,
+                meta=meta,
+                bad_protocol_wrapper=wrapper,
+                missing_fields=missing,
+            )
+            if repaired_wrapper is not None:
+                repaired_protocol = _coerce_protocol(repaired_wrapper.get("protocol"))
+                if repaired_protocol is not None:
+                    nxt = _normalize_protocol(repaired_protocol)
+                    nxt["treatment"] = treatment
+                    nxt["outcome"] = outcome
+                    wrapper = repaired_wrapper
+                    missing = _missing_required_execution_fields(nxt)
 
-        # Small hard rule to avoid “accept protocol but still pending”:
-        # If user explicitly says accept protocol and compiler says ready => lock.
-        explicit_accept = _is_explicit_accept(last_user)
-        llm_accept = bool(wrapper.get("user_accepted") is True)
-        accepted = bool(ready and (llm_accept or explicit_accept))
+        # If still missing, force NOT-ready and ask minimally (static fallback).
+        if missing:
+            nxt["accepted"] = False
+            nxt["open_questions"] = [
+                f"Protocol is missing required fields ({', '.join(missing)}). "
+                "Please clarify these protocol details so I can lock the protocol."
+            ]
+            nxt = _normalize_protocol(nxt)
+            state["protocol"] = nxt
+
+            msg = _llm_messenger_with_repair(
+                llm=llm,
+                model_name=msg_model,
+                state=state,
+                mode="NEEDS_INPUT",
+                dataset_columns=columns,
+                variable_dictionary=var_dict,
+                preview_rows=preview_rows,
+                meta=meta,
+                protocol=nxt,
+                ready_for_accept=False,
+                user_accepted=False,
+                note={"parse_error": "missing required execution fields"},
+            )
+            _append_ai(state, msg)
+            return _need_input(state, msg)
+
+        # Delegate acceptance to LLM ONLY (no explicit accept parsing here).
+        ready = bool(wrapper.get("ready_for_accept") is True) and len(nxt.get("open_questions", [])) == 0
+        accepted = bool(ready and (wrapper.get("user_accepted") is True))
 
         nxt["accepted"] = accepted
         if accepted:
             nxt["open_questions"] = []
 
-        state["protocol"] = _normalize_protocol(nxt)
+        nxt = _normalize_protocol(nxt)
+        state["protocol"] = nxt
 
         mode = "LOCKED" if accepted else ("READY" if ready else "NEEDS_INPUT")
         msg = _llm_messenger_with_repair(
@@ -204,22 +277,20 @@ def make_compile_protocol_state_node(
             variable_dictionary=var_dict,
             preview_rows=preview_rows,
             meta=meta,
-            protocol=state["protocol"],
+            protocol=nxt,
             ready_for_accept=ready,
             user_accepted=accepted,
             note=None,
         )
         _append_ai(state, msg)
 
-        if accepted:
-            return _succeed(state, msg)
-        return _need_input(state, msg)
+        return _succeed(state, msg) if accepted else _need_input(state, msg)
 
     return _node
 
 
 # ----------------------------
-# LLM #1: compile + repair (repair uses ONLY previous parse_error)
+# LLM #1: compile + repair
 # ----------------------------
 
 def _llm_compile_protocol_with_repair(
@@ -273,7 +344,7 @@ def _llm_compile_protocol_with_repair(
     if obj is not None:
         return obj, None
 
-    # Repair ONLY from parse_error (no other deterministic guessing).
+    # Repair ONLY from parse_error (delegated to LLM).
     repair_payload: Dict[str, Any] = {
         "bad_output": raw,
         "parse_error": parse_error or "Unknown parse error",
@@ -297,6 +368,40 @@ def _llm_compile_protocol_with_repair(
         return obj2, None
 
     return None, (parse_error2 or parse_error or "Repair parse failed")
+
+
+def _llm_repair_missing_fields(
+    *,
+    llm: LLMService,
+    model_name: str,
+    meta: MetadataState,
+    bad_protocol_wrapper: Dict[str, Any],
+    missing_fields: List[str],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Uses the SAME repair prompt, but with a synthetic parse_error describing missing required fields.
+    This keeps the "fixing" responsibility inside the LLM (as requested).
+    """
+    repair_payload: Dict[str, Any] = {
+        "bad_output": json.dumps(bad_protocol_wrapper, ensure_ascii=False),
+        "parse_error": f"Protocol missing required execution fields: {', '.join(missing_fields)}",
+        "required_top_level_keys": sorted(_WRAPPER_KEYS),
+        "protocol_template": _empty_protocol(),
+        "metadata_locked": {
+            "treatment": meta.get("treatment", ""),
+            "outcome": meta.get("outcome", ""),
+        },
+    }
+
+    repaired = llm.generate(
+        system_prompt=load_compile_protocol_repair_system_prompt(),
+        user_prompt=json.dumps(repair_payload, ensure_ascii=False),
+        config=LLMConfig(model=model_name, temperature=0.0),
+        history=None,
+    ).content
+
+    obj, err = _parse_strict_wrapper(repaired)
+    return obj, err
 
 
 def _parse_strict_wrapper(text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -335,15 +440,8 @@ def _parse_strict_wrapper(text: str) -> Tuple[Optional[Dict[str, Any]], Optional
         return None, f"{direct_err}; Extracted parse failed: {type(e2).__name__}: {e2}"
 
 
-def _is_explicit_accept(last_user_message: str) -> bool:
-    s = (last_user_message or "").strip().lower()
-    if not s:
-        return False
-    return s == "accept protocol" or s.startswith("accept protocol")
-
-
 # ----------------------------
-# LLM #2: messenger + repair (LLM-only)
+# LLM #2: messenger + repair (user-facing)
 # ----------------------------
 
 def _llm_messenger_with_repair(
@@ -394,7 +492,7 @@ def _llm_messenger_with_repair(
     if out:
         return out
 
-    # Repair user message (still LLM-only).
+    # Repair (still LLM-only).
     repair_payload = {"bad_output": out, "payload": payload}
     repaired = llm.generate(
         system_prompt=load_protocol_user_message_repair_system_prompt(),
@@ -409,10 +507,11 @@ def _llm_messenger_with_repair(
 
 
 # ----------------------------
-# Protocol helpers
+# Protocol helpers (template-safe merge)
 # ----------------------------
 
 def _empty_protocol() -> ProtocolState:
+    # Template MUST stay shape-complete (single source of truth).
     return cast(
         ProtocolState,
         {
@@ -439,7 +538,56 @@ def _empty_protocol() -> ProtocolState:
     )
 
 
+def _merge_protocol_into_template(existing: Any) -> ProtocolState:
+    """
+    Never "reset" protocol due to missing keys.
+    Instead, start from template and overlay any compatible values.
+    This prevents accepted=True from regressing to False because one key was missing.
+    """
+    tpl = _empty_protocol()
+    if not isinstance(existing, dict):
+        return tpl
+
+    out: Dict[str, Any] = dict(tpl)
+
+    # bool fields
+    for k in ["accepted", "outcome_is_duration"]:
+        v = existing.get(k)
+        if isinstance(v, bool):
+            out[k] = v
+
+    # str fields
+    for k in [
+        "population",
+        "time_zero_type",
+        "time_zero",
+        "time_zero_definition",
+        "treatment",
+        "treatment_window_start",
+        "treatment_window_end",
+        "treatment_window_unit",
+        "comparator",
+        "outcome",
+        "outcome_window",
+        "outcome_window_unit",
+    ]:
+        v = existing.get(k)
+        if isinstance(v, str):
+            out[k] = v
+
+    # list[str] fields
+    for k in ["clarified", "open_questions", "covariates", "effect_modifiers", "censoring_rules"]:
+        v = existing.get(k)
+        if isinstance(v, list) and all(isinstance(z, str) for z in v):
+            out[k] = v
+
+    return cast(ProtocolState, out)
+
+
 def _coerce_protocol(x: Any) -> Optional[ProtocolState]:
+    """
+    Strict check for a FULL ProtocolState (post-LLM).
+    """
     if not isinstance(x, dict):
         return None
 
@@ -475,6 +623,35 @@ def _coerce_protocol(x: Any) -> Optional[ProtocolState]:
             return None
 
     return cast(ProtocolState, x)
+
+
+def _missing_required_execution_fields(p: ProtocolState) -> List[str]:
+    """
+    These are the fields your downstream static validator expects to be non-empty.
+    Keep this aligned with your validator rules.
+    """
+    missing: List[str] = []
+
+    def is_empty_str(v: Any) -> bool:
+        return not isinstance(v, str) or not v.strip()
+
+    if is_empty_str(p.get("population")):
+        missing.append("population")
+    if is_empty_str(p.get("treatment_window_start")):
+        missing.append("treatment_window_start")
+    if is_empty_str(p.get("treatment_window_end")):
+        missing.append("treatment_window_end")
+    if is_empty_str(p.get("outcome_window")):
+        missing.append("outcome_window")
+    # comparator is also required for many flows
+    if is_empty_str(p.get("comparator")):
+        missing.append("comparator")
+
+    # time zero definition is required when conceptual
+    if p.get("time_zero_type") == "CONCEPTUAL" and is_empty_str(p.get("time_zero_definition")):
+        missing.append("time_zero_definition")
+
+    return missing
 
 
 def _normalize_protocol(p: ProtocolState) -> ProtocolState:
@@ -524,8 +701,10 @@ def _normalize_protocol(p: ProtocolState) -> ProtocolState:
     p["covariates"] = [c for c in p["covariates"] if c not in (tcol, ycol)]
     p["effect_modifiers"] = [m for m in p["effect_modifiers"] if m not in (tcol, ycol)]
 
+    # If conceptual time zero, we should not set a column name.
     if p.get("time_zero_type") == "CONCEPTUAL":
         p["time_zero"] = ""
+    # If column time zero, definition should be empty (definition is for conceptual).
     if p.get("time_zero_type") == "COLUMN":
         p["time_zero_definition"] = ""
 
@@ -533,9 +712,13 @@ def _normalize_protocol(p: ProtocolState) -> ProtocolState:
 
 
 def _ensure_protocol_container(state: ConversationState, meta: MetadataState) -> None:
-    cur = _coerce_protocol(state.get("protocol")) or _empty_protocol()
+    """
+    Ensure protocol is ALWAYS shape-complete and never regresses due to missing keys.
+    """
+    cur = _merge_protocol_into_template(state.get("protocol"))
     cur = _normalize_protocol(cur)
 
+    # Lock T/Y if present in metadata
     t = meta.get("treatment")
     y = meta.get("outcome")
     if isinstance(t, str) and t.strip():
@@ -547,7 +730,7 @@ def _ensure_protocol_container(state: ConversationState, meta: MetadataState) ->
 
 
 # ----------------------------
-# Observed values helper (tiny, only to help LLM not hallucinate)
+# Observed values helper
 # ----------------------------
 
 def _observed_values_from_preview(
@@ -585,6 +768,13 @@ def _observed_values_from_preview(
 # ----------------------------
 # Dataset helpers
 # ----------------------------
+
+def _dataset_columns_from_df(df: DataFrame) -> List[str]:
+    try:
+        return [str(c).strip() for c in df.columns if str(c).strip()]
+    except Exception:
+        return []
+
 
 def _dataset_columns(dataset: DatasetState) -> List[str]:
     cols: List[str] = []
@@ -633,7 +823,7 @@ def _build_variable_dictionary(dataset: DatasetState) -> List[Dict[str, Any]]:
                 if not isinstance(name, str) or not name.strip():
                     continue
                 dtype = c.get("dtype") or c.get("type") or "unknown"
-                out.append({"name": name, "type": str(dtype)})
+                out.append({"name": name.strip(), "type": str(dtype)})
 
     summary = dataset.get("summary")
     if isinstance(summary, dict):
@@ -646,14 +836,14 @@ def _build_variable_dictionary(dataset: DatasetState) -> List[Dict[str, Any]]:
                 dtype = "unknown"
                 if isinstance(info, dict):
                     dtype = str(info.get("dtype") or info.get("type") or "unknown")
-                out.append({"name": name, "type": dtype})
+                out.append({"name": name.strip(), "type": dtype})
 
     return out
 
 
 def _dataset_preview_rows(df: DataFrame) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
-    if df.empty:
+    if df is None or df.empty:
         return out
     for _, row in df.iterrows():
         rec: Dict[str, Any] = {}
@@ -681,6 +871,21 @@ def _last_human_text(messages: Sequence[BaseMessage]) -> str:
 # State/control helpers
 # ----------------------------
 
+def _ensure_control_container(state: ConversationState) -> None:
+    """
+    Router/logging often assumes state['control'] exists.
+    Make this node safe even if upstream forgot to initialize it.
+    """
+    c = state.get("control")
+    if isinstance(c, dict):
+        return
+    state["control"] = {
+        "current_stage_status": "PENDING",
+        "action_required": "NONE",
+        "node_message": None,
+    }
+
+
 def _require_dataset_and_meta(state: ConversationState) -> Tuple[DatasetState, MetadataState, Optional[str]]:
     dataset = state.get("dataset")
     meta = state.get("metadata")
@@ -697,27 +902,27 @@ def _append_ai(state: ConversationState, content: str) -> None:
 
 
 def _succeed(state: ConversationState, msg: Optional[str]) -> ConversationState:
-    c = state["control"]
-    c["current_stage_status"] = "DONE"  # type: ignore[assignment]
-    c["action_required"] = "NONE"  # type: ignore[assignment]
+    c = cast(Dict[str, Any], state["control"])
+    c["current_stage_status"] = "DONE"
+    c["action_required"] = "NONE"
     c["node_message"] = msg
     state["control"] = c
     return state
 
 
 def _need_input(state: ConversationState, msg: str) -> ConversationState:
-    c = state["control"]
-    c["current_stage_status"] = "PENDING"  # type: ignore[assignment]
-    c["action_required"] = "NEEDS_INPUT"  # type: ignore[assignment]
+    c = cast(Dict[str, Any], state["control"])
+    c["current_stage_status"] = "PENDING"
+    c["action_required"] = "NEEDS_INPUT"
     c["node_message"] = msg
     state["control"] = c
     return state
 
 
 def _fatal(state: ConversationState, msg: str) -> ConversationState:
-    c = state["control"]
-    c["current_stage_status"] = "ABORTED"  # type: ignore[assignment]
-    c["action_required"] = "NEEDS_INPUT"  # type: ignore[assignment]
+    c = cast(Dict[str, Any], state["control"])
+    c["current_stage_status"] = "ABORTED"
+    c["action_required"] = "NEEDS_INPUT"
     c["node_message"] = msg
     state["control"] = c
     return state
