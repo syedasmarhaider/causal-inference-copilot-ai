@@ -24,7 +24,7 @@ from python.workflows.state.conversation_state import (
     to_chat_history_last_k,
 )
 from python.workflows.state.control_state import ControlState
-from python.workflows.state.metadata_state import MetadataState, empty_metadata
+from python.workflows.state.metadata_state import MetadataState, empty_metadata_state
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ def _run_propose_and_confirm_metadata(
     llm: LLMService,
     model_name: str,
 ) -> ConversationState:
-    control = _require_control(state)
+    control = state["control"]
     md_old = _require_metadata(state)
 
     dataset_cols = _extract_dataset_columns(state.get("dataset")) or []
@@ -141,11 +141,9 @@ def _run_propose_and_confirm_metadata(
     control["node_message"] = node_msg
 
     if bool(md.get("accepted", False)):
-        control["current_stage"] = "DONE"
         control["current_stage_status"] = "DONE"
         control["action_required"] = "NONE"
     else:
-        control["current_stage"] = "PROPOSE_AND_CONFIRM_METADATA"
         control["current_stage_status"] = "PENDING"
         control["action_required"] = "NEEDS_INPUT"
 
@@ -387,7 +385,7 @@ def _sanitize_metadata(md_any: Dict[str, Any], *, dataset_columns: Optional[List
     - Accepted validity: requires treatment+outcome
     This does NOT try to infer intent or revert changes.
     """
-    base: MetadataState = empty_metadata()
+    base: MetadataState =empty_metadata_state()
 
     # keep only known keys
     for k in list(md_any.keys()):
@@ -488,12 +486,6 @@ def _dedupe(items: List[str]) -> List[str]:
 # =============================================================================
 # Control + Messages
 # =============================================================================
-def _require_control(state: ConversationState) -> ControlState:
-    c = state.get("control")
-    if not isinstance(c, dict): # type: ignore
-        raise ValueError("ConversationState.control must exist and be a dict")
-    return cast(ControlState, c) # type: ignore
-
 
 def _require_metadata(state: ConversationState) -> MetadataState:
     md_any = state.get("metadata")

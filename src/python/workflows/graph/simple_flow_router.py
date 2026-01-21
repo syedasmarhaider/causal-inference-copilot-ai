@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import  Final, Mapping, Sequence, Tuple, cast
 from uuid import UUID
-
 from langchain_core.messages import BaseMessage
-
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
 from python.workflows.state.control_state import ControlState, Stage, Status
@@ -17,13 +16,14 @@ _JSON_FENCE_RE: Final[re.Pattern[str]] = re.compile(r"```(?:json)?\s*([\s\S]*?)\
 
 _NEXT_STAGE: Final[Mapping[Stage, Stage]] = {
     "LOAD_DATASET": "PROPOSE_AND_CONFIRM_METADATA",
-    "PROPOSE_AND_CONFIRM_METADATA": "DONE",
-    "DONE": "DONE",
+    "PROPOSE_AND_CONFIRM_METADATA": "COMPILE_PROTOCOL",
+    "COMPILE_PROTOCOL": "DONE",
 }
 
 _STAGE_DOC: Final[Mapping[Stage, str]] = {
     "LOAD_DATASET": "Load CSV from dataset.path. Writes dataset.summary/raw_schema (and maybe dataset.id).",
     "PROPOSE_AND_CONFIRM_METADATA": "Propose+confirm metadata: treatment/outcome/controls/covariates/etc.",
+    "COMPILE_PROTOCOL": "Compile protocol state.",
     "DONE": "Workflow complete.",
 }
 
@@ -31,12 +31,6 @@ _STAGE_DOC: Final[Mapping[Stage, str]] = {
 def _noop_node(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
     return state
 
-
-def _require_control(state: ConversationState) -> ControlState:
-    c = state.get("control")
-    if not isinstance(c, dict): # pyright: ignore[reportUnnecessaryIsInstance]
-        raise ValueError("ConversationState.control must exist and be a dict")
-    return  c
 
 
 def _parse_json_object_strict(text: str) -> dict: # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]
@@ -76,18 +70,6 @@ def _last_ai_text(messages: Sequence[BaseMessage]) -> str:
 
 @dataclass(frozen=True)
 class WorkflowRouter:
-    """
-    Router holds ONLY llm.
-
-    Nodes mapping is provided at route-time:
-      router.route(state, nodes)
-
-    Routing rules:
-      - PENDING  -> run current_stage
-      - DONE     -> advance to next stage (set PENDING), run it
-      - ABORTED  -> LLM chooses recovery stage, set PENDING, run it
-    """
-
     llm: LLMService
     model_name: str
     nodes: Mapping[Stage, CallableNodeFunc]
@@ -96,11 +78,12 @@ class WorkflowRouter:
         self,
         state: ConversationState,
     ) -> Tuple[CallableNodeFunc, ConversationState]:
-        control = _require_control(state)
-
+        control = state["control"]
         stage: Stage = control["current_stage"]
         status: Status = control["current_stage_status"]
-
+        
+        logging.warning(f"WorkflowRouter.route: stage={stage!r} status={status!r}")
+        
         if status == "PENDING":
             return self._node_for(stage, self.nodes), state # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
 
@@ -125,34 +108,29 @@ class WorkflowRouter:
         return fn
 
     def _advance(self, state: ConversationState, next_stage: Stage) -> ConversationState:
-        control = _require_control(state)
-
-        # Keep it minimal and deterministic: reset to run the next stage.
+        control = state["control"]
+        next_status: Status = "DONE" if next_stage == "DONE" else "PENDING"
         new_control: ControlState = {
             **control,
             "current_stage": next_stage,
-            "current_stage_status": "PENDING",
+            "current_stage_status": next_status,
             "action_required": "NONE",
             "node_message": None,
         }
         return {**state, "control": new_control}
 
     def _llm_choose_recovery_stage(self, state: ConversationState) -> Stage:
-        """
-        Strict LLM contract:
-          { "next_stage": "<Stage>", "why": "<short>" }
-
-        If LLM fails or returns invalid => raise ValueError.
-        """
-        control = _require_control(state)
+        control = state["control"]
         dataset = state.get("dataset", {})
         metadata = state.get("metadata", {})
+        protocol = state.get("protocol", {})
         messages = cast(Sequence[BaseMessage], state.get("messages", []))
 
         snapshot = { # pyright: ignore[reportUnknownVariableType]
             "control": control,
-            "dataset": dataset if isinstance(dataset, dict) else {}, # pyright: ignore[reportUnnecessaryIsInstance]
-            "metadata": metadata if isinstance(metadata, dict) else {}, # pyright: ignore[reportUnnecessaryIsInstance]
+            "dataset": dataset,
+            "metadata": metadata,
+            "protocol": protocol,
             "last_user_message": _last_human_text(messages),
             "last_assistant_message": _last_ai_text(messages),
             "stages": dict(_STAGE_DOC),
@@ -178,7 +156,12 @@ class WorkflowRouter:
             temperature=0.0,
         )
         
-        resp = self.llm.generate(config=config, system_prompt=system, user_prompt=json.dumps(snapshot, ensure_ascii=False), history=None)
+        resp = self.llm.generate(
+            config=config, 
+            system_prompt=system, 
+            user_prompt=json.dumps(snapshot, ensure_ascii=False, default=str), # Added default=str
+            history=None
+          )
         obj = _parse_json_object_strict(cast(object, resp).content)  # type: ignore[attr-defined]
         if set(obj.keys()) != {"next_stage", "why"}: # pyright: ignore[reportUnknownArgumentType]
             raise ValueError("Router LLM must return exactly: {next_stage, why}")

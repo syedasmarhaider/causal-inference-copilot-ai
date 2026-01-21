@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Final, Mapping
 from uuid import UUID
@@ -10,14 +11,15 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from python.domain.repo.conversation_repo import ConversationRepo
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import LLMService
-from python.domain.service.mcp_client import McpClient
 from python.workflows.graph.simple_flow_router import WorkflowRouter
+from python.workflows.nodes.compile_protocol_state import make_compile_protocol_state_node
 from python.workflows.nodes.load_dataset import make_load_dataset_node
 from python.workflows.nodes.propose_and_confirm_metadata import make_propose_and_confirm_metadata_node
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
 from python.workflows.state.control_state import ControlState, Stage, Status
 from python.workflows.state.dataset_state import DatasetState
-from python.workflows.state.metadata_state import MetadataState, empty_metadata
+from python.workflows.state.metadata_state import get_string_metadata_state
+from python.workflows.state.protocol_state import get_string_protocol_state
 from python.workflows.utils.types import DEFAULT_MODEL_GEMNI
 
 
@@ -30,7 +32,6 @@ DEFAULT_DATASET_PATH: Final[Path] = Path(
 class WorkflowConfig:
     data_repo: DataRepo
     llm: LLMService
-    mcp: McpClient
     model_name: str = DEFAULT_MODEL_GEMNI
 
 
@@ -59,14 +60,14 @@ def _new_state() -> ConversationState:
         "load_error": None,
     }
 
-    metadata: MetadataState = empty_metadata()
     messages: list[BaseMessage] = []
 
     return {
         "control": control,
         "dataset": dataset,
-        "metadata": metadata,
+        "metadata": None,
         "messages": messages,
+        "protocol": None,
     }
     
     
@@ -77,16 +78,14 @@ def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
             llm=cfg.llm,
             model_name=cfg.model_name,
         ),
+        "COMPILE_PROTOCOL": make_compile_protocol_state_node(
+            cfg.data_repo,
+            llm=cfg.llm,
+            model_name=cfg.model_name,
+        ), 
         "DONE": _noop,
     }
 
-
-def _extract_node_message(control: ControlState) -> str | None:
-    msg = control.get("node_message")
-    if not isinstance(msg, str):
-        return None
-    msg = msg.strip()
-    return msg or None
 
 
 class SimpleWorkflow:
@@ -114,27 +113,30 @@ class SimpleWorkflow:
     ) -> WorkflowResponse:
         state = self._repo.load(user_id=user_id, conversation_id=conversation_id)
         
+       
+     
+        
         if state is None:
             state = _new_state()
- 
         if isinstance(user_text, str):
             txt = user_text.strip()
             if txt:
                 state["messages"].append(HumanMessage(content=txt))
+                
+                
 
         node_fn, routed_state = self._router.route(state)
         out_state = node_fn(user_id, conversation_id, routed_state)
 
         control = out_state["control"]
-        node_msg = _extract_node_message(control)
+        node_msg = control.get("node_message", None)
         needs_input = control.get("action_required") == "NEEDS_INPUT"
 
-        # surface needs_input in response, but do not persist NEEDS_INPUT
         if needs_input:
             control["action_required"] = "NONE"
 
         self._repo.save(user_id=user_id, conversation_id=conversation_id, state=out_state)
-
+        logging.warning("State after processing:" + get_string_protocol_state(out_state.get("protocol", None)) + " | " + get_string_metadata_state(out_state.get("metadata", None)))
         return WorkflowResponse(
             node_message=node_msg,
             needs_input=needs_input,

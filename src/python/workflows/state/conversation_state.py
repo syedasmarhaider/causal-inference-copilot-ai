@@ -6,14 +6,16 @@ from langchain_core.messages import BaseMessage
 
 from python.domain.service.llm_service import ChatMessage
 from python.domain.service.llm_service import ChatMessage
+from python.workflows.state.protocol_state import ProtocolState
 from python.workflows.state.control_state import ControlState
 from python.workflows.state.dataset_state import DatasetState
 from python.workflows.state.metadata_state import MetadataState
 
 class ConversationState(TypedDict):
     control: ControlState
-    dataset: DatasetState
-    metadata: MetadataState
+    dataset: DatasetState   | None
+    metadata: MetadataState | None
+    protocol: ProtocolState | None
     messages: List[BaseMessage]
 
 CallableNodeFunc = Callable[[UUID,UUID,ConversationState], ConversationState]

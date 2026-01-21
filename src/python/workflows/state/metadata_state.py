@@ -18,45 +18,49 @@ MetadataField = Literal[
 
 
 class MetadataState(TypedDict):
-    # Core causal spec
     treatment: str
     outcome: str
     causal_question: str
-
-    # Backdoor adjustment set (confounders)
     confounder_strategy: ConfounderStrategy
     confounders: List[str]
-
-    # Optional extras (still supported)
     controls: List[str]
     effect_modifiers: List[str]
-
-    # Workflow state
     accepted: bool
-
-    # Optional dataset context
     dataset_summary: str
-
-    # UX helpers
     locked_fields: List[MetadataField]
     notes: List[str]
     warnings: List[str]
     provenance: Dict[str, Any]
 
 
-def empty_metadata() -> MetadataState:
-    return {
-        "treatment": "",
-        "outcome": "",
-        "causal_question": "",
-        "confounder_strategy": "NONE",
-        "confounders": [],
-        "controls": [],
-        "effect_modifiers": [],
-        "accepted": False,
-        "dataset_summary": "",
-        "locked_fields": [],
-        "notes": [],
-        "warnings": [],
-        "provenance": {},
-    }
+def empty_metadata_state() -> MetadataState:
+    return MetadataState(
+        treatment="",
+        outcome="",
+        causal_question="",
+        confounder_strategy="USER_LIST",
+        confounders=[],
+        controls=[],
+        effect_modifiers=[],
+        accepted=False,
+        dataset_summary="",
+        locked_fields=[],
+        notes=[],
+        warnings=[],
+        provenance={},
+    )
+
+
+def get_string_metadata_state(metadata: MetadataState | None) -> str:
+    if metadata is None:
+        return "Metadata: None"
+    return (
+        f"Treatment: {metadata['treatment']} | "
+        f"Outcome: {metadata['outcome']} | "
+        f"Causal Question: {metadata['causal_question']} | "
+        f"Confounder Strategy: {metadata['confounder_strategy']} | "
+        f"Confounders: {', '.join(metadata['confounders'])} | "
+        f"Controls: {', '.join(metadata['controls'])} | "
+        f"Effect Modifiers: {', '.join(metadata['effect_modifiers'])} | "
+        f"Accepted: {metadata['accepted']}"
+    )    
