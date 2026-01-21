@@ -118,13 +118,13 @@ Rules:
 
 By mode:
 NEEDS_INPUT:
-- Show 5–8 relevant columns (treatment/outcome/confounders).
+- Show relevant columns (treatment/outcome/confounders) given by metadata.
 - Summarize protocol briefly (time zero, treatment, comparator, windows, outcome).
 - Ask ONLY protocol.open_questions.
 
 READY:
 - Summarize protocol in bullets.
-- One line: "Reply: accept protocol"
+- Ask for user acceptance to lock and proceed to next step.
 
 LOCKED:
 - Confirm locked.

@@ -9,28 +9,13 @@ from uuid import UUID
 from langchain_core.messages import BaseMessage
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
-from python.workflows.state.control_state import ControlState, Stage, Status
+from python.workflows.state.control_state import CONTROL_STATE_NEXT_STAGE, CONTROL_STATE_STAGE_DOC, ControlState, Stage, Status
 
 
 _JSON_FENCE_RE: Final[re.Pattern[str]] = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 
-_NEXT_STAGE: Final[Mapping[Stage, Stage]] = {
-    "LOAD_DATASET": "PROPOSE_AND_CONFIRM_METADATA",
-    "PROPOSE_AND_CONFIRM_METADATA": "COMPILE_PROTOCOL",
-    "COMPILE_PROTOCOL": "DONE",
-}
-
-_STAGE_DOC: Final[Mapping[Stage, str]] = {
-    "LOAD_DATASET": "Load CSV from dataset.path. Writes dataset.summary/raw_schema (and maybe dataset.id).",
-    "PROPOSE_AND_CONFIRM_METADATA": "Propose+confirm metadata: treatment/outcome/controls/covariates/etc.",
-    "COMPILE_PROTOCOL": "Compile protocol state.",
-    "DONE": "Workflow complete.",
-}
-
-
 def _noop_node(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
     return state
-
 
 
 def _parse_json_object_strict(text: str) -> dict: # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]
@@ -88,7 +73,7 @@ class WorkflowRouter:
             return self._node_for(stage, self.nodes), state # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
 
         if status == "DONE":
-            next_stage = _NEXT_STAGE.get(stage, "DONE")
+            next_stage = CONTROL_STATE_NEXT_STAGE.get(stage, "DONE")
             next_state = self._advance(state, next_stage)
             return self._node_for(next_stage, self.nodes), next_state # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
 
@@ -133,7 +118,7 @@ class WorkflowRouter:
             "protocol": protocol,
             "last_user_message": _last_human_text(messages),
             "last_assistant_message": _last_ai_text(messages),
-            "stages": dict(_STAGE_DOC),
+            "stages": dict(CONTROL_STATE_STAGE_DOC),
             "instructions": (
                 "Pick the earliest stage that can safely recover.\n"
                 "- Missing/invalid dataset path => GET_FILE\n"
@@ -147,7 +132,7 @@ class WorkflowRouter:
             "You are a workflow recovery router.\n"
             "Return ONLY one JSON object with EXACTLY keys:\n"
             '{ "next_stage": string, "why": string }\n'
-            f"- next_stage MUST be one of: {list(_STAGE_DOC.keys())}\n"
+            f"- next_stage MUST be one of: {list(CONTROL_STATE_STAGE_DOC.keys())}\n"
             "- No markdown. No extra keys."
         )
         
@@ -170,7 +155,7 @@ class WorkflowRouter:
         if not isinstance(ns, str):
             raise ValueError("Router LLM returned non-string next_stage")
 
-        if ns not in _STAGE_DOC:
+        if ns not in CONTROL_STATE_STAGE_DOC:
             raise ValueError(f"Router LLM returned invalid stage: {ns!r}")
 
-        return  ns
+        return cast(Stage, ns)
