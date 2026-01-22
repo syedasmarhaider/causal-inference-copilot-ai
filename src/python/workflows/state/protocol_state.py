@@ -1,17 +1,13 @@
 # src/python/workflows/state/protocol_state.py
 from __future__ import annotations
 
-from typing import List, Literal, TypedDict, NotRequired
+from typing import List, Literal, TypedDict
 
 TimeZeroType = Literal["COLUMN", "CONCEPTUAL"]
 WindowUnit = Literal["minutes", "hours", "days", "weeks", "months", "years"]
 
 
 class ProtocolState(TypedDict):
-    accepted: bool
-    clarified: List[str]
-    open_questions: List[str]
-
     population: str
 
     time_zero_type: TimeZeroType
@@ -33,18 +29,12 @@ class ProtocolState(TypedDict):
     covariates: List[str]
     effect_modifiers: List[str]
     censoring_rules: List[str]
-
-    # Optional: internal-only bookkeeping (still ONLY inside protocol)
-    user_log: NotRequired[List[str]]
-    assistant_log: NotRequired[List[str]]
-    revision: NotRequired[int]
-
+    experiment_type: str
 
 def get_string_protocol_state(protocol: ProtocolState | None) -> str:
     if protocol is None:
         return "Protocol: None"
     return (
-        f"Accepted: {protocol['accepted']} | "
         f"Population: {protocol['population']} | "
         f"Time Zero Type: {protocol['time_zero_type']} | "
         f"Time Zero Definition: {protocol['time_zero_definition']} | "

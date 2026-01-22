@@ -79,8 +79,16 @@ class WorkflowRouter:
 
         if status == "ABORTED":
             recovered_stage = self._llm_choose_recovery_stage(state)
-            next_state = self._advance(state, recovered_stage)
-            return self._node_for(recovered_stage, self.nodes), next_state # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+            new_control: ControlState = {
+            **control,
+            "current_stage": recovered_stage,
+            "current_stage_status": "PENDING",
+            "action_required": "NONE",
+            "node_message": None,
+            }
+            
+            next_state = cast(ConversationState, {**state, "control": new_control})            
+            return self._node_for(recovered_stage, self.nodes), next_state 
 
         raise ValueError(f"Unknown control.current_stage_status: {status!r}")
 
@@ -107,24 +115,20 @@ class WorkflowRouter:
     def _llm_choose_recovery_stage(self, state: ConversationState) -> Stage:
         control = state["control"]
         dataset = state.get("dataset", {})
-        metadata = state.get("metadata", {})
+        protocol_discussion = state.get("protocol_discussion", {})
         protocol = state.get("protocol", {})
         messages = cast(Sequence[BaseMessage], state.get("messages", []))
 
         snapshot = { # pyright: ignore[reportUnknownVariableType]
             "control": control,
             "dataset": dataset,
-            "metadata": metadata,
+            "protocol_discussion": protocol_discussion,
             "protocol": protocol,
             "last_user_message": _last_human_text(messages),
             "last_assistant_message": _last_ai_text(messages),
             "stages": dict(CONTROL_STATE_STAGE_DOC),
             "instructions": (
                 "Pick the earliest stage that can safely recover.\n"
-                "- Missing/invalid dataset path => GET_FILE\n"
-                "- dataset.path present but schema/summary missing => LOAD_DATASET\n"
-                "- dataset loaded but metadata incomplete/not accepted => PROPOSE_AND_CONFIRM_METADATA\n"
-                "- everything done => DONE"
             ),
         }
 

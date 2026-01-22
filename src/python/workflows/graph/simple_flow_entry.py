@@ -12,14 +12,12 @@ from python.domain.repo.conversation_repo import ConversationRepo
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import LLMService
 from python.workflows.graph.simple_flow_router import WorkflowRouter
-from python.workflows.nodes.compile_protocol_state import make_compile_protocol_state_node
+from python.workflows.nodes.compile_protocol_state import make_compile_protocol_node
 from python.workflows.nodes.load_dataset import make_load_dataset_node
-from python.workflows.nodes.propose_and_confirm_metadata import make_propose_and_confirm_metadata_node
-from python.workflows.nodes.validate_protocol_static import make_validate_protocol_static_node
+from python.workflows.nodes.protocol_discussion import make_protocol_discussion_node
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
 from python.workflows.state.control_state import ControlState, Stage, Status
 from python.workflows.state.dataset_state import DatasetState
-from python.workflows.state.metadata_state import get_string_metadata_state
 from python.workflows.state.protocol_state import get_string_protocol_state
 from python.workflows.utils.types import DEFAULT_MODEL_GEMNI
 
@@ -66,7 +64,7 @@ def _new_state() -> ConversationState:
     return {
         "control": control,
         "dataset": dataset,
-        "metadata": None,
+        "protocol_discussion": None,
         "messages": messages,
         "protocol": None,
     }
@@ -74,19 +72,17 @@ def _new_state() -> ConversationState:
     
 def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
     return {
-        "LOAD_DATASET": make_load_dataset_node(cfg.data_repo, cfg.llm, model_name=cfg.model_name),
-        "PROPOSE_AND_CONFIRM_METADATA": make_propose_and_confirm_metadata_node(
+        "LOAD_DATASET": make_load_dataset_node(data_repo=cfg.data_repo, llm=cfg.llm, model_name=cfg.model_name),
+        "PROTOCOL_DISCUSSION": make_protocol_discussion_node(
+            data_repo=cfg.data_repo,
             llm=cfg.llm,
             model_name=cfg.model_name,
         ),
-        "COMPILE_PROTOCOL": make_compile_protocol_state_node(
-            cfg.data_repo,
+        "COMPILE_PROTOCOL": make_compile_protocol_node(
+            data_repo=cfg.data_repo,
             llm=cfg.llm,
             model_name=cfg.model_name,
         ), 
-        "VALIDATE_PROTOCOL_STATIC": make_validate_protocol_static_node(
-            cfg.data_repo,
-        ),
         "DONE": _noop,
     }
 
@@ -140,7 +136,7 @@ class SimpleWorkflow:
             control["action_required"] = "NONE"
 
         self._repo.save(user_id=user_id, conversation_id=conversation_id, state=out_state)
-        logging.warning("State after processing:" + get_string_protocol_state(out_state.get("protocol", None)) + " | " + get_string_metadata_state(out_state.get("metadata", None)))
+        logging.warning("State after processing protocol:" + get_string_protocol_state(out_state.get("protocol", None)))
         return WorkflowResponse(
             node_message=node_msg,
             needs_input=needs_input,
