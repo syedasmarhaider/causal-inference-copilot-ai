@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, List, Optional, Sequence, cast
+from typing import Any, List, cast
 from uuid import UUID
 
 from python.domain.repo.data_repo import DataRepo
@@ -22,7 +22,7 @@ from python.workflows.state.control_state import ControlState
 from python.workflows.state.dataset_state import DatasetStateHelpers
 from python.workflows.state.protocol_discussion_state import ProtocolDiscussionState
 
-_DEFAULT_PREVIEW_LIMIT = 10
+_DEFAULT_PREVIEW_LIMIT = 5
 log = logging.getLogger(__name__)
 
 
@@ -87,10 +87,11 @@ def _run(
     if not getattr(pd, "discussion", ""):
         pd.discussion = _build_discussion_template()
         
-    chat_history = ConversationStateHelpers.to_chat_history_last_k(state, k=6, drop_last_user=False)
+    chat_history_messages = ConversationStateHelpers.chat_history_to_payload(state, k=7)
 
     payload: dict[str, Any] = { 
-        "protocol_discussion": pd.discussion,
+        "protocol_discussion_important_context": pd.discussion,
+        "conversation_messages_till_now":chat_history_messages,
         "dataset_columns_preview": dataset_cols,
     }
 
@@ -104,7 +105,6 @@ def _run(
             temperature=0.0,
             system_prompt=get_protocol_discussion_system_prompt(),
             user_payload=payload,
-            history=chat_history,
             empty_err="LLM#1 returned empty discussion",
         )
         state["protocol_discussion"] = pd
@@ -122,7 +122,6 @@ def _run(
             temperature=0.3,
             system_prompt=get_protocol_discussion_confirmation_prompt(),
             user_payload=payload,
-            history=chat_history,
             empty_err="LLM#2 returned empty message",
         )
     except Exception:
@@ -142,7 +141,6 @@ def _run(
             temperature=0.0,
             system_prompt=get_protocol_discussion_readiness_prompt(),
             user_payload=payload,
-            history=chat_history,
             empty_err="LLM#3 returned empty token",
         )
         token = (token or "").strip().splitlines()[0].strip().split()[0].strip().upper()
@@ -168,7 +166,6 @@ def _llm_call_text(
     temperature: float,
     system_prompt: str,
     user_payload: dict[str, Any],
-    history: Sequence[ChatMessage],
     empty_err: str,
 ) -> str:
     cfg = LLMConfig(model=model_name, temperature=temperature)
@@ -177,7 +174,6 @@ def _llm_call_text(
         config=cfg,
         system_prompt=system_prompt,
         user_prompt=json.dumps(user_payload, ensure_ascii=False),
-        history=history,
     )
     out = (raw or "").strip()
     if not out:
@@ -191,22 +187,18 @@ def _llm_text(
     config: LLMConfig,
     system_prompt: str,
     user_prompt: str,
-    history: Optional[Sequence[ChatMessage]],
 ) -> str:
     try:
         resp = llm.generate(  # type: ignore[call-arg]
             config=config,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            history=history,
         )
         return cast(Any, resp).content
     except TypeError:
         msgs: List[ChatMessage] = []
         if system_prompt:
             msgs.append(ChatMessage(role="system", content=system_prompt))
-        if history:
-            msgs.extend(list(history))
         msgs.append(ChatMessage(role="user", content=user_prompt))
         resp = llm.generate(config=config, history=msgs)  # type: ignore[arg-type]
         return cast(Any, resp).content
@@ -237,7 +229,7 @@ def _fatal(state: ConversationState, msg: str) -> ConversationState:
 def _build_discussion_template() -> str:
     qs = ProtocolDiscussionState.get_questions()
     lines: List[str] = []
-    lines.append("PROTOCOL_DISCUSSION")
+    lines.append("PROTOCOL_DISCUSSION_CONTEXT")
     lines.append("Instruction: Only edit the A: parts. Do not reorder, delete, or rename questions.")
     lines.append("")
     for i, q in enumerate(qs, start=1):

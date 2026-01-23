@@ -46,7 +46,8 @@ TIME ZERO FIELDS:
   - if CONCEPTUAL: set to "" (empty string)
 
 LIST NORMALIZATION:
-- covariates, effect_modifiers, censoring_rules:
+- covariates, effect_modifiers, censoring_rules: (If Study is oberservational covariates are must -- very important) 
+- else we can skip covariates if study is not observational
   parse comma-separated lists into arrays of strings; trim; drop empties; dedupe preserving order.
 
 WINDOW KEYS (ALWAYS REQUIRED IN JSON, but may be empty):

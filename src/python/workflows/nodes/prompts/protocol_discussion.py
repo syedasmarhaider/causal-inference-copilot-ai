@@ -110,8 +110,7 @@ Consistency checks (must pass or remain PENDING):
 - Treatment is not also listed as a covariate; outcome is not listed as a covariate.
 
 How to judge "user confirmed / proceed":
-- Consider the user CONFIRMED if the latest user message clearly indicates acceptance/proceeding, such as:
-  "yes", "yep", "I accept", "confirmed", "looks good", "ok", "okay", "let's proceed", "proceed", "go ahead", "ready", "start validation"
+- Consider the user CONFIRMED if the latest user message clearly indicates acceptance and every question has been clearly answered
 - If the latest user message is a question, a correction, a new constraint, or expresses uncertainty, then NOT confirmed.
 
 First-time rule:

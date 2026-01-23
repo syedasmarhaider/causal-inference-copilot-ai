@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Final, Mapping
 from uuid import UUID
 
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import  HumanMessage
 
 from python.domain.repo.conversation_repo import ConversationRepo
 from python.domain.repo.data_repo import DataRepo
@@ -15,9 +15,8 @@ from python.workflows.graph.simple_flow_router import WorkflowRouter
 from python.workflows.nodes.compile_protocol_state import make_compile_protocol_node
 from python.workflows.nodes.load_dataset import make_load_dataset_node
 from python.workflows.nodes.protocol_discussion import make_protocol_discussion_node
-from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
-from python.workflows.state.control_state import ControlState, Stage, Status
-from python.workflows.state.dataset_state import DatasetState
+from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState, get_init_conversation_state
+from python.workflows.state.control_state import  Stage, Status
 from python.workflows.state.protocol_state import get_string_protocol_state
 from python.workflows.utils.types import DEFAULT_MODEL_GEMNI
 
@@ -45,30 +44,6 @@ class WorkflowResponse:
 def _noop(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
     return state
 
-
-def _new_state() -> ConversationState:
-    control: ControlState = {
-        "current_stage": "LOAD_DATASET",
-        "current_stage_status": "PENDING",
-        "action_required": "NONE",
-        "node_message": None,
-    }
-
-    dataset: DatasetState = {
-        "id": UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
-        "load_error": None,
-    }
-
-    messages: list[BaseMessage] = []
-
-    return {
-        "control": control,
-        "dataset": dataset,
-        "protocol_discussion": None,
-        "messages": messages,
-        "protocol": None,
-    }
-    
     
 def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
     return {
@@ -117,7 +92,7 @@ class SimpleWorkflow:
      
         
         if state is None:
-            state = _new_state()
+            state = get_init_conversation_state(UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"))
         if isinstance(user_text, str):
             txt = user_text.strip()
             if txt:

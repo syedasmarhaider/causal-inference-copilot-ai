@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from typing import Callable, List, Sequence, TypedDict, cast
+from typing import Callable, Dict, List, Sequence, TypedDict, cast
 from uuid import UUID
 
 from python.domain.service.llm_service import ChatMessage
-from langchain_core.messages import BaseMessage
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, BaseMessage
 
 from python.workflows.state.control_state import ControlState
 from python.workflows.state.dataset_state import DatasetState
 from python.workflows.state.protocol_discussion_state import ProtocolDiscussionState
 from python.workflows.state.protocol_state import ProtocolState
+from python.workflows.state.validate_protocol_state import ProtocolStaticValidationState
 
 
 class ConversationState(TypedDict):
@@ -18,6 +18,8 @@ class ConversationState(TypedDict):
     dataset: DatasetState | None
     protocol_discussion: ProtocolDiscussionState | None
     protocol: ProtocolState | None
+    protocol_static_validation: ProtocolStaticValidationState | None
+    
     messages: List[BaseMessage]
 
 
@@ -63,6 +65,47 @@ class ConversationStateHelpers:
         return out
 
     @staticmethod
+    def chat_history_to_payload(
+        state: ConversationState,
+        *,
+        k: int = 12,
+        drop_last_user: bool = False,
+        max_chars_per_msg: int = 5000,
+        drop_system: bool = False,
+    ) -> List[Dict[str, str]]:
+        """
+        Convert the last-k messages in ConversationState into a JSON-friendly payload.
+
+        Output shape:
+          [
+            {"role": "user"|"assistant"|"system", "content": "..."},
+            ...
+          ]
+
+        - Uses to_chat_history_last_k(...) to normalize BaseMessage -> ChatMessage
+        - Optionally drops system messages
+        - Truncates content per message for prompt size control
+        """
+        history = ConversationStateHelpers.to_chat_history_last_k(
+            state,
+            k=k,
+            drop_last_user=drop_last_user,
+        )
+
+        if drop_system:
+            history = [m for m in history if getattr(m, "role", "") != "system"]
+
+        out: List[Dict[str, str]] = []
+        for m in history:
+            role = str(getattr(m, "role", ""))
+            content = str(getattr(m, "content", "") or "")
+            if max_chars_per_msg > 0 and len(content) > max_chars_per_msg:
+                content = content[:max_chars_per_msg].rstrip() + "…"
+            out.append({"role": role, "content": content})
+
+        return out
+
+    @staticmethod
     def last_human_text(state: ConversationState) -> str | None:
         messages = cast(Sequence[BaseMessage], state.get("messages", []))
         for m in reversed(list(messages)):
@@ -80,3 +123,28 @@ class ConversationStateHelpers:
             state["messages"] = []
             msgs = state["messages"]
         msgs.append(AIMessage(content=content, additional_kwargs={"source": "node", "stage": stage}))
+
+
+def get_init_conversation_state(dataset_id: UUID) -> ConversationState:
+    control: ControlState = {
+        "current_stage": "LOAD_DATASET",
+        "current_stage_status": "PENDING",
+        "action_required": "NONE",
+        "node_message": None,
+    }
+
+    dataset: DatasetState = {
+        "id": dataset_id,
+        "load_error": None,
+    }
+
+    messages: list[BaseMessage] = []
+
+    return {
+        "control": control,
+        "dataset": dataset,
+        "protocol_discussion": None,
+        "protocol_static_validation": None,
+        "messages": messages,
+        "protocol": None,
+    }
