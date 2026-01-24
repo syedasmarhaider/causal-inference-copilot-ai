@@ -149,7 +149,7 @@ def _run(
         token = "PENDING"
 
     if token == "READY":
-        _set_done(control)
+        _set_done(control, node_msg)
     else:
         _set_pending(control, control.get("node_message") or "")
 
@@ -213,9 +213,10 @@ def _set_pending(control: ControlState, msg: str) -> None:
     control["node_message"] = msg
 
 
-def _set_done(control: ControlState) -> None:
+def _set_done(control: ControlState,msg :str) -> None:
     control["current_stage_status"] = "DONE"
     control["action_required"] = "NONE"
+    control["node_message"] = msg
 
 
 def _fatal(state: ConversationState, msg: str) -> ConversationState:

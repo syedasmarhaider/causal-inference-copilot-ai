@@ -44,3 +44,5 @@ def get_string_protocol_state(protocol: ProtocolState | None) -> str:
         f"Covariates: {', '.join(protocol['covariates'])} | "
         f"Effect Modifiers: {', '.join(protocol['effect_modifiers'])}"
     )
+
+    

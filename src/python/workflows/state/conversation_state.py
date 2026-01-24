@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 
 from python.workflows.state.control_state import ControlState
 from python.workflows.state.dataset_state import DatasetState
-from python.workflows.state.protocol_discussion_state import ProtocolDiscussionState
+from python.workflows.state.protocol_discussion_state import ProtocolDiscussionState, get_test_protocol_discussion_state_pdl1_os
 from python.workflows.state.protocol_state import ProtocolState
 from python.workflows.state.validate_protocol_state import ProtocolStaticValidationState
 
@@ -127,7 +127,7 @@ class ConversationStateHelpers:
 
 def get_init_conversation_state(dataset_id: UUID) -> ConversationState:
     control: ControlState = {
-        "current_stage": "LOAD_DATASET",
+        "current_stage": "COMPILE_PROTOCOL",
         "current_stage_status": "PENDING",
         "action_required": "NONE",
         "node_message": None,
@@ -138,12 +138,12 @@ def get_init_conversation_state(dataset_id: UUID) -> ConversationState:
         "load_error": None,
     }
 
-    messages: list[BaseMessage] = []
+    messages: List[BaseMessage] = []
 
     return {
         "control": control,
         "dataset": dataset,
-        "protocol_discussion": None,
+        "protocol_discussion": get_test_protocol_discussion_state_pdl1_os(),
         "protocol_static_validation": None,
         "messages": messages,
         "protocol": None,

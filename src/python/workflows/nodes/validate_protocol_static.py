@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from uuid import UUID
 
 import numpy as np
@@ -10,7 +10,6 @@ import pandas as pd
 
 from python.domain.repo.data_repo import DataRepo
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
-from python.workflows.state.dataset_state import DatasetState
 from python.workflows.state.protocol_state import ProtocolState
 from python.workflows.state.validate_protocol_state import (
     ProtocolValidationIssue,
@@ -24,12 +23,6 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ValidationPolicy:
-    """
-    Deterministic thresholds for the static validation gate.
-    Tune per cohort size and expected missingness.
-    """
-
-    # Cohort size / feasibility
     min_total_rows: int = 200
     min_arm_size: int = 50
     max_arm_imbalance_ratio: float = 20.0
@@ -65,27 +58,34 @@ def make_validate_protocol_static_node(*, data_repo: DataRepo) -> CallableNodeFu
         protocol = state.get("protocol")
 
         if dataset is None:
-            _write_report(state, _fatal_report("Dataset is missing from state."))
+            _set_fatal(state, "Dataset is missing from state. Reload dataset")
             return state
 
         load_error = dataset.get("load_error")
         if load_error:
-            _write_report(state, _fatal_report(f"Dataset load_error is set: {load_error}"))
+            _set_fatal(state, f"Dataset load_error is set: {load_error}")
             return state
 
         if protocol is None:
-            _write_report(state, _fatal_report("Protocol is missing from state."))
+            _set_fatal(state, "Protocol is missing from state. Protocol discussion is required")
             return state
+        
+        dataset_id = dataset.get("id")
+        if dataset_id is None:
+            log.exception("Failed to load dataframe for static validation.")
+            _set_fatal(state, f"Failed to load dataset for validation: dataset id is not available")
+            return state
+            
 
         try:
-            df = _load_dataframe(data_repo, user_id, conversation_id, dataset)
+            df =  data_repo.get_csv_data(user_id, conversation_id, dataset_id)
         except Exception as e:
             log.exception("Failed to load dataframe for static validation.")
-            _write_report(state, _fatal_report(f"Failed to load dataset for validation: {e}"))
+            _set_fatal(state, f"Failed to load dataset for validation: {e}")
             return state
 
         report = _validate(protocol=protocol, df=df, policy=policy)
-        _write_report(state, report)
+        _set_done(state, report,"report has been generated.")
         return state
 
     return _run
@@ -98,7 +98,7 @@ def make_validate_protocol_static_node(*, data_repo: DataRepo) -> CallableNodeFu
 def _validate(*, protocol: ProtocolState, df: pd.DataFrame, policy: ValidationPolicy) -> ProtocolValidationReport:
     issues: List[ProtocolValidationIssue] = []
     metrics: Dict[str, Any] = {}
-
+    
     # 1) Protocol structural / numeric sanity
     issues.extend(_check_protocol_integrity(protocol))
     if _has_fail(issues):
@@ -594,16 +594,20 @@ def _compute_missingness(df: pd.DataFrame, mask: pd.Series, cols: Sequence[str])
 # Report helpers
 # -----------------------------------------------------------------------------
 
-def _write_report(state: ConversationState, report: ProtocolValidationReport) -> None:
-    state["protocol_static_validation"] = {"report": report}  # type: ignore[typeddict-item]
+def _set_done(state: ConversationState, report: ProtocolValidationReport|None, message: str) -> None:
+    state["protocol_static_validation"] = report # pyright: ignore[reportGeneralTypeIssues]
+    control = state["control"]
+    control["current_stage_status"] = "DONE"
+    control["action_required"] = "NONE" 
+    control["node_message"] = message
+    
 
-
-def _fatal_report(message: str) -> ProtocolValidationReport:
-    return {
-        "status": "FAIL",
-        "issues": [_issue("NODE_FATAL", "FAIL", message, evidence={}, fix_hint=None)],
-        "metrics": {},
-    }
+def _set_fatal(state: ConversationState, message: str) -> None:
+    control = state["control"]
+    control["current_stage_status"] = "ABORTED"
+    control["action_required"] = "NONE" 
+    control["node_message"] = message
+        
 
 
 def _finalize_report(issues: List[ProtocolValidationIssue], metrics: Dict[str, Any]) -> ProtocolValidationReport:
@@ -650,31 +654,3 @@ def _parse_float(x: Any) -> Optional[float]:
         return float(s)
     except Exception:
         return None
-
-
-# -----------------------------------------------------------------------------
-# Data loading
-# -----------------------------------------------------------------------------
-
-def _load_dataframe(data_repo: DataRepo, user_id: UUID, conversation_id: UUID, dataset: DatasetState) -> pd.DataFrame:
-    """
-    Adapter to avoid tight coupling to a single DataRepo method name.
-    Update once your DataRepo interface is fixed.
-    """
-    candidates = ("get_dataframe", "get_df", "load_dataframe", "load_df", "get_dataset_df")
-    for name in candidates:
-        fn = getattr(data_repo, name, None)
-        if not callable(fn):
-            continue
-        try:
-            if name in {"load_dataframe", "load_df"}:
-                path = dataset.get("path")
-                if not path:
-                    continue
-                return cast(pd.DataFrame, fn(path))  # type: ignore[misc]
-            if name == "get_dataset_df":
-                return cast(pd.DataFrame, fn(user_id, conversation_id, dataset.get("id")))  # type: ignore[misc]
-            return cast(pd.DataFrame, fn(user_id, conversation_id))  # type: ignore[misc]
-        except TypeError:
-            continue
-    raise RuntimeError("DataRepo has no compatible dataframe loader method.")

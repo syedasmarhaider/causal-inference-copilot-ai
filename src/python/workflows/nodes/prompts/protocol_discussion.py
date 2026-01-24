@@ -69,7 +69,7 @@ First-time rule (important):
 Important: GOAL TO GET ANSWER OF ALL QUESTIONS. You are NOT updating the PROTOCOL_DISCUSSION text in this step. You are only auditing and interacting with the user.
 
 Keep it intuitive, explanable so that it can be simple and focus on asking questions so user can answer all the questions
-Col list is mandatory .... Keep discussion within that.... dont let user to select outside and you even dont say or invent cols
+Col list is mandatory .... Keep discussion within that you know col list.... dont let user to select outside and you even dont say or invent cols. Also be suggestive but scientific and helpful as you know columns
 """.strip()
 
 
@@ -88,7 +88,7 @@ Return EXACTLY ONE token (and nothing else):
 - PENDING
 
 Core goal:
-- READY only when (1) essentials are complete AND (2) the user has clearly confirmed/proceeded.
+- READY only when essentials are complete AND the user has clearly confirmed the summary of all the questions.
 - Otherwise PENDING.
 
 How to judge "essentials complete":
@@ -110,15 +110,11 @@ Consistency checks (must pass or remain PENDING):
 - Treatment is not also listed as a covariate; outcome is not listed as a covariate.
 
 How to judge "user confirmed / proceed":
-- Consider the user CONFIRMED if the latest user message clearly indicates acceptance and every question has been clearly answered
+- Consider the user CONFIRMED if the latest user message clearly indicates acceptance and every question has been clearly answered and user accept the summary of all questions presented
 - If the latest user message is a question, a correction, a new constraint, or expresses uncertainty, then NOT confirmed.
 
 First-time rule:
 - If the PROTOCOL_DISCUSSION has no meaningful filled answers (most A: empty or "UNCLEAR"), return PENDING regardless of the user message.
-
-Decision rule:
-- If essentials complete AND consistent AND user confirmed => READY
-- Else => PENDING
 
 Return ONLY one token: READY or PENDING.
 """.strip()
