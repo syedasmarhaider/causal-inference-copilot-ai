@@ -57,10 +57,6 @@ def make_validate_protocol_static_node(*, data_repo: DataRepo) -> CallableNodeFu
         dataset = state.get("dataset")
         protocol = state.get("protocol")
 
-        if dataset is None:
-            _set_fatal(state, "Dataset is missing from state. Reload dataset")
-            return state
-
         load_error = dataset.get("load_error")
         if load_error:
             _set_fatal(state, f"Dataset load_error is set: {load_error}")
@@ -595,7 +591,7 @@ def _compute_missingness(df: pd.DataFrame, mask: pd.Series, cols: Sequence[str])
 # -----------------------------------------------------------------------------
 
 def _set_done(state: ConversationState, report: ProtocolValidationReport|None, message: str) -> None:
-    state["protocol_static_validation"] = report # pyright: ignore[reportGeneralTypeIssues]
+    state["protocol_static_validation"] = {"report": report} # type: ignore
     control = state["control"]
     control["current_stage_status"] = "DONE"
     control["action_required"] = "NONE" 

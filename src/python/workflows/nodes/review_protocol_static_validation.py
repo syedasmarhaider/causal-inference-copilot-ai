@@ -85,7 +85,7 @@ def make_review_protocol_static_validation_node(
 
 def _require_report(state: ConversationState) -> ProtocolValidationReport:
     psv = state.get("protocol_static_validation")
-    if not psv:
+    if psv is None:
         raise RuntimeError("protocol_static_validation missing from ConversationState")
 
     report = psv.get("report")

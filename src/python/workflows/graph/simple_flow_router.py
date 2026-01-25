@@ -8,7 +8,7 @@ from typing import  Final, Mapping, Sequence, Tuple, cast
 from uuid import UUID
 from langchain_core.messages import BaseMessage
 from python.domain.service.llm_service import LLMConfig, LLMService
-from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState
+from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState, ConversationStateHelpers
 from python.workflows.state.control_state import CONTROL_STATE_NEXT_STAGE, CONTROL_STATE_STAGE_DOC, ControlState, Stage, Status
 
 
@@ -118,6 +118,7 @@ class WorkflowRouter:
         protocol_discussion = state.get("protocol_discussion", {})
         protocol = state.get("protocol", {})
         messages = cast(Sequence[BaseMessage], state.get("messages", []))
+        history = ConversationStateHelpers.to_chat_history_last_k(state= state, k=10, drop_last_user=True);
 
         snapshot = { # pyright: ignore[reportUnknownVariableType]
             "control": control,
@@ -149,7 +150,7 @@ class WorkflowRouter:
             config=config, 
             system_prompt=system, 
             user_prompt=json.dumps(snapshot, ensure_ascii=False, default=str), # Added default=str
-            history=None
+            history=history
           )
         obj = _parse_json_object_strict(cast(object, resp).content)  # type: ignore[attr-defined]
         if set(obj.keys()) != {"next_stage", "why"}: # pyright: ignore[reportUnknownArgumentType]

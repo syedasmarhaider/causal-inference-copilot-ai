@@ -39,11 +39,12 @@ ESSENTIAL ITEMS (must be grounded; otherwise FEEDBACK):
 - time_zero_definition (non-empty)
 
 TIME ZERO FIELDS:
-- time_zero_type = "COLUMN" only if a specific dataset column is named for time zero.
-- time_zero_type = "CONCEPTUAL" if described as an event/timepoint without a specific column.
-- time_zero:
-  - if COLUMN: set to the column name (string)
-  - if CONCEPTUAL: set to "" (empty string)
+time_zero_type must be one of:
+"COLUMN" → only if the dataset contains an explicit timestamp/date column that defines time zero for all units.
+"CONCEPTUAL" → if time zero is a described event/timepoint but no dataset column exists for it.
+time_zero must be set as follows:
+If time_zero_type = "COLUMN" → set time_zero to the exact dataset column name (string).
+If time_zero_type = "CONCEPTUAL" → set time_zero to "" (empty string).
 
 LIST NORMALIZATION:
 - covariates, effect_modifiers, censoring_rules: (If Study is oberservational covariates are must -- very important) 

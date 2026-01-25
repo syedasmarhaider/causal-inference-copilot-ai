@@ -6,7 +6,6 @@ import re
 from typing import Any, Dict, List, Optional, Sequence, cast
 from uuid import UUID
 
-from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.workflows.nodes.prompts.compile_protocol import (
     get_compile_protocol_system_prompt,
@@ -18,10 +17,7 @@ from python.workflows.state.conversation_state import (
     ConversationStateHelpers,
 )
 from python.workflows.state.control_state import ControlState
-from python.workflows.state.dataset_state import DatasetStateHelpers
 from python.workflows.state.protocol_state import ProtocolState
-
-_DEFAULT_PREVIEW_LIMIT = 60
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +29,6 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 # =============================================================================
 def make_compile_protocol_node(
     *,
-    data_repo: DataRepo,
     llm: LLMService,
     model_name: str,
 ) -> CallableNodeFunc:
@@ -42,7 +37,6 @@ def make_compile_protocol_node(
             user_id=user_id,
             conversation_id=conversation_id,
             state=state,
-            data_repo=data_repo,
             llm=llm,
             model_name=model_name,
         )
@@ -57,7 +51,6 @@ def _run(*,
     user_id: UUID,
     conversation_id: UUID,
     state: ConversationState,
-    data_repo: DataRepo,
     llm: LLMService,
     model_name: str,) -> ConversationState:
     control = state["control"]
@@ -65,32 +58,24 @@ def _run(*,
     pd = state.get("protocol_discussion")
     discussion = getattr(pd, "discussion", "") if pd is not None else ""
     if not discussion.strip():
-        return _abort_with_feedback(
+        return _set_fatal(
             state,
             "FEEDBACK: Protocol discussion is empty. Please answer the protocol questions first.",
         )
      
     dataset = state.get("dataset")
-    dataset_id = dataset.get("id") if isinstance(dataset, dict) else None
+    dataset_id = dataset.get("id")
     if dataset_id is None:
-        return _abort_with_feedback(state, "Dataset id is missing. Reload dataset is required.")   
+        return _set_fatal(state, "Dataset id is missing. Reload dataset is required.")   
 
-    try:
-        df = data_repo.get_csv_data(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            dataset_id=dataset_id,
-            limit=_DEFAULT_PREVIEW_LIMIT,
-        )
-    except Exception as e:
-        return _abort_with_feedback(state, f"Failed to load dataset preview: {type(e).__name__}: {e}")
-
-    dataset_cols = DatasetStateHelpers.extract_columns_from_df(df)
+    summary = dataset["summary"] # pyright: ignore[reportTypedDictNotRequiredAccess, reportUnknownVariableType]
+    if summary is None:
+        return _set_fatal(state, "Data summary missing. Reload dataset is required.")
     chat_history = ConversationStateHelpers.to_chat_history_last_k(state, k=16, drop_last_user=False)
 
     payload: Dict[str, Any] = {
         "protocol_discussion": discussion,
-        "dataset_columns_preview": dataset_cols[:60],
+        "dataset_columns_preview": summary,
     }
 
     # -------------
@@ -129,7 +114,7 @@ def _run(*,
 
     # Failure path: feedback
     if out.strip().upper().startswith("FEEDBACK:"):
-        return _abort_with_feedback(state, out.strip())
+        return _set_fatal(state, out.strip())
 
     # -------------
     # LLM #2 repair
@@ -142,7 +127,7 @@ def _run(*,
         user_payload={
             "previous_output": out,
             "protocol_discussion": discussion,
-            "dataset_columns_preview": dataset_cols,
+            "dataset_columns_preview": summary,
         },
         history=None,
         empty_err="Repair LLM returned empty output",
@@ -167,9 +152,9 @@ def _run(*,
             return state
 
     if repaired.strip().upper().startswith("FEEDBACK:"):
-        return _abort_with_feedback(state, repaired.strip())
+        return _set_fatal(state, repaired.strip())
 
-    return _abort_with_feedback(
+    return _set_fatal(
         state,
         "FEEDBACK: Cannot compile protocol yet. Please review your answers; some required fields are missing or inconsistent.",
     )
@@ -303,10 +288,10 @@ def _set_done(control: ControlState) -> None:
     control["action_required"] = "NONE"
 
 
-def _abort_with_feedback(state: ConversationState, feedback: str) -> ConversationState:
+def _set_fatal(state: ConversationState, feedback: str) -> ConversationState:
     control = state["control"]
     control["current_stage_status"] = "ABORTED"
-    control["action_required"] = "NEEDS_INPUT"
+    control["action_required"] = "NONE"
     control["node_message"] = feedback
     # Append feedback message for UI trace
     ConversationStateHelpers.append_ai_message(

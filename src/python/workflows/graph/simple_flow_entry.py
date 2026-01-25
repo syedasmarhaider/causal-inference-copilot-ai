@@ -15,6 +15,7 @@ from python.workflows.graph.simple_flow_router import WorkflowRouter
 from python.workflows.nodes.compile_protocol_state import make_compile_protocol_node
 from python.workflows.nodes.load_dataset import make_load_dataset_node
 from python.workflows.nodes.protocol_discussion import make_protocol_discussion_node
+from python.workflows.nodes.review_protocol_static_validation import make_review_protocol_static_validation_node
 from python.workflows.nodes.validate_protocol_static import make_validate_protocol_static_node
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState, get_init_conversation_state
 from python.workflows.state.control_state import  Stage, Status
@@ -50,17 +51,19 @@ def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
     return {
         "LOAD_DATASET": make_load_dataset_node(data_repo=cfg.data_repo, llm=cfg.llm, model_name=cfg.model_name),
         "PROTOCOL_DISCUSSION": make_protocol_discussion_node(
-            data_repo=cfg.data_repo,
             llm=cfg.llm,
             model_name=cfg.model_name,
         ),
         "COMPILE_PROTOCOL": make_compile_protocol_node(
-            data_repo=cfg.data_repo,
             llm=cfg.llm,
             model_name=cfg.model_name,
         ), 
         "VALIDATE_PROTOCOL_STATIC": make_validate_protocol_static_node(
             data_repo=cfg.data_repo,
+        ),
+        "VALIDATE_PROTOCOL_STATIC_DISCUSSION": make_review_protocol_static_validation_node(
+            llm=cfg.llm,
+            model_name=cfg.model_name,
         ),
         "DONE": _noop,
     }

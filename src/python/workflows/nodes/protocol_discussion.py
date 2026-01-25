@@ -6,7 +6,6 @@ import logging
 from typing import Any, List, cast
 from uuid import UUID
 
-from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.workflows.nodes.prompts.protocol_discussion import (
     get_protocol_discussion_system_prompt,
@@ -19,10 +18,7 @@ from python.workflows.state.conversation_state import (
     ConversationStateHelpers,
 )
 from python.workflows.state.control_state import ControlState
-from python.workflows.state.dataset_state import DatasetStateHelpers
 from python.workflows.state.protocol_discussion_state import ProtocolDiscussionState
-
-_DEFAULT_PREVIEW_LIMIT = 5
 log = logging.getLogger(__name__)
 
 
@@ -31,7 +27,6 @@ log = logging.getLogger(__name__)
 # =============================================================================
 def make_protocol_discussion_node(
     *,
-    data_repo: DataRepo,
     llm: LLMService,
     model_name: str,
 ) -> CallableNodeFunc:
@@ -40,7 +35,6 @@ def make_protocol_discussion_node(
             user_id=user_id,
             conversation_id=conversation_id,
             state=state,
-            data_repo=data_repo,
             llm=llm,
             model_name=model_name,
         )
@@ -56,7 +50,6 @@ def _run(
     user_id: UUID,
     conversation_id: UUID,
     state: ConversationState,
-    data_repo: DataRepo,
     llm: LLMService,
     model_name: str,
 ) -> ConversationState:
@@ -68,21 +61,14 @@ def _run(
         state["protocol_discussion"] = pd
 
     dataset = state.get("dataset")
-    dataset_id = dataset.get("id") if isinstance(dataset, dict) else None
+    dataset_id = dataset.get("id")
     if dataset_id is None:
         return _fatal(state, "Dataset id is missing. Reload dataset is required.")
     
-    try:
-        df = data_repo.get_csv_data(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            dataset_id=dataset_id,
-            limit=_DEFAULT_PREVIEW_LIMIT,
-        )
-    except Exception as e:
-        return _fatal(state, f"Failed to load dataset preview: {type(e).__name__}: {e}")
-
-    dataset_cols = DatasetStateHelpers.extract_columns_from_df(df)
+    summary = dataset["summary"] # pyright: ignore[reportTypedDictNotRequiredAccess, reportUnknownVariableType]
+    if summary is None:
+        return _fatal(state, "Data summary missing. Reload dataset is required.")
+    
     
     if not getattr(pd, "discussion", ""):
         pd.discussion = _build_discussion_template()
@@ -92,7 +78,7 @@ def _run(
     payload: dict[str, Any] = { 
         "protocol_discussion_important_context": pd.discussion,
         "conversation_messages_till_now":chat_history_messages,
-        "dataset_columns_preview": dataset_cols,
+        "dataset_columns_preview": summary,
     }
 
     # -------------------------
