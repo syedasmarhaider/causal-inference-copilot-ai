@@ -1,4 +1,3 @@
-# src/python/workflows/state/protocol_state.py
 from __future__ import annotations
 
 from typing import List, Literal, TypedDict
