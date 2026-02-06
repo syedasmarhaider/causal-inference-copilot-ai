@@ -6,9 +6,8 @@ from uuid import UUID
 from python.domain.service.llm_service import ChatMessage
 from langchain_core.messages import AIMessage, BaseMessage
 
-from python.workflows.state.control_state import ControlState
+from python.workflows.state.control_state import ACTION, ControlState
 from python.workflows.state.dataset_state import DatasetState
-from python.workflows.state.leakage_report_state import LeakageReportState
 from python.workflows.state.protocol_discussion_state import ProtocolDiscussionState
 from python.workflows.state.protocol_state import ProtocolState
 from python.workflows.state.validate_protocol_state import ProtocolStaticValidationState
@@ -20,7 +19,6 @@ class ConversationState(TypedDict):
     protocol_discussion: ProtocolDiscussionState | None
     protocol: ProtocolState | None
     protocol_static_validation: ProtocolStaticValidationState | None
-    leakage_report: LeakageReportState | None
     
     messages: List[BaseMessage]
 
@@ -29,6 +27,30 @@ CallableNodeFunc = Callable[[UUID, UUID, ConversationState], ConversationState]
 
 
 class ConversationStateHelpers:
+    @staticmethod
+    def set_pending(state: ConversationState, action: ACTION ,msg: str) -> ConversationState:
+        control = state["control"]
+        control["current_stage_status"] = "PENDING"
+        control["action_required"] = action
+        control["node_message"] = msg
+        return state
+
+    @staticmethod
+    def set_done(state: ConversationState, action: ACTION, msg :str) -> ConversationState:
+        control = state["control"]
+        control["current_stage_status"] = "DONE"
+        control["action_required"] = action
+        control["node_message"] = msg
+        return state
+
+    @staticmethod
+    def set_abort(state: ConversationState, action: ACTION ,msg: str) -> ConversationState:
+        control = state["control"]
+        control["current_stage_status"] = "ABORTED"
+        control["action_required"] = action
+        control["node_message"] = msg
+        return state
+    
     @staticmethod
     def to_chat_history_last_k(
         state: ConversationState,
@@ -119,12 +141,13 @@ class ConversationStateHelpers:
         return None
 
     @staticmethod
-    def append_ai_message(state: ConversationState, content: str, *, stage: str) -> None:
+    def append_ai_message(state: ConversationState, content: str) -> None:
+        control = state["control"]
         msgs = state.get("messages")
         if not isinstance(msgs, list):  # type: ignore
             state["messages"] = []
             msgs = state["messages"]
-        msgs.append(AIMessage(content=content, additional_kwargs={"source": "node", "stage": stage}))
+        msgs.append(AIMessage(content=content, additional_kwargs={"source": "node", "stage": control["current_stage"]}))
 
 
 def get_init_conversation_state(dataset_id: UUID) -> ConversationState:
@@ -147,7 +170,7 @@ def get_init_conversation_state(dataset_id: UUID) -> ConversationState:
         "dataset": dataset,
         "protocol_discussion": None,
         "protocol_static_validation": None,
-        "leakage_report" : None,
         "messages": messages,
         "protocol": None,
     }
+    

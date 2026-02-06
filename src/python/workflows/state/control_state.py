@@ -7,17 +7,17 @@ Stage = Literal[
     "LOAD_DATASET",
     "PROTOCOL_DISCUSSION",
     "COMPILE_PROTOCOL",
-    "VALIDATE_PROTOCOL_STATIC",
-    "VALIDATE_PROTOCOL_STATIC_DISCUSSION",
+    # "VALIDATE_PROTOCOL_STATIC",
+    # "VALIDATE_PROTOCOL_STATIC_DISCUSSION",
     "DONE",
 ]
 
 CONTROL_STATE_NEXT_STAGE: Final[Mapping[Stage, Stage]] = {
     "LOAD_DATASET": "PROTOCOL_DISCUSSION",
     "PROTOCOL_DISCUSSION": "COMPILE_PROTOCOL",
-    "COMPILE_PROTOCOL": "VALIDATE_PROTOCOL_STATIC",
-    "VALIDATE_PROTOCOL_STATIC": "VALIDATE_PROTOCOL_STATIC_DISCUSSION",
-    "VALIDATE_PROTOCOL_STATIC_DISCUSSION": "DONE",
+    "COMPILE_PROTOCOL": "DONE",
+    # "VALIDATE_PROTOCOL_STATIC": "VALIDATE_PROTOCOL_STATIC_DISCUSSION",
+    # "VALIDATE_PROTOCOL_STATIC_DISCUSSION": "DONE",
 }
 
 CONTROL_STATE_STAGE_DOC: Final[Mapping[Stage, str]] = {
@@ -39,20 +39,20 @@ CONTROL_STATE_STAGE_DOC: Final[Mapping[Stage, str]] = {
         "Output either (a) a valid ProtocolState object or (b) a precise feedback message describing what must change. "
         "On (b), route back to PROTOCOL_DISCUSSION to resolve the specific issues."
     ),
-    "VALIDATE_PROTOCOL_STATIC": (
-        "Run deterministic, leakage-agnostic validation of ProtocolState against the loaded dataset. "
-        "Check column existence, basic type/shape constraints, feasibility gates (minimum N, arm sizes/imbalance), "
-        "and missingness/outcome sanity thresholds. "
-        "Write ProtocolStaticValidationState.report with PASS/WARN/FAIL plus metrics and fix hints. "
-        "If FAIL, require protocol edits (or dataset fixes) before continuing."
-    ),
-    "VALIDATE_PROTOCOL_STATIC_DISCUSSION": (
-        "Interpret the static validation report and determine whether the workflow may proceed. "
-        "If fatal validation errors exist, explain the failure to the user and abort progression until the dataset "
-        "or protocol is fixed and revalidated. "
-        "If only warnings exist, present them clearly and negotiate whether to proceed, based on the user's response. "
-        "Advance only after explicit acceptance; otherwise, remain in this stage awaiting user input."
-    ),
+    # "VALIDATE_PROTOCOL_STATIC": (
+    #     "Run deterministic, leakage-agnostic validation of ProtocolState against the loaded dataset. "
+    #     "Check column existence, basic type/shape constraints, feasibility gates (minimum N, arm sizes/imbalance), "
+    #     "and missingness/outcome sanity thresholds. "
+    #     "Write ProtocolStaticValidationState.report with PASS/WARN/FAIL plus metrics and fix hints. "
+    #     "If FAIL, require protocol edits (or dataset fixes) before continuing."
+    # ),
+    # "VALIDATE_PROTOCOL_STATIC_DISCUSSION": (
+    #     "Interpret the static validation report and determine whether the workflow may proceed. "
+    #     "If fatal validation errors exist, explain the failure to the user and abort progression until the dataset "
+    #     "or protocol is fixed and revalidated. "
+    #     "If only warnings exist, present them clearly and negotiate whether to proceed, based on the user's response. "
+    #     "Advance only after explicit acceptance; otherwise, remain in this stage awaiting user input."
+    # ),
     "DONE": (
         "Workflow completed successfully. A valid ProtocolState exists and the pipeline has reached its terminal stage. "
         "Downstream gates (e.g., leakage/temporal legality, DAG/identification, estimator selection) can proceed from this state."

@@ -2,354 +2,262 @@ from __future__ import annotations
 
 import json
 import logging
-import re
-from typing import Any, Dict, List, Optional, Sequence, cast
+from typing import Any, Dict, List, Tuple, cast, get_args
 from uuid import UUID
 
-from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
+from python.domain.service.llm_service import LLMConfig, LLMService
 from python.workflows.nodes.prompts.compile_protocol import (
-    get_compile_protocol_system_prompt,
-    get_compile_protocol_repair_system_prompt,
+    compile_protocol_prompt,
+    compile_protocol_repair_prompt,
 )
 from python.workflows.state.conversation_state import (
     CallableNodeFunc,
     ConversationState,
     ConversationStateHelpers,
 )
-from python.workflows.state.control_state import ControlState
-from python.workflows.state.protocol_state import ProtocolState
+from python.workflows.state.control_state import ACTION
+from python.workflows.state.protocol_state import (
+    REQUIRED_KEYS,
+    FilterOp,
+    ProtocolState,
+    TimeZeroType,
+    WindowUnit,
+)
 
 log = logging.getLogger(__name__)
 
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
+MAX_ATTEMPTS = 3
 
 
-# =============================================================================
-# Public factory
-# =============================================================================
-def make_compile_protocol_node(
-    *,
-    llm: LLMService,
-    model_name: str,
-) -> CallableNodeFunc:
-    def node(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
-        return _run(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            state=state,
-            llm=llm,
-            model_name=model_name,
-        )
+def make_compile_protocol_state_node(*, llm: LLMService, model_name: str) -> CallableNodeFunc:
+    def _run(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
+        dataset = state.get("dataset") or {}
+        ds_summary = dataset.get("summary")
+        if ds_summary is None:
+            ConversationStateHelpers.append_ai_message(state, "Dataset summary missing; cannot compile ProtocolState.")
+            return ConversationStateHelpers.set_abort(state,  "NONE", "Dataset summary missing; cannot compile ProtocolState.")
 
-    return node
+        dataset_cols = _extract_columns(ds_summary)
+
+        protocol_text = _extract_protocol_text(state)
+        if not protocol_text.strip():
+            ConversationStateHelpers.append_ai_message(state, "Protocol summary/discussion missing; cannot compile ProtocolState.")
+            return ConversationStateHelpers.set_abort(state,  "NONE", "Protocol summary/discussion missing; cannot compile ProtocolState.")
+
+        last_raw_json = ""
+        last_errors: List[str] = []
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                if attempt == 1:
+                    prompt = (
+                        compile_protocol_prompt()
+                        .replace("{{PROTOCOL_TEXT}}", protocol_text)
+                        .replace("{{DATASET_SUMMARY_JSON}}", json.dumps(ds_summary, ensure_ascii=False))
+                    )
+                else:
+                    prompt = (
+                        compile_protocol_repair_prompt()
+                        .replace("{{PROTOCOL_TEXT}}", protocol_text)
+                        .replace("{{DATASET_SUMMARY_JSON}}", json.dumps(ds_summary, ensure_ascii=False))
+                        .replace("{{PREVIOUS_JSON}}", last_raw_json)
+                        .replace("{{VALIDATION_ERRORS}}", json.dumps(last_errors or ["Unknown compiler error"], ensure_ascii=False))
+                    )
+
+                raw = _llm_json_only(llm=llm, model_name=model_name, prompt=prompt)
+                last_raw_json = raw
+
+                obj = _parse_json_object(raw)
+
+                ok, errs = _validate_protocol_state(obj, dataset_cols)
+                if not ok:
+                    last_errors = errs
+                    continue
+
+                protocol = _normalize_protocol_state(obj)
+                state["protocol"] = cast(ProtocolState, protocol)
+
+                msg = "ProtocolState compiled successfully."
+                ConversationStateHelpers.append_ai_message(state, msg)
+                return ConversationStateHelpers.set_done(state, cast(ACTION, "NONE"), msg)
+
+            except Exception as e:
+                last_errors = [f"Attempt {attempt} exception: {e}"]
+                continue
+
+        err_text = _format_errors(last_errors, last_raw_json)
+        final_msg = f"Failed to compile a valid ProtocolState after {MAX_ATTEMPTS} attempts.\n{err_text}"
+        ConversationStateHelpers.append_ai_message(state, final_msg)
+        return ConversationStateHelpers.set_abort(state,  "NONE", final_msg)
+
+    return _run
 
 
-# =============================================================================
-# Node runner
-# =============================================================================
-def _run(*,    
-    user_id: UUID,
-    conversation_id: UUID,
-    state: ConversationState,
-    llm: LLMService,
-    model_name: str,) -> ConversationState:
-    control = state["control"]
+# ----------------------------
+# LLM + parsing
+# ----------------------------
 
-    pd = state.get("protocol_discussion")
-    discussion = getattr(pd, "discussion", "") if pd is not None else ""
-    if not discussion.strip():
-        return _set_fatal(
-            state,
-            "FEEDBACK: Protocol discussion is empty. Please answer the protocol questions first.",
-        )
-     
-    dataset = state.get("dataset")
-    dataset_id = dataset.get("id")
-    if dataset_id is None:
-        return _set_fatal(state, "Dataset id is missing. Reload dataset is required.")   
-
-    summary = dataset["summary"] # pyright: ignore[reportTypedDictNotRequiredAccess, reportUnknownVariableType]
-    if summary is None:
-        return _set_fatal(state, "Data summary missing. Reload dataset is required.")
-    chat_history = ConversationStateHelpers.to_chat_history_last_k(state, k=16, drop_last_user=False)
-
-    payload: Dict[str, Any] = {
-        "protocol_discussion": discussion,
-        "dataset_columns_preview": summary,
-    }
-
-    # -------------
-    # LLM #1 compile
-    # -------------
-    out = _llm_call_text(
-        llm=llm,
-        model_name=model_name,
-        temperature=0.0,
-        system_prompt=get_compile_protocol_system_prompt(),
-        user_payload=payload,
-        history=chat_history,
-        empty_err="CompileProtocol LLM returned empty output",
-    )
-
-    # Success path: JSON
-    obj = _try_parse_protocol_json(out)
-    if obj is not None:
-        try:
-            protocol = _validate_protocol_state(obj)
-        except Exception as e:
-            # treat as "needs repair"
-            log.warning("COMPILE_PROTOCOL: JSON parsed but failed validation: %s", e)
-            protocol = None
-
-        if protocol is not None:
-            state["protocol"] = protocol
-            _set_done(control)
-            # optional: append a small message for traceability
-            ConversationStateHelpers.append_ai_message(
-                state,
-                "Protocol compiled successfully.",
-                stage=control["current_stage"],
-            )
-            return state
-
-    # Failure path: feedback
-    if out.strip().upper().startswith("FEEDBACK:"):
-        return _set_fatal(state, out.strip())
-
-    # -------------
-    # LLM #2 repair
-    # -------------
-    repaired = _llm_call_text(
-        llm=llm,
-        model_name=model_name,
-        temperature=0.0,
-        system_prompt=get_compile_protocol_repair_system_prompt(),
-        user_payload={
-            "previous_output": out,
-            "protocol_discussion": discussion,
-            "dataset_columns_preview": summary,
-        },
+def _llm_json_only(*, llm: LLMService, model_name: str, prompt: str) -> str:
+    cfg = LLMConfig(model=model_name, temperature=0.0)
+    resp = llm.generate(
+        config=cfg,
+        system_prompt="Return JSON only. No extra text.",
+        user_prompt=prompt,
         history=None,
-        empty_err="Repair LLM returned empty output",
     )
-
-    obj2 = _try_parse_protocol_json(repaired)
-    if obj2 is not None:
-        try:
-            protocol2 = _validate_protocol_state(obj2)
-        except Exception as e:
-            log.warning("COMPILE_PROTOCOL: repaired JSON invalid: %s", e)
-            protocol2 = None
-
-        if protocol2 is not None:
-            state["protocol"] = protocol2
-            _set_done(control)
-            ConversationStateHelpers.append_ai_message(
-                state,
-                "Protocol compiled successfully (after repair).",
-                stage=control["current_stage"],
-            )
-            return state
-
-    if repaired.strip().upper().startswith("FEEDBACK:"):
-        return _set_fatal(state, repaired.strip())
-
-    return _set_fatal(
-        state,
-        "FEEDBACK: Cannot compile protocol yet. Please review your answers; some required fields are missing or inconsistent.",
-    )
+    return cast(Any, resp).content or ""
 
 
-# =============================================================================
-# Parsing + validation
-# =============================================================================
-def _try_parse_protocol_json(text: str) -> Optional[Dict[str, Any]]:
-    raw = (text or "").strip()
-    if not raw:
-        return None
-    if raw.upper().startswith("FEEDBACK:"):
-        return None
+def _parse_json_object(raw: str) -> Dict[str, Any]:
+    txt = (raw or "").strip()
 
-    m = _JSON_FENCE_RE.search(raw)
-    if m:
-        raw = m.group(1).strip()
+    # Minimal recovery: find first '{' and last '}' (handles accidental prose or ```json fences)
+    if not txt.startswith("{"):
+        i, j = txt.find("{"), txt.rfind("}")
+        if i >= 0 and j > i:
+            txt = txt[i : j + 1]
 
-    try:
-        obj = json.loads(raw)
-    except Exception:
-        return None
-
+    obj = json.loads(txt)
     if not isinstance(obj, dict):
-        return None
+        raise ValueError("Compiler output is not a JSON object.")
     return cast(Dict[str, Any], obj)
 
 
-def _validate_protocol_state(obj: Dict[str, Any]) -> ProtocolState:
-    """
-    Strict runtime validation (no inference):
-    - required keys present
-    - enums valid
-    - types correct-ish
-    """
-    required_keys = [
-        "population",
-        "time_zero_type",
-        "time_zero",
-        "time_zero_definition",
-        "treatment",
-        "treatment_window_start",
-        "treatment_window_end",
-        "treatment_window_unit",
-        "comparator",
-        "outcome",
-        "outcome_is_duration",
-        "outcome_window",
-        "outcome_window_unit",
-        "covariates",
-        "effect_modifiers",
-        "censoring_rules",
-        "experiment_type",
-    ]
-    for k in required_keys:
+# ----------------------------
+# Validation (ProtocolState only)
+# ----------------------------
+
+def _validate_protocol_state(obj: Dict[str, Any], dataset_columns: List[str] | None) -> Tuple[bool, List[str]]:
+    errors: List[str] = []
+
+    for k in REQUIRED_KEYS:
         if k not in obj:
-            raise ValueError(f"Missing key: {k}")
+            errors.append(f"Missing required key: {k}")
+    if errors:
+        return False, errors
 
-    def s(x: Any) -> str:
-        if not isinstance(x, str):
-            raise TypeError("expected string")
-        return x.strip()
+    allowed_time_zero = set(get_args(TimeZeroType))          # {"COLUMN","CONCEPTUAL"}
+    allowed_units = set(get_args(WindowUnit))                # {"minutes","hours",...}
+    allowed_ops = set(get_args(FilterOp))                    # {"==","!=","in",...}
 
-    def b(x: Any) -> bool:
-        if isinstance(x, bool):
-            return x
-        raise TypeError("expected bool")
+    if not isinstance(obj["time_zero_type"], str) or obj["time_zero_type"] not in allowed_time_zero:
+        errors.append("time_zero_type must be 'COLUMN' or 'CONCEPTUAL'")
 
-    def ls(x: Any) -> List[str]:
-        if isinstance(x, list) and all(isinstance(i, str) for i in x): # pyright: ignore[reportUnknownVariableType]
-            return [cast(str, i).strip() for i in x if cast(str, i).strip()] # pyright: ignore[reportUnknownVariableType]
-        raise TypeError("expected list[str]")
+    if not isinstance(obj["treatment_window_unit"], str) or obj["treatment_window_unit"] not in allowed_units:
+        errors.append("treatment_window_unit must be a valid unit enum")
 
-    out: Dict[str, Any] = {}
-    out["population"] = s(obj["population"])
+    if not isinstance(obj["outcome_window_unit"], str) or obj["outcome_window_unit"] not in allowed_units:
+        errors.append("outcome_window_unit must be a valid unit enum")
 
-    tzt = s(obj["time_zero_type"])
-    if tzt not in {"COLUMN", "CONCEPTUAL"}:
-        raise ValueError("time_zero_type must be COLUMN or CONCEPTUAL")
-    out["time_zero_type"] = cast(Any, tzt)
+    if not isinstance(obj["outcome_is_duration"], bool):
+        errors.append("outcome_is_duration must be boolean")
 
-    out["time_zero"] = s(obj["time_zero"])
-    out["time_zero_definition"] = s(obj["time_zero_definition"])
+    for k in ("covariates", "effect_modifiers", "censoring_rules"):
+        if not isinstance(obj[k], list) or any(not isinstance(x, str) for x in obj[k]):
+            errors.append(f"{k} must be list[str]")
 
-    out["treatment"] = s(obj["treatment"])
-    out["treatment_window_start"] = s(obj["treatment_window_start"])
-    out["treatment_window_end"] = s(obj["treatment_window_end"])
+    if not isinstance(obj["exclusions"], list):
+        errors.append("exclusions must be a list")
+    else:
+        for i, ex in enumerate(obj["exclusions"]): # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType]
+            if not isinstance(ex, dict):
+                errors.append(f"exclusions[{i}] must be an object")
+                continue
 
-    twu = s(obj["treatment_window_unit"])
-    if twu not in {"minutes", "hours", "days", "weeks", "months", "years"}:
-        raise ValueError("invalid treatment_window_unit")
-    out["treatment_window_unit"] = cast(Any, twu)
+            for ek in ("column", "op", "values", "reason"):
+                if ek not in ex:
+                    errors.append(f"exclusions[{i}] missing key: {ek}")
 
-    out["comparator"] = s(obj["comparator"])
+            op = ex.get("op") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+            if not isinstance(op, str) or op not in allowed_ops:
+                errors.append(f"exclusions[{i}].op invalid: {op}")
 
-    out["outcome"] = s(obj["outcome"])
-    out["outcome_is_duration"] = b(obj["outcome_is_duration"])
-    out["outcome_window"] = s(obj["outcome_window"])
+            vals = ex.get("values") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+            if not isinstance(vals, list) or any(not isinstance(v, str) for v in vals): # pyright: ignore[reportUnknownVariableType]
+                errors.append(f"exclusions[{i}].values must be list[str]")
 
-    owu = s(obj["outcome_window_unit"])
-    if owu not in {"minutes", "hours", "days", "weeks", "months", "years"}:
-        raise ValueError("invalid outcome_window_unit")
-    out["outcome_window_unit"] = cast(Any, owu)
+            col = ex.get("column") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+            if dataset_columns is not None and isinstance(col, str) and col not in dataset_columns:
+                errors.append(f"exclusions[{i}].column not in dataset: '{col}'")
 
-    out["covariates"] = ls(obj["covariates"])
-    out["effect_modifiers"] = ls(obj["effect_modifiers"])
-    out["censoring_rules"] = ls(obj["censoring_rules"])
+    # Coherence: conceptual baseline cannot support duration outcome
+    if obj["time_zero_type"] == "CONCEPTUAL" and obj.get("outcome_is_duration") is True:
+        errors.append("Snapshot/CONCEPTUAL time_zero cannot have duration outcome without time support.")
 
-    out["experiment_type"] = s(obj["experiment_type"])
-    if out["experiment_type"] not in {"RCT", "OBSERVATIONAL", "Unknown", "UNKNOWN"}:
-        # don't hard-fail on casing; normalize to canonical
-        et = out["experiment_type"].upper()
-        if et in {"RCT", "OBSERVATIONAL", "UNKNOWN"}:
-            out["experiment_type"] = "Unknown" if et == "UNKNOWN" else et
-        else:
-            raise ValueError("experiment_type must be RCT or OBSERVATIONAL or Unknown")
-
-    # additional invariant: time_zero may be empty only when CONCEPTUAL
-    if out["time_zero_type"] == "COLUMN" and not out["time_zero"]:
-        raise ValueError("time_zero required when time_zero_type=COLUMN")
-
-    return cast(ProtocolState, out)
+    return (len(errors) == 0), errors
 
 
-# =============================================================================
-# Control + abort handling
-# =============================================================================
-def _set_done(control: ControlState) -> None:
-    control["current_stage_status"] = "DONE"
-    control["action_required"] = "NONE"
+def _normalize_protocol_state(obj: Dict[str, Any]) -> Dict[str, Any]:
+    # Snapshot invariants
+    if obj["time_zero_type"] == "CONCEPTUAL":
+        obj["time_zero"] = str(obj.get("time_zero") or "CONCEPTUAL_BASELINE")
+        obj["time_zero_definition"] = str(obj.get("time_zero_definition") or "shared conceptual baseline at data cut-off")
+
+        obj["treatment_window_start"] = str(obj.get("treatment_window_start") or "0")
+        obj["treatment_window_end"] = str(obj.get("treatment_window_end") or "0")
+        obj["treatment_window_unit"] = str(obj.get("treatment_window_unit") or "days")
+
+        obj["outcome_window"] = str(obj.get("outcome_window") or "0")
+        obj["outcome_window_unit"] = str(obj.get("outcome_window_unit") or "days")
+        obj["outcome_is_duration"] = False
+
+    # Ensure lists are list[str]
+    for k in ("covariates", "effect_modifiers", "censoring_rules"):
+        obj[k] = [str(x) for x in (obj.get(k, []) or [])]
+
+    # Ensure exclusions list type
+    if not isinstance(obj.get("exclusions"), list):
+        obj["exclusions"] = []
+
+    return obj
 
 
-def _set_fatal(state: ConversationState, feedback: str) -> ConversationState:
-    control = state["control"]
-    control["current_stage_status"] = "ABORTED"
-    control["action_required"] = "NONE"
-    control["node_message"] = feedback
-    # Append feedback message for UI trace
-    ConversationStateHelpers.append_ai_message(
-        state,
-        feedback,
-        stage=control["current_stage"],
-    )
-    return state
+# ----------------------------
+# Extractors
+# ----------------------------
 
-# =============================================================================
-# LLM helper
-# =============================================================================
-def _llm_call_text(
-    *,
-    llm: LLMService,
-    model_name: str,
-    temperature: float,
-    system_prompt: str,
-    user_payload: Dict[str, Any],
-    history: Optional[Sequence[ChatMessage]],
-    empty_err: str,
-) -> str:
-    cfg = LLMConfig(model=model_name, temperature=temperature)
-    raw = _llm_text(
-        llm,
-        config=cfg,
-        system_prompt=system_prompt,
-        user_prompt=json.dumps(user_payload, ensure_ascii=False),
-        history=history,
-    )
-    out = (raw or "").strip()
-    if not out:
-        raise ValueError(empty_err)
-    return out
+def _extract_protocol_text(state: ConversationState) -> str:
+    pd = state.get("protocol_discussion") or {} # pyright: ignore[reportUnknownVariableType]
+    txt = str(pd.get("discussion") or "").strip() # type: ignore
+    if txt:
+        return txt
+
+    # fallback: last assistant message text
+    messages = state.get("messages", []) or []
+    for m in reversed(list(messages)):
+        content = str(getattr(m, "content", "") or "").strip()
+        if not content:
+            continue
+        mtype = getattr(m, "type", None)
+        cls = m.__class__.__name__.lower()
+        if mtype == "ai" or "ai" in cls or "assistant" in cls:
+            return content
+
+    return ""
 
 
-def _llm_text(
-    llm: LLMService,
-    *,
-    config: LLMConfig,
-    system_prompt: str,
-    user_prompt: str,
-    history: Optional[Sequence[ChatMessage]],
-) -> str:
-    try:
-        resp = llm.generate(  # type: ignore[call-arg]
-            config=config,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            history=history,
-        )
-        return cast(Any, resp).content
-    except TypeError:
-        msgs: List[ChatMessage] = []
-        if system_prompt:
-            msgs.append(ChatMessage(role="system", content=system_prompt))
-        if history:
-            msgs.extend(list(history))
-        msgs.append(ChatMessage(role="user", content=user_prompt))
-        resp = llm.generate(config=config, history=msgs)  # type: ignore[arg-type]
-        return cast(Any, resp).content
+def _extract_columns(ds_summary: Any) -> List[str] | None:
+    if not isinstance(ds_summary, dict):
+        return None
+
+    col_names = ds_summary.get("column_names") # type: ignore
+    if isinstance(col_names, list):
+        return [str(x) for x in col_names]
+
+    cols = ds_summary.get("columns") # type: ignore
+    if isinstance(cols, list):
+        out: List[str] = []
+        for c in cols:
+            if isinstance(c, dict) and "name" in c:
+                out.append(str(c["name"])) # type: ignore
+        return out or None
+
+    return None
+
+
+def _format_errors(errors: List[str], raw_json: str) -> str:
+    e = "\n".join([f"- {x}" for x in (errors or ["Unknown error"])])
+    snippet = (raw_json or "").strip()
+    if len(snippet) > 800:
+        snippet = snippet[:800] + "…"
+    return f"Validation/compile errors:\n{e}\n\nLast JSON snippet:\n{snippet}"

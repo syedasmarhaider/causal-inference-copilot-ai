@@ -18,6 +18,7 @@ from python.workflows.utils.types import DEFAULT_MODEL_GEMNI, JSONDict
 log = logging.getLogger(__name__)
 
 
+# TODO: refactor to latest design
 def _mk_control(
     *,
     current_stage: Stage,

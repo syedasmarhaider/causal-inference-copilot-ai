@@ -1,134 +1,116 @@
-# src/python/workflows/nodes/prompts/compile_protocol.py
 from __future__ import annotations
 
 
-def get_compile_protocol_system_prompt() -> str:
+def compile_protocol_prompt() -> str:
     return """
-You are a clinical-grade Causal ML Copilot.
+You are a STRICT compiler that converts protocol text + dataset metadata into a JSON object.
 
-Goal:
-Convert PROTOCOL_DISCUSSION (questions + answers) into EXACTLY ONE ProtocolState JSON object,
-or ONE LINE starting with 'FEEDBACK:' if (and only if) essential causal items are missing/unclear.
+HARD OUTPUT RULES:
+- Output MUST be valid JSON and NOTHING else.
+- No markdown fences. No commentary.
+- Must match schema EXACTLY (all keys present).
+- Never invent column names. If you cannot map to a column, keep it as free-text within strings (population/treatment/outcome),
+  but do NOT fabricate dataset columns.
 
-You will receive:
-- PROTOCOL_DISCUSSION text with Q1..Qn and A: answers
-- Optional dataset column list (names only)
+Schema:
+{
+  "population": string,
+  "exclusions": [
+    {"column": string, "op": "=="|"!="|"in"|"not_in"|">="|"<="|">"|"<"|"is_null"|"not_null", "values": [string], "reason": string}
+  ],
+  "time_zero_type": "COLUMN"|"CONCEPTUAL",
+  "time_zero": string,
+  "time_zero_definition": string,
 
-OUTPUT FORMAT (HARD):
-- Output MUST be exactly ONE line.
-- That one line MUST be either:
-  (1) A single valid JSON object matching ProtocolState EXACTLY (all keys present), OR
-  (2) A single line beginning with: FEEDBACK: <what is missing + what to answer next>
-- No markdown. No code fences. No extra lines.
+  "treatment": string,
+  "treatment_window_start": string,
+  "treatment_window_end": string,
+  "treatment_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",
 
-HARD RULES:
-1) NEVER invent column names. Use only names explicitly present in the discussion or column list.
-2) NEVER invent numeric horizons/dates. If not given, leave as "" or null as specified below.
-3) ALWAYS include ALL ProtocolState keys in the JSON (even if empty string, empty list, or null).
-4) If an essential causal item is UNCLEAR or missing => output FEEDBACK (not JSON).
-5) If only windows/censoring details are vague BUT essentials are clear => still output JSON with safe placeholders.
+  "outcome": string,
+  "outcome_is_duration": boolean,
+  "outcome_window": string,
+  "outcome_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",
 
-ESSENTIAL ITEMS (must be grounded; otherwise FEEDBACK):
-- experiment_type (RCT or OBSERVATIONAL)
-- population (non-empty)
-- treatment (non-empty; ideally a column name)
-- comparator (non-empty)
-- outcome (non-empty; ideally a column name)
-- outcome_is_duration (true/false)
-- time_zero_type (COLUMN or CONCEPTUAL)
-- time_zero_definition (non-empty)
+  "covariates": [string],
+  "effect_modifiers": [string],
+  "censoring_rules": [string],
+  "experiment_type": string
+}
 
-TIME ZERO FIELDS:
-time_zero_type must be one of:
-"COLUMN" → only if the dataset contains an explicit timestamp/date column that defines time zero for all units.
-"CONCEPTUAL" → if time zero is a described event/timepoint but no dataset column exists for it.
-time_zero must be set as follows:
-If time_zero_type = "COLUMN" → set time_zero to the exact dataset column name (string).
-If time_zero_type = "CONCEPTUAL" → set time_zero to "" (empty string).
+Defaulting rules:
+- experiment_type: "Observational" unless an RCT randomization variable is explicitly described.
+- If dataset has no time/date columns -> time_zero_type="CONCEPTUAL".
+- If time_zero_type="CONCEPTUAL":
+  - time_zero="CONCEPTUAL_BASELINE"
+  - time_zero_definition="shared conceptual baseline at data cut-off"
+  - treatment_window_start="0", treatment_window_end="0", treatment_window_unit="days"
+  - outcome_window="0", outcome_window_unit="days"
+  - outcome_is_duration=false unless duration fields exist and are explicitly used
+- exclusions: [] if none explicitly required.
 
-LIST NORMALIZATION:
-- covariates, effect_modifiers, censoring_rules: (If Study is oberservational covariates are must -- very important) 
-- else we can skip covariates if study is not observational
-  parse comma-separated lists into arrays of strings; trim; drop empties; dedupe preserving order.
+INPUTS:
+PROTOCOL_TEXT:
+{{PROTOCOL_TEXT}}
 
-WINDOW KEYS (ALWAYS REQUIRED IN JSON, but may be empty):
-ProtocolState requires these keys:
-- treatment_window_start, treatment_window_end, treatment_window_unit
-- outcome_window, outcome_window_unit
-
-WindowUnit enum MUST be exactly one of: minutes, hours, days, weeks, months, years
-
-WINDOW ENCODING RULES (DO NOT GUESS NUMBERS):
-- If the discussion says treatment is assessed "at Time Zero" (or equivalent),
-  set:
-    treatment_window_start = "0"
-    treatment_window_end   = "0"
-    treatment_window_unit  = "days"
-  (This is a deterministic encoding, not a guess.)
-
-- If the discussion specifies a numeric window/horizon with unit, encode it faithfully.
-  If numeric provided without unit => set related fields to null (not guessed).
-
-- If outcome follow-up is described as "from Time Zero until death or censoring" (time-to-event),
-  set:
-    outcome_window = "0_to_event_or_censoring"
-    outcome_window_unit = infer from outcome column name if explicit (e.g., 'Overall Survival (Months)' => months),
-    otherwise set outcome_window_unit = null.
-
-- If outcome window is not described at all:
-    outcome_window = ""
-    outcome_window_unit = null
-
-SAFE DEFAULTS:
-- If a list (covariates/effect_modifiers/censoring_rules) is not mentioned, output [] (empty list).
-- Do NOT force FEEDBACK for missing optional items like effect_modifiers or censoring_rules.
-
-PROTOCOLSTATE JSON KEYS (MUST ALL APPEAR, EXACT SPELLING):
-population
-time_zero_type
-time_zero_definition
-time_zero
-treatment
-comparator
-outcome
-outcome_is_duration
-covariates
-effect_modifiers
-censoring_rules
-treatment_window_start
-treatment_window_end
-treatment_window_unit
-outcome_window
-outcome_window_unit
-experiment_type
-
-Return ONLY the one-line JSON or FEEDBACK line.
+DATASET_SUMMARY_JSON:
+{{DATASET_SUMMARY_JSON}}
 """.strip()
 
 
-def get_compile_protocol_repair_system_prompt() -> str:
+def compile_protocol_repair_prompt() -> str:
     return """
-You are a strict JSON repair tool.
+You are a STRICT JSON repair tool.
 
-Input: a prior assistant output that should have been ONE LINE of:
-- a ProtocolState JSON object (with ALL required keys), OR
-- a FEEDBACK line.
+You will be given:
+(1) the original protocol text
+(2) authoritative dataset summary
+(3) previous JSON output
+(4) validation errors
 
-Output: EXACTLY ONE LINE of:
-- repaired valid ProtocolState JSON matching the schema EXACTLY (ALL keys present), OR
-- FEEDBACK: ... (if essentials are missing)
+Your job:
+- Output a FIXED JSON object matching the schema EXACTLY.
+- Output MUST be valid JSON ONLY. No markdown. No commentary.
+- Must include ALL keys.
+- Must respect enum values exactly.
+- Never invent dataset columns. If an exclusion references a non-existent column, remove it or correct it.
 
-HARD RULES:
-- No extra lines, no markdown, no code fences.
-- If required keys are missing, ADD THEM with "" / [] / null as appropriate (do NOT invent values).
-- Ensure enums are valid:
-  time_zero_type in {"COLUMN","CONCEPTUAL"}
-  experiment_type in {"RCT","OBSERVATIONAL"}
-  treatment_window_unit and outcome_window_unit in {"minutes","hours","days","weeks","months","years"} or null
-- Ensure booleans are JSON true/false (not strings).
-- Ensure lists are JSON arrays of strings.
-- Only output FEEDBACK if essential items are missing/UNCLEAR.
+Schema:
+{
+  "population": string,
+  "exclusions": [
+    {"column": string, "op": "=="|"!="|"in"|"not_in"|">="|"<="|">"|"<"|"is_null"|"not_null", "values": [string], "reason": string}
+  ],
+  "time_zero_type": "COLUMN"|"CONCEPTUAL",
+  "time_zero": string,
+  "time_zero_definition": string,
 
-Key principle:
-Missing windows should NOT cause FEEDBACK — encode as "" and null when necessary.
+  "treatment": string,
+  "treatment_window_start": string,
+  "treatment_window_end": string,
+  "treatment_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",
+
+  "outcome": string,
+  "outcome_is_duration": boolean,
+  "outcome_window": string,
+  "outcome_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",
+
+  "covariates": [string],
+  "effect_modifiers": [string],
+  "censoring_rules": [string],
+  "experiment_type": string
+}
+
+INPUTS:
+PROTOCOL_TEXT:
+{{PROTOCOL_TEXT}}
+
+DATASET_SUMMARY_JSON:
+{{DATASET_SUMMARY_JSON}}
+
+PREVIOUS_JSON:
+{{PREVIOUS_JSON}}
+
+VALIDATION_ERRORS:
+{{VALIDATION_ERRORS}}
 """.strip()

@@ -11,13 +11,13 @@ from python.workflows.nodes.prompts.protocol_discussion import (
     get_protocol_discussion_system_prompt,
     get_protocol_discussion_confirmation_prompt,
     get_protocol_discussion_readiness_prompt,
+    get_questions,
 )
 from python.workflows.state.conversation_state import (
     CallableNodeFunc,
     ConversationState,
     ConversationStateHelpers,
 )
-from python.workflows.state.control_state import ControlState
 from python.workflows.state.protocol_discussion_state import ProtocolDiscussionState
 log = logging.getLogger(__name__)
 
@@ -63,20 +63,19 @@ def _run(
     dataset = state.get("dataset")
     dataset_id = dataset.get("id")
     if dataset_id is None:
-        return _fatal(state, "Dataset id is missing. Reload dataset is required.")
+        ConversationStateHelpers.append_ai_message(state=state, content="Dataset id is missing. Reload dataset is required")
+        return  ConversationStateHelpers.set_abort(state=state, action="NEEDS_INPUT",msg="Dataset id is missing. Reload dataset is required")
     
     summary = dataset["summary"] # pyright: ignore[reportTypedDictNotRequiredAccess, reportUnknownVariableType]
     if summary is None:
-        return _fatal(state, "Data summary missing. Reload dataset is required.")
+        ConversationStateHelpers.append_ai_message(state=state, content="Data summary missing. Reload dataset is required")
+        return  ConversationStateHelpers.set_abort(state=state, action="NONE",msg="Data summary missing. Reload dataset is required")
     
-    
-    if not getattr(pd, "discussion", ""):
-        pd.discussion = _build_discussion_template()
-        
+            
     chat_history_messages = ConversationStateHelpers.chat_history_to_payload(state, k=7)
 
     payload: dict[str, Any] = { 
-        "protocol_discussion_important_context": pd.discussion,
+        "prev_questions_answers_discussion_state": get_questions(),
         "conversation_messages_till_now":chat_history_messages,
         "dataset_columns_preview": summary,
     }
@@ -96,7 +95,8 @@ def _run(
         state["protocol_discussion"] = pd
     except Exception as e:
         log.exception("PROTOCOL_DISCUSSION: LLM#1 failed")
-        return _fatal(state, f"Protocol discussion update failed: {e}")
+        ConversationStateHelpers.append_ai_message(state=state, content=f"Protocol discussion update failed: {e}")
+        return  ConversationStateHelpers.set_abort(state=state, action="NONE",msg=f"Protocol discussion update failed: {e}")
 
     # -------------------------
     # LLM #2: User-facing message
@@ -115,7 +115,7 @@ def _run(
         node_msg = "I updated the protocol draft. Tell me what to change, or reply 'confirm' if it is correct."
 
     control["node_message"] = node_msg
-    ConversationStateHelpers.append_ai_message(state, node_msg, stage=control["current_stage"])
+    ConversationStateHelpers.append_ai_message(state, node_msg)
 
     # -------------------------
     # LLM #3: Readiness token
@@ -135,11 +135,12 @@ def _run(
         token = "PENDING"
 
     if token == "READY":
-        _set_done(control, node_msg)
+        return ConversationStateHelpers.set_done(state=state,action="NONE",msg=node_msg)
+    
+    if token == "ABORT":
+        return ConversationStateHelpers.set_abort(state=state,action="NONE",msg=node_msg)    
     else:
-        _set_pending(control, control.get("node_message") or "")
-
-    return state
+        return ConversationStateHelpers.set_pending(state=state,action="NEEDS_INPUT",msg=node_msg)
 
 
 # =============================================================================
@@ -188,39 +189,3 @@ def _llm_text(
         msgs.append(ChatMessage(role="user", content=user_prompt))
         resp = llm.generate(config=config, history=msgs)  # type: ignore[arg-type]
         return cast(Any, resp).content
-
-
-# =============================================================================
-# helpers
-# =============================================================================
-def _set_pending(control: ControlState, msg: str) -> None:
-    control["current_stage_status"] = "PENDING"
-    control["action_required"] = "NEEDS_INPUT"
-    control["node_message"] = msg
-
-
-def _set_done(control: ControlState,msg :str) -> None:
-    control["current_stage_status"] = "DONE"
-    control["action_required"] = "NONE"
-    control["node_message"] = msg
-
-
-def _fatal(state: ConversationState, msg: str) -> ConversationState:
-    control = state["control"]
-    control["current_stage_status"] = "ABORTED"
-    control["action_required"] = "NONE"
-    control["node_message"] = msg
-    ConversationStateHelpers.append_ai_message(state, msg, stage=control["current_stage"])
-    return state
-
-def _build_discussion_template() -> str:
-    qs = ProtocolDiscussionState.get_questions()
-    lines: List[str] = []
-    lines.append("PROTOCOL_DISCUSSION_CONTEXT")
-    lines.append("Instruction: Only edit the A: parts. Do not reorder, delete, or rename questions.")
-    lines.append("")
-    for i, q in enumerate(qs, start=1):
-        lines.append(f"Q{i}: {q}")
-        lines.append("A: ")
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
