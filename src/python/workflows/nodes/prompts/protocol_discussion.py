@@ -65,7 +65,7 @@ Return ONLY the edited PROTOCOL_DISCUSSION text.
 def get_protocol_discussion_confirmation_prompt() -> str:
     return """
 You are a helpful, precise, clinically-oriented Causal ML Copilot conducting a protocol intake DISCUSSION.
-IMPORTANT: In this step you DO NOT edit PROTOCOL_DISCUSSION. You only talk to the user.
+IMPORTANT: In this step you DO NOT edit PROTOCOL_DISCUSSION. You only talk to the user. Dont invent cols and values stick to values of data summary
 
 You will receive:
 - PROTOCOL_DISCUSSION (Q/A document; may be empty/UNCLEAR).
@@ -208,6 +208,8 @@ Essentials that must be complete for READY (unless ABORT):
 - Q8: Outcome includes column(s), outcome type, and horizon relative to t0:
     * If Q4=No and outcome type is time-to-event => contradiction => ABORT or PENDING depending on user flexibility.
 - Q9: Censoring/missingness/filters answered.
+- Q10: Covariates
+- Q11: Effect modifiers
 - Q12: If Q4=No, snapshot acknowledgement must be explicitly "Yes" or "No".
 
 Contradictions that force NOT READY:
@@ -225,13 +227,13 @@ Return ONLY one token READY, PENDING or ABORT.
 def get_questions() -> List[str]:
     return [
         # 1) Core causal intent
-        "1) Causal question : What is the effect of [treatment X] on [outcome Y]?",
+        "1) Causal question: What is the effect of [treatment/exposure T] on [outcome Y]?",
 
         # 2) Study type (controls strictness of assumptions and design gates)
-        "2) Study type: RCT / Observational / Only these are supported",
+        "2) Study type: RCT / Observational (Only these are supported).",
 
         # 3) Target population (eligibility / inclusion-exclusion)
-        "3) Target population / eligibility: Who is included in the cohort? (Can be 'all rows in dataset')",
+        "3) Target population / eligibility: Who is included in the cohort? (Can be 'all rows in dataset').",
 
         # 4) Time support (feasibility gate)
         "4) Time variables: Does the dataset contain explicit time/date columns needed to define baseline and follow-up? "
@@ -243,7 +245,7 @@ def get_questions() -> List[str]:
         "If Q4=No: specify a shared conceptual baseline that applies to BOTH treated and control units (e.g., 'start of term').",
 
         # 6) Treatment definition (implementable)
-        "6) Treatment/exposure definition: Which column(s) define X? If binary, specify treated vs control levels "
+        "6) Treatment/exposure definition: Which column(s) define T? If binary, specify treated vs control levels "
         "(e.g., uses_ai=1 vs uses_ai=0). If not binary, describe levels (dose/categories).",
 
         # 7) Assignment / exposure window (prevents 'ever-treated later' bias)
@@ -251,7 +253,7 @@ def get_questions() -> List[str]:
         "Examples: 'at t0', 'within 7 days after t0 (grace period)', or for snapshot data: "
         "'static exposure during the period [describe]'.",
 
-        # 8) Outcome specification (merged: columns + type + horizon)
+        # 8) Outcome specification (columns + type + horizon)
         "8) Outcome specification: Which column(s) define Y? Is Y time-to-event (duration) or a fixed-time endpoint? "
         "Define the follow-up horizon/end-of-period relative to t0 (e.g., 'MI within 2 years', 'final score at end of term').",
 
@@ -260,16 +262,20 @@ def get_questions() -> List[str]:
         "(e.g., only students who took the final, only patients with follow-up labs)? "
         "If none, write: 'None / complete outcome capture'. Otherwise describe the rule(s).",
 
-        # 10) Baseline candidate variables (system will bucket; user does not pick adjustment set)
-        "10) Baseline candidate variables: List variables measured at/before t0 that could plausibly affect BOTH X and Y or Y. like covariates and counfounders"
-        "(comma-separated). If unknown, write: 'Unknown'. The system will categorize (adjust / do-not-adjust / needs clarification).",
+        # 10) Baseline adjustment covariates (W)
+        "10) Baseline adjustment covariates (W): List variables measured at/before t0 that could plausibly affect BOTH T and Y "
+        "(comma-separated). If unknown, write: 'Unknown' but recommended for observational study.",
 
-        # 11) Optional: suspected post-treatment variables (only if user knows)
-        "11) Suspected post-treatment variables (optional): List any variables you believe are measured after t0 or after treatment starts "
+        # 11) Effect modifiers / heterogeneity features (X)
+        "11) Effect modifiers / heterogeneity features (X, optional): List baseline variables measured at/before t0 that you want the "
+        "treatment effect to vary by (subgroups), e.g., age, sex, stage (comma-separated). If none, write: 'None'.",
+
+        # 12) Suspected post-treatment variables (leakage guard)
+        "12) Suspected post-treatment variables (optional): List any variables you believe are measured after t0 or after treatment starts "
         "(comma-separated). If unknown, write: 'Unknown'.",
 
-        # 12) Snapshot acknowledgement (conditional in UI; keep question text here for simplicity)
-        "12) If Q4=No (no time columns): acknowledge snapshot assumptions (Yes/No). "
-        "You are implicitly assuming: shared baseline; X precedes Y; no unmeasured confounding after adjustment; positivity; consistency; "
+        # 13) Snapshot acknowledgement (conditional in UI; keep question text here for simplicity)
+        "13) If Q4=No (no time columns): acknowledge snapshot assumptions (Yes/No). "
+        "You are implicitly assuming: shared baseline; T precedes Y; no unmeasured confounding after adjustment; positivity; consistency; "
         "and no post-treatment adjustment."
     ]

@@ -1,4 +1,3 @@
-# src/python/workflows/nodes/propose_and_confirm_protocol_discussion.py
 from __future__ import annotations
 
 import json
@@ -77,7 +76,7 @@ def _run(
     payload: dict[str, Any] = { 
         "prev_questions_answers_discussion_state": get_questions(),
         "conversation_messages_till_now":chat_history_messages,
-        "dataset_columns_preview": summary,
+        "dataset_columns_summary": summary,
     }
 
     # -------------------------

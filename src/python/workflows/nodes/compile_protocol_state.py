@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Tuple, cast, get_args
+from typing import Any, Dict, Final, List, Mapping, MutableMapping, Sequence, Tuple, cast
 from uuid import UUID
 
 from python.domain.service.llm_service import LLMConfig, LLMService
@@ -17,65 +17,61 @@ from python.workflows.state.conversation_state import (
 )
 from python.workflows.state.control_state import ACTION
 from python.workflows.state.protocol_state import (
-    REQUIRED_KEYS,
-    FilterOp,
+    ALLOWED_OPS,
+    ALLOWED_OUT_KINDS,
+    ALLOWED_TIME_ZERO,
+    ALLOWED_TREAT_KINDS,
+    ALLOWED_UNITS,
     ProtocolState,
-    TimeZeroType,
-    WindowUnit,
+    REQUIRED_KEYS,
 )
 
 log = logging.getLogger(__name__)
 
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS: Final[int] = 1
 
 
 def make_compile_protocol_state_node(*, llm: LLMService, model_name: str) -> CallableNodeFunc:
     def _run(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
-        dataset = state.get("dataset") or {}
-        ds_summary = dataset.get("summary")
+        ds_summary = _require_dataset_summary(state)
         if ds_summary is None:
-            ConversationStateHelpers.append_ai_message(state, "Dataset summary missing; cannot compile ProtocolState.")
-            return ConversationStateHelpers.set_abort(state,  "NONE", "Dataset summary missing; cannot compile ProtocolState.")
+            msg = "Dataset summary missing; cannot compile ProtocolState."
+            ConversationStateHelpers.append_ai_message(state, msg)
+            return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), msg)
 
         dataset_cols = _extract_columns(ds_summary)
 
-        protocol_text = _extract_protocol_text(state)
-        if not protocol_text.strip():
-            ConversationStateHelpers.append_ai_message(state, "Protocol summary/discussion missing; cannot compile ProtocolState.")
-            return ConversationStateHelpers.set_abort(state,  "NONE", "Protocol summary/discussion missing; cannot compile ProtocolState.")
+        protocol_text = _require_protocol_text(state)
+        if protocol_text is None:
+            msg = "Protocol summary/discussion missing; cannot compile ProtocolState."
+            ConversationStateHelpers.append_ai_message(state, msg)
+            return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), msg)
 
-        last_raw_json = ""
+        last_raw = ""
         last_errors: List[str] = []
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
-                if attempt == 1:
-                    prompt = (
-                        compile_protocol_prompt()
-                        .replace("{{PROTOCOL_TEXT}}", protocol_text)
-                        .replace("{{DATASET_SUMMARY_JSON}}", json.dumps(ds_summary, ensure_ascii=False))
-                    )
-                else:
-                    prompt = (
-                        compile_protocol_repair_prompt()
-                        .replace("{{PROTOCOL_TEXT}}", protocol_text)
-                        .replace("{{DATASET_SUMMARY_JSON}}", json.dumps(ds_summary, ensure_ascii=False))
-                        .replace("{{PREVIOUS_JSON}}", last_raw_json)
-                        .replace("{{VALIDATION_ERRORS}}", json.dumps(last_errors or ["Unknown compiler error"], ensure_ascii=False))
-                    )
+                prompt = _build_prompt(
+                    attempt=attempt,
+                    protocol_text=protocol_text,
+                    dataset_summary=ds_summary,
+                    previous_json=last_raw,
+                    validation_errors=last_errors,
+                )
 
                 raw = _llm_json_only(llm=llm, model_name=model_name, prompt=prompt)
-                last_raw_json = raw
+                last_raw = raw
 
-                obj = _parse_json_object(raw)
+                obj = _parse_json_object(raw)  # pyright: ignore[reportUnknownVariableType] # Dict[str, Any] but treated as untrusted
 
-                ok, errs = _validate_protocol_state(obj, dataset_cols)
+                ok, errs = _validate_protocol_object(obj, dataset_cols) # pyright: ignore[reportUnknownArgumentType]
                 if not ok:
                     last_errors = errs
                     continue
 
-                protocol = _normalize_protocol_state(obj)
-                state["protocol"] = cast(ProtocolState, protocol)
+                normalized = _normalize_protocol_object(obj) # type: ignore
+                state["protocol"] = cast(ProtocolState, normalized)
 
                 msg = "ProtocolState compiled successfully."
                 ConversationStateHelpers.append_ai_message(state, msg)
@@ -85,17 +81,65 @@ def make_compile_protocol_state_node(*, llm: LLMService, model_name: str) -> Cal
                 last_errors = [f"Attempt {attempt} exception: {e}"]
                 continue
 
-        err_text = _format_errors(last_errors, last_raw_json)
+        err_text = _format_errors(last_errors, last_raw)
         final_msg = f"Failed to compile a valid ProtocolState after {MAX_ATTEMPTS} attempts.\n{err_text}"
         ConversationStateHelpers.append_ai_message(state, final_msg)
-        return ConversationStateHelpers.set_abort(state,  "NONE", final_msg)
+        return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), final_msg)
 
     return _run
 
 
-# ----------------------------
+# =============================================================================
+# Required input extractors
+# =============================================================================
+
+def _require_dataset_summary(state: ConversationState) -> Mapping[str, Any] | None:
+    dataset = state.get("dataset") or {}
+    summary = dataset.get("summary")
+    if isinstance(summary, dict):
+        return cast(Mapping[str, Any], summary)
+    return None
+
+
+def _require_protocol_text(state: ConversationState) -> str | None:
+    pd = state.get("protocol_discussion")
+    txt = (pd.discussion if pd is not None else "").strip()
+    return txt or None
+
+
+# =============================================================================
+# Prompt builder
+# =============================================================================
+
+def _build_prompt(
+    *,
+    attempt: int,
+    protocol_text: str,
+    dataset_summary: Mapping[str, Any],
+    previous_json: str,
+    validation_errors: List[str],
+) -> str:
+    ds_json = json.dumps(dict(dataset_summary), ensure_ascii=False)
+
+    if attempt == 1:
+        return (
+            compile_protocol_prompt()
+            .replace("{{PROTOCOL_TEXT}}", protocol_text)
+            .replace("{{DATASET_SUMMARY_JSON}}", ds_json)
+        )
+
+    return (
+        compile_protocol_repair_prompt()
+        .replace("{{PROTOCOL_TEXT}}", protocol_text)
+        .replace("{{DATASET_SUMMARY_JSON}}", ds_json)
+        .replace("{{PREVIOUS_JSON}}", previous_json)
+        .replace("{{VALIDATION_ERRORS}}", json.dumps(validation_errors or ["Unknown compiler error"], ensure_ascii=False))
+    )
+
+
+# =============================================================================
 # LLM + parsing
-# ----------------------------
+# =============================================================================
 
 def _llm_json_only(*, llm: LLMService, model_name: str, prompt: str) -> str:
     cfg = LLMConfig(model=model_name, temperature=0.0)
@@ -105,13 +149,12 @@ def _llm_json_only(*, llm: LLMService, model_name: str, prompt: str) -> str:
         user_prompt=prompt,
         history=None,
     )
-    return cast(Any, resp).content or ""
+    return str(cast(Any, resp).content or "")
 
 
 def _parse_json_object(raw: str) -> Dict[str, Any]:
     txt = (raw or "").strip()
 
-    # Minimal recovery: find first '{' and last '}' (handles accidental prose or ```json fences)
     if not txt.startswith("{"):
         i, j = txt.find("{"), txt.rfind("}")
         if i >= 0 and j > i:
@@ -123,73 +166,176 @@ def _parse_json_object(raw: str) -> Dict[str, Any]:
     return cast(Dict[str, Any], obj)
 
 
-# ----------------------------
-# Validation (ProtocolState only)
-# ----------------------------
+# =============================================================================
+# Validation (single-responsibility helpers)
+# =============================================================================
 
-def _validate_protocol_state(obj: Dict[str, Any], dataset_columns: List[str] | None) -> Tuple[bool, List[str]]:
+def _validate_protocol_object(obj: Mapping[str, Any], dataset_columns: List[str] | None) -> Tuple[bool, List[str]]:
     errors: List[str] = []
-
-    for k in REQUIRED_KEYS:
-        if k not in obj:
-            errors.append(f"Missing required key: {k}")
-    if errors:
-        return False, errors
-
-    allowed_time_zero = set(get_args(TimeZeroType))          # {"COLUMN","CONCEPTUAL"}
-    allowed_units = set(get_args(WindowUnit))                # {"minutes","hours",...}
-    allowed_ops = set(get_args(FilterOp))                    # {"==","!=","in",...}
-
-    if not isinstance(obj["time_zero_type"], str) or obj["time_zero_type"] not in allowed_time_zero:
-        errors.append("time_zero_type must be 'COLUMN' or 'CONCEPTUAL'")
-
-    if not isinstance(obj["treatment_window_unit"], str) or obj["treatment_window_unit"] not in allowed_units:
-        errors.append("treatment_window_unit must be a valid unit enum")
-
-    if not isinstance(obj["outcome_window_unit"], str) or obj["outcome_window_unit"] not in allowed_units:
-        errors.append("outcome_window_unit must be a valid unit enum")
-
-    if not isinstance(obj["outcome_is_duration"], bool):
-        errors.append("outcome_is_duration must be boolean")
-
-    for k in ("covariates", "effect_modifiers", "censoring_rules"):
-        if not isinstance(obj[k], list) or any(not isinstance(x, str) for x in obj[k]):
-            errors.append(f"{k} must be list[str]")
-
-    if not isinstance(obj["exclusions"], list):
-        errors.append("exclusions must be a list")
-    else:
-        for i, ex in enumerate(obj["exclusions"]): # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType]
-            if not isinstance(ex, dict):
-                errors.append(f"exclusions[{i}] must be an object")
-                continue
-
-            for ek in ("column", "op", "values", "reason"):
-                if ek not in ex:
-                    errors.append(f"exclusions[{i}] missing key: {ek}")
-
-            op = ex.get("op") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-            if not isinstance(op, str) or op not in allowed_ops:
-                errors.append(f"exclusions[{i}].op invalid: {op}")
-
-            vals = ex.get("values") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-            if not isinstance(vals, list) or any(not isinstance(v, str) for v in vals): # pyright: ignore[reportUnknownVariableType]
-                errors.append(f"exclusions[{i}].values must be list[str]")
-
-            col = ex.get("column") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-            if dataset_columns is not None and isinstance(col, str) and col not in dataset_columns:
-                errors.append(f"exclusions[{i}].column not in dataset: '{col}'")
-
-    # Coherence: conceptual baseline cannot support duration outcome
-    if obj["time_zero_type"] == "CONCEPTUAL" and obj.get("outcome_is_duration") is True:
-        errors.append("Snapshot/CONCEPTUAL time_zero cannot have duration outcome without time support.")
-
+    errors.extend(_validate_required_keys(obj))
+    errors.extend(_validate_enums(obj))
+    errors.extend(_validate_string_list_fields(obj, fields=("covariates", "effect_modifiers", "censoring_rules")))
+    errors.extend(_validate_exclusions(obj, dataset_columns))
+    errors.extend(_validate_treatment_spec(obj, dataset_columns))
+    errors.extend(_validate_outcome_spec(obj, dataset_columns))
     return (len(errors) == 0), errors
 
 
-def _normalize_protocol_state(obj: Dict[str, Any]) -> Dict[str, Any]:
-    # Snapshot invariants
-    if obj["time_zero_type"] == "CONCEPTUAL":
+def _validate_required_keys(obj: Mapping[str, Any]) -> List[str]:
+    out: List[str] = []
+    for k in REQUIRED_KEYS:
+        if k not in obj:
+            out.append(f"Missing required key: {k}")
+    return out
+
+
+def _validate_enums(obj: Mapping[str, Any]) -> List[str]:
+    out: List[str] = []
+
+    tz = _get_str(obj, "time_zero_type")
+    if tz is None or tz not in ALLOWED_TIME_ZERO:
+        out.append(f"time_zero_type must be one of: {sorted(ALLOWED_TIME_ZERO)}")
+
+    twu = _get_str(obj, "treatment_window_unit")
+    if twu is None or twu not in ALLOWED_UNITS:
+        out.append(f"treatment_window_unit must be one of: {sorted(ALLOWED_UNITS)}")
+
+    owu = _get_str(obj, "outcome_window_unit")
+    if owu is None or owu not in ALLOWED_UNITS:
+        out.append(f"outcome_window_unit must be one of: {sorted(ALLOWED_UNITS)}")
+
+    return out
+
+
+def _validate_string_list_fields(obj: Mapping[str, Any], *, fields: Sequence[str]) -> List[str]:
+    out: List[str] = []
+    for f in fields:
+        v = obj.get(f)
+        if not isinstance(v, list) or any(not isinstance(x, str) for x in v): # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+            out.append(f"{f} must be list[str]") 
+    return out
+
+
+def _validate_exclusions(obj: Mapping[str, Any], dataset_columns: List[str] | None) -> List[str]:
+    out: List[str] = []
+    excls = obj.get("exclusions")
+
+    if not isinstance(excls, list):
+        return ["exclusions must be a list"]
+
+    cols = set(dataset_columns or [])
+
+    for i, ex in enumerate(excls): # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+        if not isinstance(ex, dict):
+            out.append(f"exclusions[{i}] must be an object")
+            continue
+
+        col = ex.get("column") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+        op = ex.get("op") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+        values = ex.get("values") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+        reason = ex.get("reason") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+
+        if not isinstance(col, str) or not col:
+            out.append(f"exclusions[{i}].column must be a non-empty string")
+        elif dataset_columns is not None and col not in cols:
+            out.append(f"exclusions[{i}].column not in dataset: '{col}'")
+
+        if not isinstance(op, str) or op not in ALLOWED_OPS:
+            out.append(f"exclusions[{i}].op invalid: {op}")
+
+        if not isinstance(values, list) or any(not isinstance(v, str) for v in values): # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+            out.append(f"exclusions[{i}].values must be list[str]")
+
+        if not isinstance(reason, str):
+            out.append(f"exclusions[{i}].reason must be string")
+
+    return out
+
+
+def _validate_treatment_spec(obj: Mapping[str, Any], dataset_columns: List[str] | None) -> List[str]:
+    out: List[str] = []
+    ts = obj.get("treatment_spec")
+    if not isinstance(ts, dict):
+        return ["treatment_spec must be an object"]
+
+    kind = ts.get("kind") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    if not isinstance(kind, str) or kind not in ALLOWED_TREAT_KINDS:
+        return [f"treatment_spec.kind must be one of: {sorted(ALLOWED_TREAT_KINDS)}"]
+
+    col = ts.get("column") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    if not isinstance(col, str) or not col:
+        out.append("treatment_spec.column must be a non-empty string")
+    elif dataset_columns is not None and col not in set(dataset_columns):
+        out.append(f"treatment_spec.column not in dataset: '{col}'")
+
+    if kind == "binary":
+        if not isinstance(ts.get("treated"), str) or not isinstance(ts.get("control"), str): # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+            out.append("binary treatment_spec requires 'treated' and 'control' strings")
+
+    if kind == "categorical":
+        lv = ts.get("levels") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+        if not isinstance(lv, list) or len(lv) < 2 or any(not isinstance(x, str) for x in lv): # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType, reportUnknownMemberType]
+            out.append("categorical treatment_spec requires levels: list[str] with len>=2")
+
+    # continuous: optional numeric fields allowed; validation handled in static node
+    return out
+
+
+def _validate_outcome_spec(obj: Mapping[str, Any], dataset_columns: List[str] | None) -> List[str]:
+    out: List[str] = []
+    ys = obj.get("outcome_spec")
+    if not isinstance(ys, dict):
+        return ["outcome_spec must be an object"]
+
+    kind = ys.get("kind") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    if not isinstance(kind, str) or kind not in ALLOWED_OUT_KINDS:
+        return [f"outcome_spec.kind must be one of: {sorted(ALLOWED_OUT_KINDS)}"]
+
+    ds_cols = set(dataset_columns or [])
+
+    if kind == "duration":
+        dcol = ys.get("duration_column") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+        ecol = ys.get("event_column") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+        if not isinstance(dcol, str) or not dcol:
+            out.append("duration outcome_spec requires duration_column")
+        elif dataset_columns is not None and dcol not in ds_cols:
+            out.append(f"outcome_spec.duration_column not in dataset: '{dcol}'")
+
+        if not isinstance(ecol, str) or not ecol:
+            out.append("duration outcome_spec requires event_column")
+        elif dataset_columns is not None and ecol not in ds_cols:
+            out.append(f"outcome_spec.event_column not in dataset: '{ecol}'")
+
+        if not isinstance(ys.get("event_value"), str) or not isinstance(ys.get("censor_value"), str): # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+            out.append("duration outcome_spec requires event_value and censor_value strings")
+
+        return out
+
+    # non-duration: must have column
+    col = ys.get("column") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    if not isinstance(col, str) or not col:
+        out.append("outcome_spec.column must be a non-empty string")
+    elif dataset_columns is not None and col not in ds_cols:
+        out.append(f"outcome_spec.column not in dataset: '{col}'")
+
+    if kind == "binary":
+        if not isinstance(ys.get("event"), str) or not isinstance(ys.get("non_event"), str): # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+            out.append("binary outcome_spec requires 'event' and 'non_event' strings")
+
+    if kind == "categorical":
+        lv = ys.get("levels") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+        if not isinstance(lv, list) or len(lv) < 2 or any(not isinstance(x, str) for x in lv): # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType, reportUnknownMemberType]
+            out.append("categorical outcome_spec requires levels: list[str] with len>=2")
+
+    return out
+
+
+# =============================================================================
+# Normalization (safe mutations only)
+# =============================================================================
+
+def _normalize_protocol_object(obj: Dict[str, Any]) -> Dict[str, Any]:
+    if obj.get("time_zero_type") == "CONCEPTUAL":
         obj["time_zero"] = str(obj.get("time_zero") or "CONCEPTUAL_BASELINE")
         obj["time_zero_definition"] = str(obj.get("time_zero_definition") or "shared conceptual baseline at data cut-off")
 
@@ -199,60 +345,54 @@ def _normalize_protocol_state(obj: Dict[str, Any]) -> Dict[str, Any]:
 
         obj["outcome_window"] = str(obj.get("outcome_window") or "0")
         obj["outcome_window_unit"] = str(obj.get("outcome_window_unit") or "days")
-        obj["outcome_is_duration"] = False
 
-    # Ensure lists are list[str]
-    for k in ("covariates", "effect_modifiers", "censoring_rules"):
-        obj[k] = [str(x) for x in (obj.get(k, []) or [])]
+    _normalize_list_str(obj, "covariates")
+    _normalize_list_str(obj, "effect_modifiers")
+    _normalize_list_str(obj, "censoring_rules")
 
-    # Ensure exclusions list type
     if not isinstance(obj.get("exclusions"), list):
         obj["exclusions"] = []
 
     return obj
 
 
-# ----------------------------
-# Extractors
-# ----------------------------
-
-def _extract_protocol_text(state: ConversationState) -> str:
-    pd = state.get("protocol_discussion") or {} # pyright: ignore[reportUnknownVariableType]
-    txt = str(pd.get("discussion") or "").strip() # type: ignore
-    if txt:
-        return txt
-
-    # fallback: last assistant message text
-    messages = state.get("messages", []) or []
-    for m in reversed(list(messages)):
-        content = str(getattr(m, "content", "") or "").strip()
-        if not content:
-            continue
-        mtype = getattr(m, "type", None)
-        cls = m.__class__.__name__.lower()
-        if mtype == "ai" or "ai" in cls or "assistant" in cls:
-            return content
-
-    return ""
+def _normalize_list_str(obj: MutableMapping[str, Any], key: str) -> None:
+    v = obj.get(key)
+    if not isinstance(v, list):
+        obj[key] = []
+        return
+    obj[key] = [str(x) for x in v] # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
 
 
-def _extract_columns(ds_summary: Any) -> List[str] | None:
-    if not isinstance(ds_summary, dict):
-        return None
+# =============================================================================
+# Dataset column extraction
+# =============================================================================
 
-    col_names = ds_summary.get("column_names") # type: ignore
-    if isinstance(col_names, list):
-        return [str(x) for x in col_names]
+def _extract_columns(ds_summary: Mapping[str, Any]) -> List[str] | None:
+    col_names = ds_summary.get("column_names")
+    if isinstance(col_names, list) and all(isinstance(x, str) for x in col_names): # pyright: ignore[reportUnknownVariableType]
+        return list(col_names) # pyright: ignore[reportUnknownArgumentType]
 
-    cols = ds_summary.get("columns") # type: ignore
+    cols = ds_summary.get("columns")
     if isinstance(cols, list):
         out: List[str] = []
-        for c in cols:
-            if isinstance(c, dict) and "name" in c:
-                out.append(str(c["name"])) # type: ignore
+        for c in cols: # pyright: ignore[reportUnknownVariableType]
+            if isinstance(c, dict):
+                name = c.get("name") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+                if isinstance(name, str) and name:
+                    out.append(name)
         return out or None
 
     return None
+
+
+# =============================================================================
+# Small access helpers
+# =============================================================================
+
+def _get_str(obj: Mapping[str, Any], key: str) -> str | None:
+    v = obj.get(key)
+    return v if isinstance(v, str) else None
 
 
 def _format_errors(errors: List[str], raw_json: str) -> str:

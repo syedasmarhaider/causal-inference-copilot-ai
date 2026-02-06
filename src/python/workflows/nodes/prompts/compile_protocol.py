@@ -8,46 +8,71 @@ You are a STRICT compiler that converts protocol text + dataset metadata into a 
 HARD OUTPUT RULES:
 - Output MUST be valid JSON and NOTHING else.
 - No markdown fences. No commentary.
-- Must match schema EXACTLY (all keys present).
-- Never invent column names. If you cannot map to a column, keep it as free-text within strings (population/treatment/outcome),
-  but do NOT fabricate dataset columns.
+- Must match the schema EXACTLY (all keys present).
+- NEVER invent dataset column names.
+- If you cannot map something to a dataset column, keep it as free-text only in:
+  - population
+  - time_zero_definition
+  - censoring_rules
+  Do NOT fabricate columns in treatment_spec/outcome_spec/exclusions/covariates/effect_modifiers.
 
-Schema:
+SCHEMA (must match exactly):
 {
   "population": string,
   "exclusions": [
     {"column": string, "op": "=="|"!="|"in"|"not_in"|">="|"<="|">"|"<"|"is_null"|"not_null", "values": [string], "reason": string}
   ],
+
   "time_zero_type": "COLUMN"|"CONCEPTUAL",
   "time_zero": string,
   "time_zero_definition": string,
 
-  "treatment": string,
+  "treatment_spec": (
+     {"kind":"binary","column":string,"treated":string,"control":string}
+   | {"kind":"continuous","column":string,"unit":string?,"transform":"none"|"log"|"standardize"|"minmax"?,"clip_min":number?,"clip_max":number?}
+   | {"kind":"categorical","column":string,"levels":[string],"baseline":string?}
+  ),
   "treatment_window_start": string,
   "treatment_window_end": string,
   "treatment_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",
 
-  "outcome": string,
-  "outcome_is_duration": boolean,
+  "outcome_spec": (
+     {"kind":"binary","column":string,"event":string,"non_event":string}
+   | {"kind":"continuous","column":string,"unit":string?,"transform":"none"|"log"|"standardize"|"minmax"?,"clip_min":number?,"clip_max":number?}
+   | {"kind":"categorical","column":string,"levels":[string],"baseline":string?}
+   | {"kind":"duration","duration_column":string,"event_column":string,"event_value":string,"censor_value":string}
+  ),
   "outcome_window": string,
   "outcome_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",
 
   "covariates": [string],
   "effect_modifiers": [string],
   "censoring_rules": [string],
+
   "experiment_type": string
 }
 
-Defaulting rules:
-- experiment_type: "Observational" unless an RCT randomization variable is explicitly described.
+DEFAULTING RULES:
+- experiment_type: "Observational" unless randomization is explicitly described.
 - If dataset has no time/date columns -> time_zero_type="CONCEPTUAL".
 - If time_zero_type="CONCEPTUAL":
   - time_zero="CONCEPTUAL_BASELINE"
   - time_zero_definition="shared conceptual baseline at data cut-off"
   - treatment_window_start="0", treatment_window_end="0", treatment_window_unit="days"
   - outcome_window="0", outcome_window_unit="days"
-  - outcome_is_duration=false unless duration fields exist and are explicitly used
 - exclusions: [] if none explicitly required.
+- covariates/effect_modifiers: use ONLY dataset columns explicitly mentioned in the protocol text. If none, [].
+
+TREATMENT SPEC INFERENCE:
+- If protocol compares two explicit levels -> use kind="binary".
+- If protocol implies numeric intensity/dose/score -> use kind="continuous".
+- If protocol implies multiple categories (>2) -> kind="categorical".
+
+OUTCOME SPEC INFERENCE:
+- If protocol describes death/event indicator with two labels -> kind="binary".
+- If protocol describes a numeric endpoint -> kind="continuous".
+- If protocol describes multiple categories -> kind="categorical".
+- If protocol explicitly describes time-to-event using (duration column + event indicator column) -> kind="duration".
 
 INPUTS:
 PROTOCOL_TEXT:
@@ -62,42 +87,47 @@ def compile_protocol_repair_prompt() -> str:
     return """
 You are a STRICT JSON repair tool.
 
-You will be given:
-(1) the original protocol text
-(2) authoritative dataset summary
-(3) previous JSON output
-(4) validation errors
-
-Your job:
-- Output a FIXED JSON object matching the schema EXACTLY.
-- Output MUST be valid JSON ONLY. No markdown. No commentary.
-- Must include ALL keys.
+HARD OUTPUT RULES:
+- Output MUST be valid JSON and NOTHING else.
+- No markdown fences. No commentary.
+- Must match the schema EXACTLY (all keys present).
 - Must respect enum values exactly.
-- Never invent dataset columns. If an exclusion references a non-existent column, remove it or correct it.
+- NEVER invent dataset column names.
+- If a referenced column does not exist in the dataset summary, remove or correct it.
 
-Schema:
+SCHEMA (must match exactly):
 {
   "population": string,
   "exclusions": [
     {"column": string, "op": "=="|"!="|"in"|"not_in"|">="|"<="|">"|"<"|"is_null"|"not_null", "values": [string], "reason": string}
   ],
+
   "time_zero_type": "COLUMN"|"CONCEPTUAL",
   "time_zero": string,
   "time_zero_definition": string,
 
-  "treatment": string,
+  "treatment_spec": (
+     {"kind":"binary","column":string,"treated":string,"control":string}
+   | {"kind":"continuous","column":string,"unit":string?,"transform":"none"|"log"|"standardize"|"minmax"?,"clip_min":number?,"clip_max":number?}
+   | {"kind":"categorical","column":string,"levels":[string],"baseline":string?}
+  ),
   "treatment_window_start": string,
   "treatment_window_end": string,
   "treatment_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",
 
-  "outcome": string,
-  "outcome_is_duration": boolean,
+  "outcome_spec": (
+     {"kind":"binary","column":string,"event":string,"non_event":string}
+   | {"kind":"continuous","column":string,"unit":string?,"transform":"none"|"log"|"standardize"|"minmax"?,"clip_min":number?,"clip_max":number?}
+   | {"kind":"categorical","column":string,"levels":[string],"baseline":string?}
+   | {"kind":"duration","duration_column":string,"event_column":string,"event_value":string,"censor_value":string}
+  ),
   "outcome_window": string,
   "outcome_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",
 
   "covariates": [string],
   "effect_modifiers": [string],
   "censoring_rules": [string],
+
   "experiment_type": string
 }
 
