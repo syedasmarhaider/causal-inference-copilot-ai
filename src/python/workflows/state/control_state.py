@@ -8,7 +8,7 @@ Stage = Literal[
     "PROTOCOL_DISCUSSION",
     "COMPILE_PROTOCOL",
     "VALIDATE_PROTOCOL_STATIC",
-    # "VALIDATE_PROTOCOL_STATIC_DISCUSSION",
+    "INFERENCE_READY",
     "DONE",
 ]
 
@@ -16,8 +16,8 @@ CONTROL_STATE_NEXT_STAGE: Final[Mapping[Stage, Stage]] = {
     "LOAD_DATASET": "PROTOCOL_DISCUSSION",
     "PROTOCOL_DISCUSSION": "COMPILE_PROTOCOL",
     "COMPILE_PROTOCOL": "VALIDATE_PROTOCOL_STATIC",
-    "VALIDATE_PROTOCOL_STATIC": "DONE",
-    # "VALIDATE_PROTOCOL_STATIC_DISCUSSION": "DONE",
+    "VALIDATE_PROTOCOL_STATIC": "INFERENCE_READY",
+    "INFERENCE_READY": "DONE",
 }
 
 CONTROL_STATE_STAGE_DOC: Final[Mapping[Stage, str]] = {
@@ -46,15 +46,19 @@ CONTROL_STATE_STAGE_DOC: Final[Mapping[Stage, str]] = {
         "Write ProtocolStaticValidationState.report with PASS/WARN/FAIL plus metrics and fix hints. "
         "If FAIL, require protocol edits (or dataset fixes) before continuing."
     ),
-    # "VALIDATE_PROTOCOL_STATIC_DISCUSSION": (
-    #     "Interpret the static validation report and determine whether the workflow may proceed. "
-    #     "If fatal validation errors exist, explain the failure to the user and abort progression until the dataset "
-    #     "or protocol is fixed and revalidated. "
-    #     "If only warnings exist, present them clearly and negotiate whether to proceed, based on the user's response. "
-    #     "Advance only after explicit acceptance; otherwise, remain in this stage awaiting user input."
-    # ),
+    "INFERENCE_READY": (
+        "Build InferenceReadyState from (DatasetState + ProtocolState + ProtocolStaticValidationState). "
+        "This stage must only proceed if protocol_static_validation.report.status is PASS or WARN. "
+        "Apply cohort exclusions, canonicalize treatment/outcome encodings (aliases -> canonical), and compute "
+        "EconML-ready column sets (T_col, Y_cols, W_cols, X_cols) plus feature_sets (W, X, XW). "
+        "Populate prepared_columns metadata (dtype, missing_rate, n_unique, encoding/imputation decisions), "
+        "exclusions_summary audit trail, and PreparationMetrics (row counts, treated/control/event counts when applicable). "
+        "Optionally materialize a prepared dataset artifact and attach PreparedDatasetArtifact to inference_ready.prepared. "
+        "On hard failure, set inference_ready.status=FAILED with error and abort progression."
+    ),
     "DONE": (
-        "Workflow completed successfully. A valid ProtocolState exists and the pipeline has reached its terminal stage. "
+        "Workflow completed successfully. A valid ProtocolState exists, static validation has passed/warned, "
+        "and an InferenceReadyState has been produced (or a failure has been recorded). "
         "Downstream gates (e.g., leakage/temporal legality, DAG/identification, estimator selection) can proceed from this state."
     ),
 }

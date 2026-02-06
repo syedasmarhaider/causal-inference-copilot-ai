@@ -14,6 +14,7 @@ from python.domain.service.llm_service import LLMService
 from python.workflows.graph.simple_flow_router import WorkflowRouter
 from python.workflows.nodes.compile_protocol_state import make_compile_protocol_state_node
 from python.workflows.nodes.load_dataset import make_load_dataset_node
+from python.workflows.nodes.prepare_inference_ready_state import make_prepare_inference_ready_node
 from python.workflows.nodes.protocol_discussion import make_protocol_discussion_node
 from python.workflows.nodes.validate_protocol_static import make_validate_protocol_static_node
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState, get_init_conversation_state
@@ -62,10 +63,9 @@ def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
             llm=cfg.llm,
             model_name=cfg.model_name,
         ),
-        # "VALIDATE_PROTOCOL_STATIC_DISCUSSION": make_review_protocol_static_validation_node(
-        #     llm=cfg.llm,
-        #     model_name=cfg.model_name,
-        # ),
+        "INFERENCE_READY": make_prepare_inference_ready_node(
+            data_repo=cfg.data_repo,
+        ),
         "DONE": _noop,
     }
 
