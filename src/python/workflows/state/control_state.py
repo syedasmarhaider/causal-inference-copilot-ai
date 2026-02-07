@@ -10,6 +10,7 @@ Stage = Literal[
     "VALIDATE_PROTOCOL_STATIC",
     "INFERENCE_READY",
     "MODEL_SELECTION",
+    "MODEL_SELECTION_DISCUSSION",
     "DONE",
 ]
 
@@ -19,7 +20,8 @@ CONTROL_STATE_NEXT_STAGE: Final[Mapping[Stage, Stage]] = {
     "COMPILE_PROTOCOL": "VALIDATE_PROTOCOL_STATIC",
     "VALIDATE_PROTOCOL_STATIC": "INFERENCE_READY",
     "INFERENCE_READY": "MODEL_SELECTION",
-    "MODEL_SELECTION": "DONE",
+    "MODEL_SELECTION": "MODEL_SELECTION_DISCUSSION",
+    "MODEL_SELECTION_DISCUSSION": "DONE",
 }
 
 CONTROL_STATE_STAGE_DOC: Final[Mapping[Stage, str]] = {
@@ -68,11 +70,18 @@ CONTROL_STATE_STAGE_DOC: Final[Mapping[Stage, str]] = {
         "selection_notes/rejected/unknowns, rationale_text, plus allow-list validation metadata. "
         "On any hard failure (missing inputs, JSON parse/validation failure after retry), abort progression."
     ),
+    "MODEL_SELECTION_DISCUSSION": (
+        "Run an interactive discussion so the user can pick a single estimator to proceed with. "
+        "Inputs are the ModelSelectionState (top-3 + rationale/unknowns) and the allowed estimator allow-list. "
+        "This stage is allowed to ask the minimum follow-ups needed. "
+        "Termination condition: ModelSelectionDiscussionState.selected_model_fqcn is set to an allowed estimator. "
+        "If selected, mark DONE and proceed to DONE stage; otherwise remain PENDING with action_required=NEEDS_INPUT."
+    ),
     "DONE": (
         "Workflow completed successfully. A valid ProtocolState exists, static validation has passed/warned, "
-        "an InferenceReadyState has been produced (or a failure has been recorded), and ModelSelectionState may "
-        "contain a validated top-3 EconML estimator shortlist + rationale. "
-        "Downstream gates (e.g., leakage/temporal legality, DAG/identification, estimator discussion/selection) can proceed from this state."
+        "an InferenceReadyState has been produced (or a failure has been recorded), ModelSelectionState contains a "
+        "validated top-3 EconML estimator shortlist + rationale, and ModelSelectionDiscussionState may contain a "
+        "final user-selected estimator to run next."
     ),
 }
 

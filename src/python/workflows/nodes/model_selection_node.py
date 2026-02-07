@@ -192,7 +192,7 @@ def _run(
         return _abort(state, ms, f"Model selection (rationale) failed: {e}")
 
     ConversationStateHelpers.append_ai_message(state=state, content=rationale_text)
-    return ConversationStateHelpers.set_done(state=state, action="NONE", msg=rationale_text)
+    return ConversationStateHelpers.set_done(state=state, action="NEEDS_INPUT", msg=rationale_text)
 
 
 def _abort(state: ConversationState, ms: ModelSelectionState, msg: str) -> ConversationState:

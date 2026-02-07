@@ -14,6 +14,7 @@ from python.domain.service.llm_service import LLMService
 from python.workflows.graph.simple_flow_router import WorkflowRouter
 from python.workflows.nodes.compile_protocol_state import make_compile_protocol_state_node
 from python.workflows.nodes.load_dataset import make_load_dataset_node
+from python.workflows.nodes.model_selection_discussion_node import make_model_selection_discussion_node
 from python.workflows.nodes.model_selection_node import make_model_selection_node
 from python.workflows.nodes.prepare_inference_ready_state import make_prepare_inference_ready_node
 from python.workflows.nodes.protocol_discussion import make_protocol_discussion_node
@@ -68,6 +69,11 @@ def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
             data_repo=cfg.data_repo,
         ),
         "MODEL_SELECTION": make_model_selection_node(
+            llm=cfg.llm,
+            model_name=cfg.model_name,
+            
+        ),
+        "MODEL_SELECTION_DISCUSSION": make_model_selection_discussion_node(
             llm=cfg.llm,
             model_name=cfg.model_name,
             
