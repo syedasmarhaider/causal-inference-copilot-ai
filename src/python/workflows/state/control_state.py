@@ -9,6 +9,7 @@ Stage = Literal[
     "COMPILE_PROTOCOL",
     "VALIDATE_PROTOCOL_STATIC",
     "INFERENCE_READY",
+    "MODEL_SELECTION",
     "DONE",
 ]
 
@@ -17,7 +18,8 @@ CONTROL_STATE_NEXT_STAGE: Final[Mapping[Stage, Stage]] = {
     "PROTOCOL_DISCUSSION": "COMPILE_PROTOCOL",
     "COMPILE_PROTOCOL": "VALIDATE_PROTOCOL_STATIC",
     "VALIDATE_PROTOCOL_STATIC": "INFERENCE_READY",
-    "INFERENCE_READY": "DONE",
+    "INFERENCE_READY": "MODEL_SELECTION",
+    "MODEL_SELECTION": "DONE",
 }
 
 CONTROL_STATE_STAGE_DOC: Final[Mapping[Stage, str]] = {
@@ -56,10 +58,21 @@ CONTROL_STATE_STAGE_DOC: Final[Mapping[Stage, str]] = {
         "Optionally materialize a prepared dataset artifact and attach PreparedDatasetArtifact to inference_ready.prepared. "
         "On hard failure, set inference_ready.status=FAILED with error and abort progression."
     ),
+    "MODEL_SELECTION": (
+        "Select the top-3 candidate EconML estimator classes (by exact fully-qualified name) using a deterministic "
+        "3-call LLM pipeline: (1) draft candidates from InferenceReadyState + DatasetState.summary + ProtocolState "
+        "using embedded EconML library notes; (2) strict refutation/finalization with JSON-only output and validation "
+        "against an allow-list; (3) grounded rationale summary. "
+        "No user input is required in this stage. "
+        "Persist results in ModelSelectionState: draft_text, final_json_raw, final_json, selected_top3, "
+        "selection_notes/rejected/unknowns, rationale_text, plus allow-list validation metadata. "
+        "On any hard failure (missing inputs, JSON parse/validation failure after retry), abort progression."
+    ),
     "DONE": (
         "Workflow completed successfully. A valid ProtocolState exists, static validation has passed/warned, "
-        "and an InferenceReadyState has been produced (or a failure has been recorded). "
-        "Downstream gates (e.g., leakage/temporal legality, DAG/identification, estimator selection) can proceed from this state."
+        "an InferenceReadyState has been produced (or a failure has been recorded), and ModelSelectionState may "
+        "contain a validated top-3 EconML estimator shortlist + rationale. "
+        "Downstream gates (e.g., leakage/temporal legality, DAG/identification, estimator discussion/selection) can proceed from this state."
     ),
 }
 

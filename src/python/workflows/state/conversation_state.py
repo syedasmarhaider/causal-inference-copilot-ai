@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from python.workflows.state.control_state import ACTION, ControlState
 from python.workflows.state.dataset_state import DatasetState
 from python.workflows.state.inference_ready_state import InferenceReadyState
+from python.workflows.state.model_selection_state import ModelSelectionState
 from python.workflows.state.protocol_discussion_state import ProtocolDiscussionState
 from python.workflows.state.protocol_state import ProtocolState
 from python.workflows.state.validate_protocol_state import ProtocolStaticValidationState
@@ -21,6 +22,7 @@ class ConversationState(TypedDict):
     protocol: ProtocolState | None
     protocol_static_validation: ProtocolStaticValidationState | None
     inference_ready : InferenceReadyState | None
+    model_selection: ModelSelectionState | None
     messages: List[BaseMessage]
 
 
@@ -173,6 +175,7 @@ def get_init_conversation_state(dataset_id: UUID) -> ConversationState:
         "protocol_static_validation": None,
         "messages": messages,
         "protocol": None,
-        "inference_ready":None
+        "inference_ready":None,
+        "model_selection":None
     }
     

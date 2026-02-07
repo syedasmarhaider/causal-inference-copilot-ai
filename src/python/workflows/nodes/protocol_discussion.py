@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, List, cast
+from typing import Any,  cast
 from uuid import UUID
 
-from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
+from python.domain.service.llm_service import  LLMConfig, LLMService
 from python.workflows.nodes.prompts.protocol_discussion import (
     get_protocol_discussion_system_prompt,
     get_protocol_discussion_confirmation_prompt,
@@ -174,17 +174,10 @@ def _llm_text(
     system_prompt: str,
     user_prompt: str,
 ) -> str:
-    try:
-        resp = llm.generate(  # type: ignore[call-arg]
+        resp = llm.generate(  
             config=config,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            history=None
         )
-        return cast(Any, resp).content
-    except TypeError:
-        msgs: List[ChatMessage] = []
-        if system_prompt:
-            msgs.append(ChatMessage(role="system", content=system_prompt))
-        msgs.append(ChatMessage(role="user", content=user_prompt))
-        resp = llm.generate(config=config, history=msgs)  # type: ignore[arg-type]
         return cast(Any, resp).content
