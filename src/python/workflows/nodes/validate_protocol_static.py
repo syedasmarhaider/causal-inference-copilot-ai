@@ -45,9 +45,14 @@ MIN_N_TOTAL_FAIL: Final[int] = 200
 MIN_N_ARM_FAIL: Final[int] = 50
 MIN_ARM_SHARE_WARN: Final[float] = 0.05  # warn if treated share <5% or >95%
 
-# =============================================================================
-# Exclusion normalization (defensive against compiler inversion)
-# =============================================================================
+# --- Overlap / positivity (static, heuristic; not identification) ---
+OVERLAP_NUM_BINS: Final[int] = 10
+OVERLAP_MAX_CATEG_LEVELS: Final[int] = 20
+OVERLAP_MIN_BIN_COUNT_WARN: Final[int] = 5
+
+# fraction of bins/levels where BOTH arms appear (binary)
+OVERLAP_COVERAGE_WARN: Final[float] = 0.70
+OVERLAP_COVERAGE_FAIL: Final[float] = 0.50
 
 SENTINEL_STRINGS: Final[set[str]] = {
     "unknown",
@@ -61,67 +66,117 @@ SENTINEL_STRINGS: Final[set[str]] = {
     "",
 }
 
+# =============================================================================
+# Public factory
+# =============================================================================
 
-def _is_sentinel_value(v: str) -> bool:
-    return v.strip().lower() in SENTINEL_STRINGS
 
+def make_validate_protocol_static_node(*, data_repo: DataRepo, llm: LLMService, model_name: str) -> CallableNodeFunc:
+    def _run(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
+        protocol = state.get("protocol")
+        if protocol is None:
+            msg = "ProtocolState missing; cannot run static validation."
+            ConversationStateHelpers.append_ai_message(state, msg)
+            return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), msg)
 
-def _normalize_exclusion_rule(ex: ExclusionRule) -> Tuple[ExclusionRule, Optional[ProtocolValidationIssue]]:
-    """
-    Semantics in this node:
-        - ExclusionRule builds a mask of rows to REMOVE, then we drop ~mask.
+        dataset_id = _require_dataset_id(state)
+        if dataset_id is None:
+            msg = "Dataset missing; load dataset first."
+            ConversationStateHelpers.append_ai_message(state, msg)
+            return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), msg)
 
-    Common compiler/LLM inversion:
-        - User intent: "exclude Unknown"
-        - Compiler emits: op='!=' values=['Unknown']  (this actually means "remove NOT Unknown", i.e., keep only Unknown)
-      We normalize that to:
-        - op='in' values=['Unknown'] (remove Unknown rows), and emit a WARN issue.
-    """
-    col = str(ex.get("column", ""))
-    op_raw = str(ex.get("op", ""))
-    values_raw = ex.get("values", [])
-    reason = str(ex.get("reason", ""))
+        df0 = _load_df(data_repo=data_repo, user_id=user_id, conversation_id=conversation_id, dataset_id=dataset_id)
+        if df0 is None:
+            msg = "Failed to load dataset for validation."
+            ConversationStateHelpers.append_ai_message(state, msg)
+            return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), msg)
 
-    values: List[str] = []
-    if isinstance(values_raw, list):
-        values = [str(v) for v in values_raw]
+        exclusions = _safe_exclusions(protocol)
+        df1, excl_issues, excl_metrics = _apply_exclusions(df0, exclusions)
 
-    op_applied = op_raw
-    issue: Optional[ProtocolValidationIssue] = None
+        issues: List[ProtocolValidationIssue] = []
+        issues.extend(_validate_protocol_enums(protocol))
+        issues.extend(_validate_supported_identification(protocol))
+        issues.extend(excl_issues)
+        issues.extend(_validate_nonempty_after_exclusions(df_before=df0, df_after=df1, excl_metrics=excl_metrics))
 
-    # Normalize "!= Unknown" -> "in Unknown"  (exclude sentinel rows)
-    if op_raw == "!=" and any(_is_sentinel_value(v) for v in values):
-        op_applied = "in"
-        issue = _mk_issue(
-            rule_id="EXCL_OP_NORMALIZED",
-            severity="WARN",
-            message="Exclusion operator normalized: '!= <sentinel>' interpreted as 'exclude <sentinel>'.",
-            evidence={"column": col, "op_raw": op_raw, "op_applied": op_applied, "values": values},
-            fix_hint="Fix compiler: for 'exclude Unknown', emit op='in' values=['Unknown'] (or op='==').",
+        # Early stop if cohort is dead
+        if _has_hard_cohort_failure(issues):
+            report = _build_report(
+                issues=issues,
+                metrics=_build_metrics(
+                    df_before=df0,
+                    df_after=df1,
+                    protocol=protocol,
+                    excl_metrics=excl_metrics,
+                    overlap_metrics=None,
+                ),
+            )
+            state["protocol_static_validation"] = cast(ProtocolStaticValidationState, {"report": report})
+            user_msg = _llm_render_validation_message(llm=llm, model_name=model_name, report=report)
+            ConversationStateHelpers.append_ai_message(state, user_msg)
+            return ConversationStateHelpers.set_abort(state, cast(ACTION, "NEEDS_INPUT"), user_msg)
+
+        # Column existence gates first to avoid cascaded junk
+        issues.extend(_validate_required_columns_exist(df=df1, protocol=protocol))
+
+        # If required columns fail, stop (avoid bogus downstream checks)
+        if _has_required_column_failure(issues):
+            report = _build_report(
+                issues=issues,
+                metrics=_build_metrics(
+                    df_before=df0,
+                    df_after=df1,
+                    protocol=protocol,
+                    excl_metrics=excl_metrics,
+                    overlap_metrics=None,
+                ),
+            )
+            state["protocol_static_validation"] = cast(ProtocolStaticValidationState, {"report": report})
+            user_msg = _llm_render_validation_message(llm=llm, model_name=model_name, report=report)
+            ConversationStateHelpers.append_ai_message(state, user_msg)
+            return ConversationStateHelpers.set_abort(state, cast(ACTION, "NEEDS_INPUT"), user_msg)
+
+        # Distributions / missingness
+        issues.extend(_validate_missingness(df=df1, protocol=protocol))
+        issues.extend(_validate_treatment_distribution(df=df1, protocol=protocol))
+        issues.extend(_validate_outcome_distribution(df=df1, protocol=protocol))
+        issues.extend(_validate_covariates(df=df1, protocol=protocol))
+        issues.extend(_validate_effect_modifiers(df=df1, protocol=protocol))
+
+        # Overlap / positivity heuristics (binary/categorical only)
+        overlap_issues, overlap_metrics = _validate_overlap(df=df1, protocol=protocol)
+        issues.extend(overlap_issues)
+
+        metrics = _build_metrics(
+            df_before=df0,
+            df_after=df1,
+            protocol=protocol,
+            excl_metrics=excl_metrics,
+            overlap_metrics=overlap_metrics,
         )
+        report = _build_report(issues=issues, metrics=metrics)
+        state["protocol_static_validation"] = cast(ProtocolStaticValidationState, {"report": report})
 
-    # Normalize "not_in Unknown" -> "in Unknown" (same failure mode: would keep only Unknown)
-    if op_raw == "not_in" and values and all(_is_sentinel_value(v) for v in values):
-        op_applied = "in"
-        issue = issue or _mk_issue(
-            rule_id="EXCL_OP_NORMALIZED",
-            severity="WARN",
-            message="Exclusion operator normalized: 'not_in <sentinel>' interpreted as 'exclude <sentinel>'.",
-            evidence={"column": col, "op_raw": op_raw, "op_applied": op_applied, "values": values},
-            fix_hint="Fix compiler: for 'exclude Unknown', emit op='in' values=['Unknown'] (or op='==').",
-        )
+        if report["status"] == "FAIL":
+            user_msg = _llm_render_validation_message(llm=llm, model_name=model_name, report=report)
+            ConversationStateHelpers.append_ai_message(state, user_msg)
+            return ConversationStateHelpers.set_abort(state, cast(ACTION, "NEEDS_INPUT"), user_msg)
 
-    ex2: ExclusionRule = {
-        "column": col,
-        "op": cast(Any, op_applied),
-        "values": values,
-        "reason": reason,
-    }
-    return ex2, issue
+        if report["status"] == "WARN":
+            user_msg = _llm_render_validation_message(llm=llm, model_name=model_name, report=report)
+            ConversationStateHelpers.append_ai_message(state, user_msg)
+            return ConversationStateHelpers.set_done(state, cast(ACTION, "NONE"), user_msg)
+
+        msg = "Static validation passed. Proceeding."
+        ConversationStateHelpers.append_ai_message(state, msg)
+        return ConversationStateHelpers.set_done(state, cast(ACTION, "NONE"), msg)
+
+    return _run
 
 
 # =============================================================================
-# Issue helpers (single job: create report issues)
+# Issue helpers
 # =============================================================================
 
 
@@ -158,66 +213,30 @@ def _build_report(*, issues: List[ProtocolValidationIssue], metrics: Dict[str, A
     }
 
 
-# =============================================================================
-# Public factory
-# =============================================================================
+def _has_hard_cohort_failure(issues: Sequence[ProtocolValidationIssue]) -> bool:
+    hard = {"EMPTY_AFTER_EXCL", "N_TOO_SMALL"}
+    return any(i["severity"] == "FAIL" and i["rule_id"] in hard for i in issues)
 
 
-def make_validate_protocol_static_node(*, data_repo: DataRepo, llm: LLMService, model_name: str) -> CallableNodeFunc:
-    def _run(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
-        protocol = state.get("protocol")
-        if protocol is None:
-            msg = "ProtocolState missing; cannot run static validation."
-            ConversationStateHelpers.append_ai_message(state, msg)
-            return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), msg)
-
-        dataset_id = _require_dataset_id(state)
-        if dataset_id is None:
-            msg = "Dataset missing; load dataset first."
-            ConversationStateHelpers.append_ai_message(state, msg)
-            return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), msg)
-
-        df0 = _load_df(
-            data_repo=data_repo,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            dataset_id=dataset_id,
-        )
-        if df0 is None:
-            msg = "Failed to load dataset for validation."
-            ConversationStateHelpers.append_ai_message(state, msg)
-            return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), msg)
-
-        # Apply exclusions (filtering)
-        exclusions = _safe_exclusions(protocol)
-        df1, excl_issues, excl_metrics = _apply_exclusions(df0, exclusions)
-
-        issues: List[ProtocolValidationIssue] = []
-        issues.extend(_validate_protocol_enums(protocol))
-        issues.extend(excl_issues)
-        issues.extend(_validate_nonempty_after_exclusions(df_before=df0, df_after=df1, excl_metrics=excl_metrics))
-        issues.extend(_validate_required_columns_exist(df=df1, protocol=protocol))
-        issues.extend(_validate_missingness(df=df1, protocol=protocol))
-        issues.extend(_validate_treatment_distribution(df=df1, protocol=protocol))
-        issues.extend(_validate_outcome_distribution(df=df1, protocol=protocol))
-        issues.extend(_validate_covariates(df=df1, protocol=protocol))
-        issues.extend(_validate_effect_modifiers(df=df1, protocol=protocol))
-
-        metrics = _build_metrics(df_before=df0, df_after=df1, protocol=protocol, excl_metrics=excl_metrics)
-        report = _build_report(issues=issues, metrics=metrics)
-
-        state["protocol_static_validation"] = cast(ProtocolStaticValidationState, {"report": report})
-
-        if report["status"] == "PASS":
-            msg = "Static validation passed. Proceeding."
-            ConversationStateHelpers.append_ai_message(state, msg)
-            return ConversationStateHelpers.set_done(state, cast(ACTION, "NONE"), msg)
-
-        user_msg = _llm_render_validation_message(llm=llm, model_name=model_name, report=report)
-        ConversationStateHelpers.append_ai_message(state, user_msg)
-        return ConversationStateHelpers.set_abort(state, cast(ACTION, "NEEDS_INPUT"), user_msg)
-
-    return _run
+def _has_required_column_failure(issues: Sequence[ProtocolValidationIssue]) -> bool:
+    # Anything that means we cannot safely compute later checks.
+    blocking_prefixes = {
+        "TREAT_SPEC_MISSING",
+        "TREAT_KIND_INVALID",
+        "TREAT_COL_INVALID",
+        "TREAT_COL_MISSING",
+        "OUT_SPEC_MISSING",
+        "OUT_KIND_INVALID",
+        "OUT_COL_INVALID",
+        "OUT_COL_MISSING",
+        "OUT_DUR_COL_INVALID",
+        "OUT_DUR_COL_MISSING",
+        "OUT_EVENT_COL_INVALID",
+        "OUT_EVENT_COL_MISSING",
+        "COV_COL_MISSING",
+        "EM_COL_MISSING",
+    }
+    return any(i["severity"] == "FAIL" and i["rule_id"] in blocking_prefixes for i in issues)
 
 
 # =============================================================================
@@ -245,7 +264,195 @@ def _load_df(*, data_repo: DataRepo, user_id: UUID, conversation_id: UUID, datas
 
 
 # =============================================================================
-# Validation: protocol enums (single job)
+# Exclusions (normalize + apply)
+# =============================================================================
+
+
+def _is_sentinel_value(v: str) -> bool:
+    return v.strip().lower() in SENTINEL_STRINGS
+
+
+def _normalize_exclusion_rule(ex: ExclusionRule) -> Tuple[ExclusionRule, Optional[ProtocolValidationIssue]]:
+    """
+    Semantics:
+      - ExclusionRule builds a mask of rows to REMOVE, then we drop ~mask.
+
+    Defensive normalization:
+      - User intent: "exclude Unknown"
+      - Compiler emits: op='!=' values=['Unknown']  (would remove NOT Unknown -> keep only Unknown)
+      - Normalize to: op='in' values=['Unknown'] and emit WARN.
+    """
+    col = str(ex.get("column", ""))
+    op_raw = str(ex.get("op", ""))
+    values_raw = ex.get("values", [])
+    reason = str(ex.get("reason", ""))
+
+    values: List[str] = [str(v) for v in values_raw]
+    op_applied = op_raw
+    issue: Optional[ProtocolValidationIssue] = None
+
+    if op_raw == "!=" and any(_is_sentinel_value(v) for v in values):
+        op_applied = "in"
+        issue = _mk_issue(
+            rule_id="EXCL_OP_NORMALIZED",
+            severity="WARN",
+            message="Exclusion operator normalized: '!= <sentinel>' interpreted as 'exclude <sentinel>'.",
+            evidence={"column": col, "op_raw": op_raw, "op_applied": op_applied, "values": values},
+            fix_hint="Fix compiler: for 'exclude Unknown', emit op='in' values=['Unknown'] (or op='==').",
+        )
+
+    if op_raw == "not_in" and values and all(_is_sentinel_value(v) for v in values):
+        op_applied = "in"
+        issue = issue or _mk_issue(
+            rule_id="EXCL_OP_NORMALIZED",
+            severity="WARN",
+            message="Exclusion operator normalized: 'not_in <sentinel>' interpreted as 'exclude <sentinel>'.",
+            evidence={"column": col, "op_raw": op_raw, "op_applied": op_applied, "values": values},
+            fix_hint="Fix compiler: for 'exclude Unknown', emit op='in' values=['Unknown'] (or op='==').",
+        )
+
+    ex2: ExclusionRule = {"column": col, "op": cast(Any, op_applied), "values": values, "reason": reason}
+    return ex2, issue
+
+
+def _safe_exclusions(protocol: ProtocolState) -> List[ExclusionRule]:
+    ex = protocol.get("exclusions") or []
+    return [ e for e in ex]
+
+
+def _apply_exclusions(
+    df: pd.DataFrame, exclusions: Sequence[ExclusionRule]
+) -> Tuple[pd.DataFrame, List[ProtocolValidationIssue], Dict[str, Any]]:
+    out_df = df
+    issues: List[ProtocolValidationIssue] = []
+    rules_metrics: List[Dict[str, Any]] = []
+
+    for i, ex in enumerate(exclusions):
+        ex_norm, norm_issue = _normalize_exclusion_rule( ex)
+        if norm_issue is not None:
+            issues.append(norm_issue)
+
+        col = str(ex_norm.get("column", ""))
+        op = str(ex_norm.get("op", ""))
+        values = ex_norm.get("values", [])
+        reason = str(ex_norm.get("reason", ""))
+
+        if col not in out_df.columns:
+            issues.append(
+                _mk_issue(
+                    rule_id="EXCL_COL_MISSING",
+                    severity="FAIL",
+                    message="Exclusion column missing; cannot apply exclusion rule.",
+                    evidence={"index": i, "column": col},
+                    fix_hint="Fix exclusions[].column to match an existing dataset column.",
+                )
+            )
+            continue
+
+        if op not in ALLOWED_OPS:
+            issues.append(
+                _mk_issue(
+                    rule_id="EXCL_OP_INVALID",
+                    severity="FAIL",
+                    message="Exclusion operator invalid; cannot apply exclusion rule.",
+                    evidence={"index": i, "op": op, "allowed": sorted(ALLOWED_OPS)},
+                    fix_hint="Fix exclusions[].op to a supported operator.",
+                )
+            )
+            continue
+
+        before = int(out_df.shape[0])
+        mask = _build_exclusion_mask(out_df, col=col, op=op, values=values)
+        out_df = out_df.loc[~mask].copy()
+        after = int(out_df.shape[0])
+
+        values_list = values
+        rules_metrics.append(
+            {
+                "index": i,
+                "column": col,
+                "op_raw": str(ex.get("op", "")),
+                "op_applied": op,
+                "values": [str(v) for v in values_list],
+                "reason": reason,
+                "removed": before - after,
+                "n_after": after,
+            }
+        )
+
+    metrics = {"n_before": int(df.shape[0]), "n_after": int(out_df.shape[0]), "rules": rules_metrics}
+    return out_df, issues, metrics # pyright: ignore[reportUnknownVariableType]
+
+
+def _build_exclusion_mask(df: pd.DataFrame, *, col: str, op: str, values: Any) -> pd.Series:
+    s = df[col]
+
+    if op == "is_null":
+        return s.isna()
+    if op == "not_null":
+        return ~s.isna()
+
+    vals: List[str] = [str(v) for v in values] if isinstance(values, list) else []
+
+    if op in (">=", "<=", ">", "<"):
+        x = pd.to_numeric(s, errors="coerce")
+        v = float(vals[0]) if vals else float("nan")
+        if op == ">=":
+            return x >= v
+        if op == "<=":
+            return x <= v
+        if op == ">":
+            return x > v
+        return x < v
+
+    ss = s.astype(str)
+
+    if op in ("==", "in"):
+        return ss.isin(vals)
+    if op in ("!=", "not_in"):
+        return ~ss.isin(vals)
+
+    return pd.Series([False] * df.shape[0], index=df.index)
+
+
+# =============================================================================
+# Validation: supported identification (best-effort, does not invent schema)
+# =============================================================================
+
+
+def _validate_supported_identification(protocol: ProtocolState) -> List[ProtocolValidationIssue]:
+    """
+    Current pipeline supports unconfoundedness/backdoor-style adjustment only.
+    If protocol includes a field implying IV/frontdoor/etc., hard-fail.
+    If the field doesn't exist, do nothing (no schema invention).
+    """
+    val = None
+    for k in ("identification_strategy", "id_strategy", "identification", "design"):
+        if k in protocol:
+            val = protocol.get(k)
+            break
+
+    if val is None:
+        return []
+
+    s = str(val).strip().lower()
+    ok = {"backdoor", "unconfoundedness", "ignorability", "rct", "randomized"}
+    if s in ok:
+        return []
+
+    return [
+        _mk_issue(
+            rule_id="UNSUPPORTED_IDENTIFICATION",
+            severity="FAIL",
+            message="Identification strategy is not supported by this copilot (only unconfoundedness/backdoor supported).",
+            evidence={"value": val},
+            fix_hint="Change to backdoor/unconfoundedness assumptions or use a different pipeline for IV/frontdoor.",
+        )
+    ]
+
+
+# =============================================================================
+# Validation: protocol enums
 # =============================================================================
 
 
@@ -288,121 +495,11 @@ def _validate_protocol_enums(protocol: ProtocolState) -> List[ProtocolValidation
             )
         )
 
-    # NOTE: conceptual time zero -> ignore time logic.
-    # So: do NOT fail on duration outcomes here.
-
     return out
 
 
 # =============================================================================
-# Exclusions: apply filters (single job)
-# =============================================================================
-
-
-def _safe_exclusions(protocol: ProtocolState) -> List[ExclusionRule]:
-    ex = protocol.get("exclusions") or []
-    if not isinstance(ex, list):
-        return []
-    return [cast(ExclusionRule, e) for e in ex if isinstance(e, dict)]
-
-
-def _apply_exclusions(
-    df: pd.DataFrame, exclusions: Sequence[ExclusionRule]
-) -> Tuple[pd.DataFrame, List[ProtocolValidationIssue], Dict[str, Any]]:
-    out_df = df
-    issues: List[ProtocolValidationIssue] = []
-    rules_metrics: List[Dict[str, Any]] = []
-
-    for i, ex in enumerate(exclusions):
-        ex_norm, norm_issue = _normalize_exclusion_rule(cast(ExclusionRule, ex))
-        if norm_issue is not None:
-            issues.append(norm_issue)
-
-        col = str(ex_norm.get("column", ""))
-        op = str(ex_norm.get("op", ""))
-        values = ex_norm.get("values", [])
-        reason = str(ex_norm.get("reason", ""))
-
-        if col not in out_df.columns:
-            issues.append(
-                _mk_issue(
-                    rule_id="EXCL_COL_MISSING",
-                    severity="FAIL",
-                    message="Exclusion column missing; cannot apply exclusion rule.",
-                    evidence={"index": i, "column": col},
-                    fix_hint="Fix exclusions[].column to match an existing dataset column.",
-                )
-            )
-            continue
-
-        if op not in ALLOWED_OPS:
-            issues.append(
-                _mk_issue(
-                    rule_id="EXCL_OP_INVALID",
-                    severity="FAIL",
-                    message="Exclusion operator invalid; cannot apply exclusion rule.",
-                    evidence={"index": i, "op": op, "allowed": sorted(ALLOWED_OPS)},
-                    fix_hint="Fix exclusions[].op to a supported operator.",
-                )
-            )
-            continue
-
-        before = int(out_df.shape[0])
-        mask = _build_exclusion_mask(out_df, col=col, op=op, values=values)
-        out_df = out_df.loc[~mask].copy()
-        after = int(out_df.shape[0])
-
-        values_list = values if isinstance(values, list) else []
-        rules_metrics.append(
-            {
-                "index": i,
-                "column": col,
-                "op_raw": str(ex.get("op", "")),
-                "op_applied": op,
-                "values": [str(v) for v in values_list],
-                "reason": reason,
-                "removed": before - after,
-                "n_after": after,
-            }
-        )
-
-    metrics = {"n_before": int(df.shape[0]), "n_after": int(out_df.shape[0]), "rules": rules_metrics}
-    return out_df, issues, metrics  # pyright: ignore[reportUnknownVariableType]
-
-
-def _build_exclusion_mask(df: pd.DataFrame, *, col: str, op: str, values: Any) -> pd.Series:
-    s = df[col]
-
-    if op == "is_null":
-        return s.isna()
-    if op == "not_null":
-        return ~s.isna()
-
-    vals: List[str] = [str(v) for v in values] if isinstance(values, list) else []
-
-    if op in (">=", "<=", ">", "<"):
-        x = pd.to_numeric(s, errors="coerce")
-        v = float(vals[0]) if vals else float("nan")
-        if op == ">=":
-            return x >= v
-        if op == "<=":
-            return x <= v
-        if op == ">":
-            return x > v
-        return x < v
-
-    ss = s.astype(str)
-
-    if op in ("==", "in"):
-        return ss.isin(vals)
-    if op in ("!=", "not_in"):
-        return ~ss.isin(vals)
-
-    return pd.Series([False] * df.shape[0], index=df.index)
-
-
-# =============================================================================
-# Validation: cohort size after exclusions (single job)
+# Validation: cohort size after exclusions
 # =============================================================================
 
 
@@ -438,30 +535,18 @@ def _validate_nonempty_after_exclusions(
 
 
 # =============================================================================
-# Validation: required columns exist (single job)
+# Validation: required columns exist
 # =============================================================================
 
 
 def _validate_required_columns_exist(*, df: pd.DataFrame, protocol: ProtocolState) -> List[ProtocolValidationIssue]:
     cols = set(map(str, df.columns))
     out: List[ProtocolValidationIssue] = []
-
-    # treatment_spec
+    
     ts = protocol.get("treatment_spec")
-    if not isinstance(ts, dict):
-        out.append(
-            _mk_issue(
-                rule_id="TREAT_SPEC_MISSING",
-                severity="FAIL",
-                message="treatment_spec missing or invalid.",
-                evidence={},
-                fix_hint="Compile protocol again to produce treatment_spec.",
-            )
-        )
-    else:
-        tkind = ts.get("kind")
-        tcol = ts.get("column")
-        if not isinstance(tkind, str) or tkind not in ALLOWED_TREAT_KINDS:
+    tkind = ts.get("kind")
+    tcol = ts.get("column")
+    if tkind not in ALLOWED_TREAT_KINDS:
             out.append(
                 _mk_issue(
                     rule_id="TREAT_KIND_INVALID",
@@ -471,7 +556,7 @@ def _validate_required_columns_exist(*, df: pd.DataFrame, protocol: ProtocolStat
                     fix_hint="Set treatment_spec.kind to 'binary'|'continuous'|'categorical'.",
                 )
             )
-        if not isinstance(tcol, str) or not tcol:
+    if  not tcol:
             out.append(
                 _mk_issue(
                     rule_id="TREAT_COL_INVALID",
@@ -481,7 +566,7 @@ def _validate_required_columns_exist(*, df: pd.DataFrame, protocol: ProtocolStat
                     fix_hint="Set treatment_spec.column to an existing dataset column name.",
                 )
             )
-        elif tcol not in cols:
+    elif tcol not in cols:
             out.append(
                 _mk_issue(
                     rule_id="TREAT_COL_MISSING",
@@ -494,20 +579,8 @@ def _validate_required_columns_exist(*, df: pd.DataFrame, protocol: ProtocolStat
 
     # outcome_spec
     ys = protocol.get("outcome_spec")
-    if not isinstance(ys, dict):
-        out.append(
-            _mk_issue(
-                rule_id="OUT_SPEC_MISSING",
-                severity="FAIL",
-                message="outcome_spec missing or invalid.",
-                evidence={},
-                fix_hint="Compile protocol again to produce outcome_spec.",
-            )
-        )
-        return out
-
     ykind = ys.get("kind")
-    if not isinstance(ykind, str) or ykind not in ALLOWED_OUT_KINDS:
+    if ykind not in ALLOWED_OUT_KINDS:
         out.append(
             _mk_issue(
                 rule_id="OUT_KIND_INVALID",
@@ -586,7 +659,6 @@ def _validate_required_columns_exist(*, df: pd.DataFrame, protocol: ProtocolStat
                 )
             )
 
-    # covariates + effect modifiers
     for c in protocol.get("covariates", []):
         if c not in cols:
             out.append(
@@ -615,14 +687,13 @@ def _validate_required_columns_exist(*, df: pd.DataFrame, protocol: ProtocolStat
 
 
 # =============================================================================
-# Validation: missingness thresholds (single job)
+# Validation: missingness thresholds
 # =============================================================================
 
 
 def _validate_missingness(*, df: pd.DataFrame, protocol: ProtocolState) -> List[ProtocolValidationIssue]:
     out: List[ProtocolValidationIssue] = []
 
-    # treatment missingness
     ts = protocol.get("treatment_spec")
     if isinstance(ts, dict):
         tcol = ts.get("column")
@@ -639,7 +710,6 @@ def _validate_missingness(*, df: pd.DataFrame, protocol: ProtocolState) -> List[
                     )
                 )
 
-    # outcome missingness
     ys = protocol.get("outcome_spec")
     if isinstance(ys, dict):
         ykind = ys.get("kind")
@@ -685,7 +755,6 @@ def _validate_missingness(*, df: pd.DataFrame, protocol: ProtocolState) -> List[
                         )
                     )
 
-    # covariates missingness
     for c in protocol.get("covariates", []):
         if c in df.columns:
             miss = float(df[c].isna().mean())
@@ -714,7 +783,7 @@ def _validate_missingness(*, df: pd.DataFrame, protocol: ProtocolState) -> List[
 
 
 # =============================================================================
-# Validation: treatment distribution (single job)
+# Validation: treatment distribution
 # =============================================================================
 
 
@@ -796,7 +865,7 @@ def _validate_binary_treatment(*, df: pd.DataFrame, col: str, ts: Mapping[str, A
 
 def _validate_categorical_treatment(*, df: pd.DataFrame, col: str, ts: Mapping[str, Any]) -> List[ProtocolValidationIssue]:
     levels = ts.get("levels")
-    if not isinstance(levels, list) or len(levels) < 2 or any(not isinstance(x, str) for x in levels):  # type: ignore
+    if not isinstance(levels, list) or len(levels) < 2 or any(not isinstance(x, str) for x in levels):
         return [
             _mk_issue(
                 rule_id="TREAT_CAT_LEVELS",
@@ -865,7 +934,7 @@ def _validate_continuous_treatment(*, df: pd.DataFrame, col: str) -> List[Protoc
 
 
 # =============================================================================
-# Validation: outcome distribution (single job)
+# Validation: outcome distribution
 # =============================================================================
 
 
@@ -976,7 +1045,7 @@ def _validate_continuous_outcome(*, df: pd.DataFrame, col: str) -> List[Protocol
             _mk_issue(
                 rule_id="OUT_CONT_CONSTANT",
                 severity="WARN",
-                message="Continuous outcome has <=1 unique numeric value after exclusions; effect estimation may be degenerate.",
+                message="Continuous outcome has <=1 unique value after exclusions; effect estimation may be degenerate.",
                 evidence={"column": col},
                 fix_hint="Verify outcome definition; choose an outcome with variability.",
             )
@@ -1039,7 +1108,7 @@ def _validate_duration_outcome(*, df: pd.DataFrame, ys: Mapping[str, Any]) -> Li
 
 
 # =============================================================================
-# Validation: covariate sanity (single job)
+# Validation: covariates / effect modifiers sanity
 # =============================================================================
 
 
@@ -1048,7 +1117,6 @@ def _validate_covariates(*, df: pd.DataFrame, protocol: ProtocolState) -> List[P
     exp_type = str(protocol.get("experiment_type", "Observational"))
 
     if not covs:
-        # Only warn if observational (for RCT, covariates can be optional)
         if exp_type.lower().startswith("obs"):
             return [
                 _mk_issue(
@@ -1079,11 +1147,6 @@ def _validate_covariates(*, df: pd.DataFrame, protocol: ProtocolState) -> List[P
     return out
 
 
-# =============================================================================
-# Validation: effect modifiers sanity (single job)
-# =============================================================================
-
-
 def _validate_effect_modifiers(*, df: pd.DataFrame, protocol: ProtocolState) -> List[ProtocolValidationIssue]:
     em = protocol.get("effect_modifiers", [])
     if not em:
@@ -1107,12 +1170,310 @@ def _validate_effect_modifiers(*, df: pd.DataFrame, protocol: ProtocolState) -> 
 
 
 # =============================================================================
-# Metrics builder (single job)
+# Validation: overlap / positivity heuristics (binary + categorical only)
+# =============================================================================
+
+
+def _validate_overlap(*, df: pd.DataFrame, protocol: ProtocolState) -> Tuple[List[ProtocolValidationIssue], Dict[str, Any]]:
+    """
+    Static overlap/positivity diagnostics (heuristic):
+      - Binary treatment: for each stratifier feature, compute coverage across bins/levels where BOTH arms appear.
+      - Categorical treatment: compute coverage that >=2 levels appear in bin/level (best-effort).
+    """
+    ts = protocol.get("treatment_spec")
+    if not isinstance(ts, dict):
+        return [], {"status": "SKIP", "reason": "treatment_spec missing"}
+
+    kind = ts.get("kind")
+    tcol = ts.get("column")
+    if not isinstance(kind, str) or not isinstance(tcol, str) or tcol not in df.columns:
+        return [], {"status": "SKIP", "reason": "treatment_spec invalid or column missing"}
+
+    if kind not in ("binary", "categorical"):
+        return [], {"status": "SKIP", "reason": f"not_applicable kind={kind}"}
+
+    covs = [c for c in (protocol.get("covariates", []) or []) if isinstance(c, str)]
+    ems = [c for c in (protocol.get("effect_modifiers", []) or []) if isinstance(c, str)]
+    strata_cols = [c for c in (covs + ems) if c in df.columns]
+
+    if not strata_cols:
+        issues = [
+            _mk_issue(
+                rule_id="OVERLAP_NO_STRATA",
+                severity="WARN",
+                message="No covariates/effect modifiers available to run overlap heuristics.",
+                evidence={},
+                fix_hint="Add baseline covariates/effect modifiers to enable overlap diagnostics.",
+            )
+        ]
+        return issues, {"status": cast(Any, _derive_status(issues)), "reason": "no_strata_cols"}
+
+    t = df[tcol].astype(str)
+
+    issues: List[ProtocolValidationIssue] = []
+    per_feature: List[Dict[str, Any]] = []
+
+    if kind == "binary":
+        treated = ts.get("treated")
+        control = ts.get("control")
+        if not isinstance(treated, str) or not isinstance(control, str):
+            return [], {"status": "SKIP", "reason": "treated/control missing"}
+
+        mask_t = (t == treated)
+        mask_c = (t == control)
+        if int(mask_t.sum()) == 0 or int(mask_c.sum()) == 0:
+            return [], {"status": "SKIP", "reason": "one_arm_empty"}
+
+        for col in strata_cols:
+            feat_issues, feat_metrics = _overlap_feature_binary(df=df, col=col, mask_t=mask_t, mask_c=mask_c)
+            issues.extend(feat_issues)
+            per_feature.append(feat_metrics)
+
+    else:  # categorical treatment
+        levels = ts.get("levels")
+        if not isinstance(levels, list) or len(levels) < 2 or any(not isinstance(x, str) for x in levels):
+            return [], {"status": "SKIP", "reason": "levels invalid"}
+
+        present_levels = [lvl for lvl in levels if int((t == lvl).sum()) > 0]
+        if len(present_levels) < 2:
+            return [], {"status": "SKIP", "reason": "fewer_than_2_levels_present"}
+
+        for col in strata_cols:
+            feat_issues, feat_metrics = _overlap_feature_multitreat(df=df, col=col, t=t, levels=present_levels)
+            issues.extend(feat_issues)
+            per_feature.append(feat_metrics)
+
+    status = cast(Any, _derive_status(issues))
+    metrics: Dict[str, Any] = {
+        "status": status,
+        "treatment_column": tcol,
+        "treatment_kind": kind,
+        "checked_cols": strata_cols,
+        "per_feature": per_feature,
+    }
+    return issues, metrics
+
+
+def _overlap_feature_binary(
+    *,
+    df: pd.DataFrame,
+    col: str,
+    mask_t: pd.Series,
+    mask_c: pd.Series,
+) -> Tuple[List[ProtocolValidationIssue], Dict[str, Any]]:
+    s = df[col]
+
+    nunq = int(s.nunique(dropna=True))
+    is_low_card = nunq <= OVERLAP_MAX_CATEG_LEVELS
+
+    # If numeric-ish -> quantile bins
+    x = pd.to_numeric(s, errors="coerce")
+    numeric_usable = int(x.notna().sum()) > 0 and (int(x.nunique(dropna=True)) > 1)
+
+    if numeric_usable and not (s.dtype == object and is_low_card):
+        valid = x.notna()
+        x2 = x[valid]
+        mt = mask_t[valid]
+        mc = mask_c[valid]
+
+        if int(x2.shape[0]) < 10:
+            return [], {"col": col, "type": "numeric", "status": "SKIP", "reason": "too_few_valid_rows"}
+
+        try:
+            bins = pd.qcut(x2, q=OVERLAP_NUM_BINS, duplicates="drop")
+        except Exception:
+            return [], {"col": col, "type": "numeric", "status": "SKIP", "reason": "qcut_failed"}
+
+        dfb = pd.DataFrame({"bin": bins.astype(str), "t": mt.astype(int), "c": mc.astype(int)})
+        g = dfb.groupby("bin", dropna=False).agg(n_t=("t", "sum"), n_c=("c", "sum"))
+        g["n"] = g["n_t"] + g["n_c"]
+
+        # “good” bins: both arms present
+        good = (g["n_t"] > 0) & (g["n_c"] > 0)
+        coverage = float(good.mean()) if int(g.shape[0]) > 0 else 0.0
+
+        # bins with tiny counts -> warn (unstable strata)
+        tiny = int((g["n"] < OVERLAP_MIN_BIN_COUNT_WARN).sum())
+
+        issues: List[ProtocolValidationIssue] = []
+        sev = _overlap_severity_from_coverage(coverage)
+        if sev is not None:
+            issues.append(
+                _mk_issue(
+                    rule_id="OVERLAP_LOW_COVERAGE",
+                    severity=sev,
+                    message="Low overlap coverage across numeric strata bins (binary treatment).",
+                    evidence={"feature": col, "coverage": coverage, "n_bins": int(g.shape[0])},
+                    fix_hint="Consider trimming, redefining cohort/treatment, or reducing heterogeneity feature set.",
+                )
+            )
+
+        if tiny > 0:
+            issues.append(
+                _mk_issue(
+                    rule_id="OVERLAP_TINY_BINS",
+                    severity="WARN",
+                    message="Some numeric strata bins have very small sample size; overlap diagnostics may be noisy.",
+                    evidence={"feature": col, "tiny_bins": tiny, "min_bin_count_warn": OVERLAP_MIN_BIN_COUNT_WARN},
+                    fix_hint="Consider fewer bins or stronger cohort definition.",
+                )
+            )
+
+        return issues, {
+            "col": col,
+            "type": "numeric",
+            "n_bins": int(g.shape[0]),
+            "coverage": coverage,
+            "tiny_bins": tiny,
+        }
+
+    # Otherwise treat as categorical strata
+    ss = s.astype(str)
+    if nunq > OVERLAP_MAX_CATEG_LEVELS:
+        issues = [
+            _mk_issue(
+                rule_id="OVERLAP_HIGH_CARDINALITY",
+                severity="WARN",
+                message="Stratifier has high cardinality; categorical overlap check skipped.",
+                evidence={"feature": col, "n_unique": nunq, "max_levels": OVERLAP_MAX_CATEG_LEVELS},
+                fix_hint="Consider binning/featurizing this variable before using it for overlap diagnostics.",
+            )
+        ]
+        return issues, {"col": col, "type": "categorical", "status": "SKIP", "reason": "high_cardinality"}
+
+    dfc = pd.DataFrame({"lvl": ss, "t": mask_t.astype(int), "c": mask_c.astype(int)})
+    g = dfc.groupby("lvl", dropna=False).agg(n_t=("t", "sum"), n_c=("c", "sum"))
+    good = (g["n_t"] > 0) & (g["n_c"] > 0)
+    coverage = float(good.mean()) if int(g.shape[0]) > 0 else 0.0
+
+    issues2: List[ProtocolValidationIssue] = []
+    sev2 = _overlap_severity_from_coverage(coverage)
+    if sev2 is not None:
+        issues2.append(
+            _mk_issue(
+                rule_id="OVERLAP_LOW_COVERAGE",
+                severity=sev2,
+                message="Low overlap coverage across categorical strata levels (binary treatment).",
+                evidence={"feature": col, "coverage": coverage, "n_levels": int(g.shape[0])},
+                fix_hint="Consider merging rare levels, trimming, or redefining cohort/treatment.",
+            )
+        )
+
+    return issues2, {"col": col, "type": "categorical", "n_levels": int(g.shape[0]), "coverage": coverage}
+
+
+def _overlap_feature_multitreat(
+    *, df: pd.DataFrame, col: str, t: pd.Series, levels: Sequence[str]
+) -> Tuple[List[ProtocolValidationIssue], Dict[str, Any]]:
+    """
+    Best-effort overlap for categorical multi-treatment:
+      - For each bin/level of the stratifier, count how many treatment levels appear.
+      - Coverage = fraction of strata where at least 2 treatment levels appear.
+    """
+    s = df[col]
+    nunq = int(s.nunique(dropna=True))
+
+    # Try numeric binning first if feasible
+    x = pd.to_numeric(s, errors="coerce")
+    numeric_usable = int(x.notna().sum()) > 0 and (int(x.nunique(dropna=True)) > 1)
+
+    if numeric_usable and not (s.dtype == object and nunq <= OVERLAP_MAX_CATEG_LEVELS):
+        valid = x.notna()
+        x2 = x[valid]
+        t2 = t[valid]
+
+        try:
+            bins = pd.qcut(x2, q=OVERLAP_NUM_BINS, duplicates="drop").astype(str)
+        except Exception:
+            return [], {"col": col, "type": "numeric", "status": "SKIP", "reason": "qcut_failed"}
+
+        dfb = pd.DataFrame({"bin": bins, "t": t2})
+        counts = dfb.groupby(["bin", "t"]).size().unstack(fill_value=0)
+
+        # only keep declared/present levels columns
+        for lvl in levels:
+            if lvl not in counts.columns:
+                counts[lvl] = 0
+        counts = counts[list(levels)]
+
+        present_k = (counts > 0).sum(axis=1)
+        coverage = float((present_k >= 2).mean()) if int(counts.shape[0]) > 0 else 0.0
+
+        issues: List[ProtocolValidationIssue] = []
+        sev = _overlap_severity_from_coverage(coverage)
+        if sev is not None:
+            issues.append(
+                _mk_issue(
+                    rule_id="OVERLAP_LOW_COVERAGE",
+                    severity=sev,
+                    message="Low overlap coverage across strata bins (categorical multi-treatment).",
+                    evidence={"feature": col, "coverage_ge2_levels": coverage, "n_bins": int(counts.shape[0])},
+                    fix_hint="Consider merging treatment levels, trimming, or redefining cohort/treatment.",
+                )
+            )
+
+        return issues, {"col": col, "type": "numeric", "n_bins": int(counts.shape[0]), "coverage_ge2_levels": coverage}
+
+    # Categorical strata
+    ss = s.astype(str)
+    if nunq > OVERLAP_MAX_CATEG_LEVELS:
+        issues = [
+            _mk_issue(
+                rule_id="OVERLAP_HIGH_CARDINALITY",
+                severity="WARN",
+                message="Stratifier has high cardinality; categorical overlap check skipped.",
+                evidence={"feature": col, "n_unique": nunq, "max_levels": OVERLAP_MAX_CATEG_LEVELS},
+                fix_hint="Consider binning/featurizing this variable before overlap diagnostics.",
+            )
+        ]
+        return issues, {"col": col, "type": "categorical", "status": "SKIP", "reason": "high_cardinality"}
+
+    dfc = pd.DataFrame({"lvl": ss, "t": t})
+    counts = dfc.groupby(["lvl", "t"]).size().unstack(fill_value=0)
+    for lvl in levels:
+        if lvl not in counts.columns:
+            counts[lvl] = 0
+    counts = counts[list(levels)]
+
+    present_k = (counts > 0).sum(axis=1)
+    coverage = float((present_k >= 2).mean()) if int(counts.shape[0]) > 0 else 0.0
+
+    issues2: List[ProtocolValidationIssue] = []
+    sev2 = _overlap_severity_from_coverage(coverage)
+    if sev2 is not None:
+        issues2.append(
+            _mk_issue(
+                rule_id="OVERLAP_LOW_COVERAGE",
+                severity=sev2,
+                message="Low overlap coverage across strata levels (categorical multi-treatment).",
+                evidence={"feature": col, "coverage_ge2_levels": coverage, "n_levels": int(counts.shape[0])},
+                fix_hint="Consider merging rare levels or redefining cohort/treatment.",
+            )
+        )
+
+    return issues2, {"col": col, "type": "categorical", "n_levels": int(counts.shape[0]), "coverage_ge2_levels": coverage}
+
+
+def _overlap_severity_from_coverage(coverage: float) -> ValidationSeverity | None:
+    if coverage < OVERLAP_COVERAGE_FAIL:
+        return "FAIL"
+    if coverage < OVERLAP_COVERAGE_WARN:
+        return "WARN"
+    return None
+
+
+# =============================================================================
+# Metrics builder
 # =============================================================================
 
 
 def _build_metrics(
-    *, df_before: pd.DataFrame, df_after: pd.DataFrame, protocol: ProtocolState, excl_metrics: Dict[str, Any]
+    *,
+    df_before: pd.DataFrame,
+    df_after: pd.DataFrame,
+    protocol: ProtocolState,
+    excl_metrics: Dict[str, Any],
+    overlap_metrics: Dict[str, Any] | None,
 ) -> Dict[str, Any]:
     m: Dict[str, Any] = {
         "n_before": int(df_before.shape[0]),
@@ -1135,11 +1496,14 @@ def _build_metrics(
     if isinstance(ys, dict):
         m["outcome_kind"] = ys.get("kind")
 
+    if overlap_metrics is not None:
+        m["overlap"] = overlap_metrics
+
     return m
 
 
 # =============================================================================
-# LLM: user-facing message rendering (single job)
+# LLM: user-facing message rendering
 # =============================================================================
 
 
