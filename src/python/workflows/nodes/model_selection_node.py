@@ -49,6 +49,7 @@ def _run(
 
     dataset = state.get("dataset")
 
+    # TODO: filter data summary here
     dataset_summary = dataset.get("summary")
     if dataset_summary is None:
         return _abort(state, ms, "Dataset summary is missing. Reload dataset is required.")

@@ -29,7 +29,6 @@ venv:
 
 install: venv
 	@$(PIP) install -r requirements.txt
-	@$(PIP) install -r dev-requirements.txt
 
 # Install dev tools only if missing (fast no-op when already present)
 dev-tools: venv
