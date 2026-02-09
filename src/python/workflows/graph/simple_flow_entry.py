@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import logging
 from pathlib import Path
 from typing import Final, Mapping
 from uuid import UUID
@@ -12,6 +13,7 @@ from python.domain.repo.conversation_repo import ConversationRepo
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import LLMService
 from python.workflows.graph.simple_flow_router import WorkflowRouter
+from python.workflows.nodes.compile_protocol_state import make_compile_protocol_state_node
 from python.workflows.nodes.compile_protocol_state import make_compile_protocol_state_node
 from python.workflows.nodes.load_dataset import make_load_dataset_node
 from python.workflows.nodes.model_selection_discussion_node import make_model_selection_discussion_node
@@ -48,6 +50,7 @@ class WorkflowResponse:
 
 def _noop(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
     return state
+
 
     
 def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
