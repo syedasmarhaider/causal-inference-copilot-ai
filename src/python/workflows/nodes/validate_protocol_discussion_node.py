@@ -6,9 +6,7 @@ from typing import Any, Dict, Final,  Optional, Tuple, cast
 from uuid import UUID
 
 from python.domain.service.llm_service import LLMConfig, LLMService
-from python.workflows.nodes.prompts.validate_protocol_discussion import (
-    get_validate_protocol_discussion_system_prompt,
-)
+from python.workflows.nodes.prompts.validate_protocol_discussion import get_validate_protocol_discussion_system_prompt
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState, ConversationStateHelpers
 from python.workflows.state.control_state import ACTION
 

@@ -18,6 +18,7 @@ from python.workflows.nodes.model_selection_discussion_node import make_model_se
 from python.workflows.nodes.model_selection_node import make_model_selection_node
 from python.workflows.nodes.prepare_inference_ready_state import make_prepare_inference_ready_node
 from python.workflows.nodes.protocol_discussion import make_protocol_discussion_node
+from python.workflows.nodes.validate_protocol_discussion_node import make_validate_protocol_discussion_node
 from python.workflows.nodes.validate_protocol_static import make_validate_protocol_static_node
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState, get_init_conversation_state
 from python.workflows.state.control_state import  Stage, Status
@@ -62,6 +63,10 @@ def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
         ), 
         "VALIDATE_PROTOCOL_STATIC": make_validate_protocol_static_node(
             data_repo=cfg.data_repo,
+            llm=cfg.llm,
+            model_name=cfg.model_name,
+        ),
+        "VALIDATE_PROTOCOL_STATIC_DISCUSSION": make_validate_protocol_discussion_node(
             llm=cfg.llm,
             model_name=cfg.model_name,
         ),
