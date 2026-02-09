@@ -7,3 +7,6 @@ DEFAULT_MODEL_GEMNI: str = "gemini-3-flash-preview"
 JSONValue: TypeAlias = Any
 JSONDict: TypeAlias = Dict[str, JSONValue]
 
+# {
+#   "user_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+#   "conversation_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"

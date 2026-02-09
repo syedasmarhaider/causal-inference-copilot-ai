@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Final, Literal, TypedDict
+from collections.abc import Mapping
+from typing import Final, Literal, TypedDict
 
 Stage = Literal[
     "LOAD_DATASET",
     "PROTOCOL_DISCUSSION",
     "COMPILE_PROTOCOL",
     "VALIDATE_PROTOCOL_STATIC",
+    "VALIDATE_PROTOCOL_STATIC_DISCUSSION",
     "INFERENCE_READY",
     "MODEL_SELECTION",
     "MODEL_SELECTION_DISCUSSION",
@@ -18,7 +21,8 @@ CONTROL_STATE_NEXT_STAGE: Final[Mapping[Stage, Stage]] = {
     "LOAD_DATASET": "PROTOCOL_DISCUSSION",
     "PROTOCOL_DISCUSSION": "COMPILE_PROTOCOL",
     "COMPILE_PROTOCOL": "VALIDATE_PROTOCOL_STATIC",
-    "VALIDATE_PROTOCOL_STATIC": "INFERENCE_READY",
+    "VALIDATE_PROTOCOL_STATIC": "VALIDATE_PROTOCOL_STATIC_DISCUSSION",
+    "VALIDATE_PROTOCOL_STATIC_DISCUSSION": "INFERENCE_READY",
     "INFERENCE_READY": "MODEL_SELECTION",
     "MODEL_SELECTION": "MODEL_SELECTION_DISCUSSION",
     "MODEL_SELECTION_DISCUSSION": "DONE",
@@ -49,6 +53,11 @@ CONTROL_STATE_STAGE_DOC: Final[Mapping[Stage, str]] = {
         "and missingness/outcome sanity thresholds. "
         "Write ProtocolStaticValidationState.report with PASS/WARN/FAIL plus metrics and fix hints. "
         "If FAIL, require protocol edits (or dataset fixes) before continuing."
+    ),
+    "VALIDATE_PROTOCOL_STATIC_DISCUSSION": (
+        "Discuss the static validation report with the user. "
+        "Ensure the user understands any issues flagged in the validation report and has an opportunity to address them."   
+        "If the report status is WARN, confirm whether the user wants to proceed anyway or edit the protocol/dataset first. "
     ),
     "INFERENCE_READY": (
         "Build InferenceReadyState from (DatasetState + ProtocolState + ProtocolStaticValidationState). "
