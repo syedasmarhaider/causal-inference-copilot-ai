@@ -7,12 +7,10 @@ from uuid import UUID, uuid4
 from python.domain.repo.conversation_repo import ConversationRepo
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import LLMService
-from python.domain.service.mcp_client import McpClient
 
 from python.implementation.repo.inmemory_conversation_repo import InMemoryConversationRepo
 from python.implementation.repo.file_data_repo import FileDataRepo
 from python.implementation.service.gemini_llm_service import GeminiLLMService
-from python.implementation.service.http_mcp_client import HttpMcpClient
 
 from python.workflows.graph.simple_flow_entry import SimpleWorkflow, WorkflowConfig
 
@@ -111,17 +109,14 @@ def wire_llm() -> LLMService:
     return GeminiLLMService()
 
 
-def wire_mcp() -> McpClient:
-    return HttpMcpClient(endpoint="http://127.0.0.1:8765/mcp")
-
 
 # =============================================================================
 # Main console
 # =============================================================================
-def run_console(*, repo: ConversationRepo, data_repo: DataRepo, llm: LLMService, mcp: McpClient) -> None:
+def run_console(*, repo: ConversationRepo, data_repo: DataRepo, llm: LLMService) -> None:
     logging.basicConfig(level=logging.INFO)
 
-    cfg = WorkflowConfig(data_repo=data_repo, llm=llm, mcp=mcp)
+    cfg = WorkflowConfig(data_repo=data_repo, llm=llm)
     workflow = SimpleWorkflow(repo=repo, cfg=cfg)
     adapter = ConsoleAdapter(workflow=workflow, repo=repo)
 
@@ -178,5 +173,4 @@ if __name__ == "__main__":
         repo=wire_repo(),
         data_repo=wire_data_repo(),
         llm=wire_llm(),
-        mcp=wire_mcp(),
     )
