@@ -57,7 +57,7 @@ The Makefile provides shortcuts for maintaining code quality.
 | **Format**       | `make format`     | Check formatting.            |
 | **Format (Fix)** | `make format-fix` | Auto-format code with Black. |
 
-### Testing
+### Testing (Not active for now)
 
 | Action         | Command           | Description                          |
 | :------------- | :---------------- | :----------------------------------- |
@@ -83,3 +83,12 @@ make run-cli ARGS="--help"
 # Run with parameters
 make run-cli ARGS="--dataset ./data/sample.csv --treatment T --outcome Y"
 ```
+
+
+## 🖥 Usage: API
+
+In order to run it with frontend we have to run api 
+
+**Entrypoint:** `python.adapters.api.app`
+
+To run the CLI, use `make run-api`. default port is 8000 but you can change it in Makefile
