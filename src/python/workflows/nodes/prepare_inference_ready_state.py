@@ -218,7 +218,6 @@ def make_prepare_inference_ready_node(
         # Assemble InferenceReadyState
         # ----------------------------
         inference_ready: InferenceReadyState = {
-            "source_dataset_id":  dataset_id,
             "protocol": protocol,
             "treatment": treatment,
             "outcome": outcome,

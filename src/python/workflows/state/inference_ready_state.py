@@ -205,8 +205,6 @@ class PreparedDatasetArtifact(TypedDict):
 # Inference-ready state (metadata only)
 # -------------------------
 class InferenceReadyState(TypedDict):
-    # lineage
-    source_dataset_id: UUID
     prepared: NotRequired[PreparedDatasetArtifact]  # present only if READY
 
     # snapshot of protocol used (for auditability)
