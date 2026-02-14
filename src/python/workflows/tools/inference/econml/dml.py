@@ -6,9 +6,9 @@ from uuid import UUID, uuid4
 
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.linear_model import ElasticNet, Lasso, LogisticRegression
-from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression
-from econml.dml import DML 
+from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRegression
+from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression # pyright: ignore[reportMissingTypeStubs]
+from econml.dml import DML  # pyright: ignore[reportMissingTypeStubs]
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
@@ -88,8 +88,6 @@ class EconMLDMLAdapter:
                     {"path": "options.init.cv", "prompt": "Cross-fitting folds", "default": 2},
                     {"path": "options.fit.inference", "prompt": "Inference for intervals", "choices": ["auto", "bootstrap", None], "default": "auto"},
                     {"path": "options.feature_set_key", "prompt": "Which prepared feature set to use", "choices": ["X", "W", "XW", None], "default": None},
-                    # keep any other econml knobs behind an escape hatch if you want:
-                    # {"path": "options.init.<other>", ...}
                 ]
             }
 
@@ -290,7 +288,7 @@ class EconMLDMLAdapter:
         # Here we only pass through provided scalar/arrays if any.
         try:
             est = DML(**init_kwargs)
-            est.fit(Y, T, X=X, W=W, **fit_kwargs)
+            est.fit(Y, T, X=X, W=W, **fit_kwargs) # pyright: ignore[reportUnknownMemberType]
         except Exception as e:
             return CausalResult(status="ERROR", issues=[invalid("fit", f"DML fit failed: {e}")])
 
@@ -317,12 +315,8 @@ class EconMLDMLAdapter:
     # -------------------------
     # EFFECT
     # -------------------------
-    def _effect(self, command: CausalCommand, *, user_id: UUID, conversation_id: UUID, ir: InferenceReadyState) -> CausalResult:
+    def _effect(self, command: CausalCommand, *, user_id: UUID, conversation_id: UUID, ir: InferenceReadyState, model_id: UUID) -> CausalResult:
         opts = command.options or {}
-        model_id = cast(Optional[UUID], opts.get("model_id"))
-        if model_id is None:
-            return CausalResult(status="NEEDS_INPUT", issues=[need("options.model_id", "model_id is required", required=["options.model_id"])])
-
         rec = self.models_repo.load_model(user_id=user_id, conversation_id=conversation_id, model_id=model_id)
         if rec is None:
             return CausalResult(status="INVALID", issues=[invalid("options.model_id", f"Model not found: {model_id}")])
