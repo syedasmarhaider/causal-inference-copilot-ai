@@ -354,7 +354,7 @@ def _llm_parse_user_message(
     confirm_any: Any = parsed.get("confirm")
     assistant_message_any: Any = parsed.get("assistant_message")
 
-    params_patch: Dict[str, Any] = params_patch_any if isinstance(params_patch_any, dict) else {}
+    params_patch: Dict[str, Any] = params_patch_any if isinstance(params_patch_any, dict) else {} # pyright: ignore[reportUnknownVariableType]
     confirm: bool = confirm_any if isinstance(confirm_any, bool) else False
     assistant_message: str = assistant_message_any if isinstance(assistant_message_any, str) else ""
 
@@ -389,7 +389,7 @@ def _parse_json_object(raw: Any) -> Optional[Dict[str, Any]]:
         return None
     try:
         out: Any = json.loads(s)
-        return out if isinstance(out, dict) else None
+        return out 
     except Exception:
         return None
 
@@ -399,9 +399,6 @@ def _parse_json_object(raw: Any) -> Optional[Dict[str, Any]]:
 # (keep your semantics; just ensure they exist here)
 # -------------------------
 def _validate_patch_against_requirements(patch: Dict[str, Any], req: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
-    if not isinstance(patch, dict):
-        return False, "params_patch must be an object."
-
     allowed_init_keys, allowed_fit_keys, feature_choices, knob_choice_map = _extract_allowed(req)
 
     allowed_top: set[str] = {"init", "fit", "feature_set_key"}
@@ -413,7 +410,7 @@ def _validate_patch_against_requirements(patch: Dict[str, Any], req: Dict[str, A
     if init_any is not None:
         if not isinstance(init_any, dict):
             return False, "init must be an object."
-        for k, v in init_any.items():
+        for k, v in init_any.items(): # pyright: ignore[reportUnknownVariableType]
             if k not in allowed_init_keys:
                 return False, f"Unsupported init knob '{k}'. Supported: {sorted(allowed_init_keys)}"
             ok, reason = _validate_value_against_choices(
@@ -428,7 +425,7 @@ def _validate_patch_against_requirements(patch: Dict[str, Any], req: Dict[str, A
     if fit_any is not None:
         if not isinstance(fit_any, dict):
             return False, "fit must be an object."
-        for k, v in fit_any.items():
+        for k, v in fit_any.items(): # pyright: ignore[reportUnknownVariableType]
             if k not in allowed_fit_keys:
                 return False, f"Unsupported fit knob '{k}'. Supported: {sorted(allowed_fit_keys)}"
             ok, reason = _validate_value_against_choices(
@@ -459,16 +456,16 @@ def _extract_allowed(
     for key in ("required_user", "optional_user"):
         v_any: Any = req.get(key)
         if isinstance(v_any, list):
-            items.extend(v_any)
+            items.extend(v_any) # pyright: ignore[reportUnknownArgumentType]
 
     for it in items:
         if not isinstance(it, dict):
             continue
-        path_any: Any = it.get("path")
+        path_any: Any = it.get("path") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
         if not isinstance(path_any, str):
             continue
 
-        choices_any: Any = it.get("choices")
+        choices_any: Any = it.get("choices") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
         choice_map[path_any] = choices_any if isinstance(choices_any, list) else None
 
         if path_any.startswith("options.init."):
@@ -476,7 +473,7 @@ def _extract_allowed(
         elif path_any.startswith("options.fit."):
             allowed_fit.add(path_any[len("options.fit.") :])
         elif path_any == "options.feature_set_key" and isinstance(choices_any, list):
-            feature_choices = choices_any
+            feature_choices = choices_any # pyright: ignore[reportUnknownVariableType]
 
     return allowed_init, allowed_fit, feature_choices, choice_map
 
@@ -492,7 +489,7 @@ def _validate_value_against_choices(
         return True, None
 
     # estimator spec: {"name": "...", "kwargs": {...}}
-    if isinstance(value, dict) and isinstance(value.get("name"), str):
+    if isinstance(value, dict) and isinstance(value.get("name"), str): # pyright: ignore[reportUnknownMemberType]
         name = cast(str, value["name"])
         if name not in choices:
             return False, f"'{path}': unsupported estimator '{name}'. Supported: {choices}"
@@ -508,17 +505,17 @@ def _apply_defaults_in_place(params: Dict[str, Any], req: Dict[str, Any]) -> Non
     for key in ("required_user", "optional_user"):
         v_any: Any = req.get(key)
         if isinstance(v_any, list):
-            items.extend(v_any)
+            items.extend(v_any) # pyright: ignore[reportUnknownArgumentType]
 
     for it in items:
         if not isinstance(it, dict):
             continue
-        path_any: Any = it.get("path")
+        path_any: Any = it.get("path") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
         if not isinstance(path_any, str):
             continue
         if "default" not in it:
             continue
-        _set_default_by_path(params, path_any, it.get("default"))
+        _set_default_by_path(params, path_any, it.get("default")) # pyright: ignore[reportUnknownMemberType]
 
 
 def _set_default_by_path(params: Dict[str, Any], path: str, default: Any) -> None:
@@ -534,9 +531,9 @@ def _set_default_by_path(params: Dict[str, Any], path: str, default: Any) -> Non
     for p in parts[:-1]:
         if not isinstance(cur, dict):
             return
-        if p not in cur or not isinstance(cur.get(p), dict):
+        if p not in cur or not isinstance(cur.get(p), dict): # pyright: ignore[reportUnknownMemberType]
             cur[p] = {}
-        cur = cur[p]
+        cur = cur[p] # pyright: ignore[reportUnknownVariableType]
 
     leaf = parts[-1]
     if isinstance(cur, dict) and leaf not in cur:
@@ -548,7 +545,7 @@ def _deep_merge_in_place(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
         if isinstance(v, dict):
             dst_any: Any = dst.get(k)
             if isinstance(dst_any, dict):
-                _deep_merge_in_place(cast(Dict[str, Any], dst_any), v)
+                _deep_merge_in_place(cast(Dict[str, Any], dst_any), v) # pyright: ignore[reportUnknownArgumentType]
             else:
                 dst[k] = v
         else:
