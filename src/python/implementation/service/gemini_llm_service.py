@@ -4,8 +4,10 @@ from collections.abc import Mapping, Sequence
 import logging
 from typing import Any, cast
 import os
+import time  # Added for backoff
 
 import google.generativeai as _genai
+from google.api_core import exceptions as google_exceptions  # Added to catch specific errors
 
 from python.domain.service.llm_service import (
     LLMService,
@@ -71,14 +73,47 @@ class GeminiLLMService(LLMService):
         
         generation_config = self._build_generation_config(config)
 
-        response = gen_model.generate_content(
-            history_content,
-            generation_config=generation_config,
-        )
-        
-        logging.warning(f"-----GeminiLLMService.generate responeded-----\n")
+        max_retries = 1
+        last_exception = None
 
-        return self._to_llm_response(response, model_name)
+        for attempt in range(max_retries + 1):
+            try:
+                response = gen_model.generate_content(
+                    history_content,
+                    generation_config=generation_config,
+                    request_options={"timeout": 300}
+                )
+                
+                logging.warning(f"-----GeminiLLMService.generate responeded-----\n")
+                return self._to_llm_response(response, model_name)
+
+            except google_exceptions.ResourceExhausted as e:
+                # Handle 429 Too Many Requests
+                logging.warning(f"Gemini 429 Rate Limit encountered. Attempt {attempt + 1}/{max_retries + 1}. Retrying...")
+                last_exception = e
+                if attempt < max_retries:
+                    time.sleep(2 * (attempt + 1))  # Backoff: 2s, then 4s...
+                    continue
+                
+            except (google_exceptions.DeadlineExceeded, google_exceptions.ServiceUnavailable) as e:
+                # Handle 499 (Client Closed/Timeout) or 503 (Service Unavailable)
+                logging.warning(f"Gemini Connection/Timeout error ({type(e).__name__}). Attempt {attempt + 1}/{max_retries + 1}. Retrying...")
+                last_exception = e
+                if attempt < max_retries:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+            
+            except Exception as e:
+                # Catch-all for other unrecoverable errors
+                logging.error(f"Gemini unrecoverable error: {e}")
+                raise e
+
+        # If we exhausted retries, raise the last exception
+        if last_exception:
+            raise last_exception
+        
+        # Should not be reachable, but acts as a fallback return
+        raise RuntimeError("Gemini generation failed after retries.")
 
     # ------------- helpers -------------
 
