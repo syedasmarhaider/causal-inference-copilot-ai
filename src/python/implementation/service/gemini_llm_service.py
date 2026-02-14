@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import logging
 from typing import Any, cast
 import os
 
@@ -52,6 +53,8 @@ class GeminiLLMService(LLMService):
         config: LLMConfig,
         history: Sequence[ChatMessage] | None = None,
     ) -> LLMResponse:
+        logging.warning(f"-----GeminiLLMService.generate called-----\n")
+        
         model_name = config.model or self._default_model
         history_content = self._build_contents(history) if history else []
         history_content.append(
@@ -72,6 +75,8 @@ class GeminiLLMService(LLMService):
             history_content,
             generation_config=generation_config,
         )
+        
+        logging.warning(f"-----GeminiLLMService.generate responeded-----\n")
 
         return self._to_llm_response(response, model_name)
 
