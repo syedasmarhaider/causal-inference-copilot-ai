@@ -10,11 +10,13 @@ from langchain_core.messages import  HumanMessage
 
 from python.domain.repo.conversation_repo import ConversationRepo
 from python.domain.repo.data_repo import DataRepo
+from python.domain.repo.models_repo import ModelsRepo
 from python.domain.service.llm_service import LLMService
 from python.workflows.graph.simple_flow_router import WorkflowRouter
 from python.workflows.nodes.compile_protocol_state import make_compile_protocol_state_node
 from python.workflows.nodes.compile_protocol_state import make_compile_protocol_state_node
 from python.workflows.nodes.load_dataset import make_load_dataset_node
+from python.workflows.nodes.model_params_fit_discussion_node import make_model_params_fit_discussion_node
 from python.workflows.nodes.model_selection_discussion_node import make_model_selection_discussion_node
 from python.workflows.nodes.model_selection_node import make_model_selection_node
 from python.workflows.nodes.prepare_inference_ready_state import make_prepare_inference_ready_node
@@ -24,6 +26,7 @@ from python.workflows.nodes.validate_protocol_static import make_validate_protoc
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState, get_init_conversation_state
 from python.workflows.state.control_state import  Stage, Status
 from python.workflows.state.protocol_state import get_string_protocol_state
+from python.workflows.tools.inference.causal_inference_factory import CausalInferenceFactory
 from python.workflows.utils.types import DEFAULT_MODEL_GEMNI
 
 
@@ -35,6 +38,7 @@ DEFAULT_DATASET_PATH: Final[Path] = Path(
 @dataclass(frozen=True)
 class WorkflowConfig:
     data_repo: DataRepo
+    models_repo: ModelsRepo
     llm: LLMService
     model_name: str = DEFAULT_MODEL_GEMNI
 
@@ -84,6 +88,14 @@ def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
             llm=cfg.llm,
             model_name=cfg.model_name,
             
+        ),
+        "MODEL_PARAMS_FIT_DISCUSSION": make_model_params_fit_discussion_node(
+            llm=cfg.llm,
+            model_name=cfg.model_name,
+            causal_factory = CausalInferenceFactory.create_default(
+              data_repo=cfg.data_repo,
+              models_repo=cfg.models_repo,
+            ),
         ),
         "DONE": _noop,
     }

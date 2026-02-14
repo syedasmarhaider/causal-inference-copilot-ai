@@ -30,7 +30,7 @@ _PROMPTS: Dict[str, Callable[..., str]] = {
 
 
 class _FitStateView(TypedDict):
-    # required view (Pylance-safe)
+    # Pylance-safe “required view”
     params: Dict[str, Any]
     confirmed: bool
 
@@ -70,34 +70,35 @@ def _run(
     model_name: str,
     causal_factory: CausalInferenceFactory,
 ) -> ConversationState:
-    ir: Any | None = state.get("inference_ready")
-    if not ir:
-        msg: str = "Missing inference_ready state."
+    ir_any: Any = state.get("inference_ready")
+    if not ir_any:
+        msg = "Missing inference_ready state."
         ConversationStateHelpers.append_ai_message(state, msg)
         return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NONE"), msg=msg)
 
-    model_state: ModelState | None = cast(Optional[ModelState], state.get("model"))
+    model_state = cast(Optional[ModelState], state.get("model"))
     if model_state is None:
-        msg: str = "ModelState missing. Run MODEL_SELECTION first."
+        msg = "ModelState missing. Run MODEL_SELECTION first."
         ConversationStateHelpers.append_ai_message(state, msg)
         return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NONE"), msg=msg)
 
-    model_fqcn: Optional[str] = model_state.get("selected_model_fqcn")
+    model_fqcn: str | None = model_state.get("selected_model_fqcn")
     if not model_fqcn:
-        msg: str = "No model selected yet. Select a model first."
+        msg = "No model selected yet. Select a model first."
         ConversationStateHelpers.append_ai_message(state, msg)
         return ConversationStateHelpers.set_pending(state=state, action=cast(ACTION, "NEEDS_INPUT"), msg=msg)
 
     inference: CausalInference | None = causal_factory.resolve(model_fqcn)
     if inference is None:
-        msg: str = f"Selected model is not supported by any adapter: reselect the model {model_fqcn}"
+        msg = f"Selected model is not supported by any adapter: reselect the model {model_fqcn}"
         ConversationStateHelpers.append_ai_message(state, msg)
         return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NONE"), msg=msg)
 
-    req:Dict[str, Any]  = inference.get_input_requirements(cmd="FIT", ir=ir)
+    req_any: Any = inference.get_input_requirements(cmd="FIT", ir=ir_any)
+    req: Dict[str, Any] = cast(Dict[str, Any], req_any)
 
     if req.get("status") == "UNSUPPORTED":
-        msg: str = str(
+        msg = str(
             req.get("reason")
             or (
                 f"Unsupported: {model_fqcn} does not support FIT stage. "
@@ -107,7 +108,8 @@ def _run(
         ConversationStateHelpers.append_ai_message(state, msg)
         return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NONE"), msg=msg)
 
-    def _view(
+    # ---------- local helpers ----------
+    def _compose(
         *,
         mode: str,
         user_text: Optional[str],
@@ -136,49 +138,52 @@ def _run(
         ConversationStateHelpers.append_ai_message(state, msg)
         return ConversationStateHelpers.set_done(state=state, action=cast(ACTION, "NONE"), msg=msg)
 
-    # --- fit_state load/init (Pylance-safe via _FitStateView) ---
+    # ---------- fit_state init (Pylance-safe) ----------
     fit_state_any: Any = model_state.get("model_params_fit")
-    is_new_fit_state: bool = not isinstance(fit_state_any, dict)
-
-    if is_new_fit_state:
+    is_new: bool = not isinstance(fit_state_any, dict)
+    if is_new:
         fit_state_any = {"params": {}, "confirmed": False}
         model_state["model_params_fit"] = cast(ModelParamsFitState, fit_state_any)
 
     fit_state: ModelParamsFitState = cast(ModelParamsFitState, fit_state_any)
-    fit_view: _FitStateView = _fit_state_view(fit_state)
+    fit_view: _FitStateView = _fit_state_view(fit_state)  # materializes required keys
 
-    if is_new_fit_state:
+    if is_new:
         _apply_defaults_in_place(fit_view["params"], req)
-        msg: str = _view(
-            mode="INIT",
-            user_text=None,
-            params_patch=None,
-            validation_error=None,
-            current_params=fit_view["params"],
+        return _pending(
+            _compose(
+                mode="INIT",
+                user_text=None,
+                params_patch=None,
+                validation_error=None,
+                current_params=fit_view["params"],
+            )
         )
-        return _pending(msg)
 
-    if fit_view["confirmed"] is True:
-        msg: str = _view(
-            mode="ALREADY_CONFIRMED",
-            user_text=None,
-            params_patch=None,
-            validation_error=None,
-            current_params=fit_view["params"],
+    if fit_view["confirmed"]:
+        return _done(
+            _compose(
+                mode="ALREADY_CONFIRMED",
+                user_text=None,
+                params_patch=None,
+                validation_error=None,
+                current_params=fit_view["params"],
+            )
         )
-        return _done(msg)
 
     user_text: str = (ConversationStateHelpers.last_human_text(state) or "").strip()
     if not user_text:
-        msg: str = _view(
-            mode="REMIND",
-            user_text=None,
-            params_patch=None,
-            validation_error=None,
-            current_params=fit_view["params"],
+        return _pending(
+            _compose(
+                mode="REMIND",
+                user_text=None,
+                params_patch=None,
+                validation_error=None,
+                current_params=fit_view["params"],
+            )
         )
-        return _pending(msg)
 
+    # ---------- parse (LLM) + repair (LLM) ----------
     parse: Optional[_ParseResult] = _llm_parse_user_message(
         llm=llm,
         model_name=model_name,
@@ -189,71 +194,76 @@ def _run(
         user_text=user_text,
     )
     if parse is None:
-        msg: str = _view(
-            mode="PARSE_FAILED",
-            user_text=user_text,
-            params_patch=None,
-            validation_error="Could not parse your message into a valid JSON patch.",
-            current_params=fit_view["params"],
+        return _pending(
+            _compose(
+                mode="PARSE_FAILED",
+                user_text=user_text,
+                params_patch=None,
+                validation_error="Could not parse your message into a valid JSON patch.",
+                current_params=fit_view["params"],
+            )
         )
-        return _pending(msg)
 
-    ok: bool
-    reason: Optional[str]
+    # ---------- validate (deterministic) ----------
     ok, reason = _validate_patch_against_requirements(parse.params_patch, req)
     if not ok:
-        msg: str = _view(
-            mode="INVALID_CHANGE",
-            user_text=user_text,
-            params_patch=parse.params_patch,
-            validation_error=reason or "Unsupported change.",
-            current_params=fit_view["params"],
+        return _pending(
+            _compose(
+                mode="INVALID_CHANGE",
+                user_text=user_text,
+                params_patch=parse.params_patch,
+                validation_error=reason or "Unsupported change.",
+                current_params=fit_view["params"],
+            )
         )
-        return _pending(msg)
 
+    # ---------- apply patch + defaults ----------
     _deep_merge_in_place(fit_view["params"], parse.params_patch)
     _apply_defaults_in_place(fit_view["params"], req)
-    model_state["model_params_fit"] = fit_state
+    model_state["model_params_fit"] = fit_state  # persist
 
-    if parse.confirm is True:
+    if parse.confirm:
         fit_view["confirmed"] = True
         model_state["model_params_fit"] = fit_state
+        return _done(
+            _compose(
+                mode="CONFIRMED",
+                user_text=user_text,
+                params_patch=parse.params_patch,
+                validation_error=None,
+                current_params=fit_view["params"],
+            )
+        )
 
-        msg: str = _view(
-            mode="CONFIRMED",
+    return _pending(
+        _compose(
+            mode="UPDATED",
             user_text=user_text,
             params_patch=parse.params_patch,
             validation_error=None,
             current_params=fit_view["params"],
         )
-        return _done(msg)
-
-    msg: str = _view(
-        mode="UPDATED",
-        user_text=user_text,
-        params_patch=parse.params_patch,
-        validation_error=None,
-        current_params=fit_view["params"],
     )
-    return _pending(msg)
 
 
-# -------------------------
-# FitState "required view" (fixes Pylance NotRequiredAccess)
-# -------------------------
 def _fit_state_view(fit_state: ModelParamsFitState) -> _FitStateView:
+    """
+    Fixes Pylance `NotRequiredAccess` by materializing required keys,
+    then returning a TypedDict that *requires* them.
+    """
     params_any: Any = fit_state.get("params")
     if not isinstance(params_any, dict):
-        fit_state["params"] = {}  # materialize
+        fit_state["params"] = {}
+
     confirmed_any: Any = fit_state.get("confirmed")
     if not isinstance(confirmed_any, bool):
-        fit_state["confirmed"] = False  # materialize
+        fit_state["confirmed"] = False
 
     return cast(_FitStateView, fit_state)
 
 
 # -------------------------
-# LLM helpers (LLMConfig + generate)
+# LLM helpers
 # -------------------------
 def _llm_compose_message(
     *,
@@ -269,18 +279,18 @@ def _llm_compose_message(
     validation_error: Optional[str],
 ) -> str:
     sys_prompt: str = _PROMPTS["compose"]()
-    payload: Dict[str, Any] = _prompt_payload(
-        mode=mode,
-        model_fqcn=model_fqcn,
-        requirements=requirements,
-        current_params=current_params,
-        user_text=user_text,
-        params_patch=params_patch,
-        validation_error=validation_error,
-    )
+    payload: Dict[str, Any] = {
+        "mode": mode,
+        "model_fqcn": model_fqcn,
+        "requirements": requirements,
+        "current_params": current_params,
+        "user_text": user_text,
+        "params_patch": params_patch,
+        "validation_error": validation_error,
+    }
 
     try:
-        out: str = _llm_call_prompt(
+        return _llm_call_text(
             llm=llm,
             model_name=model_name,
             temperature=temperature,
@@ -288,7 +298,6 @@ def _llm_compose_message(
             user_prompt=json.dumps(payload, ensure_ascii=False),
             empty_err="Compose prompt returned empty output.",
         )
-        return out
     except Exception:
         return "Please confirm the defaults or specify what you want to change."
 
@@ -310,7 +319,7 @@ def _llm_parse_user_message(
     )
 
     try:
-        raw: str = _llm_call_prompt(
+        raw: str = _llm_call_text(
             llm=llm,
             model_name=model_name,
             temperature=temperature,
@@ -321,11 +330,12 @@ def _llm_parse_user_message(
     except Exception:
         return None
 
-    parsed: Optional[Dict[str, Any]] = _parse_json_object(raw)
+    parsed = _parse_json_object(raw)
     if parsed is None:
-        repair_prompt: str =  _PROMPTS["repair"](bad_output=str(raw or ""))
+        # Repair prompt must turn any garbage into strict JSON.
+        repair_prompt: str = _PROMPTS["repair"](bad_output=str(raw or ""))
         try:
-            raw2: str = _llm_call_prompt(
+            raw2: str = _llm_call_text(
                 llm=llm,
                 model_name=model_name,
                 temperature=temperature,
@@ -344,18 +354,14 @@ def _llm_parse_user_message(
     confirm_any: Any = parsed.get("confirm")
     assistant_message_any: Any = parsed.get("assistant_message")
 
-    params_patch: Dict[str, Any] = params_patch_any if isinstance(params_patch_any, dict) else {} # pyright: ignore[reportUnknownVariableType]
+    params_patch: Dict[str, Any] = params_patch_any if isinstance(params_patch_any, dict) else {}
     confirm: bool = confirm_any if isinstance(confirm_any, bool) else False
     assistant_message: str = assistant_message_any if isinstance(assistant_message_any, str) else ""
 
-    return _ParseResult(
-        params_patch=params_patch,
-        confirm=confirm,
-        assistant_message=assistant_message,
-    )
+    return _ParseResult(params_patch=params_patch, confirm=confirm, assistant_message=assistant_message)
 
 
-def _llm_call_prompt(
+def _llm_call_text(
     *,
     llm: LLMService,
     model_name: str,
@@ -364,50 +370,17 @@ def _llm_call_prompt(
     user_prompt: str,
     empty_err: str,
 ) -> str:
-    cfg: LLMConfig = LLMConfig(model=model_name, temperature=temperature)
-    raw: str = _llm_text(llm, config=cfg, system_prompt=system_prompt, user_prompt=user_prompt)
-    out: str = (raw or "").strip()
-    if not out:
-        raise ValueError(empty_err)
-    return out
-
-
-def _llm_text(
-    llm: LLMService,
-    *,
-    config: LLMConfig,
-    system_prompt: str,
-    user_prompt: str,
-) -> str:
+    cfg = LLMConfig(model=model_name, temperature=temperature)
     resp_any: Any = llm.generate(
-        config=config,
+        config=cfg,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         history=None,
     )
     content: str = str(getattr(resp_any, "content", "") or "").strip()
+    if not content:
+        raise ValueError(empty_err)
     return content
-
-
-def _prompt_payload(
-    *,
-    mode: str,
-    model_fqcn: str,
-    requirements: Dict[str, Any],
-    current_params: Dict[str, Any],
-    user_text: Optional[str],
-    params_patch: Optional[Dict[str, Any]],
-    validation_error: Optional[str],
-) -> Dict[str, Any]:
-    return {
-        "mode": mode,
-        "model_fqcn": model_fqcn,
-        "requirements": requirements,
-        "current_params": current_params,
-        "user_text": user_text,
-        "params_patch": params_patch,
-        "validation_error": validation_error,
-    }
 
 
 def _parse_json_object(raw: Any) -> Optional[Dict[str, Any]]:
@@ -416,22 +389,19 @@ def _parse_json_object(raw: Any) -> Optional[Dict[str, Any]]:
         return None
     try:
         out: Any = json.loads(s)
-        return out
+        return out if isinstance(out, dict) else None
     except Exception:
         return None
 
 
 # -------------------------
 # Validation / defaults / merge
+# (keep your semantics; just ensure they exist here)
 # -------------------------
 def _validate_patch_against_requirements(patch: Dict[str, Any], req: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     if not isinstance(patch, dict):
         return False, "params_patch must be an object."
 
-    allowed_init_keys: set[str]
-    allowed_fit_keys: set[str]
-    feature_choices: Optional[list[Any]]
-    knob_choice_map: Dict[str, Optional[list[Any]]]
     allowed_init_keys, allowed_fit_keys, feature_choices, knob_choice_map = _extract_allowed(req)
 
     allowed_top: set[str] = {"init", "fit", "feature_set_key"}
@@ -477,6 +447,40 @@ def _validate_patch_against_requirements(patch: Dict[str, Any], req: Dict[str, A
     return True, None
 
 
+def _extract_allowed(
+    req: Dict[str, Any],
+) -> Tuple[set[str], set[str], Optional[list[Any]], Dict[str, Optional[list[Any]]]]:
+    allowed_init: set[str] = set()
+    allowed_fit: set[str] = set()
+    feature_choices: Optional[list[Any]] = None
+    choice_map: Dict[str, Optional[list[Any]]] = {}
+
+    items: list[Any] = []
+    for key in ("required_user", "optional_user"):
+        v_any: Any = req.get(key)
+        if isinstance(v_any, list):
+            items.extend(v_any)
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        path_any: Any = it.get("path")
+        if not isinstance(path_any, str):
+            continue
+
+        choices_any: Any = it.get("choices")
+        choice_map[path_any] = choices_any if isinstance(choices_any, list) else None
+
+        if path_any.startswith("options.init."):
+            allowed_init.add(path_any[len("options.init.") :])
+        elif path_any.startswith("options.fit."):
+            allowed_fit.add(path_any[len("options.fit.") :])
+        elif path_any == "options.feature_set_key" and isinstance(choices_any, list):
+            feature_choices = choices_any
+
+    return allowed_init, allowed_fit, feature_choices, choice_map
+
+
 def _validate_value_against_choices(
     *,
     path: str,
@@ -487,9 +491,9 @@ def _validate_value_against_choices(
     if not choices:
         return True, None
 
-    # Special-case: estimator spec may be {"name": "...", "kwargs": {...}}
+    # estimator spec: {"name": "...", "kwargs": {...}}
     if isinstance(value, dict) and isinstance(value.get("name"), str):
-        name: str = cast(str, value["name"])
+        name = cast(str, value["name"])
         if name not in choices:
             return False, f"'{path}': unsupported estimator '{name}'. Supported: {choices}"
         return True, None
@@ -514,16 +518,15 @@ def _apply_defaults_in_place(params: Dict[str, Any], req: Dict[str, Any]) -> Non
             continue
         if "default" not in it:
             continue
-        default_any: Any = it.get("default")
-        _set_default_by_path(params, path_any, default_any)
+        _set_default_by_path(params, path_any, it.get("default"))
 
 
 def _set_default_by_path(params: Dict[str, Any], path: str, default: Any) -> None:
     if not path.startswith("options."):
         return
 
-    tail: str = path[len("options.") :]
-    parts: list[str] = tail.split(".")
+    tail = path[len("options.") :]
+    parts = tail.split(".")
     if not parts:
         return
 
@@ -535,7 +538,7 @@ def _set_default_by_path(params: Dict[str, Any], path: str, default: Any) -> Non
             cur[p] = {}
         cur = cur[p]
 
-    leaf: str = parts[-1]
+    leaf = parts[-1]
     if isinstance(cur, dict) and leaf not in cur:
         cur[leaf] = default
 

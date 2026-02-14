@@ -6,12 +6,16 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Protocol, cast
+from typing import Any, Dict, Final, Mapping, Optional, Protocol, cast
 from uuid import UUID, uuid4
 
 import joblib  # pyright: ignore[reportMissingTypeStubs]
 
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
+
+DEFAULT_DATASET_PATH: Final[Path] = Path(
+    "./models/"
+).resolve()
 
 
 def _utc_now_iso() -> str:
@@ -77,7 +81,7 @@ def _sha256_file(path: Path) -> str:
 
 @dataclass(frozen=True)
 class FileSystemModelsRepo(ModelsRepo):
-    root_dir: Path
+    root_dir: Path = DEFAULT_DATASET_PATH
 
     def __post_init__(self) -> None:
         # ensure root_dir exists and is a directory

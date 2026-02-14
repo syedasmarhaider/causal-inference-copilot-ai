@@ -14,6 +14,7 @@ Stage = Literal[
     "INFERENCE_READY",
     "MODEL_SELECTION",
     "MODEL_SELECTION_DISCUSSION",
+    "MODEL_PARAMS_FIT_DISCUSSION", 
     "DONE",
 ]
 
@@ -25,8 +26,10 @@ CONTROL_STATE_NEXT_STAGE: Final[Mapping[Stage, Stage]] = {
     "VALIDATE_PROTOCOL_STATIC_DISCUSSION": "INFERENCE_READY",
     "INFERENCE_READY": "MODEL_SELECTION",
     "MODEL_SELECTION": "MODEL_SELECTION_DISCUSSION",
-    "MODEL_SELECTION_DISCUSSION": "DONE",
+    "MODEL_SELECTION_DISCUSSION": "MODEL_PARAMS_FIT_DISCUSSION", 
+    "MODEL_PARAMS_FIT_DISCUSSION": "DONE", 
 }
+
 
 CONTROL_STATE_STAGE_DOC: Final[Mapping[Stage, str]] = {
     "LOAD_DATASET": (
@@ -86,6 +89,15 @@ CONTROL_STATE_STAGE_DOC: Final[Mapping[Stage, str]] = {
         "Termination condition: ModelSelectionDiscussionState.selected_model_fqcn is set to an allowed estimator. "
         "If selected, mark DONE and proceed to DONE stage; otherwise remain PENDING with action_required=NEEDS_INPUT."
     ),
+    "MODEL_PARAMS_FIT_DISCUSSION": (
+        "Run an interactive discussion to set/confirm the estimator FIT parameters (options.* only). "
+        "Use the estimator adapter's get_input_requirements(cmd='FIT', ir=InferenceReadyState) as the "
+        "authoritative source of allowed knobs, choices, and defaults. "
+        "Apply user changes as a JSON patch to model.model_params_fit.params, re-apply defaults, validate "
+        "against requirements, and require explicit confirmation to set model.model_params_fit.confirmed=true. "
+        "If confirmed, proceed to DONE; otherwise remain PENDING with action_required=NEEDS_INPUT."
+    ),
+
     "DONE": (
         "Workflow completed successfully. A valid ProtocolState exists, static validation has passed/warned, "
         "an InferenceReadyState has been produced (or a failure has been recorded), ModelSelectionState contains a "

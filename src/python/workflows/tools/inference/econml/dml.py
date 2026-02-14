@@ -300,8 +300,8 @@ class EconMLDMLInference(CausalInference):
 
         meta: Dict[str, Any] = {
             "estimator_fqcn": DML_FQCN,
-            "prepared_dataset_id": str(ir["prepared"]["dataset_id"]) if ir.get("prepared") else None,
-            "schema_fingerprint": ir["prepared"]["schema_fingerprint"] if ir.get("prepared") else None,
+            "prepared_dataset_id": str(ir["prepared"]["dataset_id"]) if ir.get("prepared") else None, # pyright: ignore[reportTypedDictNotRequiredAccess]
+            "schema_fingerprint": ir["prepared"]["schema_fingerprint"] if ir.get("prepared") else None, # pyright: ignore[reportTypedDictNotRequiredAccess]
             "T_col": ir["T_col"],
             "Y_cols": list(ir["Y_cols"]),
             "X_cols_used": X.columns.tolist() if X is not None else [],
@@ -358,7 +358,7 @@ class EconMLDMLInference(CausalInference):
                         )
                     ],
                 )
-            T0, T1 = effect_opts["T0"], effect_opts["T1"]
+            T0, T1 = effect_opts["T0"], effect_opts["T1"] # pyright: ignore[reportConstantRedefinition]
 
         # Xq is ONLY under options.effect.Xq (never command.inputs)
         Xq: Any = effect_opts.get("Xq")
@@ -413,7 +413,7 @@ class EconMLDMLInference(CausalInference):
                         )
                     ],
                 )
-            T0, T1 = interval_opts["T0"], interval_opts["T1"]
+            T0, T1 = interval_opts["T0"], interval_opts["T1"] # pyright: ignore[reportConstantRedefinition]
 
         # Xq is ONLY under options.interval.Xq (never command.inputs)
         Xq: Any = interval_opts.get("Xq")
