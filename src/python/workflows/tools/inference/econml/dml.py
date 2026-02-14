@@ -2,17 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pandas as pd
+from econml.dml import DML  # pyright: ignore[reportMissingTypeStubs]
+from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression  # pyright: ignore[reportMissingTypeStubs]
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRegression
-from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression # pyright: ignore[reportMissingTypeStubs]
-from econml.dml import DML  # pyright: ignore[reportMissingTypeStubs]
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
 from python.workflows.state.inference_ready_state import InferenceReadyState
+from python.workflows.tools.inference.causal_inference import CausalInference
 from python.workflows.tools.inference.models.causal_command import CausalCommand
 from python.workflows.tools.inference.models.causal_result import CausalResult
 from python.workflows.tools.inference.econml.utils import (
@@ -29,21 +30,16 @@ from python.workflows.tools.inference.econml.utils import (
 
 DML_FQCN = "econml.dml.DML"
 
-# Adapter-local registry (NO global assumptions in shared utils)
 _DML_SUPPORTED: Dict[str, type] = {
-    # linear
     "sklearn.linear_model.LinearRegression": LinearRegression,
     "sklearn.linear_model.Lasso": Lasso,
     "sklearn.linear_model.ElasticNet": ElasticNet,
     "sklearn.linear_model.LogisticRegression": LogisticRegression,
-    # forests
     "sklearn.ensemble.RandomForestRegressor": RandomForestRegressor,
     "sklearn.ensemble.RandomForestClassifier": RandomForestClassifier,
-    # econml linear
     "econml.sklearn_extensions.linear_model.StatsModelsLinearRegression": StatsModelsLinearRegression,
 }
 
-# DML-specific correctness constraint: final stage must be linear
 _DML_LINEAR_FINAL_ALLOWED: set[str] = {
     "sklearn.linear_model.LinearRegression",
     "sklearn.linear_model.Lasso",
@@ -53,26 +49,39 @@ _DML_LINEAR_FINAL_ALLOWED: set[str] = {
 
 
 @dataclass(frozen=True)
-class EconMLDMLAdapter:
+class EconMLDMLInference(CausalInference):
+    """
+    Stateless runtime for EconML DML:
+    - No user_id / conversation_id / model_id / ir in constructor.
+    - All runtime context comes via execute(...).
+    - Negotiation is via get_input_requirements(..., ir=...).
+
+    Contract:
+    - ONLY `options.*` paths are used in requirements and execution.
+    - No `inputs.*` paths anywhere.
+    """
+
     data_repo: DataRepo
     models_repo: ModelsRepo
 
-    # ---------------------------------
-    # minimal capability advertisement
-    # ---------------------------------
-    def get_info(self) -> Dict[str, Any]:
+    # -------------------------
+    # capability advertisement
+    # -------------------------
+    def get_info(self, estimator_fqcn: str) -> Dict[str, Any]:
+        if estimator_fqcn != DML_FQCN:
+            return {"status": "UNSUPPORTED", "estimator_fqcn": estimator_fqcn, "supports_cmds": []}
         return {"estimator_fqcn": DML_FQCN, "supports_cmds": ["FIT", "EFFECT", "INTERVAL"]}
 
-    # ---------------------------------
-    # what the LLM should ask user for
-    # (ONLY knobs; columns come from IR)
-    # ---------------------------------
-    def get_user_input_requirements(self, *, cmd: str, ir: InferenceReadyState) -> Dict[str, Any]:
+    # -------------------------
+    # negotiation contract (knobs only; options.* only)
+    # -------------------------
+    def get_input_requirements(self, *, cmd: str, ir: InferenceReadyState) -> Dict[str, Any]:
         if ir["outcome"]["kind"] == "duration":
-            return {"status": "UNSUPPORTED", "reason": "DML adapter does not support duration outcomes."}
+            return {"status": "UNSUPPORTED", "reason": "DML does not support duration outcomes."}
 
-        nuisance_choices = ["auto", *sorted(_DML_SUPPORTED.keys())]
-        final_choices = sorted(_DML_LINEAR_FINAL_ALLOWED)
+        nuisance_choices: List[Any] = ["auto", *sorted(_DML_SUPPORTED.keys())]
+        final_choices: List[Any] = sorted(_DML_LINEAR_FINAL_ALLOWED)
+        feature_choices: List[Any] = ["X", "W", "XW", None]
 
         if cmd == "FIT":
             return {
@@ -86,55 +95,75 @@ class EconMLDMLAdapter:
                         "default": {"name": "sklearn.linear_model.LinearRegression", "kwargs": {"fit_intercept": False}},
                     },
                     {"path": "options.init.cv", "prompt": "Cross-fitting folds", "default": 2},
-                    {"path": "options.fit.inference", "prompt": "Inference for intervals", "choices": ["auto", "bootstrap", None], "default": "auto"},
-                    {"path": "options.feature_set_key", "prompt": "Which prepared feature set to use", "choices": ["X", "W", "XW", None], "default": None},
+                    {"path": "options.fit.inference", "prompt": "Inference (needed for intervals)", "choices": ["auto", "bootstrap", None], "default": "auto"},
+                    {"path": "options.feature_set_key", "prompt": "Which prepared feature set to use", "choices": feature_choices, "default": None},
                 ]
             }
 
-        if cmd in ("EFFECT", "INTERVAL"):
-            optional_user: List[Dict[str, Any]] = [
-                {"path": "inputs.Xq", "prompt": "Optional query rows Xq (array-like). If omitted, uses prepared X from state."}
-            ]
-            if ir["treatment"]["kind"] != "binary":
-                optional_user += [
-                    {"path": f"options.{cmd.lower()}.T0", "prompt": "Baseline treatment value T0"},
-                    {"path": f"options.{cmd.lower()}.T1", "prompt": "Target treatment value T1"},
+        if cmd == "EFFECT":
+            req: Dict[str, Any] = {
+                "optional_user": [
+                    {"path": "options.effect.Xq", "prompt": "Optional query rows Xq (array-like). If omitted, use prepared X.", "default": None},
+                    {"path": "options.feature_set_key", "prompt": "Which prepared feature set to use", "choices": feature_choices, "default": None},
                 ]
-            if cmd == "INTERVAL":
-                optional_user.append({"path": "options.interval.alpha", "prompt": "alpha", "default": 0.05})
+            }
+            if ir["treatment"]["kind"] != "binary":
+                req["optional_user"] += [
+                    {"path": "options.effect.T0", "prompt": "Baseline treatment value T0", "default": None},
+                    {"path": "options.effect.T1", "prompt": "Target treatment value T1", "default": None},
+                ]
+            return req
 
-            return {"ask_user": [{"path": "options.model_id", "prompt": "model_id"}], "optional_user": optional_user}
+        if cmd == "INTERVAL":
+            req2: Dict[str, Any] = {
+                "optional_user": [
+                    {"path": "options.interval.Xq", "prompt": "Optional query rows Xq (array-like). If omitted, use prepared X.", "default": None},
+                    {"path": "options.interval.alpha", "prompt": "alpha", "default": 0.05},
+                    {"path": "options.feature_set_key", "prompt": "Which prepared feature set to use", "choices": feature_choices, "default": None},
+                ]
+            }
+            if ir["treatment"]["kind"] != "binary":
+                req2["optional_user"] += [
+                    {"path": "options.interval.T0", "prompt": "Baseline treatment value T0", "default": None},
+                    {"path": "options.interval.T1", "prompt": "Target treatment value T1", "default": None},
+                ]
+            return req2
 
         return {"status": "UNSUPPORTED", "reason": f"Unknown cmd: {cmd}"}
 
-    # ---------------------------------
-    # output contract (lean)
-    # ---------------------------------
     def get_output_schema(self, *, cmd: str) -> Dict[str, Any]:
         if cmd == "FIT":
             return {"outputs": {"model_id": "uuid"}}
         if cmd == "EFFECT":
-            return {"outputs": {"effect": "array-like", "T0": "any", "T1": "any"}}
+            return {"outputs": {"effect": "array-like"}}
         if cmd == "INTERVAL":
             return {"outputs": {"lb": "array-like", "ub": "array-like", "alpha": "float"}}
         return {"outputs": {}}
 
-    # ---------------------------------
-    # execution
-    # ---------------------------------
-    def execute(self, command: CausalCommand, *, user_id: UUID, conversation_id: UUID, ir: InferenceReadyState) -> CausalResult:
+    # -------------------------
+    # execution (runtime ctx passed in)
+    # -------------------------
+    def execute(
+        self,
+        command: CausalCommand,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        model_id: UUID,
+        ir: InferenceReadyState,
+    ) -> CausalResult:
         if command.estimator_fqcn != DML_FQCN:
             return CausalResult(status="UNSUPPORTED", issues=[unsupported("estimator_fqcn", f"Unsupported: {command.estimator_fqcn}")])
 
         if ir["outcome"]["kind"] == "duration":
-            return CausalResult(status="UNSUPPORTED", issues=[unsupported("outcome.kind", "Duration outcomes not supported by DML adapter.")])
+            return CausalResult(status="UNSUPPORTED", issues=[unsupported("outcome.kind", "Duration outcomes not supported by DML.")])
 
         if command.cmd == "FIT":
-            return self._fit(command, user_id=user_id, conversation_id=conversation_id, ir=ir)
+            return self._fit(command, user_id=user_id, conversation_id=conversation_id, model_id=model_id, ir=ir)
         if command.cmd == "EFFECT":
-            return self._effect(command, user_id=user_id, conversation_id=conversation_id, ir=ir)
+            return self._effect(command, user_id=user_id, conversation_id=conversation_id, model_id=model_id, ir=ir)
         if command.cmd == "INTERVAL":
-            return self._interval(command, user_id=user_id, conversation_id=conversation_id, ir=ir)
+            return self._interval(command, user_id=user_id, conversation_id=conversation_id, model_id=model_id, ir=ir)
 
         return CausalResult(status="UNSUPPORTED", issues=[unsupported("cmd", f"Unsupported cmd: {command.cmd}")])
 
@@ -152,9 +181,8 @@ class EconMLDMLAdapter:
             limit=None,
         )
 
-    def _choose_feature_set(self, ir: InferenceReadyState, key: Optional[str]) -> tuple[List[str], List[str]]:
+    def _choose_feature_set(self, *, ir: InferenceReadyState, key: Optional[str]) -> tuple[List[str], List[str]]:
         if key is None:
-            # default heuristic
             if ir["X_cols"] and ir["W_cols"]:
                 return ir["X_cols"], ir["W_cols"]
             if ir["X_cols"]:
@@ -162,17 +190,15 @@ class EconMLDMLAdapter:
             if ir["W_cols"]:
                 return [], ir["W_cols"]
             return [], []
-
         if key not in ("X", "W", "XW"):
             raise ValueError("feature_set_key must be one of: X, W, XW")
-
         if key == "X":
             return ir["X_cols"], []
         if key == "W":
             return [], ir["W_cols"]
         return ir["X_cols"], ir["W_cols"]
 
-    def _derive_discrete_flags(self, ir: InferenceReadyState) -> tuple[bool, bool]:
+    def _derive_discrete_flags(self, *, ir: InferenceReadyState) -> tuple[bool, bool]:
         discrete_treatment = ir["treatment"]["kind"] in ("binary", "categorical")
         discrete_outcome = ir["outcome"]["kind"] in ("binary", "categorical")
         return discrete_outcome, discrete_treatment
@@ -180,33 +206,31 @@ class EconMLDMLAdapter:
     # -------------------------
     # FIT
     # -------------------------
-    def _fit(self, command: CausalCommand, *, user_id: UUID, conversation_id: UUID, ir: InferenceReadyState) -> CausalResult:
+    def _fit(
+        self,
+        command: CausalCommand,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        model_id: UUID,
+        ir: InferenceReadyState,
+    ) -> CausalResult:
         try:
             df = self._load_prepared_df(user_id=user_id, conversation_id=conversation_id, ir=ir)
         except Exception as e:
             return CausalResult(status="ERROR", issues=[invalid("prepared.dataset_id", f"Failed to load prepared dataset: {e}")])
 
-        opts = command.options or {}
-        init_raw = cast(Dict[str, Any], opts.get("init") or {})
-        fit_raw = cast(Dict[str, Any], opts.get("fit") or {})
+        opts: Dict[str, Any] =  command.options or {}
+        init_raw: Dict[str, Any] = cast(Dict[str, Any], opts.get("init") or {})
+        fit_raw: Dict[str, Any] = cast(Dict[str, Any], opts.get("fit") or {})
 
         init_allowed = [
-            "model_y",
-            "model_t",
-            "model_final",
-            "featurizer",
-            "treatment_featurizer",
+            "model_y", "model_t", "model_final",
+            "featurizer", "treatment_featurizer",
             "fit_cate_intercept",
-            "discrete_outcome",
-            "discrete_treatment",
-            "categories",
-            "cv",
-            "mc_iters",
-            "mc_agg",
-            "random_state",
-            "allow_missing",
-            "use_ray",
-            "ray_remote_func_options",
+            "discrete_outcome", "discrete_treatment", "categories",
+            "cv", "mc_iters", "mc_agg", "random_state",
+            "allow_missing", "use_ray", "ray_remote_func_options",
         ]
         fit_allowed = ["cache_values", "inference", "sample_weight", "freq_weight", "sample_var", "groups"]
 
@@ -218,51 +242,36 @@ class EconMLDMLAdapter:
         if issues:
             return CausalResult(status="INVALID", issues=issues)
 
-        # Columns come ONLY from IR
+        # Columns ONLY from IR
         try:
             T = resolve_col(df, ir["T_col"], role="T")
 
             ycols = ir["Y_cols"]
             if not ycols:
                 return CausalResult(status="INVALID", issues=[invalid("ir.Y_cols", "Y_cols is empty.")])
-
             Y = resolve_cols(df, ycols, role="Y") if len(ycols) > 1 else resolve_col(df, ycols[0], role="Y")
 
             feature_key = cast(Optional[str], opts.get("feature_set_key"))
-            X_cols, W_cols = self._choose_feature_set(ir, feature_key)
+            X_cols, W_cols = self._choose_feature_set(ir=ir, key=feature_key)
             X = covariates_or_none(df, X_cols)
             W = covariates_or_none(df, W_cols)
         except Exception as e:
-            return CausalResult(status="INVALID", issues=[invalid("state.columns", f"Failed to resolve columns from state: {e}")])
+            return CausalResult(status="INVALID", issues=[invalid("state.columns", f"Failed to resolve columns from IR: {e}")])
 
-        # Defaults derived from IR
-        discrete_outcome, discrete_treatment = self._derive_discrete_flags(ir)
+        # Defaults from IR
+        discrete_outcome, discrete_treatment = self._derive_discrete_flags(ir=ir)
         init_kwargs.setdefault("discrete_outcome", discrete_outcome)
         init_kwargs.setdefault("discrete_treatment", discrete_treatment)
-
         init_kwargs.setdefault("model_y", "auto")
         init_kwargs.setdefault("model_t", "auto")
         init_kwargs.setdefault("model_final", {"name": "sklearn.linear_model.LinearRegression", "kwargs": {"fit_intercept": False}})
         init_kwargs.setdefault("cv", 2)
 
-        # Build estimators (adapter-local registry)
-        model_y, issue = build_from_registry(
-            _DML_SUPPORTED,
-            init_kwargs.get("model_y"),
-            role_path="options.init.model_y",
-            allow_auto=True,
-            default="auto",
-        )
+        model_y, issue = build_from_registry(_DML_SUPPORTED, init_kwargs.get("model_y"), role_path="options.init.model_y", allow_auto=True, default="auto")
         if issue:
             return CausalResult(status="UNSUPPORTED", issues=[issue])
 
-        model_t, issue = build_from_registry(
-            _DML_SUPPORTED,
-            init_kwargs.get("model_t"),
-            role_path="options.init.model_t",
-            allow_auto=True,
-            default="auto",
-        )
+        model_t, issue = build_from_registry(_DML_SUPPORTED, init_kwargs.get("model_t"), role_path="options.init.model_t", allow_auto=True, default="auto")
         if issue:
             return CausalResult(status="UNSUPPORTED", issues=[issue])
 
@@ -272,7 +281,7 @@ class EconMLDMLAdapter:
             role_path="options.init.model_final",
             allow_auto=False,
             default={"name": "sklearn.linear_model.LinearRegression", "kwargs": {"fit_intercept": False}},
-            allow_names=_DML_LINEAR_FINAL_ALLOWED,  # DML-specific rule stays in adapter
+            allow_names=_DML_LINEAR_FINAL_ALLOWED,
         )
         if issue:
             return CausalResult(status="UNSUPPORTED", issues=[issue])
@@ -281,18 +290,14 @@ class EconMLDMLAdapter:
         init_kwargs["model_t"] = model_t
         init_kwargs["model_final"] = model_final
 
-        # Intervals need inference; default enabled
         fit_kwargs.setdefault("inference", "auto")
 
-        # Optional weights/groups: if user gave column names, they should have resolved earlier.
-        # Here we only pass through provided scalar/arrays if any.
         try:
             est = DML(**init_kwargs)
-            est.fit(Y, T, X=X, W=W, **fit_kwargs) # pyright: ignore[reportUnknownMemberType]
+            est.fit(Y, T, X=X, W=W, **fit_kwargs)  # pyright: ignore[reportUnknownMemberType]
         except Exception as e:
             return CausalResult(status="ERROR", issues=[invalid("fit", f"DML fit failed: {e}")])
 
-        model_id = cast(Optional[UUID], opts.get("model_id")) or uuid4()
         meta: Dict[str, Any] = {
             "estimator_fqcn": DML_FQCN,
             "prepared_dataset_id": str(ir["prepared"]["dataset_id"]) if ir.get("prepared") else None,
@@ -306,42 +311,62 @@ class EconMLDMLAdapter:
         }
 
         try:
-            self.models_repo.save_model(user_id=user_id, conversation_id=conversation_id, model_id=model_id, model=est, metadata=meta)
+            self.models_repo.save_model(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                model_id=model_id,
+                model=est,
+                metadata=meta,
+            )
         except Exception as e:
             return CausalResult(status="ERROR", issues=[invalid("models_repo.save_model", f"Persist failed: {e}")])
 
         return CausalResult(status="OK", model_id=model_id, outputs={"model_id": str(model_id)})
 
     # -------------------------
-    # EFFECT
+    # EFFECT (options.* only)
     # -------------------------
-    def _effect(self, command: CausalCommand, *, user_id: UUID, conversation_id: UUID, ir: InferenceReadyState, model_id: UUID) -> CausalResult:
-        opts = command.options or {}
+    def _effect(
+        self,
+        command: CausalCommand,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        model_id: UUID,
+        ir: InferenceReadyState,
+    ) -> CausalResult:
         rec = self.models_repo.load_model(user_id=user_id, conversation_id=conversation_id, model_id=model_id)
         if rec is None:
-            return CausalResult(status="INVALID", issues=[invalid("options.model_id", f"Model not found: {model_id}")])
+            return CausalResult(status="INVALID", issues=[invalid("model_id", f"Model not found: {model_id}")])
 
         est = rec.model
-        effect_opts = cast(Dict[str, Any], opts.get("effect") or {})
+        opts: Dict[str, Any] =  command.options or {}
+        effect_opts: Dict[str, Any] = cast(Dict[str, Any], opts.get("effect") or {})
 
+        # For non-binary treatments EconML needs a contrast (T0 -> T1).
         if ir["treatment"]["kind"] == "binary":
-            T0 = effect_opts.get("T0", 0)
-            T1 = effect_opts.get("T1", 1)
+            T0, T1 = effect_opts.get("T0", 0), effect_opts.get("T1", 1)
         else:
             if "T0" not in effect_opts or "T1" not in effect_opts:
                 return CausalResult(
                     status="NEEDS_INPUT",
-                    issues=[need("options.effect.T0/T1", "T0 and T1 required for non-binary treatment.", required=["options.effect.T0", "options.effect.T1"])],
+                    issues=[
+                        need(
+                            "options.effect.T0",
+                            "Need T0 and T1 for non-binary treatment.",
+                            required=["options.effect.T0", "options.effect.T1"],
+                        )
+                    ],
                 )
             T0, T1 = effect_opts["T0"], effect_opts["T1"]
 
-        Xq = (command.inputs or {}).get("Xq")
+        # Xq is ONLY under options.effect.Xq (never command.inputs)
+        Xq: Any = effect_opts.get("Xq")
         if Xq is None:
-            # fall back to prepared X from IR
             try:
                 df = self._load_prepared_df(user_id=user_id, conversation_id=conversation_id, ir=ir)
                 feature_key = cast(Optional[str], opts.get("feature_set_key"))
-                X_cols, _ = self._choose_feature_set(ir, feature_key)
+                X_cols, _ = self._choose_feature_set(ir=ir, key=feature_key)
                 Xq = covariates_or_none(df, X_cols)
             except Exception:
                 Xq = None
@@ -351,42 +376,52 @@ class EconMLDMLAdapter:
         except Exception as e:
             return CausalResult(status="ERROR", issues=[invalid("effect", f"effect failed: {e}")])
 
-        return CausalResult(status="OK", model_id=model_id, outputs={"effect": json_safe(tau), "T0": json_safe(T0), "T1": json_safe(T1)})
+        return CausalResult(status="OK", model_id=model_id, outputs={"effect": json_safe(tau)})
 
     # -------------------------
-    # INTERVAL
+    # INTERVAL (options.* only)
     # -------------------------
-    def _interval(self, command: CausalCommand, *, user_id: UUID, conversation_id: UUID, ir: InferenceReadyState) -> CausalResult:
-        opts = command.options or {}
-        model_id = cast(Optional[UUID], opts.get("model_id"))
-        if model_id is None:
-            return CausalResult(status="NEEDS_INPUT", issues=[need("options.model_id", "model_id is required", required=["options.model_id"])])
-
+    def _interval(
+        self,
+        command: CausalCommand,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        model_id: UUID,
+        ir: InferenceReadyState,
+    ) -> CausalResult:
         rec = self.models_repo.load_model(user_id=user_id, conversation_id=conversation_id, model_id=model_id)
         if rec is None:
-            return CausalResult(status="INVALID", issues=[invalid("options.model_id", f"Model not found: {model_id}")])
+            return CausalResult(status="INVALID", issues=[invalid("model_id", f"Model not found: {model_id}")])
 
         est = rec.model
-        interval_opts = cast(Dict[str, Any], opts.get("interval") or {})
+        opts: Dict[str, Any] =  command.options or {}
+        interval_opts: Dict[str, Any] = cast(Dict[str, Any], opts.get("interval") or {})
         alpha = float(interval_opts.get("alpha", 0.05))
 
         if ir["treatment"]["kind"] == "binary":
-            T0 = interval_opts.get("T0", 0)
-            T1 = interval_opts.get("T1", 1)
+            T0, T1 = interval_opts.get("T0", 0), interval_opts.get("T1", 1)
         else:
             if "T0" not in interval_opts or "T1" not in interval_opts:
                 return CausalResult(
                     status="NEEDS_INPUT",
-                    issues=[need("options.interval.T0/T1", "T0 and T1 required for non-binary treatment.", required=["options.interval.T0", "options.interval.T1"])],
+                    issues=[
+                        need(
+                            "options.interval.T0",
+                            "Need T0 and T1 for non-binary treatment.",
+                            required=["options.interval.T0", "options.interval.T1"],
+                        )
+                    ],
                 )
             T0, T1 = interval_opts["T0"], interval_opts["T1"]
 
-        Xq = (command.inputs or {}).get("Xq")
+        # Xq is ONLY under options.interval.Xq (never command.inputs)
+        Xq: Any = interval_opts.get("Xq")
         if Xq is None:
             try:
                 df = self._load_prepared_df(user_id=user_id, conversation_id=conversation_id, ir=ir)
                 feature_key = cast(Optional[str], opts.get("feature_set_key"))
-                X_cols, _ = self._choose_feature_set(ir, feature_key)
+                X_cols, _ = self._choose_feature_set(ir=ir, key=feature_key)
                 Xq = covariates_or_none(df, X_cols)
             except Exception:
                 Xq = None
@@ -396,7 +431,13 @@ class EconMLDMLAdapter:
         except Exception as e:
             return CausalResult(
                 status="INVALID",
-                issues=[invalid("interval", f"effect_interval failed: {e}", fix="Re-fit with options.fit.inference='auto' or 'bootstrap' (not None).")],
+                issues=[
+                    invalid(
+                        "interval",
+                        f"effect_interval failed: {e}",
+                        fix="Re-fit with options.fit.inference='auto' or 'bootstrap' (not None).",
+                    )
+                ],
             )
 
         return CausalResult(status="OK", model_id=model_id, outputs={"lb": json_safe(lb), "ub": json_safe(ub), "alpha": alpha})
