@@ -47,10 +47,7 @@ def get_econml_allowed_estimators() -> Tuple[str, ...]:
 # --------------------------------------------------------------------------------------
 
 def get_econml_method_notes_broad() -> str:
-    """
-    Broader, structured notes derived ONLY from the user's pasted EconML documentation excerpt.
-    Do not treat as general causal inference knowledge; treat as the authoritative "library notes".
-    """
+
     return (
         "ECONML METHOD NOTES (authoritative; derived ONLY from the provided EconML doc text;)\n"
         "\n"

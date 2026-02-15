@@ -9,10 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from python.domain.repo.conversation_repo import ConversationRepo
 from python.domain.repo.data_repo import DataRepo
+from python.domain.repo.models_repo import ModelsRepo
 from python.domain.service.llm_service import LLMService
 
 from python.implementation.repo.inmemory_conversation_repo import InMemoryConversationRepo
 from python.implementation.repo.file_data_repo import FileDataRepo
+from python.implementation.repo.models_repo import FileSystemModelsRepo
 from python.implementation.service.gemini_llm_service import GeminiLLMService
 
 from python.workflows.graph.simple_flow_entry import SimpleWorkflow, WorkflowConfig
@@ -32,6 +34,9 @@ def wire_repo() -> ConversationRepo:
 def wire_data_repo() -> DataRepo:
     return FileDataRepo()
 
+def wire_models_repo() -> ModelsRepo:
+    return FileSystemModelsRepo()
+
 def wire_llm() -> LLMService:
     return GeminiLLMService()
 
@@ -50,7 +55,7 @@ logging.basicConfig(level=logging.INFO)
 _repo = wire_repo()
 _data_repo = wire_data_repo()
 _llm = wire_llm()
-_cfg = WorkflowConfig(data_repo=_data_repo, llm=_llm)
+_cfg = WorkflowConfig(data_repo=_data_repo, llm=_llm, models_repo=wire_models_repo())
 _workflow = SimpleWorkflow(repo=_repo, cfg=_cfg)
 
 
@@ -63,7 +68,7 @@ def healthz():
 def create_conversation(req: CreateConversationRequest):
     user_id = req.user_id or uuid4()
     conversation_id = uuid4()
-    # NOTE: no invoke here; just create IDs. First invoke happens via /invoke.
+    logging.warning(f"Creating conversation: user_id={user_id}, conversation_id={conversation_id}")
     return CreateConversationResponse(user_id=user_id, conversation_id=conversation_id)
 
 

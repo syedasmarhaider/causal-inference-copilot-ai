@@ -16,5 +16,5 @@ Rules:
 - If LOAD_FAILED: explain the failure in simple terms and ask the user what to do next.
   (In this prototype, the CSV path is controlled by the app constant, so suggest verifying the file exists
    at the configured path or updating the configured path.)
-Return ONLY the message text. No markdown fences.
+Return ONLY the message text descrbing about data in a nice human way and structure not asking for actions or anything.
 """.strip()

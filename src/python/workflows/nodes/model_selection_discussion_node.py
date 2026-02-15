@@ -17,7 +17,7 @@ from python.workflows.state.conversation_state import (
     ConversationState,
     ConversationStateHelpers,
 )
-from python.workflows.state.model_selection_discussion_state import ModelSelectionDiscussionState
+from python.workflows.state.model_state import ModelState
 
 log = logging.getLogger(__name__)
 
@@ -46,8 +46,8 @@ def _run(
 
     selected_top3 =  ms.get("selected_top3") or []
 
-    mds =  state.get("model_selection_discussion") or ModelSelectionDiscussionState()
-    state["model_selection_discussion"] = mds
+    mds =  state.get("model_state") or ModelState()
+    state["model_state"] = mds
 
     already = (mds.get("selected_model_fqcn") or "").strip()
     if already:
@@ -78,7 +78,7 @@ def _run(
 
         chosen = _resolve_choice_minimal(extracted, selected_top3=selected_top3, allowed=allowed_set)
         if chosen is not None:
-            state["model_selection_discussion"] = ModelSelectionDiscussionState(selected_model_fqcn=chosen)
+            state["model_state"] = ModelState(selected_model_fqcn=chosen)
             msg = f"Model confirmed: {chosen}"
             ConversationStateHelpers.append_ai_message(state=state, content=msg)
             return ConversationStateHelpers.set_done(state=state, action="NONE", msg=msg)

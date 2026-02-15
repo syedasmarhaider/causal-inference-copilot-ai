@@ -6,10 +6,12 @@ from uuid import UUID, uuid4
 
 from python.domain.repo.conversation_repo import ConversationRepo
 from python.domain.repo.data_repo import DataRepo
+from python.domain.repo.models_repo import ModelsRepo
 from python.domain.service.llm_service import LLMService
 
 from python.implementation.repo.inmemory_conversation_repo import InMemoryConversationRepo
 from python.implementation.repo.file_data_repo import FileDataRepo
+from python.implementation.repo.models_repo import FileSystemModelsRepo
 from python.implementation.service.gemini_llm_service import GeminiLLMService
 
 from python.workflows.graph.simple_flow_entry import SimpleWorkflow, WorkflowConfig
@@ -104,6 +106,8 @@ def wire_data_repo() -> DataRepo:
     # file-based dataset access; not a DB
     return FileDataRepo()
 
+def wire_models_repo() -> ModelsRepo:
+    return FileSystemModelsRepo()
 
 def wire_llm() -> LLMService:
     return GeminiLLMService()
@@ -116,7 +120,7 @@ def wire_llm() -> LLMService:
 def run_console(*, repo: ConversationRepo, data_repo: DataRepo, llm: LLMService) -> None:
     logging.basicConfig(level=logging.INFO)
 
-    cfg = WorkflowConfig(data_repo=data_repo, llm=llm)
+    cfg = WorkflowConfig(data_repo=data_repo, llm=llm, models_repo=wire_models_repo())
     workflow = SimpleWorkflow(repo=repo, cfg=cfg)
     adapter = ConsoleAdapter(workflow=workflow, repo=repo)
 

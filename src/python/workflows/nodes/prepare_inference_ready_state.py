@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any,  Dict, List, Literal, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, cast
 from uuid import UUID, uuid4
 
 import pandas as pd
 from pandas.api import types as ptypes
 
-
+from python.domain.repo.data_repo import DataRepo
 from python.workflows.state.control_state import ACTION
-from python.workflows.state.dataset_state import  DatasetStateHelpers
+from python.workflows.state.dataset_state import DatasetStateHelpers
 from python.workflows.state.inference_ready_state import (
     ExclusionApplicationSummary,
     InferenceReadyState,
@@ -34,12 +34,10 @@ from python.workflows.state.protocol_state import (
     DurationOutcomeSpec,
     ExclusionRule,
     OutcomeSpec,
+    ProtocolState,
     TreatmentSpec,
 )
-from python.workflows.state.protocol_state import ProtocolState
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState, ConversationStateHelpers
-from python.domain.repo.data_repo import DataRepo
-
 
 
 # ============================================================
@@ -48,14 +46,10 @@ from python.domain.repo.data_repo import DataRepo
 def make_prepare_inference_ready_node(
     data_repo: DataRepo,
 ) -> CallableNodeFunc:
-
     def node(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
-        # ----------------------------
-        # Preconditions
-        # ----------------------------
-        dataset_state =  state.get("dataset", {})
+        dataset_state = state.get("dataset", {})
         dataset_id = dataset_state.get("id")
-        protocol =  state.get("protocol")
+        protocol = state.get("protocol")
         vstate = state.get("protocol_static_validation")
 
         if dataset_id is None:
@@ -80,12 +74,13 @@ def make_prepare_inference_ready_node(
                 state, cast(ACTION, "NONE"), "Protocol validation failed; inference preparation aborted."
             )
 
-        # PASS or WARN => proceed
         # ----------------------------
         # Load data
         # ----------------------------
         try:
-            df = data_repo.get_csv_data(user_id=user_id, conversation_id=conversation_id, dataset_id=dataset_id, limit=None)
+            df = data_repo.get_csv_data(
+                user_id=user_id, conversation_id=conversation_id, dataset_id=dataset_id, limit=None
+            )
         except Exception as e:
             err = f"Failed to load dataset for inference preparation: {type(e).__name__}: {e}"
             ConversationStateHelpers.append_ai_message(state, err)
@@ -104,16 +99,23 @@ def make_prepare_inference_ready_node(
                 return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), "Could not profile dataset.")
 
         # ----------------------------
-        # Apply exclusions (eligibility)
+        # Apply required NA drop (T/Y) + user exclusions
         # ----------------------------
         try:
-            df_filtered, excl_summary = _apply_exclusions(df, protocol.get("exclusions", []))
+            required_cols = _required_not_null_cols(protocol["treatment_spec"], protocol["outcome_spec"], df)
+            df_filtered, excl_summary = _apply_exclusions(
+                df,
+                protocol.get("exclusions", []),
+                required_not_null_cols=required_cols,
+            )
         except Exception as e:
             err = f"Applying exclusions failed: {type(e).__name__}: {e}"
             ConversationStateHelpers.append_ai_message(state, err)
             return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), "Exclusions application failed.")
 
-        n_rows_after_exclusions = int(df_filtered.shape[0])
+        # We report both steps explicitly
+        n_rows_after_required_drop = int(excl_summary.get("n_after_required_drop", excl_summary["n_before"]))
+        n_rows_after_exclusions = int(excl_summary["n_after"])
 
         # ----------------------------
         # Canonicalize treatment/outcome encodings (best-effort)
@@ -126,11 +128,12 @@ def make_prepare_inference_ready_node(
 
             _apply_treatment_canonicalization(df_prepared, protocol["treatment_spec"])
             _apply_outcome_canonicalization(df_prepared, protocol["outcome_spec"])
-
         except Exception as e:
             err = f"Canonicalization (treatment/outcome mapping) failed: {type(e).__name__}: {e}"
             ConversationStateHelpers.append_ai_message(state, err)
-            return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), "Could not canonicalize treatment/outcome.")
+            return ConversationStateHelpers.set_abort(
+                state, cast(ACTION, "NONE"), "Could not canonicalize treatment/outcome."
+            )
 
         # ----------------------------
         # Build EconML conventions
@@ -138,7 +141,6 @@ def make_prepare_inference_ready_node(
         T_col, Y_cols = _resolve_econml_cols(protocol["treatment_spec"], protocol["outcome_spec"])
         W_cols = _dedupe_preserve_order(protocol.get("covariates", []))
         X_cols = _dedupe_preserve_order(protocol.get("effect_modifiers", []))
-
         feature_sets = _build_feature_sets(W_cols=W_cols, X_cols=X_cols)
 
         # ----------------------------
@@ -147,7 +149,7 @@ def make_prepare_inference_ready_node(
         try:
             prepared_cols = _build_prepared_columns_meta(
                 df_prepared=df_prepared,
-                summary= summary,
+                summary=cast(Dict[str, Dict[str, Any]], summary),
                 treatment_spec=protocol["treatment_spec"],
                 outcome_spec=protocol["outcome_spec"],
                 W_cols=W_cols,
@@ -163,20 +165,18 @@ def make_prepare_inference_ready_node(
         # ----------------------------
         metrics: PreparationMetrics = {
             "n_rows_source": n_rows_source,
+            "n_rows_after_required_drop": n_rows_after_required_drop,
             "n_rows_after_exclusions": n_rows_after_exclusions,
             "n_rows_final": int(df_prepared.shape[0]),
         }
 
-        # binary T counts if applicable
         _fill_treatment_metrics(metrics, df_prepared, protocol["treatment_spec"])
-        # binary/duration event counts if applicable
         _fill_outcome_metrics(metrics, df_prepared, protocol["outcome_spec"])
-
         metrics["max_missing_rate_W"] = _max_missing_rate(prepared_cols, role="W")
         metrics["max_missing_rate_X"] = _max_missing_rate(prepared_cols, role="X")
 
         # ----------------------------
-        # Materialize prepared dataset artifact (best-effort)
+        # Materialize prepared dataset artifact
         # ----------------------------
         prepared_artifact: Optional[PreparedDatasetArtifact] = None
         try:
@@ -205,20 +205,16 @@ def make_prepare_inference_ready_node(
                 "storage_kind": storage_kind,
                 "schema_fingerprint": schema_fingerprint,
                 "row_count": int(df_prepared.shape[0]),
-                "created_from_dataset_id":  dataset_id,
+                "created_from_dataset_id": dataset_id,
             }
         except Exception as e:
-            ConversationStateHelpers.append_ai_message(
-                state,
-                f"could not materialize prepared dataset artifact. {e}"
-            )
+            ConversationStateHelpers.append_ai_message(state, f"could not materialize prepared dataset artifact. {e}")
             return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), f"Inference-ready state prepared.{e}")
 
         # ----------------------------
         # Assemble InferenceReadyState
         # ----------------------------
         inference_ready: InferenceReadyState = {
-            "source_dataset_id":  dataset_id,
             "protocol": protocol,
             "treatment": treatment,
             "outcome": outcome,
@@ -231,14 +227,15 @@ def make_prepare_inference_ready_node(
             "exclusions_summary": excl_summary,
             "metrics": metrics,
         }
-
         inference_ready["prepared"] = prepared_artifact
 
-        # Optional human-readable summary
         inference_ready["summary_text"] = _build_summary_text(
             report_status=cast(str, status),
             n_rows_source=n_rows_source,
+            n_rows_after_required_drop=n_rows_after_required_drop,
+            n_rows_after_exclusions=n_rows_after_exclusions,
             n_rows_final=int(df_prepared.shape[0]),
+            required_not_null_cols=required_cols,
             T_col=T_col,
             Y_cols=Y_cols,
             W_cols=W_cols,
@@ -254,9 +251,229 @@ def make_prepare_inference_ready_node(
 
 
 # ============================================================
-# Helpers
+# Exclusions (required NA drop + user rules)
 # ============================================================
+ExclusionOp = Literal["==", "!=", "in", "not_in", ">=", "<=", ">", "<", "is_null", "not_null"]
 
+
+def _required_not_null_cols(treatment_spec: TreatmentSpec, outcome_spec: OutcomeSpec, df: pd.DataFrame) -> List[str]:
+    cols: List[str] = []
+    tcol = cast(str, treatment_spec["column"])
+    cols.append(tcol)
+
+    if outcome_spec["kind"] == "duration":
+        y = cast(Any, outcome_spec)
+        cols.append(cast(str, y["event_column"]))
+        cols.append(cast(str, y["duration_column"]))
+    else:
+        ycol = cast(str, cast(Any, outcome_spec)["column"])
+        cols.append(ycol)
+
+    # ensure exist; protocol should already be validated, but fail loudly if not
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Required treatment/outcome columns missing in dataset: {missing}")
+
+    # dedupe preserve order
+    seen: set[str] = set()
+    out: List[str] = []
+    for c in cols:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _apply_exclusions(
+    df: pd.DataFrame,
+    exclusions: List[ExclusionRule],
+    *,
+    required_not_null_cols: List[str],
+) -> Tuple[pd.DataFrame, ExclusionApplicationSummary]:
+    n_before = int(df.shape[0])
+    rules_audit: List[Dict[str, Any]] = []
+
+    out = df
+
+    # (1) ALWAYS drop true-missing in required T/Y columns first
+    before_req = int(out.shape[0])
+    out = out.dropna(subset=required_not_null_cols)
+    after_req = int(out.shape[0])
+    rules_audit.append(
+        {
+            "kind": "AUTO_DROP_REQUIRED_NA",
+            "columns": list(required_not_null_cols),
+            "n_before": before_req,
+            "n_after": after_req,
+            "n_removed": before_req - after_req,
+        }
+    )
+
+    # (2) Apply user exclusions (rows to REMOVE)
+    for r in exclusions or []:
+        col = cast(str, r["column"])
+        op = cast(ExclusionOp, r["op"])
+        vals = cast(List[str], r.get("values", []) or [])
+        reason = cast(str, r.get("reason", ""))
+
+        if col not in out.columns:
+            raise ValueError(f"Exclusion rule references missing column '{col}'.")
+
+        before = int(out.shape[0])
+        mask_keep = _mask_keep_for_rule(out[col], op, vals)
+        out = out.loc[mask_keep].copy(deep=False)
+        after = int(out.shape[0])
+
+        rules_audit.append(
+            {
+                "kind": "USER_RULE",
+                "column": col,
+                "op": op,
+                "values": list(vals),
+                "reason": reason,
+                "n_before": before,
+                "n_after": after,
+                "n_removed": before - after,
+            }
+        )
+
+    summary: Dict[str, Any] = {
+        "n_before": n_before,
+        "n_after_required_drop": after_req,
+        "n_after": int(out.shape[0]),
+        "rules": rules_audit,
+    }
+    return out, cast(ExclusionApplicationSummary, summary)
+
+
+def _mask_keep_for_rule(series: pd.Series, op: ExclusionOp, values: List[str]) -> pd.Series:
+    # Exclusion rule defines rows to REMOVE; keep is the inverse.
+    exclude_mask = _mask_exclude_for_rule(series, op, values)
+    return ~exclude_mask
+
+
+def _mask_exclude_for_rule(series: pd.Series, op: ExclusionOp, values: List[str]) -> pd.Series:
+    s = series
+
+    # Null checks: exclude missing or exclude non-missing
+    if op == "is_null":
+        return s.isna()
+    if op == "not_null":
+        return ~s.isna()
+
+    # For other ops, empty values => exclude nothing
+    cleaned_vals = [str(v) for v in (values or []) if str(v).strip() != ""]
+    if not cleaned_vals and op in ("==", "!=", "in", "not_in"):
+        return pd.Series([False] * len(s), index=s.index)
+
+    coerced_vals = _coerce_values_for_series(s, cleaned_vals)
+
+    if op in ("==", "in"):
+        return s.isin(coerced_vals)
+
+    if op in ("!=", "not_in"):
+        return ~s.isin(coerced_vals)
+
+    # Comparisons: exclude rows matching the comparison predicate
+    if op in (">", ">=", "<", "<="):
+        if not coerced_vals:
+            return pd.Series([False] * len(s), index=s.index)
+
+        x, v0 = _coerce_series_and_scalar_for_comparison(s, coerced_vals[0])
+
+        if op == ">":
+            return x > v0
+        if op == ">=":
+            return x >= v0
+        if op == "<":
+            return x < v0
+        return x <= v0
+
+    raise ValueError(f"Unsupported exclusion op '{op}'.")
+
+
+def _coerce_series_and_scalar_for_comparison(series: pd.Series, v0: Any) -> Tuple[pd.Series, Any]:
+    # numeric columns
+    if ptypes.is_numeric_dtype(series):
+        x = pd.to_numeric(series, errors="coerce")
+        try:
+            return x, float(v0)
+        except Exception:
+            raise ValueError(f"Comparison threshold '{v0}' is not numeric for numeric column '{series.name}'.")
+
+    # datetime columns
+    if ptypes.is_datetime64_any_dtype(series):
+        x = pd.to_datetime(series, errors="coerce")
+        v = pd.to_datetime(v0, errors="coerce")
+        if pd.isna(v):
+            raise ValueError(f"Comparison threshold '{v0}' is not a valid datetime for column '{series.name}'.")
+        return x, v
+
+    # object columns: best-effort numeric coercion (common case)
+    x_num = pd.to_numeric(series, errors="coerce")
+    if int(x_num.notna().sum()) > 0:
+        try:
+            return x_num, float(v0)
+        except Exception:
+            raise ValueError(f"Comparison threshold '{v0}' is not numeric for column '{series.name}'.")
+
+    # object columns: best-effort datetime coercion
+    x_dt = pd.to_datetime(series, errors="coerce")
+    if int(x_dt.notna().sum()) > 0:
+        v = pd.to_datetime(v0, errors="coerce")
+        if pd.isna(v):
+            raise ValueError(f"Comparison threshold '{v0}' is not a valid datetime for column '{series.name}'.")
+        return x_dt, v
+
+    raise ValueError(
+        f"Cannot apply comparison operator on non-numeric/non-datetime column '{series.name}' (dtype={series.dtype})."
+    )
+
+
+def _coerce_values_for_series(series: pd.Series, values: List[str]) -> List[Any]:
+    if not values:
+        return []
+
+    # numeric
+    if ptypes.is_numeric_dtype(series):
+        out: List[Any] = []
+        for v in values:
+            try:
+                out.append(float(v))
+            except Exception:
+                out.append(str(v))
+        return out
+
+    # datetime-like
+    if ptypes.is_datetime64_any_dtype(series):
+        out_dt: List[Any] = []
+        for v in values:
+            try:
+                out_dt.append(pd.to_datetime(v))
+            except Exception:
+                out_dt.append(str(v))
+        return out_dt
+
+    # boolean-like
+    if ptypes.is_bool_dtype(series):
+        out_b: List[Any] = []
+        for v in values:
+            vv = str(v).strip().lower()
+            if vv in ("true", "1", "yes", "y"):
+                out_b.append(True)
+            elif vv in ("false", "0", "no", "n"):
+                out_b.append(False)
+            else:
+                out_b.append(str(v))
+        return out_b
+
+    # default string
+    return [str(v) for v in values]
+
+
+# ============================================================
+# Remaining helpers (unchanged except summary_text signature)
+# ============================================================
 def _dedupe_preserve_order(cols: Sequence[str]) -> List[str]:
     seen: set[str] = set()
     out: List[str] = []
@@ -275,167 +492,50 @@ def _build_feature_sets(*, W_cols: List[str], X_cols: List[str]) -> Dict[str, Li
 
 
 def _resolve_econml_cols(treatment_spec: TreatmentSpec, outcome_spec: OutcomeSpec) -> Tuple[str, List[str]]:
-    T_col = treatment_spec["column"]
+    T_col = cast(str, treatment_spec["column"])
 
     if outcome_spec["kind"] == "duration":
-        y =  outcome_spec
-        # convention: [event, duration]
-        return T_col, [y["event_column"], y["duration_column"]]
+        y = cast(Any, outcome_spec)
+        return T_col, [cast(str, y["event_column"]), cast(str, y["duration_column"])]
 
-    # all other outcomes are single-column
-    return T_col, [cast(Any, outcome_spec)["column"]]
-
-
-def _apply_exclusions(df: pd.DataFrame, exclusions: List[ExclusionRule]) -> Tuple[pd.DataFrame, ExclusionApplicationSummary]:
-    n_before = int(df.shape[0])
-    rules_audit: List[Dict[str, Any]] = []
-
-    out = df
-    for r in exclusions or []:
-        col = r["column"]
-        op = r["op"]
-        vals = r.get("values", []) or []
-        reason = r.get("reason", "")
-
-        if col not in out.columns:
-            raise ValueError(f"Exclusion rule references missing column '{col}'.")
-
-        before = int(out.shape[0])
-        mask_keep = _mask_keep_for_rule(out[col], op, vals)
-        out = out.loc[mask_keep].copy(deep=False)
-        after = int(out.shape[0])
-
-        rules_audit.append(
-            {
-                "column": col,
-                "op": op,
-                "values": list(vals),
-                "reason": reason,
-                "n_before": before,
-                "n_after": after,
-                "n_removed": before - after,
-            }
-        )
-
-    return out, {"n_before": n_before, "n_after": int(out.shape[0]), "rules": rules_audit}
-
-
-def _mask_keep_for_rule(series: pd.Series, op: str, values: List[str]) -> pd.Series:
-    s = series
-    # null checks do not need values
-    if op == "is_null":
-        return s.isna()
-    if op == "not_null":
-        return ~s.isna()
-
-    coerced_vals = _coerce_values_for_series(s, values)
-
-    if op == "==":
-        return ~s.isin(coerced_vals) if len(coerced_vals) > 0 else pd.Series([True] * len(s), index=s.index)
-    if op == "!=":
-        return s.isin(coerced_vals) if len(coerced_vals) > 0 else pd.Series([True] * len(s), index=s.index)
-    if op == "in":
-        return ~s.isin(coerced_vals)
-    if op == "not_in":
-        return s.isin(coerced_vals)
-
-    # comparisons: use first value
-    if op in (">", ">=", "<", "<="):
-        if not coerced_vals:
-            return pd.Series([True] * len(s), index=s.index)
-        v0 = coerced_vals[0]
-        # For comparisons, define "keep" as NOT matching the exclusion condition.
-        if op == ">":
-            return ~(s > v0)
-        if op == ">=":
-            return ~(s >= v0)
-        if op == "<":
-            return ~(s < v0)
-        if op == "<=":
-            return ~(s <= v0)
-
-    raise ValueError(f"Unsupported exclusion op '{op}'.")
-
-
-def _coerce_values_for_series(series: pd.Series, values: List[str]) -> List[Any]:
-    vals = [v for v in (values or []) if str(v).strip() != ""]
-    if not vals:
-        return []
-
-    # numeric
-    if ptypes.is_numeric_dtype(series):
-        out: List[Any] = []
-        for v in vals:
-            try:
-                out.append(float(v))
-            except Exception:
-                # fallback to string comparison if numeric cast fails
-                out.append(str(v))
-        return out
-
-    # datetime-like
-    if ptypes.is_datetime64_any_dtype(series):
-        out = []
-        for v in vals:
-            try:
-                out.append(pd.to_datetime(v))
-            except Exception:
-                out.append(str(v))
-        return out
-
-    # boolean-like
-    if ptypes.is_bool_dtype(series):
-        out = []
-        for v in vals:
-            vv = str(v).strip().lower()
-            if vv in ("true", "1", "yes", "y"):
-                out.append(True)
-            elif vv in ("false", "0", "no", "n"):
-                out.append(False)
-            else:
-                out.append(str(v))
-        return out
-
-    # default string
-    return [str(v) for v in vals]
+    return T_col, [cast(str, cast(Any, outcome_spec)["column"])]
 
 
 def _build_prepared_treatment(spec: TreatmentSpec, df: pd.DataFrame) -> PreparedTreatment:
     if spec["kind"] == "binary":
-        s =  spec
+        s = cast(Any, spec)
         labels_binary: PreparedBinaryLabels = {
-            "treated": s["treated"],
-            "control": s["control"],
+            "treated": cast(str, s["treated"]),
+            "control": cast(str, s["control"]),
             "value_map": _build_binary_value_map(
-                treated=s["treated"],
-                control=s["control"],
-                treated_aliases=s.get("treated_aliases", []),
-                control_aliases=s.get("control_aliases", []),
+                treated=cast(str, s["treated"]),
+                control=cast(str, s["control"]),
+                treated_aliases=cast(Sequence[str], s.get("treated_aliases", [])),
+                control_aliases=cast(Sequence[str], s.get("control_aliases", [])),
             ),
         }
-        return {"kind": "binary", "column": s["column"], "labels": labels_binary}
+        return {"kind": "binary", "column": cast(str, s["column"]), "labels": labels_binary}
 
     if spec["kind"] == "continuous":
-        s =  spec
+        s = cast(Any, spec)
         numeric: PreparedContinuousMeta = {}
         if "unit" in s:
-            numeric["unit"] = s["unit"]
+            numeric["unit"] = cast(str, s["unit"])
         if "transform" in s:
             numeric["transform"] = cast(Any, s["transform"])
         if "clip_min" in s:
-            numeric["clip_min"] =  s["clip_min"]
+            numeric["clip_min"] = cast(float, s["clip_min"])
         if "clip_max" in s:
-            numeric["clip_max"] =  s["clip_max"]
-        return {"kind": "continuous", "column": s["column"], "numeric": numeric}
+            numeric["clip_max"] = cast(float, s["clip_max"])
+        return {"kind": "continuous", "column": cast(str, s["column"]), "numeric": numeric}
 
-    # categorical
-    s =  spec
-    col = s["column"]
-    baseline = s.get("baseline") or _most_frequent_level(df[col]) if col in df.columns else None
+    s = cast(Any, spec)
+    col = cast(str, s["column"])
+    baseline = s.get("baseline") or (_most_frequent_level(df[col]) if col in df.columns else None)
     labels: PreparedCategoricalLabels = {
-        "levels": list(s["levels"]),
-        "baseline":  baseline if baseline is not None else (s["levels"][0] if s["levels"] else ""),
-        "value_map": {lvl: lvl for lvl in s["levels"]},
+        "levels": list(cast(List[str], s["levels"])),
+        "baseline": cast(str, baseline if baseline is not None else (s["levels"][0] if s["levels"] else "")),
+        "value_map": {lvl: lvl for lvl in cast(List[str], s["levels"])},
     }
     return {"kind": "categorical", "column": col, "labels": labels}
 
@@ -452,8 +552,8 @@ def _build_prepared_outcome(spec: OutcomeSpec, df: pd.DataFrame) -> PreparedOutc
             "value_map": _build_binary_value_map(
                 treated=s["event"],
                 control=s["non_event"],
-                treated_aliases=s.get("event_aliases", []),
-                control_aliases=s.get("non_event_aliases", []),
+                treated_aliases=cast(Sequence[str], s.get("event_aliases", [])),
+                control_aliases=cast(Sequence[str], s.get("non_event_aliases", [])),
             ),
         }
         return {"kind": "binary", "binary": binary}
@@ -462,28 +562,27 @@ def _build_prepared_outcome(spec: OutcomeSpec, df: pd.DataFrame) -> PreparedOutc
         s = cast(ContinuousOutcomeSpec, spec)
         cont: PreparedContinuousOutcome = {"column": s["column"]}
         if "unit" in s:
-            cont["unit"] =  s["unit"]
+            cont["unit"] = s["unit"]
         if "transform" in s:
             cont["transform"] = cast(Any, s["transform"])
         if "clip_min" in s:
-            cont["clip_min"] =  s["clip_min"]
+            cont["clip_min"] = cast(float, s["clip_min"])
         if "clip_max" in s:
-            cont["clip_max"] =  s["clip_max"]
+            cont["clip_max"] = cast(float, s["clip_max"])
         return {"kind": "continuous", "continuous": cont}
 
     if kind == "categorical":
         s = cast(CategoricalOutcomeSpec, spec)
         col = s["column"]
-        baseline = s.get("baseline") or _most_frequent_level(df[col]) if col in df.columns else None
+        baseline = s.get("baseline") or (_most_frequent_level(df[col]) if col in df.columns else None)
         cat: PreparedCategoricalOutcome = {
             "column": col,
             "levels": list(s["levels"]),
-            "baseline":  baseline if baseline is not None else (s["levels"][0] if s["levels"] else ""),
+            "baseline": cast(str, baseline if baseline is not None else (s["levels"][0] if s["levels"] else "")),
             "value_map": {lvl: lvl for lvl in s["levels"]},
         }
         return {"kind": "categorical", "categorical": cat}
 
-    # duration
     s = cast(DurationOutcomeSpec, spec)
     dur: PreparedDurationOutcome = {
         "duration_column": s["duration_column"],
@@ -493,8 +592,8 @@ def _build_prepared_outcome(spec: OutcomeSpec, df: pd.DataFrame) -> PreparedOutc
         "value_map": _build_binary_value_map(
             treated=s["event_value"],
             control=s["censor_value"],
-            treated_aliases=s.get("event_aliases", []),
-            control_aliases=s.get("censor_aliases", []),
+            treated_aliases=cast(Sequence[str], s.get("event_aliases", [])),
+            control_aliases=cast(Sequence[str], s.get("censor_aliases", [])),
         ),
     }
     return {"kind": "duration", "duration": dur}
@@ -508,10 +607,8 @@ def _build_binary_value_map(
     control_aliases: Sequence[str] | None,
 ) -> Dict[str, str]:
     m: Dict[str, str] = {}
-    # canonical
     m[str(treated)] = str(treated)
     m[str(control)] = str(control)
-    # aliases
     for a in (treated_aliases or []):
         m[str(a)] = str(treated)
     for a in (control_aliases or []):
@@ -520,22 +617,19 @@ def _build_binary_value_map(
 
 
 def _apply_treatment_canonicalization(df: pd.DataFrame, spec: TreatmentSpec) -> None:
-    col = spec["column"]
+    col = cast(str, spec["column"])
     if col not in df.columns:
         raise ValueError(f"Treatment column '{col}' not found in dataset.")
 
     if spec["kind"] == "binary":
-        s =  spec
+        s = cast(Any, spec)
         vmap = _build_binary_value_map(
-            treated=s["treated"],
-            control=s["control"],
-            treated_aliases=s.get("treated_aliases", []),
-            control_aliases=s.get("control_aliases", []),
+            treated=cast(str, s["treated"]),
+            control=cast(str, s["control"]),
+            treated_aliases=cast(Sequence[str], s.get("treated_aliases", [])),
+            control_aliases=cast(Sequence[str], s.get("control_aliases", [])),
         )
         df[col] = _map_series_best_effort(df[col], vmap)
-
-    # categorical baseline/levels already constrain; we do not remap unless you add alias support
-    # continuous: no remap
 
 
 def _apply_outcome_canonicalization(df: pd.DataFrame, spec: OutcomeSpec) -> None:
@@ -549,8 +643,8 @@ def _apply_outcome_canonicalization(df: pd.DataFrame, spec: OutcomeSpec) -> None
         vmap = _build_binary_value_map(
             treated=s["event"],
             control=s["non_event"],
-            treated_aliases=s.get("event_aliases", []),
-            control_aliases=s.get("non_event_aliases", []),
+            treated_aliases=cast(Sequence[str], s.get("event_aliases", [])),
+            control_aliases=cast(Sequence[str], s.get("non_event_aliases", [])),
         )
         df[col] = _map_series_best_effort(df[col], vmap)
         return
@@ -563,26 +657,17 @@ def _apply_outcome_canonicalization(df: pd.DataFrame, spec: OutcomeSpec) -> None
         vmap = _build_binary_value_map(
             treated=s["event_value"],
             control=s["censor_value"],
-            treated_aliases=s.get("event_aliases", []),
-            control_aliases=s.get("censor_aliases", []),
+            treated_aliases=cast(Sequence[str], s.get("event_aliases", [])),
+            control_aliases=cast(Sequence[str], s.get("censor_aliases", [])),
         )
         df[ecol] = _map_series_best_effort(df[ecol], vmap)
         return
 
-    # continuous/categorical: no remap by default
-
 
 def _map_series_best_effort(series: pd.Series, value_map: Dict[str, str]) -> pd.Series:
-    """
-    Map values using:
-      - exact key match
-      - fallback to stringified key match
-    Unmapped values remain unchanged.
-    """
     def _map_one(x: Any) -> Any:
         if x is None or (isinstance(x, float) and pd.isna(x)):
             return x
-        # exact
         if x in value_map:  # type: ignore[operator]
             return value_map[cast(str, x)]
         sx = str(x)
@@ -596,7 +681,7 @@ def _map_series_best_effort(series: pd.Series, value_map: Dict[str, str]) -> pd.
 def _most_frequent_level(series: pd.Series) -> Optional[str]:
     try:
         vc = series.value_counts(dropna=True)
-        if  len(vc) == 0:
+        if len(vc) == 0:
             return None
         return str(vc.index[0])
     except Exception:
@@ -613,8 +698,7 @@ def _build_prepared_columns_meta(
     X_cols: List[str],
 ) -> List[PreparedColumnMeta]:
     cols = list(df_prepared.columns)
-
-    tcol = treatment_spec["column"]
+    tcol = cast(str, treatment_spec["column"])
     y_roles = _outcome_roles_map(outcome_spec)
 
     metas: List[PreparedColumnMeta] = []
@@ -622,7 +706,7 @@ def _build_prepared_columns_meta(
         c_str = str(c)
         prof = summary.get(c_str, {})
 
-        role = "other"
+        role: str = "other"
         if c_str == tcol:
             role = "T"
         elif c_str in y_roles:
@@ -639,7 +723,11 @@ def _build_prepared_columns_meta(
         inferred_kind = str(prof.get("inferred_kind") or "").upper()
         encoding = "none"
         if role in ("W", "X"):
-            if inferred_kind in ("CATEGORICAL", "BOOLEAN") or ptypes.is_object_dtype(df_prepared[c]) or ptypes.is_bool_dtype(df_prepared[c]):
+            if (
+                inferred_kind in ("CATEGORICAL", "BOOLEAN")
+                or ptypes.is_object_dtype(df_prepared[c])
+                or ptypes.is_bool_dtype(df_prepared[c])
+            ):
                 encoding = "one_hot"
 
         metas.append(
@@ -659,11 +747,10 @@ def _build_prepared_columns_meta(
 
 def _outcome_roles_map(outcome_spec: OutcomeSpec) -> Dict[str, Literal["Y", "Y_event", "Y_duration"]]:
     if outcome_spec["kind"] == "duration":
-        y =  outcome_spec
-        return {y["event_column"]: "Y_event", y["duration_column"]: "Y_duration"}
-    # single outcome column
-    col = cast(Any, outcome_spec)["column"]
-    return {cast(str, col): "Y"}
+        y = cast(Any, outcome_spec)
+        return {cast(str, y["event_column"]): "Y_event", cast(str, y["duration_column"]): "Y_duration"}
+    col = cast(str, cast(Any, outcome_spec)["column"])
+    return {col: "Y"}
 
 
 def _safe_float(v: Any, *, default: float) -> float:
@@ -706,12 +793,12 @@ def _max_missing_rate(prepared_cols: List[PreparedColumnMeta], *, role: str) -> 
 def _fill_treatment_metrics(metrics: PreparationMetrics, df: pd.DataFrame, spec: TreatmentSpec) -> None:
     if spec["kind"] != "binary":
         return
-    s =  spec
-    col = s["column"]
+    s = cast(Any, spec)
+    col = cast(str, s["column"])
     if col not in df.columns:
         return
-    treated_val = s["treated"]
-    control_val = s["control"]
+    treated_val = cast(str, s["treated"])
+    control_val = cast(str, s["control"])
     try:
         vc = df[col].value_counts(dropna=True)
         n_treated = int(vc.get(treated_val, 0))
@@ -726,7 +813,7 @@ def _fill_treatment_metrics(metrics: PreparationMetrics, df: pd.DataFrame, spec:
 
 def _fill_outcome_metrics(metrics: PreparationMetrics, df: pd.DataFrame, spec: OutcomeSpec) -> None:
     if spec["kind"] == "binary":
-        s = spec
+        s = cast(BinaryOutcomeSpec, spec)
         col = s["column"]
         if col not in df.columns:
             return
@@ -739,7 +826,7 @@ def _fill_outcome_metrics(metrics: PreparationMetrics, df: pd.DataFrame, spec: O
         return
 
     if spec["kind"] == "duration":
-        s =  spec
+        s = cast(DurationOutcomeSpec, spec)
         col = s["event_column"]
         if col not in df.columns:
             return
@@ -761,7 +848,7 @@ def _schema_fingerprint(
     X_cols: List[str],
     exclusions: List[ExclusionRule],
 ) -> str:
-    payload = { # pyright: ignore[reportUnknownVariableType]
+    payload = {
         "cols": [{"name": c, "dtype": str(df[c].dtype)} for c in df.columns],
         "protocol_core": {
             "experiment_type": protocol.get("experiment_type"),
@@ -782,7 +869,10 @@ def _build_summary_text(
     *,
     report_status: str,
     n_rows_source: int,
+    n_rows_after_required_drop: int,
+    n_rows_after_exclusions: int,
     n_rows_final: int,
+    required_not_null_cols: List[str],
     T_col: str,
     Y_cols: List[str],
     W_cols: List[str],
@@ -791,6 +881,8 @@ def _build_summary_text(
 ) -> str:
     return (
         f"Inference-ready prepared ({report_status}). "
-        f"Rows: {n_rows_source} -> {n_rows_final} after exclusions ({exclusions_applied} rule(s)). "
-        f"T={T_col}; Y={Y_cols}; |W|={len(W_cols)}; |X|={len(X_cols)}. "
+        f"Rows: {n_rows_source} -> {n_rows_after_required_drop} after dropping NA in required columns {required_not_null_cols}; "
+        f"-> {n_rows_after_exclusions} after exclusions ({exclusions_applied} rule(s)); "
+        f"-> {n_rows_final} final. "
+        f"T={T_col}; Y={Y_cols}; |W|={len(W_cols)}; |X|={len(X_cols)}."
     )
