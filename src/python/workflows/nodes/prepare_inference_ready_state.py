@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, cast
 from uuid import UUID, uuid4
 
@@ -10,7 +8,7 @@ from pandas.api import types as ptypes
 
 from python.domain.repo.data_repo import DataRepo
 from python.workflows.state.control_state import ACTION
-from python.workflows.state.dataset_state import DatasetStateHelpers
+from python.workflows.state.dataset_state import DatasetState, DatasetStateHelpers
 from python.workflows.state.inference_ready_state import (
     ExclusionApplicationSummary,
     InferenceReadyState,
@@ -21,11 +19,11 @@ from python.workflows.state.inference_ready_state import (
     PreparedColumnMeta,
     PreparedContinuousMeta,
     PreparedContinuousOutcome,
-    PreparedDatasetArtifact,
     PreparedDurationOutcome,
     PreparedOutcome,
     PreparedTreatment,
     PreparationMetrics,
+    get_inference_ready_state_summary,
 )
 from python.workflows.state.protocol_state import (
     BinaryOutcomeSpec,
@@ -34,7 +32,6 @@ from python.workflows.state.protocol_state import (
     DurationOutcomeSpec,
     ExclusionRule,
     OutcomeSpec,
-    ProtocolState,
     TreatmentSpec,
 )
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState, ConversationStateHelpers
@@ -54,24 +51,24 @@ def make_prepare_inference_ready_node(
 
         if dataset_id is None:
             return ConversationStateHelpers.set_abort(
-                state, cast(ACTION, "NONE"), "Dataset id missing; cannot prepare inference."
+                state,  "NONE", "Dataset id missing; cannot prepare inference."
             )
 
         if protocol is None:
             return ConversationStateHelpers.set_abort(
-                state, cast(ACTION, "NONE"), "Protocol missing; discuss the protocol first cannot prepare inference."
+                state,  "NONE", "Protocol missing; discuss the protocol first cannot prepare inference."
             )
 
         report = (vstate or {}).get("report") if vstate else None
         if report is None:
             return ConversationStateHelpers.set_pending(
-                state, cast(ACTION, "NONE"), "Protocol validation report missing; cannot prepare inference."
+                state,  "NONE", "Protocol validation report missing; cannot prepare inference."
             )
 
         status = report.get("status")
         if status == "FAIL":
             return ConversationStateHelpers.set_abort(
-                state, cast(ACTION, "NONE"), "Protocol validation failed; inference preparation aborted."
+                state,  "NONE", "Protocol validation failed; inference preparation aborted."
             )
 
         # ----------------------------
@@ -90,13 +87,9 @@ def make_prepare_inference_ready_node(
 
         summary = dataset_state.get("summary")
         if summary is None:
-            try:
-                summary = DatasetStateHelpers.extract_column_profile(df, strict=True)
-                dataset_state["summary"] = summary
-            except Exception as e:
-                err = f"Dataset profiling failed: {type(e).__name__}: {e}"
-                ConversationStateHelpers.append_ai_message(state, err)
-                return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), "Could not profile dataset.")
+            err = "Dataset summary missing; cannot prepare inference."
+            ConversationStateHelpers.append_ai_message(state, err)
+            return ConversationStateHelpers.set_abort(state,  "NONE", err)
 
         # ----------------------------
         # Apply required NA drop (T/Y) + user exclusions
@@ -114,7 +107,6 @@ def make_prepare_inference_ready_node(
             return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), "Exclusions application failed.")
 
         # We report both steps explicitly
-        n_rows_after_required_drop = int(excl_summary.get("n_after_required_drop", excl_summary["n_before"]))
         n_rows_after_exclusions = int(excl_summary["n_after"])
 
         # ----------------------------
@@ -142,6 +134,8 @@ def make_prepare_inference_ready_node(
         W_cols = _dedupe_preserve_order(protocol.get("covariates", []))
         X_cols = _dedupe_preserve_order(protocol.get("effect_modifiers", []))
         feature_sets = _build_feature_sets(W_cols=W_cols, X_cols=X_cols)
+        
+        
 
         # ----------------------------
         # Build prepared column metadata
@@ -149,7 +143,7 @@ def make_prepare_inference_ready_node(
         try:
             prepared_cols = _build_prepared_columns_meta(
                 df_prepared=df_prepared,
-                summary=cast(Dict[str, Dict[str, Any]], summary),
+                summary=summary,
                 treatment_spec=protocol["treatment_spec"],
                 outcome_spec=protocol["outcome_spec"],
                 W_cols=W_cols,
@@ -165,7 +159,6 @@ def make_prepare_inference_ready_node(
         # ----------------------------
         metrics: PreparationMetrics = {
             "n_rows_source": n_rows_source,
-            "n_rows_after_required_drop": n_rows_after_required_drop,
             "n_rows_after_exclusions": n_rows_after_exclusions,
             "n_rows_final": int(df_prepared.shape[0]),
         }
@@ -178,34 +171,22 @@ def make_prepare_inference_ready_node(
         # ----------------------------
         # Materialize prepared dataset artifact
         # ----------------------------
-        prepared_artifact: Optional[PreparedDatasetArtifact] = None
+        new_dataset_state: Optional[DatasetState] = None
         try:
-            prepared_dataset_id = uuid4()
-            storage_kind: Literal["DATA_REPO_CSV", "DATA_REPO_PARQUET"] = "DATA_REPO_CSV"
+            new_dataset_id = uuid4()
 
             data_repo.save_csv_data(
                 user_id=user_id,
                 conversation_id=conversation_id,
-                dataset_id=prepared_dataset_id,
+                dataset_id=new_dataset_id,
                 df=df_prepared,
             )
+            
+            new_dataset_summary = DatasetStateHelpers.extract_column_profile(df_prepared)
 
-            schema_fingerprint = _schema_fingerprint(
-                df=df_prepared,
-                protocol=protocol,
-                treatment=treatment,
-                outcome=outcome,
-                W_cols=W_cols,
-                X_cols=X_cols,
-                exclusions=protocol.get("exclusions", []),
-            )
-
-            prepared_artifact = {
-                "dataset_id": prepared_dataset_id,
-                "storage_kind": storage_kind,
-                "schema_fingerprint": schema_fingerprint,
-                "row_count": int(df_prepared.shape[0]),
-                "created_from_dataset_id": dataset_id,
+            new_dataset_state = {
+                "id": new_dataset_id,
+                "summary": new_dataset_summary,
             }
         except Exception as e:
             ConversationStateHelpers.append_ai_message(state, f"could not materialize prepared dataset artifact. {e}")
@@ -215,7 +196,7 @@ def make_prepare_inference_ready_node(
         # Assemble InferenceReadyState
         # ----------------------------
         inference_ready: InferenceReadyState = {
-            "protocol": protocol,
+            "prepared_dataset": new_dataset_state,
             "treatment": treatment,
             "outcome": outcome,
             "T_col": T_col,
@@ -226,26 +207,12 @@ def make_prepare_inference_ready_node(
             "prepared_columns": prepared_cols,
             "exclusions_summary": excl_summary,
             "metrics": metrics,
-        }
-        inference_ready["prepared"] = prepared_artifact
-
-        inference_ready["summary_text"] = _build_summary_text(
-            report_status=cast(str, status),
-            n_rows_source=n_rows_source,
-            n_rows_after_required_drop=n_rows_after_required_drop,
-            n_rows_after_exclusions=n_rows_after_exclusions,
-            n_rows_final=int(df_prepared.shape[0]),
-            required_not_null_cols=required_cols,
-            T_col=T_col,
-            Y_cols=Y_cols,
-            W_cols=W_cols,
-            X_cols=X_cols,
-            exclusions_applied=len(protocol.get("exclusions", [])),
-        )
-
+        } 
+    
         state["inference_ready"] = inference_ready
-        ConversationStateHelpers.append_ai_message(state, inference_ready["summary_text"])
-        return ConversationStateHelpers.set_done(state, cast(ACTION, "NONE"), "Inference-ready state prepared.")
+        ready_summary = get_inference_ready_state_summary(inference_ready)
+        ConversationStateHelpers.append_ai_message(state, ready_summary)
+        return ConversationStateHelpers.set_done(state, cast(ACTION, "NONE"), f"Inference-ready state prepared successfully. Summary: {ready_summary}")
 
     return node
 
@@ -258,7 +225,7 @@ ExclusionOp = Literal["==", "!=", "in", "not_in", ">=", "<=", ">", "<", "is_null
 
 def _required_not_null_cols(treatment_spec: TreatmentSpec, outcome_spec: OutcomeSpec, df: pd.DataFrame) -> List[str]:
     cols: List[str] = []
-    tcol = cast(str, treatment_spec["column"])
+    tcol = treatment_spec["column"]
     cols.append(tcol)
 
     if outcome_spec["kind"] == "duration":
@@ -297,7 +264,7 @@ def _apply_exclusions(
 
     # (1) ALWAYS drop true-missing in required T/Y columns first
     before_req = int(out.shape[0])
-    out = out.dropna(subset=required_not_null_cols)
+    out = out.dropna(subset=required_not_null_cols) # pyright: ignore[reportUnknownMemberType]
     after_req = int(out.shape[0])
     rules_audit.append(
         {
@@ -311,10 +278,10 @@ def _apply_exclusions(
 
     # (2) Apply user exclusions (rows to REMOVE)
     for r in exclusions or []:
-        col = cast(str, r["column"])
-        op = cast(ExclusionOp, r["op"])
-        vals = cast(List[str], r.get("values", []) or [])
-        reason = cast(str, r.get("reason", ""))
+        col =  r["column"]
+        op =  r["op"]
+        vals =  r.get("values", []) or []
+        reason =  r.get("reason", "")
 
         if col not in out.columns:
             raise ValueError(f"Exclusion rule references missing column '{col}'.")
@@ -343,6 +310,7 @@ def _apply_exclusions(
         "n_after": int(out.shape[0]),
         "rules": rules_audit,
     }
+    
     return out, cast(ExclusionApplicationSummary, summary)
 
 
@@ -404,10 +372,10 @@ def _coerce_series_and_scalar_for_comparison(series: pd.Series, v0: Any) -> Tupl
     # datetime columns
     if ptypes.is_datetime64_any_dtype(series):
         x = pd.to_datetime(series, errors="coerce")
-        v = pd.to_datetime(v0, errors="coerce")
-        if pd.isna(v):
+        v = pd.to_datetime(v0, errors="coerce") # pyright: ignore[reportUnknownVariableType]
+        if pd.isna(v): # pyright: ignore[reportUnknownArgumentType]
             raise ValueError(f"Comparison threshold '{v0}' is not a valid datetime for column '{series.name}'.")
-        return x, v
+        return x, v # pyright: ignore[reportUnknownVariableType]
 
     # object columns: best-effort numeric coercion (common case)
     x_num = pd.to_numeric(series, errors="coerce")
@@ -420,10 +388,10 @@ def _coerce_series_and_scalar_for_comparison(series: pd.Series, v0: Any) -> Tupl
     # object columns: best-effort datetime coercion
     x_dt = pd.to_datetime(series, errors="coerce")
     if int(x_dt.notna().sum()) > 0:
-        v = pd.to_datetime(v0, errors="coerce")
-        if pd.isna(v):
+        v = pd.to_datetime(v0, errors="coerce") # pyright: ignore[reportUnknownVariableType]
+        if pd.isna(v): # pyright: ignore[reportUnknownArgumentType]
             raise ValueError(f"Comparison threshold '{v0}' is not a valid datetime for column '{series.name}'.")
-        return x_dt, v
+        return x_dt, v # pyright: ignore[reportUnknownVariableType]
 
     raise ValueError(
         f"Cannot apply comparison operator on non-numeric/non-datetime column '{series.name}' (dtype={series.dtype})."
@@ -492,7 +460,7 @@ def _build_feature_sets(*, W_cols: List[str], X_cols: List[str]) -> Dict[str, Li
 
 
 def _resolve_econml_cols(treatment_spec: TreatmentSpec, outcome_spec: OutcomeSpec) -> Tuple[str, List[str]]:
-    T_col = cast(str, treatment_spec["column"])
+    T_col =  treatment_spec["column"]
 
     if outcome_spec["kind"] == "duration":
         y = cast(Any, outcome_spec)
@@ -522,7 +490,7 @@ def _build_prepared_treatment(spec: TreatmentSpec, df: pd.DataFrame) -> Prepared
         if "unit" in s:
             numeric["unit"] = cast(str, s["unit"])
         if "transform" in s:
-            numeric["transform"] = cast(Any, s["transform"])
+            numeric["transform"] =  s["transform"]
         if "clip_min" in s:
             numeric["clip_min"] = cast(float, s["clip_min"])
         if "clip_max" in s:
@@ -534,7 +502,7 @@ def _build_prepared_treatment(spec: TreatmentSpec, df: pd.DataFrame) -> Prepared
     baseline = s.get("baseline") or (_most_frequent_level(df[col]) if col in df.columns else None)
     labels: PreparedCategoricalLabels = {
         "levels": list(cast(List[str], s["levels"])),
-        "baseline": cast(str, baseline if baseline is not None else (s["levels"][0] if s["levels"] else "")),
+        "baseline": baseline if baseline is not None else (s["levels"][0] if s["levels"] else ""),
         "value_map": {lvl: lvl for lvl in cast(List[str], s["levels"])},
     }
     return {"kind": "categorical", "column": col, "labels": labels}
@@ -566,9 +534,9 @@ def _build_prepared_outcome(spec: OutcomeSpec, df: pd.DataFrame) -> PreparedOutc
         if "transform" in s:
             cont["transform"] = cast(Any, s["transform"])
         if "clip_min" in s:
-            cont["clip_min"] = cast(float, s["clip_min"])
+            cont["clip_min"] =  s["clip_min"]
         if "clip_max" in s:
-            cont["clip_max"] = cast(float, s["clip_max"])
+            cont["clip_max"] =  s["clip_max"]
         return {"kind": "continuous", "continuous": cont}
 
     if kind == "categorical":
@@ -578,7 +546,7 @@ def _build_prepared_outcome(spec: OutcomeSpec, df: pd.DataFrame) -> PreparedOutc
         cat: PreparedCategoricalOutcome = {
             "column": col,
             "levels": list(s["levels"]),
-            "baseline": cast(str, baseline if baseline is not None else (s["levels"][0] if s["levels"] else "")),
+            "baseline": baseline if baseline is not None else (s["levels"][0] if s["levels"] else ""),
             "value_map": {lvl: lvl for lvl in s["levels"]},
         }
         return {"kind": "categorical", "categorical": cat}
@@ -617,7 +585,7 @@ def _build_binary_value_map(
 
 
 def _apply_treatment_canonicalization(df: pd.DataFrame, spec: TreatmentSpec) -> None:
-    col = cast(str, spec["column"])
+    col =  spec["column"]
     if col not in df.columns:
         raise ValueError(f"Treatment column '{col}' not found in dataset.")
 
@@ -698,7 +666,7 @@ def _build_prepared_columns_meta(
     X_cols: List[str],
 ) -> List[PreparedColumnMeta]:
     cols = list(df_prepared.columns)
-    tcol = cast(str, treatment_spec["column"])
+    tcol =  treatment_spec["column"]
     y_roles = _outcome_roles_map(outcome_spec)
 
     metas: List[PreparedColumnMeta] = []
@@ -813,7 +781,7 @@ def _fill_treatment_metrics(metrics: PreparationMetrics, df: pd.DataFrame, spec:
 
 def _fill_outcome_metrics(metrics: PreparationMetrics, df: pd.DataFrame, spec: OutcomeSpec) -> None:
     if spec["kind"] == "binary":
-        s = cast(BinaryOutcomeSpec, spec)
+        s =  spec
         col = s["column"]
         if col not in df.columns:
             return
@@ -826,7 +794,7 @@ def _fill_outcome_metrics(metrics: PreparationMetrics, df: pd.DataFrame, spec: O
         return
 
     if spec["kind"] == "duration":
-        s = cast(DurationOutcomeSpec, spec)
+        s =  spec
         col = s["event_column"]
         if col not in df.columns:
             return
@@ -836,53 +804,3 @@ def _fill_outcome_metrics(metrics: PreparationMetrics, df: pd.DataFrame, spec: O
             metrics["n_censor"] = int(vc.get(s["censor_value"], 0))
         except Exception:
             return
-
-
-def _schema_fingerprint(
-    *,
-    df: pd.DataFrame,
-    protocol: ProtocolState,
-    treatment: PreparedTreatment,
-    outcome: PreparedOutcome,
-    W_cols: List[str],
-    X_cols: List[str],
-    exclusions: List[ExclusionRule],
-) -> str:
-    payload = {
-        "cols": [{"name": c, "dtype": str(df[c].dtype)} for c in df.columns],
-        "protocol_core": {
-            "experiment_type": protocol.get("experiment_type"),
-            "time_zero_type": protocol.get("time_zero_type"),
-            "time_zero": protocol.get("time_zero"),
-        },
-        "treatment": treatment,
-        "outcome": outcome,
-        "W_cols": W_cols,
-        "X_cols": X_cols,
-        "exclusions": exclusions,
-    }
-    b = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
-    return hashlib.sha256(b).hexdigest()
-
-
-def _build_summary_text(
-    *,
-    report_status: str,
-    n_rows_source: int,
-    n_rows_after_required_drop: int,
-    n_rows_after_exclusions: int,
-    n_rows_final: int,
-    required_not_null_cols: List[str],
-    T_col: str,
-    Y_cols: List[str],
-    W_cols: List[str],
-    X_cols: List[str],
-    exclusions_applied: int,
-) -> str:
-    return (
-        f"Inference-ready prepared ({report_status}). "
-        f"Rows: {n_rows_source} -> {n_rows_after_required_drop} after dropping NA in required columns {required_not_null_cols}; "
-        f"-> {n_rows_after_exclusions} after exclusions ({exclusions_applied} rule(s)); "
-        f"-> {n_rows_final} final. "
-        f"T={T_col}; Y={Y_cols}; |W|={len(W_cols)}; |X|={len(X_cols)}."
-    )

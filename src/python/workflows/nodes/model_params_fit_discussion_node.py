@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-import logging
 from typing import Any, Callable, Dict, Optional, Tuple, TypedDict, cast
 from uuid import UUID
 
@@ -76,22 +75,13 @@ def _run(
     if not ir:
         msg = "Missing inference_ready state."
         ConversationStateHelpers.append_ai_message(state, msg)
-        return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NONE"), msg=msg)
-    
-    
-    logging.warning("IR prepared: dataset_id=%s, Y_cols=%s, outcome.kind=%s",
-        ir.get("prepared", {}).get("dataset_id"),
-        ir.get("Y_cols"),
-        ir.get("outcome", {}).get("kind"),
-    )
-    logging.warning("IR outcome.kind=%s Y_cols=%s outcome=%s",
-            ir["outcome"]["kind"], ir["Y_cols"], ir["outcome"])
+        return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NEEDS_INPUT"), msg=msg)
 
     model_state: ModelState | None = state.get("model_state")
     if model_state is None:
         msg = "ModelState missing. Run MODEL_SELECTION first."
         ConversationStateHelpers.append_ai_message(state, msg)
-        return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NONE"), msg=msg)
+        return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NEEDS_INPUT"), msg=msg)
 
     model_fqcn: str | None = model_state.get("selected_model_fqcn")
     if not model_fqcn:
@@ -103,7 +93,7 @@ def _run(
     if inference is None:
         msg = f"Selected model is not supported by any adapter: reselect the model {model_fqcn}"
         ConversationStateHelpers.append_ai_message(state, msg)
-        return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NONE"), msg=msg)
+        return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NEEDS_INPUT"), msg=msg)
 
     req_any: Any = inference.get_input_requirements(cmd="FIT", ir=ir)
     req: Dict[str, Any] = cast(Dict[str, Any], req_any)
@@ -117,7 +107,7 @@ def _run(
             )
         )
         ConversationStateHelpers.append_ai_message(state, msg)
-        return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NONE"), msg=msg)
+        return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NEEDS_INPUT"), msg=msg)
 
     # ---------- local helpers ----------
     def _compose(
@@ -147,7 +137,7 @@ def _run(
 
     def _done(msg: str) -> ConversationState:
         ConversationStateHelpers.append_ai_message(state, msg)
-        return ConversationStateHelpers.set_done(state=state, action=cast(ACTION, "NONE"), msg=msg)
+        return ConversationStateHelpers.set_done(state=state, action=cast(ACTION, "NEEDS_INPUT"), msg=msg)
 
     # ---------- fit_state init (Pylance-safe) ----------
     fit_state_any: Any = model_state.get("model_params_fit")

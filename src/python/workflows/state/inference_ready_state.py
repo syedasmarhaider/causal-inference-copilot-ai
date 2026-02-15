@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Final, List, Literal, NotRequired, TypedDict
-from uuid import UUID
 
-from python.workflows.state.protocol_state import ProtocolState
+from python.workflows.state.dataset_state import DatasetState
 
 # ============================================================
 # Inference-ready metadata state (NO raw data stored here)
@@ -190,45 +189,41 @@ class PreparationMetrics(TypedDict, total=False):
     max_missing_rate_X: float
 
 
-# -------------------------
-# Prepared dataset artifact (pointer only)
-# -------------------------
-class PreparedDatasetArtifact(TypedDict):
-    dataset_id: UUID
-    storage_kind: Literal["DATA_REPO_CSV", "DATA_REPO_PARQUET"]
-    schema_fingerprint: str
-    row_count: int
-    created_from_dataset_id: UUID
+
 
 
 # -------------------------
 # Inference-ready state (metadata only)
 # -------------------------
 class InferenceReadyState(TypedDict):
-    prepared: NotRequired[PreparedDatasetArtifact]  # present only if READY
-
-    # snapshot of protocol used (for auditability)
-    protocol: ProtocolState
-
-    # resolved modeling variables
+    prepared_dataset: DatasetState 
     treatment: PreparedTreatment
     outcome: PreparedOutcome
-
-    # econml conventions
+    
     T_col: str
-    Y_cols: List[str]  # [Y] or [Y_event, Y_duration] for duration outcomes
-    W_cols: List[str]  # adjustment covariates
-    X_cols: List[str]  # effect modifiers
-
-    # convenience bundles (must include DEFAULT_FEATURE_SET_KEYS)
+    Y_cols: List[str]  
+    W_cols: List[str] 
+    X_cols: List[str]  
+    
     feature_sets: Dict[str, List[str]]  # {"W":..., "X":..., "XW":...}
 
     prepared_columns: List[PreparedColumnMeta]
     exclusions_summary: ExclusionApplicationSummary
     metrics: PreparationMetrics
-
-    summary_text: NotRequired[str]
     error: NotRequired[str]
 
 
 DEFAULT_FEATURE_SET_KEYS: Final[List[str]] = ["W", "X", "XW"]
+
+
+def get_inference_ready_state_summary(state: InferenceReadyState) -> str:
+    if "error" in state:
+        return f"Inference-ready state has error: {state['error']}"
+
+    treatment_summary = f"Treatment: {state['treatment']['kind']} (column: {state['treatment']['column']})"
+    outcome_summary = f"Outcome: {state['outcome']['kind']} (columns: {', '.join(state['Y_cols'])})"
+    feature_summary = f"Features: W({len(state['W_cols'])}), X({len(state['X_cols'])}), XW({len(state['feature_sets'].get('XW', []))})"
+    exclusion_summary = f"Exclusions applied: {state['exclusions_summary']['n_before']} -> {state['exclusions_summary']['n_after']} rows"
+    metrics_summary = f"Metrics: n_rows_final={state['metrics'].get('n_rows_final', 'N/A')}, treated_share={state['metrics'].get('treated_share', 'N/A'):.2f}"
+
+    return "\n".join([treatment_summary, outcome_summary, feature_summary, exclusion_summary, metrics_summary])

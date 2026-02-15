@@ -48,21 +48,18 @@ def _run(
     ms["allowed_estimators"] = allowed_list
     ms["allowed_estimators_map"] = {fqcn: True for fqcn in allowed_list}
 
-    dataset = state.get("dataset")
-
-    # TODO: filter data summary here
-    dataset_summary = dataset.get("summary")
+    inference_state = state.get("inference_ready")
+    if inference_state is None:
+        msg = "InferenceReadyState missing from state. Run inference-ready stage is required."
+        ConversationStateHelpers.append_ai_message(state=state, content=msg)
+        return ConversationStateHelpers.set_abort(state=state, action="NONE", msg=msg)
+    
+    dataset_summary = inference_state.get("prepared_dataset").get("summary") if inference_state.get("prepared_dataset") else None
     if dataset_summary is None:
-        return _abort(state, ms, "Dataset summary is missing. Reload dataset is required.")
-
-    inference_obj = (
-        state.get("inference_ready_state")
-        or state.get("inference_ready")
-        or state.get("inference")
-        or state.get("inference_ready_state_summary")
-    )
-    if inference_obj is None:
-        return _abort(state, ms, "InferenceReadyState is missing from state. Run inference-ready stage is required.")
+        msg = "Prepared dataset summary is missing from InferenceReadyState. Run inference-ready stage is required."
+        ConversationStateHelpers.append_ai_message(state=state, content=msg)
+        return ConversationStateHelpers.set_abort(state=state, action="NONE", msg=msg)
+    
 
     protocol_obj = state.get("protocol_state") or state.get("protocol") or state.get("protocol_discussion")
     if protocol_obj is None:
@@ -81,7 +78,7 @@ def _run(
         for issue in report.get("issues", [])
     ])
     
-    inference_str = _normalize_to_text(inference_obj)
+    inference_str = _normalize_to_text(inference_state)
     dataset_str = _normalize_to_text(dataset_summary)
     protocol_str = _normalize_to_text(protocol_obj)
     

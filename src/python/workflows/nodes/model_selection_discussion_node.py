@@ -64,7 +64,7 @@ def _run(
         extractor_payload: dict[str, Any] = {
             "allowed_estimators": list(allowed),
             "selected_top3": selected_top3,
-            "last_user_message": json.dumps(chat_history, ensure_ascii=False),
+            "chat_history": json.dumps(chat_history, ensure_ascii=False),
         }
 
         extracted = _llm_call_text(
