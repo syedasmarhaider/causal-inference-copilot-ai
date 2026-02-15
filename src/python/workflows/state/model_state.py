@@ -7,7 +7,7 @@ from typing import Any, Dict, NotRequired
 
 
 class ModelParamsFitState(TypedDict, total=False):
-    params: Dict[str, Any]        # e.g. {"init": {...}, "fit": {...}, "feature_set_key": "XW"}
+    params: Dict[str, Any]      
     confirmed: NotRequired[bool]  # True only after user explicitly confirms
     model_id: NotRequired[str]   # populated after FIT, for reference in EFFECT/INTERVAL commands
 
