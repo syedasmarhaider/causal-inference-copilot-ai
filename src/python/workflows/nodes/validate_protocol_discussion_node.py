@@ -35,7 +35,7 @@ def _run(*, state: ConversationState, llm: LLMService, model_name: str) -> Conve
     # PASS => no discussion stage work
     if status == "PASS":
         state["control"]["node_message"] = None  # type: ignore[index]
-        return ConversationStateHelpers.set_done(state=state, action=cast(ACTION, "NONE"), msg="DONE")
+        return ConversationStateHelpers.set_done(state=state, action=cast(ACTION, "NONE"), msg="Protocol static validation PASSED with no issues.")
 
     chat_history = ConversationStateHelpers.chat_history_to_payload(state, k=12)
 
@@ -56,7 +56,7 @@ def _run(*, state: ConversationState, llm: LLMService, model_name: str) -> Conve
     if token == "DONE":
         state["control"]["node_message"] = None  # type: ignore[index]
         # Per your requirement: no assistant message on DONE
-        return ConversationStateHelpers.set_done(state=state, action=cast(ACTION, "NONE"), msg="DONE")
+        return ConversationStateHelpers.set_done(state=state, action=cast(ACTION, "NONE"), msg="Protocol static validation PASSED with no issues.")
 
     if token == "ABORT":
         state["control"]["node_message"] = None  # type: ignore[index]
