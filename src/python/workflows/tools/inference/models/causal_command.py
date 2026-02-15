@@ -10,7 +10,7 @@ class CausalCommand:
     cmd: CmdType
     estimator_fqcn: str
     dataset_id: UUID
-    inputs: Dict[str, Any]                 # "directory": Y,T,X,W,Z,Xq,...
+    inputs: Dict[str, Any]                 
     options: Dict[str, Any] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType] # init kwargs, inference, etc.
     meta: Dict[str, Any] = field(default_factory=dict)     # pyright: ignore[reportUnknownVariableType] # run_id, schema_fingerprint, provenance
 

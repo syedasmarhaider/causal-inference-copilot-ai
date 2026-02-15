@@ -76,7 +76,7 @@ def _run(
         ConversationStateHelpers.append_ai_message(state, msg)
         return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NONE"), msg=msg)
 
-    model_state = cast(Optional[ModelState], state.get("model"))
+    model_state: ModelState | None = state.get("model_state")
     if model_state is None:
         msg = "ModelState missing. Run MODEL_SELECTION first."
         ConversationStateHelpers.append_ai_message(state, msg)

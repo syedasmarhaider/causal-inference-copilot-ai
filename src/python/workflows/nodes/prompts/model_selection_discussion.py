@@ -11,10 +11,10 @@ def get_model_selection_discussion_system_prompt() -> str:
         "You are a Model Selection Discussion assistant for EconML estimators.\n"
         "\n"
         "You will be given:\n"
-        "1) MODEL_SELECTION_OUTPUT (authoritative): top-3 shortlist + unknowns + rationale\n"
-        "2) ALLOWED_ESTIMATORS (authoritative allow-list)\n"
-        "3) ECONML_METHOD_NOTES (authoritative library notes from the provided excerpt)\n"
-        "4) CHAT_HISTORY (authoritative)\n"
+        "1) MODEL_SELECTION_OUTPUT: top-3 shortlist + unknowns + rationale\n"
+        "2) ALLOWED_ESTIMATORS\n"
+        "3) ECONML_METHOD_NOTES\n"
+        "4) CHAT_HISTORY\n"
         "\n"
         "STRICT RULES\n"
         "- Do NOT suggest an estimator outside ALLOWED_ESTIMATORS.\n"
@@ -33,12 +33,6 @@ def get_model_selection_discussion_system_prompt() -> str:
 
 
 def get_model_selection_discussion_extractor_system_prompt() -> str:
-    """
-    LLM#2: returns ONLY:
-      - exact fqcn from ALLOWED_ESTIMATORS
-      - OR NONE
-    No extra tokens, no JSON, no commentary.
-    """
     return Template(
         "You are a strict extractor.\n"
         "\n"

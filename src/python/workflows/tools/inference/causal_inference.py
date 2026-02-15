@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Protocol
+from uuid import UUID
 
 from python.workflows.state.inference_ready_state import InferenceReadyState
 from python.workflows.tools.inference.models.causal_command import CausalCommand
@@ -22,8 +23,8 @@ class CausalInference(Protocol):
         self,
         command: CausalCommand,
         *,
-        user_id: Any,
-        conversation_id: Any,
-        model_id: Any,
+        user_id: UUID,
+        conversation_id: UUID,
+        model_id: UUID,
         ir: InferenceReadyState,
     ) -> CausalResult: ...
