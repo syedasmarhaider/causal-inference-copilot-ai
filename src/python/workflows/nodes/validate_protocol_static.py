@@ -54,17 +54,6 @@ OVERLAP_MIN_BIN_COUNT_WARN: Final[int] = 5
 OVERLAP_COVERAGE_WARN: Final[float] = 0.70
 OVERLAP_COVERAGE_FAIL: Final[float] = 0.50
 
-SENTINEL_STRINGS: Final[set[str]] = {
-    "unknown",
-    "unk",
-    "n/a",
-    "na",
-    "nan",
-    "none",
-    "null",
-    "missing",
-    "",
-}
 
 # =============================================================================
 # Public factory
@@ -74,7 +63,7 @@ SENTINEL_STRINGS: Final[set[str]] = {
 def make_validate_protocol_static_node(*, data_repo: DataRepo, llm: LLMService, model_name: str) -> CallableNodeFunc:
     def _run(user_id: UUID, conversation_id: UUID, state: ConversationState) -> ConversationState:
         protocol = state.get("protocol")
-        if protocol is None:
+        if not isinstance(protocol, dict):
             msg = "ProtocolState missing; cannot run static validation."
             ConversationStateHelpers.append_ai_message(state, msg)
             return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), msg)
@@ -85,30 +74,28 @@ def make_validate_protocol_static_node(*, data_repo: DataRepo, llm: LLMService, 
             ConversationStateHelpers.append_ai_message(state, msg)
             return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), msg)
 
-        df0 = _load_df(data_repo=data_repo, user_id=user_id, conversation_id=conversation_id, dataset_id=dataset_id)
-        if df0 is None:
+        df_raw = _load_df(data_repo=data_repo, user_id=user_id, conversation_id=conversation_id, dataset_id=dataset_id)
+        if df_raw is None:
             msg = "Failed to load dataset for validation."
             ConversationStateHelpers.append_ai_message(state, msg)
             return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), msg)
 
-        exclusions = _safe_exclusions(protocol)
-        df1, excl_issues, excl_metrics = _apply_exclusions(df0, exclusions)
-
         issues: List[ProtocolValidationIssue] = []
         issues.extend(_validate_protocol_enums(protocol))
         issues.extend(_validate_supported_identification(protocol))
-        issues.extend(excl_issues)
-        issues.extend(_validate_nonempty_after_exclusions(df_before=df0, df_after=df1, excl_metrics=excl_metrics))
 
-        # Early stop if cohort is dead
-        if _has_hard_cohort_failure(issues):
+        # Gate: required protocol specs + required columns must exist BEFORE we can drop NA / apply exclusions.
+        issues.extend(_validate_required_columns_exist(df=df_raw, protocol=protocol))
+        if _has_required_column_failure(issues):
             report = _build_report(
                 issues=issues,
                 metrics=_build_metrics(
-                    df_before=df0,
-                    df_after=df1,
+                    df_raw=df_raw,
+                    df_after_dropna=df_raw,
+                    df_after_exclusions=df_raw,
                     protocol=protocol,
-                    excl_metrics=excl_metrics,
+                    dropna_metrics={"status": "SKIP", "reason": "required_columns_missing"},
+                    excl_metrics={"status": "SKIP", "reason": "required_columns_missing"},
                     overlap_metrics=None,
                 ),
             )
@@ -117,17 +104,34 @@ def make_validate_protocol_static_node(*, data_repo: DataRepo, llm: LLMService, 
             ConversationStateHelpers.append_ai_message(state, user_msg)
             return ConversationStateHelpers.set_abort(state, cast(ACTION, "NEEDS_INPUT"), user_msg)
 
-        # Column existence gates first to avoid cascaded junk
-        issues.extend(_validate_required_columns_exist(df=df1, protocol=protocol))
+        # Step 1: drop TRUE missing values (NaN/None/pd.NA) for required T/Y columns.
+        # IMPORTANT: we do NOT treat "Unknown" (or any string sentinel) as missing.
+        df_dropna, dropna_issues, dropna_metrics = _drop_required_ty_missing(df_raw, protocol=protocol)
+        issues.extend(dropna_issues)
 
-        # If required columns fail, stop (avoid bogus downstream checks)
-        if _has_required_column_failure(issues):
+        # Step 2: apply user exclusions exactly as provided (no heuristics, no auto-normalization).
+        exclusions = _safe_exclusions(protocol)
+        df_excl, excl_issues, excl_metrics = _apply_exclusions(df_dropna, exclusions)
+        issues.extend(excl_issues)
+
+        # Cohort viability after exclusions
+        issues.extend(
+            _validate_nonempty_after_exclusions(
+                df_before=df_dropna,
+                df_after=df_excl,
+                excl_metrics=excl_metrics,
+            )
+        )
+
+        if _has_hard_cohort_failure(issues):
             report = _build_report(
                 issues=issues,
                 metrics=_build_metrics(
-                    df_before=df0,
-                    df_after=df1,
+                    df_raw=df_raw,
+                    df_after_dropna=df_dropna,
+                    df_after_exclusions=df_excl,
                     protocol=protocol,
+                    dropna_metrics=dropna_metrics,
                     excl_metrics=excl_metrics,
                     overlap_metrics=None,
                 ),
@@ -138,34 +142,35 @@ def make_validate_protocol_static_node(*, data_repo: DataRepo, llm: LLMService, 
             return ConversationStateHelpers.set_abort(state, cast(ACTION, "NEEDS_INPUT"), user_msg)
 
         # Distributions / missingness
-        issues.extend(_validate_missingness(df=df1, protocol=protocol))
-        issues.extend(_validate_treatment_distribution(df=df1, protocol=protocol))
-        issues.extend(_validate_outcome_distribution(df=df1, protocol=protocol))
-        issues.extend(_validate_covariates(df=df1, protocol=protocol))
-        issues.extend(_validate_effect_modifiers(df=df1, protocol=protocol))
+        issues.extend(_validate_missingness(df=df_excl, protocol=protocol))
+        issues.extend(_validate_treatment_distribution(df=df_excl, protocol=protocol))
+        issues.extend(_validate_outcome_distribution(df=df_excl, protocol=protocol))
+        issues.extend(_validate_covariates(df=df_excl, protocol=protocol))
+        issues.extend(_validate_effect_modifiers(df=df_excl, protocol=protocol))
 
         # Overlap / positivity heuristics (binary/categorical only)
-        overlap_issues, overlap_metrics = _validate_overlap(df=df1, protocol=protocol)
+        overlap_issues, overlap_metrics = _validate_overlap(df=df_excl, protocol=protocol)
         issues.extend(overlap_issues)
 
-        metrics = _build_metrics(
-            df_before=df0,
-            df_after=df1,
-            protocol=protocol,
-            excl_metrics=excl_metrics,
-            overlap_metrics=overlap_metrics,
+        report = _build_report(
+            issues=issues,
+            metrics=_build_metrics(
+                df_raw=df_raw,
+                df_after_dropna=df_dropna,
+                df_after_exclusions=df_excl,
+                protocol=protocol,
+                dropna_metrics=dropna_metrics,
+                excl_metrics=excl_metrics,
+                overlap_metrics=overlap_metrics,
+            ),
         )
-        report = _build_report(issues=issues, metrics=metrics)
         state["protocol_static_validation"] = cast(ProtocolStaticValidationState, {"report": report})
 
-        if report["status"] == "FAIL":
+        if report["status"] in ("FAIL", "WARN"):
             user_msg = _llm_render_validation_message(llm=llm, model_name=model_name, report=report)
             ConversationStateHelpers.append_ai_message(state, user_msg)
-            return ConversationStateHelpers.set_abort(state, cast(ACTION, "NEEDS_INPUT"), user_msg)
-
-        if report["status"] == "WARN":
-            user_msg = _llm_render_validation_message(llm=llm, model_name=model_name, report=report)
-            ConversationStateHelpers.append_ai_message(state, user_msg)
+            if report["status"] == "FAIL":
+                return ConversationStateHelpers.set_abort(state, cast(ACTION, "NEEDS_INPUT"), user_msg)
             return ConversationStateHelpers.set_done(state, cast(ACTION, "NONE"), user_msg)
 
         msg = "Static validation passed. Proceeding."
@@ -206,11 +211,7 @@ def _derive_status(issues: Sequence[ProtocolValidationIssue]) -> ValidationStatu
 
 
 def _build_report(*, issues: List[ProtocolValidationIssue], metrics: Dict[str, Any]) -> ProtocolValidationReport:
-    return {
-        "status": cast(Any, _derive_status(issues)),
-        "issues": issues,
-        "metrics": metrics,
-    }
+    return {"status": cast(Any, _derive_status(issues)), "issues": issues, "metrics": metrics}
 
 
 def _has_hard_cohort_failure(issues: Sequence[ProtocolValidationIssue]) -> bool:
@@ -219,8 +220,7 @@ def _has_hard_cohort_failure(issues: Sequence[ProtocolValidationIssue]) -> bool:
 
 
 def _has_required_column_failure(issues: Sequence[ProtocolValidationIssue]) -> bool:
-    # Anything that means we cannot safely compute later checks.
-    blocking_prefixes = {
+    blocking = {
         "TREAT_SPEC_MISSING",
         "TREAT_KIND_INVALID",
         "TREAT_COL_INVALID",
@@ -236,7 +236,7 @@ def _has_required_column_failure(issues: Sequence[ProtocolValidationIssue]) -> b
         "COV_COL_MISSING",
         "EM_COL_MISSING",
     }
-    return any(i["severity"] == "FAIL" and i["rule_id"] in blocking_prefixes for i in issues)
+    return any(i["severity"] == "FAIL" and i["rule_id"] in blocking for i in issues)
 
 
 # =============================================================================
@@ -264,60 +264,187 @@ def _load_df(*, data_repo: DataRepo, user_id: UUID, conversation_id: UUID, datas
 
 
 # =============================================================================
-# Exclusions (normalize + apply)
+# Drop NA in required T/Y (and duration/event if duration outcome)
 # =============================================================================
 
 
-def _is_sentinel_value(v: str) -> bool:
-    return v.strip().lower() in SENTINEL_STRINGS
-
-
-def _normalize_exclusion_rule(ex: ExclusionRule) -> Tuple[ExclusionRule, Optional[ProtocolValidationIssue]]:
+def _required_ty_columns(protocol: ProtocolState) -> Tuple[List[str], List[ProtocolValidationIssue]]:
     """
-    Semantics:
-      - ExclusionRule builds a mask of rows to REMOVE, then we drop ~mask.
+    Returns columns that must be NON-NA for modeling to make sense.
 
-    Defensive normalization:
-      - User intent: "exclude Unknown"
-      - Compiler emits: op='!=' values=['Unknown']  (would remove NOT Unknown -> keep only Unknown)
-      - Normalize to: op='in' values=['Unknown'] and emit WARN.
+    IMPORTANT:
+      - Only true missing values are handled here (NaN/None/pd.NA).
+      - Strings like "Unknown" are treated as ordinary values.
     """
-    col = str(ex.get("column", ""))
-    op_raw = str(ex.get("op", ""))
-    values_raw = ex.get("values", [])
-    reason = str(ex.get("reason", ""))
+    issues: List[ProtocolValidationIssue] = []
 
-    values: List[str] = [str(v) for v in values_raw]
-    op_applied = op_raw
-    issue: Optional[ProtocolValidationIssue] = None
+    ts = protocol.get("treatment_spec")
+    if not isinstance(ts, dict):
+        issues.append(
+            _mk_issue(
+                rule_id="TREAT_SPEC_MISSING",
+                severity="FAIL",
+                message="treatment_spec missing or invalid.",
+                evidence={"treatment_spec": ts},
+                fix_hint="Provide treatment_spec with kind and column.",
+            )
+        )
+        return [], issues
 
-    if op_raw == "!=" and any(_is_sentinel_value(v) for v in values):
-        op_applied = "in"
-        issue = _mk_issue(
-            rule_id="EXCL_OP_NORMALIZED",
-            severity="WARN",
-            message="Exclusion operator normalized: '!= <sentinel>' interpreted as 'exclude <sentinel>'.",
-            evidence={"column": col, "op_raw": op_raw, "op_applied": op_applied, "values": values},
-            fix_hint="Fix compiler: for 'exclude Unknown', emit op='in' values=['Unknown'] (or op='==').",
+    tcol = ts.get("column")
+    if not isinstance(tcol, str) or not tcol.strip():
+        issues.append(
+            _mk_issue(
+                rule_id="TREAT_COL_INVALID",
+                severity="FAIL",
+                message="treatment_spec.column must be a non-empty string.",
+                evidence={"value": tcol},
+                fix_hint="Set treatment_spec.column to an existing dataset column name.",
+            )
+        )
+        return [], issues
+
+    ys = protocol.get("outcome_spec")
+    if not isinstance(ys, dict):
+        issues.append(
+            _mk_issue(
+                rule_id="OUT_SPEC_MISSING",
+                severity="FAIL",
+                message="outcome_spec missing or invalid.",
+                evidence={"outcome_spec": ys},
+                fix_hint="Provide outcome_spec with kind and required columns.",
+            )
+        )
+        return [], issues
+
+    ykind = ys.get("kind")
+    if ykind not in ALLOWED_OUT_KINDS:
+        issues.append(
+            _mk_issue(
+                rule_id="OUT_KIND_INVALID",
+                severity="FAIL",
+                message="Invalid outcome_spec.kind.",
+                evidence={"value": ykind, "allowed": sorted(ALLOWED_OUT_KINDS)},
+                fix_hint="Set outcome_spec.kind to 'binary'|'continuous'|'categorical'|'duration'.",
+            )
+        )
+        return [], issues
+
+    cols: List[str] = [tcol]
+
+    if ykind == "duration":
+        dcol = ys.get("duration_column")
+        ecol = ys.get("event_column")
+        if not isinstance(dcol, str) or not dcol.strip():
+            issues.append(
+                _mk_issue(
+                    rule_id="OUT_DUR_COL_INVALID",
+                    severity="FAIL",
+                    message="Duration outcome_spec requires duration_column.",
+                    evidence={"duration_column": dcol},
+                    fix_hint="Set outcome_spec.duration_column to an existing dataset column.",
+                )
+            )
+            return [], issues
+        if not isinstance(ecol, str) or not ecol.strip():
+            issues.append(
+                _mk_issue(
+                    rule_id="OUT_EVENT_COL_INVALID",
+                    severity="FAIL",
+                    message="Duration outcome_spec requires event_column.",
+                    evidence={"event_column": ecol},
+                    fix_hint="Set outcome_spec.event_column to an existing dataset column.",
+                )
+            )
+            return [], issues
+        cols.extend([dcol, ecol])
+    else:
+        ycol = ys.get("column")
+        if not isinstance(ycol, str) or not ycol.strip():
+            issues.append(
+                _mk_issue(
+                    rule_id="OUT_COL_INVALID",
+                    severity="FAIL",
+                    message="outcome_spec.column must be a non-empty string.",
+                    evidence={"value": ycol},
+                    fix_hint="Set outcome_spec.column to an existing dataset column name.",
+                )
+            )
+            return [], issues
+        cols.append(ycol)
+
+    # de-dup while preserving order
+    seen: set[str] = set()
+    cols2: List[str] = []
+    for c in cols:
+        if c not in seen:
+            seen.add(c)
+            cols2.append(c)
+
+    return cols2, issues
+
+
+def _drop_required_ty_missing(
+    df: pd.DataFrame,
+    *,
+    protocol: ProtocolState,
+) -> Tuple[pd.DataFrame, List[ProtocolValidationIssue], Dict[str, Any]]:
+    required_cols, req_issues = _required_ty_columns(protocol)
+    if req_issues:
+        # Caller should already have gated required columns, but stay defensive.
+        metrics = {"status": "FAIL", "reason": "required_ty_columns_invalid"}
+        return df, req_issues, metrics
+
+    # Column existence should be guaranteed by _validate_required_columns_exist, but stay defensive.
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        issues = [
+            _mk_issue(
+                rule_id="DROPNA_COL_MISSING",
+                severity="FAIL",
+                message="Cannot drop missing T/Y because required columns are missing.",
+                evidence={"missing_columns": missing},
+                fix_hint="Fix treatment/outcome column names to match the dataset.",
+            )
+        ]
+        metrics = {"status": "FAIL", "missing_columns": missing}
+        return df, issues, metrics
+
+    n0 = int(df.shape[0])
+    out_df = df.dropna(subset=required_cols).copy()
+    n1 = int(out_df.shape[0])
+    dropped = n0 - n1
+
+    issues: List[ProtocolValidationIssue] = []
+    if dropped > 0:
+        issues.append(
+            _mk_issue(
+                rule_id="DROPNA_TY_APPLIED",
+                severity="WARN",
+                message="Dropped rows with true missing values in required treatment/outcome columns.",
+                evidence={"required_cols": required_cols, "n_before": n0, "n_after": n1, "dropped": dropped},
+                fix_hint="If you need to keep these rows, impute missingness upstream (not via string sentinels).",
+            )
         )
 
-    if op_raw == "not_in" and values and all(_is_sentinel_value(v) for v in values):
-        op_applied = "in"
-        issue = issue or _mk_issue(
-            rule_id="EXCL_OP_NORMALIZED",
-            severity="WARN",
-            message="Exclusion operator normalized: 'not_in <sentinel>' interpreted as 'exclude <sentinel>'.",
-            evidence={"column": col, "op_raw": op_raw, "op_applied": op_applied, "values": values},
-            fix_hint="Fix compiler: for 'exclude Unknown', emit op='in' values=['Unknown'] (or op='==').",
-        )
+    metrics = {"status": "OK", "required_cols": required_cols, "n_before": n0, "n_after": n1, "dropped": dropped}
+    return out_df, issues, metrics
 
-    ex2: ExclusionRule = {"column": col, "op": cast(Any, op_applied), "values": values, "reason": reason}
-    return ex2, issue
+
+# =============================================================================
+# Exclusions (apply exactly as provided)
+# =============================================================================
 
 
 def _safe_exclusions(protocol: ProtocolState) -> List[ExclusionRule]:
     ex = protocol.get("exclusions") or []
-    return [ e for e in ex]
+    if not isinstance(ex, list):
+        return []
+    out: List[ExclusionRule] = []
+    for e in ex:
+        if isinstance(e, dict):
+            out.append(cast(ExclusionRule, e))
+    return out
 
 
 def _apply_exclusions(
@@ -328,14 +455,10 @@ def _apply_exclusions(
     rules_metrics: List[Dict[str, Any]] = []
 
     for i, ex in enumerate(exclusions):
-        ex_norm, norm_issue = _normalize_exclusion_rule( ex)
-        if norm_issue is not None:
-            issues.append(norm_issue)
-
-        col = str(ex_norm.get("column", ""))
-        op = str(ex_norm.get("op", ""))
-        values = ex_norm.get("values", [])
-        reason = str(ex_norm.get("reason", ""))
+        col = str(ex.get("column", ""))
+        op = str(ex.get("op", ""))
+        values = ex.get("values", [])
+        reason = str(ex.get("reason", ""))
 
         if col not in out_df.columns:
             issues.append(
@@ -366,22 +489,26 @@ def _apply_exclusions(
         out_df = out_df.loc[~mask].copy()
         after = int(out_df.shape[0])
 
-        values_list = values
         rules_metrics.append(
             {
                 "index": i,
                 "column": col,
-                "op_raw": str(ex.get("op", "")),
-                "op_applied": op,
-                "values": [str(v) for v in values_list],
+                "op": op,
+                "values": _coerce_str_list(values),
                 "reason": reason,
                 "removed": before - after,
                 "n_after": after,
             }
         )
 
-    metrics = {"n_before": int(df.shape[0]), "n_after": int(out_df.shape[0]), "rules": rules_metrics}
-    return out_df, issues, metrics # pyright: ignore[reportUnknownVariableType]
+    metrics: Dict[str, Any] = {"n_before": int(df.shape[0]), "n_after": int(out_df.shape[0]), "rules": rules_metrics}
+    return out_df, issues, metrics
+
+
+def _coerce_str_list(values: Any) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    return [str(v) for v in values]
 
 
 def _build_exclusion_mask(df: pd.DataFrame, *, col: str, op: str, values: Any) -> pd.Series:
@@ -392,11 +519,17 @@ def _build_exclusion_mask(df: pd.DataFrame, *, col: str, op: str, values: Any) -
     if op == "not_null":
         return ~s.isna()
 
-    vals: List[str] = [str(v) for v in values] if isinstance(values, list) else []
+    vals = _coerce_str_list(values)
 
     if op in (">=", "<=", ">", "<"):
+        if not vals:
+            return pd.Series([False] * int(df.shape[0]), index=df.index)
         x = pd.to_numeric(s, errors="coerce")
-        v = float(vals[0]) if vals else float("nan")
+        try:
+            v = float(vals[0])
+        except Exception:
+            return pd.Series([False] * int(df.shape[0]), index=df.index)
+
         if op == ">=":
             return x >= v
         if op == "<=":
@@ -412,20 +545,15 @@ def _build_exclusion_mask(df: pd.DataFrame, *, col: str, op: str, values: Any) -
     if op in ("!=", "not_in"):
         return ~ss.isin(vals)
 
-    return pd.Series([False] * df.shape[0], index=df.index)
+    return pd.Series([False] * int(df.shape[0]), index=df.index)
 
 
 # =============================================================================
-# Validation: supported identification (best-effort, does not invent schema)
+# Validation: supported identification (best-effort)
 # =============================================================================
 
 
 def _validate_supported_identification(protocol: ProtocolState) -> List[ProtocolValidationIssue]:
-    """
-    Current pipeline supports unconfoundedness/backdoor-style adjustment only.
-    If protocol includes a field implying IV/frontdoor/etc., hard-fail.
-    If the field doesn't exist, do nothing (no schema invention).
-    """
     val = None
     for k in ("identification_strategy", "id_strategy", "identification", "design"):
         if k in protocol:
@@ -535,50 +663,77 @@ def _validate_nonempty_after_exclusions(
 
 
 # =============================================================================
-# Validation: required columns exist
+# Validation: required columns exist (defensive + non-crashing)
 # =============================================================================
 
 
 def _validate_required_columns_exist(*, df: pd.DataFrame, protocol: ProtocolState) -> List[ProtocolValidationIssue]:
     cols = set(map(str, df.columns))
     out: List[ProtocolValidationIssue] = []
-    
+
+    # treatment_spec
     ts = protocol.get("treatment_spec")
+    if not isinstance(ts, dict):
+        out.append(
+            _mk_issue(
+                rule_id="TREAT_SPEC_MISSING",
+                severity="FAIL",
+                message="treatment_spec missing or invalid.",
+                evidence={"treatment_spec": ts},
+                fix_hint="Provide treatment_spec with kind and column.",
+            )
+        )
+        return out
+
     tkind = ts.get("kind")
     tcol = ts.get("column")
+
     if tkind not in ALLOWED_TREAT_KINDS:
-            out.append(
-                _mk_issue(
-                    rule_id="TREAT_KIND_INVALID",
-                    severity="FAIL",
-                    message="Invalid treatment_spec.kind.",
-                    evidence={"value": tkind, "allowed": sorted(ALLOWED_TREAT_KINDS)},
-                    fix_hint="Set treatment_spec.kind to 'binary'|'continuous'|'categorical'.",
-                )
+        out.append(
+            _mk_issue(
+                rule_id="TREAT_KIND_INVALID",
+                severity="FAIL",
+                message="Invalid treatment_spec.kind.",
+                evidence={"value": tkind, "allowed": sorted(ALLOWED_TREAT_KINDS)},
+                fix_hint="Set treatment_spec.kind to 'binary'|'continuous'|'categorical'.",
             )
-    if  not tcol:
-            out.append(
-                _mk_issue(
-                    rule_id="TREAT_COL_INVALID",
-                    severity="FAIL",
-                    message="treatment_spec.column must be a non-empty string.",
-                    evidence={"value": tcol},
-                    fix_hint="Set treatment_spec.column to an existing dataset column name.",
-                )
+        )
+
+    if not isinstance(tcol, str) or not tcol.strip():
+        out.append(
+            _mk_issue(
+                rule_id="TREAT_COL_INVALID",
+                severity="FAIL",
+                message="treatment_spec.column must be a non-empty string.",
+                evidence={"value": tcol},
+                fix_hint="Set treatment_spec.column to an existing dataset column name.",
             )
+        )
     elif tcol not in cols:
-            out.append(
-                _mk_issue(
-                    rule_id="TREAT_COL_MISSING",
-                    severity="FAIL",
-                    message="Treatment column not found in dataset.",
-                    evidence={"column": tcol},
-                    fix_hint="Choose an existing column for treatment_spec.column.",
-                )
+        out.append(
+            _mk_issue(
+                rule_id="TREAT_COL_MISSING",
+                severity="FAIL",
+                message="Treatment column not found in dataset.",
+                evidence={"column": tcol},
+                fix_hint="Choose an existing column for treatment_spec.column.",
             )
+        )
 
     # outcome_spec
     ys = protocol.get("outcome_spec")
+    if not isinstance(ys, dict):
+        out.append(
+            _mk_issue(
+                rule_id="OUT_SPEC_MISSING",
+                severity="FAIL",
+                message="outcome_spec missing or invalid.",
+                evidence={"outcome_spec": ys},
+                fix_hint="Provide outcome_spec with kind and required columns.",
+            )
+        )
+        return out
+
     ykind = ys.get("kind")
     if ykind not in ALLOWED_OUT_KINDS:
         out.append(
@@ -595,7 +750,8 @@ def _validate_required_columns_exist(*, df: pd.DataFrame, protocol: ProtocolStat
     if ykind == "duration":
         dcol = ys.get("duration_column")
         ecol = ys.get("event_column")
-        if not isinstance(dcol, str) or not dcol:
+
+        if not isinstance(dcol, str) or not dcol.strip():
             out.append(
                 _mk_issue(
                     rule_id="OUT_DUR_COL_INVALID",
@@ -616,7 +772,7 @@ def _validate_required_columns_exist(*, df: pd.DataFrame, protocol: ProtocolStat
                 )
             )
 
-        if not isinstance(ecol, str) or not ecol:
+        if not isinstance(ecol, str) or not ecol.strip():
             out.append(
                 _mk_issue(
                     rule_id="OUT_EVENT_COL_INVALID",
@@ -638,7 +794,7 @@ def _validate_required_columns_exist(*, df: pd.DataFrame, protocol: ProtocolStat
             )
     else:
         ycol = ys.get("column")
-        if not isinstance(ycol, str) or not ycol:
+        if not isinstance(ycol, str) or not ycol.strip():
             out.append(
                 _mk_issue(
                     rule_id="OUT_COL_INVALID",
@@ -659,8 +815,8 @@ def _validate_required_columns_exist(*, df: pd.DataFrame, protocol: ProtocolStat
                 )
             )
 
-    for c in protocol.get("covariates", []):
-        if c not in cols:
+    for c in protocol.get("covariates", []) or []:
+        if isinstance(c, str) and c not in cols:
             out.append(
                 _mk_issue(
                     rule_id="COV_COL_MISSING",
@@ -671,8 +827,8 @@ def _validate_required_columns_exist(*, df: pd.DataFrame, protocol: ProtocolStat
                 )
             )
 
-    for c in protocol.get("effect_modifiers", []):
-        if c not in cols:
+    for c in protocol.get("effect_modifiers", []) or []:
+        if isinstance(c, str) and c not in cols:
             out.append(
                 _mk_issue(
                     rule_id="EM_COL_MISSING",
@@ -755,8 +911,8 @@ def _validate_missingness(*, df: pd.DataFrame, protocol: ProtocolState) -> List[
                         )
                     )
 
-    for c in protocol.get("covariates", []):
-        if c in df.columns:
+    for c in protocol.get("covariates", []) or []:
+        if isinstance(c, str) and c in df.columns:
             miss = float(df[c].isna().mean())
             if miss > MAX_COVARIATE_MISSING_FAIL:
                 out.append(
@@ -856,7 +1012,7 @@ def _validate_binary_treatment(*, df: pd.DataFrame, col: str, ts: Mapping[str, A
                 severity="WARN",
                 message="Treatment assignment is highly imbalanced; estimates may be unstable.",
                 evidence={"n_total": n, "n_treated": n_t, "n_control": n_c, "treated_share": share_t},
-                fix_hint="Consider re-defining treatment or using trimming/overlap checks later.",
+                fix_hint="Consider redefining treatment or using trimming/overlap checks later.",
             )
         )
 
@@ -1113,7 +1269,7 @@ def _validate_duration_outcome(*, df: pd.DataFrame, ys: Mapping[str, Any]) -> Li
 
 
 def _validate_covariates(*, df: pd.DataFrame, protocol: ProtocolState) -> List[ProtocolValidationIssue]:
-    covs = protocol.get("covariates", [])
+    covs = protocol.get("covariates", []) or []
     exp_type = str(protocol.get("experiment_type", "Observational"))
 
     if not covs:
@@ -1131,7 +1287,7 @@ def _validate_covariates(*, df: pd.DataFrame, protocol: ProtocolState) -> List[P
 
     out: List[ProtocolValidationIssue] = []
     for c in covs:
-        if c in df.columns:
+        if isinstance(c, str) and c in df.columns:
             nunq = int(df[c].nunique(dropna=True))
             if nunq <= 1:
                 out.append(
@@ -1148,13 +1304,13 @@ def _validate_covariates(*, df: pd.DataFrame, protocol: ProtocolState) -> List[P
 
 
 def _validate_effect_modifiers(*, df: pd.DataFrame, protocol: ProtocolState) -> List[ProtocolValidationIssue]:
-    em = protocol.get("effect_modifiers", [])
+    em = protocol.get("effect_modifiers", []) or []
     if not em:
         return []
 
     out: List[ProtocolValidationIssue] = []
     for c in em:
-        if c in df.columns:
+        if isinstance(c, str) and c in df.columns:
             nunq = int(df[c].nunique(dropna=True))
             if nunq <= 1:
                 out.append(
@@ -1175,11 +1331,6 @@ def _validate_effect_modifiers(*, df: pd.DataFrame, protocol: ProtocolState) -> 
 
 
 def _validate_overlap(*, df: pd.DataFrame, protocol: ProtocolState) -> Tuple[List[ProtocolValidationIssue], Dict[str, Any]]:
-    """
-    Static overlap/positivity diagnostics (heuristic):
-      - Binary treatment: for each stratifier feature, compute coverage across bins/levels where BOTH arms appear.
-      - Categorical treatment: compute coverage that >=2 levels appear in bin/level (best-effort).
-    """
     ts = protocol.get("treatment_spec")
     if not isinstance(ts, dict):
         return [], {"status": "SKIP", "reason": "treatment_spec missing"}
@@ -1219,8 +1370,8 @@ def _validate_overlap(*, df: pd.DataFrame, protocol: ProtocolState) -> Tuple[Lis
         if not isinstance(treated, str) or not isinstance(control, str):
             return [], {"status": "SKIP", "reason": "treated/control missing"}
 
-        mask_t = (t == treated)
-        mask_c = (t == control)
+        mask_t = t == treated
+        mask_c = t == control
         if int(mask_t.sum()) == 0 or int(mask_c.sum()) == 0:
             return [], {"status": "SKIP", "reason": "one_arm_empty"}
 
@@ -1229,7 +1380,7 @@ def _validate_overlap(*, df: pd.DataFrame, protocol: ProtocolState) -> Tuple[Lis
             issues.extend(feat_issues)
             per_feature.append(feat_metrics)
 
-    else:  # categorical treatment
+    else:
         levels = ts.get("levels")
         if not isinstance(levels, list) or len(levels) < 2 or any(not isinstance(x, str) for x in levels):
             return [], {"status": "SKIP", "reason": "levels invalid"}
@@ -1262,11 +1413,9 @@ def _overlap_feature_binary(
     mask_c: pd.Series,
 ) -> Tuple[List[ProtocolValidationIssue], Dict[str, Any]]:
     s = df[col]
-
     nunq = int(s.nunique(dropna=True))
     is_low_card = nunq <= OVERLAP_MAX_CATEG_LEVELS
 
-    # If numeric-ish -> quantile bins
     x = pd.to_numeric(s, errors="coerce")
     numeric_usable = int(x.notna().sum()) > 0 and (int(x.nunique(dropna=True)) > 1)
 
@@ -1288,11 +1437,8 @@ def _overlap_feature_binary(
         g = dfb.groupby("bin", dropna=False).agg(n_t=("t", "sum"), n_c=("c", "sum"))
         g["n"] = g["n_t"] + g["n_c"]
 
-        # “good” bins: both arms present
         good = (g["n_t"] > 0) & (g["n_c"] > 0)
         coverage = float(good.mean()) if int(g.shape[0]) > 0 else 0.0
-
-        # bins with tiny counts -> warn (unstable strata)
         tiny = int((g["n"] < OVERLAP_MIN_BIN_COUNT_WARN).sum())
 
         issues: List[ProtocolValidationIssue] = []
@@ -1319,15 +1465,8 @@ def _overlap_feature_binary(
                 )
             )
 
-        return issues, {
-            "col": col,
-            "type": "numeric",
-            "n_bins": int(g.shape[0]),
-            "coverage": coverage,
-            "tiny_bins": tiny,
-        }
+        return issues, {"col": col, "type": "numeric", "n_bins": int(g.shape[0]), "coverage": coverage, "tiny_bins": tiny}
 
-    # Otherwise treat as categorical strata
     ss = s.astype(str)
     if nunq > OVERLAP_MAX_CATEG_LEVELS:
         issues = [
@@ -1365,15 +1504,9 @@ def _overlap_feature_binary(
 def _overlap_feature_multitreat(
     *, df: pd.DataFrame, col: str, t: pd.Series, levels: Sequence[str]
 ) -> Tuple[List[ProtocolValidationIssue], Dict[str, Any]]:
-    """
-    Best-effort overlap for categorical multi-treatment:
-      - For each bin/level of the stratifier, count how many treatment levels appear.
-      - Coverage = fraction of strata where at least 2 treatment levels appear.
-    """
     s = df[col]
     nunq = int(s.nunique(dropna=True))
 
-    # Try numeric binning first if feasible
     x = pd.to_numeric(s, errors="coerce")
     numeric_usable = int(x.notna().sum()) > 0 and (int(x.nunique(dropna=True)) > 1)
 
@@ -1390,7 +1523,6 @@ def _overlap_feature_multitreat(
         dfb = pd.DataFrame({"bin": bins, "t": t2})
         counts = dfb.groupby(["bin", "t"]).size().unstack(fill_value=0)
 
-        # only keep declared/present levels columns
         for lvl in levels:
             if lvl not in counts.columns:
                 counts[lvl] = 0
@@ -1414,7 +1546,6 @@ def _overlap_feature_multitreat(
 
         return issues, {"col": col, "type": "numeric", "n_bins": int(counts.shape[0]), "coverage_ge2_levels": coverage}
 
-    # Categorical strata
     ss = s.astype(str)
     if nunq > OVERLAP_MAX_CATEG_LEVELS:
         issues = [
@@ -1469,28 +1600,32 @@ def _overlap_severity_from_coverage(coverage: float) -> ValidationSeverity | Non
 
 def _build_metrics(
     *,
-    df_before: pd.DataFrame,
-    df_after: pd.DataFrame,
+    df_raw: pd.DataFrame,
+    df_after_dropna: pd.DataFrame,
+    df_after_exclusions: pd.DataFrame,
     protocol: ProtocolState,
+    dropna_metrics: Dict[str, Any],
     excl_metrics: Dict[str, Any],
     overlap_metrics: Dict[str, Any] | None,
 ) -> Dict[str, Any]:
     m: Dict[str, Any] = {
-        "n_before": int(df_before.shape[0]),
-        "n_after": int(df_after.shape[0]),
+        "n_raw": int(df_raw.shape[0]),
+        "n_after_dropna_required_ty": int(df_after_dropna.shape[0]),
+        "n_after_exclusions": int(df_after_exclusions.shape[0]),
+        "dropna_required_ty": dropna_metrics,
         "exclusions": excl_metrics,
         "experiment_type": protocol.get("experiment_type"),
         "time_zero_type": protocol.get("time_zero_type"),
-        "covariates_count": len(protocol.get("covariates", [])),
-        "effect_modifiers_count": len(protocol.get("effect_modifiers", [])),
+        "covariates_count": len(protocol.get("covariates", []) or []),
+        "effect_modifiers_count": len(protocol.get("effect_modifiers", []) or []),
     }
 
     ts = protocol.get("treatment_spec")
     if isinstance(ts, dict):
         m["treatment_kind"] = ts.get("kind")
         tcol = ts.get("column")
-        if isinstance(tcol, str) and tcol in df_after.columns:
-            m["treatment_missing_rate"] = float(df_after[tcol].isna().mean())
+        if isinstance(tcol, str) and tcol in df_after_exclusions.columns:
+            m["treatment_missing_rate"] = float(df_after_exclusions[tcol].isna().mean())
 
     ys = protocol.get("outcome_spec")
     if isinstance(ys, dict):

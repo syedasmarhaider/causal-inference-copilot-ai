@@ -69,8 +69,8 @@ def _run(*, state: ConversationState, llm: LLMService, model_name: str) -> Conve
         msg = _fallback_discuss_message(status=status, report=report)
 
     ConversationStateHelpers.append_ai_message(state=state, content=msg)
-    state["control"]["node_message"] = msg  # type: ignore[index]
-    return ConversationStateHelpers.set_pending(state=state, action=cast(ACTION, "NEEDS_INPUT"), msg=msg)
+    state["control"]["node_message"] = msg  
+    return ConversationStateHelpers.set_pending(state=state, action= "NEEDS_INPUT", msg=msg)
 
 
 # =============================================================================
