@@ -51,6 +51,7 @@ def get_econml_method_notes_broad() -> str:
     return (
         "ECONML METHOD NOTES (authoritative; derived ONLY from the provided EconML doc text;)\n"
         "\n"
+        "Also use validation notes if provided (e.g., treatment type, CI requirement, dimensionality hints) to rule out candidates that are incompatible with stated facts or that have limitations that are explicitly relevant.\n"
         "A) ORTHOGONAL / DOUBLE MACHINE LEARNING (DML)\n"
         "- Setting described: observational (or experimental/A-B) data with recorded controls/confounders; "
         "controls may be high-dimensional and/or relationships may be non-parametric.\n"
@@ -150,7 +151,7 @@ class PromptInputs:
     inference_ready_state_summary: str
     dataset_summary: str
     protocol_state: str
-    # Optional: if you want to include draft output from prompt 1 into prompt 2
+    validation_notes: str = ""
     paste_from_previous_step: str = ""
     final_selection_json: str = ""
 

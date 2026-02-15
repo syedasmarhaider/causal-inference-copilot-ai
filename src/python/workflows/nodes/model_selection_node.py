@@ -20,6 +20,7 @@ from python.workflows.state.conversation_state import (
     ConversationStateHelpers,
 )
 from python.workflows.state.model_selection_state import ModelSelectionState
+from python.workflows.state.validate_protocol_state import ProtocolStaticValidationState, ProtocolValidationReport
 
 log = logging.getLogger(__name__)
 
@@ -67,13 +68,28 @@ def _run(
     if protocol_obj is None:
         return _abort(state, ms, "Protocol state is missing from state. Run protocol compilation is required.")
 
+    validation_state: ProtocolStaticValidationState | None = state.get("protocol_static_validation")
+    if validation_state is None:
+        return _abort(state, ms, "ProtocolStaticValidationState is missing from state. Run protocol validation stage is required.")
+    
+    report : ProtocolValidationReport | None =  validation_state.get("report")
+    if report is None:
+        return _abort(state, ms, "Protocol validation report is missing from state. Run protocol validation stage is required.")
+    
+    validation_issues: str = "\n".join([
+        f"- {issue.get('description', 'No description')} (severity: {issue.get('severity', 'UNKNOWN')})"
+        for issue in report.get("issues", [])
+    ])
+    
     inference_str = _normalize_to_text(inference_obj)
     dataset_str = _normalize_to_text(dataset_summary)
     protocol_str = _normalize_to_text(protocol_obj)
+    
 
     prompt_inputs_base = PromptInputs(
         inference_ready_state_summary=inference_str,
         dataset_summary=dataset_str,
+        validation_notes=validation_issues,
         protocol_state=protocol_str,
     )
 
@@ -104,6 +120,7 @@ def _run(
             inference_ready_state_summary=inference_str,
             dataset_summary=dataset_str,
             protocol_state=protocol_str,
+            validation_notes=validation_issues,
             paste_from_previous_step=draft_text,
         )
         prompt_2 = get_model_selection_prompt_2(prompt_inputs_2)
@@ -175,6 +192,7 @@ def _run(
             inference_ready_state_summary=inference_str,
             dataset_summary=dataset_str,
             protocol_state=protocol_str,
+            validation_notes=validation_issues,
             final_selection_json=json.dumps(ms["final_json"], ensure_ascii=False, indent=2), # pyright: ignore[reportTypedDictNotRequiredAccess]
         )
         prompt_3 = get_model_selection_prompt_3(prompt_inputs_3)
