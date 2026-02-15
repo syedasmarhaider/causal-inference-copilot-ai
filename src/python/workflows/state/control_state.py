@@ -14,7 +14,8 @@ Stage = Literal[
     "INFERENCE_READY",
     "MODEL_SELECTION",
     "MODEL_SELECTION_DISCUSSION",
-    "MODEL_PARAMS_FIT_DISCUSSION", 
+    "MODEL_PARAMS_FIT_DISCUSSION",
+    "MODEL_FIT",
     "DONE",
 ]
 
@@ -27,7 +28,8 @@ CONTROL_STATE_NEXT_STAGE: Final[Mapping[Stage, Stage]] = {
     "INFERENCE_READY": "MODEL_SELECTION",
     "MODEL_SELECTION": "MODEL_SELECTION_DISCUSSION",
     "MODEL_SELECTION_DISCUSSION": "MODEL_PARAMS_FIT_DISCUSSION", 
-    "MODEL_PARAMS_FIT_DISCUSSION": "DONE", 
+    "MODEL_PARAMS_FIT_DISCUSSION": "MODEL_FIT", 
+    "MODEL_FIT": "DONE",   
 }
 
 
@@ -97,7 +99,13 @@ CONTROL_STATE_STAGE_DOC: Final[Mapping[Stage, str]] = {
         "against requirements, and require explicit confirmation to set model.model_params_fit.confirmed=true. "
         "If confirmed, proceed to DONE; otherwise remain PENDING with action_required=NEEDS_INPUT."
     ),
-
+    "MODEL_FIT": (
+        "Fit/train the selected estimator using the prepared dataset referenced by InferenceReadyState. "
+        "This stage must not use an LLM. It must require model.selected_model_fqcn and "
+        "model.model_params_fit.confirmed=true. It generates a new model_id (UUID) and saves it to "
+        "model.model_params_fit.model_id, then executes the FIT command via the resolved inference adapter. "
+        "On success, mark DONE; on failure, ABORT with a user-actionable error."
+    ),
     "DONE": (
         "Workflow completed successfully. A valid ProtocolState exists, static validation has passed/warned, "
         "an InferenceReadyState has been produced (or a failure has been recorded), ModelSelectionState contains a "
