@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List
 from uuid import UUID, uuid4
 
 from python.workflows.state.conversation_state import (
@@ -11,7 +11,7 @@ from python.workflows.state.conversation_state import (
 )
 from python.workflows.state.model_state import ModelState
 from python.workflows.tools.inference.causal_inference_factory import CausalInferenceFactory
-from python.workflows.tools.inference.models.causal_command import CausalCommand
+from python.workflows.tools.inference.models.causal_command import CausalCommand, Issue
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +105,13 @@ def _run(
             model_id=model_id,
             ir=ir,
         )
+        
+        issues: List[Issue] = getattr(result, "issues", [])
+        
+    
+        for issue  in issues:
+            logging.warning("Issue: code=%s message=%s path=%s fix_hint=%s required=%s",
+                issue.code, issue.message, issue.path, issue.fix_hint, issue.required)
 
         # Persist model_id after successful fit
         mpf["model_id"] = str(model_id)

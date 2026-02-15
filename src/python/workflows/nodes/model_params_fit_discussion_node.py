@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+import logging
 from typing import Any, Callable, Dict, Optional, Tuple, TypedDict, cast
 from uuid import UUID
 
@@ -17,6 +18,7 @@ from python.workflows.state.conversation_state import (
     ConversationState,
     ConversationStateHelpers,
 )
+from python.workflows.state.inference_ready_state import InferenceReadyState
 from python.workflows.state.model_state import ModelParamsFitState, ModelState
 from python.workflows.tools.inference.causal_inference import CausalInference
 from python.workflows.tools.inference.causal_inference_factory import CausalInferenceFactory
@@ -70,11 +72,20 @@ def _run(
     model_name: str,
     causal_factory: CausalInferenceFactory,
 ) -> ConversationState:
-    ir_any: Any = state.get("inference_ready")
-    if not ir_any:
+    ir: InferenceReadyState | None = state.get("inference_ready")
+    if not ir:
         msg = "Missing inference_ready state."
         ConversationStateHelpers.append_ai_message(state, msg)
         return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NONE"), msg=msg)
+    
+    
+    logging.warning("IR prepared: dataset_id=%s, Y_cols=%s, outcome.kind=%s",
+        ir.get("prepared", {}).get("dataset_id"),
+        ir.get("Y_cols"),
+        ir.get("outcome", {}).get("kind"),
+    )
+    logging.warning("IR outcome.kind=%s Y_cols=%s outcome=%s",
+            ir["outcome"]["kind"], ir["Y_cols"], ir["outcome"])
 
     model_state: ModelState | None = state.get("model_state")
     if model_state is None:
@@ -94,7 +105,7 @@ def _run(
         ConversationStateHelpers.append_ai_message(state, msg)
         return ConversationStateHelpers.set_abort(state=state, action=cast(ACTION, "NONE"), msg=msg)
 
-    req_any: Any = inference.get_input_requirements(cmd="FIT", ir=ir_any)
+    req_any: Any = inference.get_input_requirements(cmd="FIT", ir=ir)
     req: Dict[str, Any] = cast(Dict[str, Any], req_any)
 
     if req.get("status") == "UNSUPPORTED":

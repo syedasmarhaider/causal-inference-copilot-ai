@@ -16,6 +16,7 @@ from python.workflows.graph.simple_flow_router import WorkflowRouter
 from python.workflows.nodes.compile_protocol_state import make_compile_protocol_state_node
 from python.workflows.nodes.compile_protocol_state import make_compile_protocol_state_node
 from python.workflows.nodes.load_dataset import make_load_dataset_node
+from python.workflows.nodes.model_fit import make_model_fit_node
 from python.workflows.nodes.model_params_fit_discussion_node import make_model_params_fit_discussion_node
 from python.workflows.nodes.model_selection_discussion_node import make_model_selection_discussion_node
 from python.workflows.nodes.model_selection_node import make_model_selection_node
@@ -92,6 +93,12 @@ def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
         "MODEL_PARAMS_FIT_DISCUSSION": make_model_params_fit_discussion_node(
             llm=cfg.llm,
             model_name=cfg.model_name,
+            causal_factory = CausalInferenceFactory.create_default(
+              data_repo=cfg.data_repo,
+              models_repo=cfg.models_repo,
+            ),
+        ),
+        "MODEL_FIT": make_model_fit_node(
             causal_factory = CausalInferenceFactory.create_default(
               data_repo=cfg.data_repo,
               models_repo=cfg.models_repo,
