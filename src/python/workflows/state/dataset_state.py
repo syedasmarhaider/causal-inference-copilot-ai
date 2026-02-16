@@ -1,28 +1,27 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, TypedDict
+from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict, NotRequired
 from uuid import UUID
 
-from python.workflows.utils.types import JSONDict
+from python.workflows.utils.types import  json_sanitize
 
+
+# =============================================================================
+# DatasetState (store deterministic summary)
+# =============================================================================
 
 class DatasetState(TypedDict, total=False):
-    """
-    total=False because early stages only have `path`,
-    later stages enrich with id/schema/summary.
-    """
     id: Optional[UUID]
-    raw_schema: Optional[JSONDict]
-    summary: Optional[Dict[str, Dict[str, Any]]]
+    summary: NotRequired["DatasetSummary"]
     load_error: Optional[str]
-    get_file_last_user_msg_idx: Optional[int]
 
 
-# ---------------------------
-# Exceptions (user-actionable)
-# ---------------------------
+# =============================================================================
+# Errors (user-actionable)
+# =============================================================================
 
 @dataclass(frozen=True)
 class ColumnProfileErrorDetails:
@@ -33,11 +32,6 @@ class ColumnProfileErrorDetails:
 
 
 class DatasetProfilingError(RuntimeError):
-    """
-    Raise this when dataset profiling cannot proceed and user action is needed.
-    Keep it user-actionable: reason + hint + evidence.
-    """
-
     def __init__(self, details: ColumnProfileErrorDetails):
         self.details = details
         msg = details.reason
@@ -48,104 +42,200 @@ class DatasetProfilingError(RuntimeError):
         super().__init__(msg)
 
 
-# ---------------------------
+# =============================================================================
+# Typed output schema (discriminated union, NO invalid overrides)
+# =============================================================================
+
+InferredKind = Literal["NUMERIC", "DATETIME", "BOOLEAN", "CATEGORICAL", "OTHER"]
+
+
+class NumericSummary(TypedDict):
+    min: Optional[float]
+    max: Optional[float]
+    mean: Optional[float]
+    std: Optional[float]
+    quantiles: Optional[Dict[str, float]]  # e.g. {"0.05": 1.2, "0.5": 3.4}
+
+
+class DatetimeSummary(TypedDict):
+    min: Optional[str]  # isoformat-ish
+    max: Optional[str]
+
+
+class BooleanSummary(TypedDict):
+    counts: Dict[str, int]  # keys are stringified values
+
+
+class CategoricalSummary(TypedDict):
+    top_categories: List[Dict[str, int | str]]  # [{"value": "...", "count": 123}, ...]
+    other_count: int
+
+
+class OtherSummary(TypedDict):
+    distinct_values_sample: List[str]
+
+
+class ColumnProfileCommon(TypedDict):
+    # Name is stored here => deterministic list, no duplicated "columns" list needed.
+    name: str
+    dtype: Optional[str]
+    n_rows: int
+    n_missing: int
+    missing_rate: float
+    distinct_count: Optional[int]
+    note: NotRequired[str]  # only used in non-strict mode on failures
+
+
+class NumericColumnProfile(ColumnProfileCommon):
+    inferred_kind: Literal["NUMERIC"]
+    summary: NumericSummary
+
+
+class DatetimeColumnProfile(ColumnProfileCommon):
+    inferred_kind: Literal["DATETIME"]
+    summary: DatetimeSummary
+
+
+class BooleanColumnProfile(ColumnProfileCommon):
+    inferred_kind: Literal["BOOLEAN"]
+    summary: BooleanSummary
+
+
+class CategoricalColumnProfile(ColumnProfileCommon):
+    inferred_kind: Literal["CATEGORICAL"]
+    summary: CategoricalSummary
+
+
+class OtherColumnProfile(ColumnProfileCommon):
+    inferred_kind: Literal["OTHER"]
+    summary: OtherSummary
+
+
+ColumnProfile = (
+    NumericColumnProfile
+    | DatetimeColumnProfile
+    | BooleanColumnProfile
+    | CategoricalColumnProfile
+    | OtherColumnProfile
+)
+
+
+class DatasetSummary(TypedDict):
+    n_rows: int
+    profiles: List[ColumnProfile]  # deterministic order = df.columns order
+
+
+# =============================================================================
 # Public API
-# ---------------------------
+# =============================================================================
 
 class DatasetStateHelpers:
     @staticmethod
-    def extract_column_profile(
+    def extract_dataset_summary(
         df: Any,
         *,
         max_categories: int = 30,
         sample_distinct: int = 50,
         compute_quantiles: bool = True,
         strict: bool = True,
-    ) -> Dict[str, Dict[str, Any]]:
-        """
-        Build a type-aware profile for each column.
-
-        Returns:
-          Dict[column_name, profile]
-
-        profile includes:
-          - dtype (string | None)
-          - inferred_kind: NUMERIC|CATEGORICAL|DATETIME|BOOLEAN|OTHER
-          - n_rows, n_missing, missing_rate, distinct_count
-          - summary (type-specific)
-
-        Error policy:
-          - strict=True (default): raise DatasetProfilingError on any hard failure
-          - strict=False: best-effort; column failures become per-column "summary.note"
-        """
+    ) -> DatasetSummary:
         _validate_params(max_categories=max_categories, sample_distinct=sample_distinct)
 
         cols = _get_columns(df, strict=strict)
         n_rows = _safe_n_rows(df, strict=strict)
         dtypes = getattr(df, "dtypes", None)
 
-        out: Dict[str, Dict[str, Any]] = {}
+        profiles: List[ColumnProfile] = []
 
-        for col in cols:
-            col_name = str(col).strip()
-            if not col_name:
-                # empty column label is a real schema issue; raise in strict mode
+        for col_key in cols:
+            name = str(col_key).strip()
+            if not name:
                 if strict:
                     raise DatasetProfilingError(
                         ColumnProfileErrorDetails(
                             column=None,
                             reason="Dataset contains an empty column name.",
                             hint="Rename the column to a non-empty string.",
-                            evidence={"raw_column": repr(col)},
+                            evidence={"raw_column": repr(col_key)},
                         )
                     )
                 continue
 
             try:
-                series = _get_series(df, col, col_name, strict=strict)
-                dtype_str = _dtype_to_str(dtypes, col)
-                kind = _infer_kind(series, dtype_str)
+                s = _get_series(df, col_key, name, strict=strict)
+                dtype_str = _dtype_to_str(dtypes, col_key)
+                kind = _infer_kind(s, dtype_str)
 
-                n_missing, missing_rate = _missingness(series, n_rows=n_rows, strict=strict)
-                distinct_count = _distinct_count(series)
+                n_missing, missing_rate = _missingness(s, n_rows=n_rows)
+                distinct = _distinct_count(s)
 
-                base: Dict[str, Any] = {
+                base: ColumnProfileCommon = {
+                    "name": name,
                     "dtype": dtype_str,
-                    "inferred_kind": kind,
                     "n_rows": n_rows,
                     "n_missing": n_missing,
                     "missing_rate": missing_rate,
-                    "distinct_count": distinct_count,
+                    "distinct_count": distinct,
                 }
 
                 if kind == "NUMERIC":
-                    base["summary"] = _numeric_summary(series, compute_quantiles=compute_quantiles, strict=strict)
-                elif kind == "DATETIME":
-                    base["summary"] = _datetime_summary(series, strict=strict)
-                elif kind == "BOOLEAN":
-                    base["summary"] = _boolean_summary(series, strict=strict)
-                elif kind == "CATEGORICAL":
-                    base["summary"] = _categorical_summary(series, max_categories=max_categories, strict=strict)
-                else:
-                    base["summary"] = _other_summary(series, sample_distinct=sample_distinct, strict=strict)
+                    numeric_prof: NumericColumnProfile = {
+                        **base,
+                        "inferred_kind": "NUMERIC",
+                        "summary": _numeric_summary(s, compute_quantiles=compute_quantiles),
+                    }
+                    profiles.append(numeric_prof)
 
-                out[col_name] = base
+                elif kind == "DATETIME":
+                    datetime_prof: DatetimeColumnProfile = {
+                        **base,
+                        "inferred_kind": "DATETIME",
+                        "summary": _datetime_summary(s),
+                    }
+                    profiles.append(datetime_prof)
+
+                elif kind == "BOOLEAN":
+                    boolean_prof: BooleanColumnProfile = {
+                        **base,
+                        "inferred_kind": "BOOLEAN",
+                        "summary": _boolean_summary(s),
+                    }
+                    profiles.append(boolean_prof)
+
+                elif kind == "CATEGORICAL":
+                    categorical_prof: CategoricalColumnProfile = {
+                        **base,
+                        "inferred_kind": "CATEGORICAL",
+                        "summary": _categorical_summary(s, max_categories=max_categories),
+                    }
+                    profiles.append(categorical_prof)
+
+                else:
+                    other_prof: OtherColumnProfile = {
+                        **base,
+                        "inferred_kind": "OTHER",
+                        "summary": _other_summary(s, sample_distinct=sample_distinct),
+                    }
+                    profiles.append(other_prof)
 
             except DatasetProfilingError:
-                # strict mode should bubble; non-strict should convert to note
                 if strict:
                     raise
-                out[col_name] = {
-                    "dtype": _dtype_to_str(dtypes, col),
-                    "inferred_kind": "OTHER",
+                # Non-strict: emit a valid profile with a note.
+                fallback: OtherColumnProfile = {
+                    "name": name,
+                    "dtype": _dtype_to_str(dtypes, col_key),
                     "n_rows": n_rows,
-                    "n_missing": None,
-                    "missing_rate": None,
+                    "n_missing": 0,
+                    "missing_rate": 0.0,
                     "distinct_count": None,
-                    "summary": {"note": "Profiling failed for this column; continue in non-strict mode."},
+                    "inferred_kind": "OTHER",
+                    "summary": {"distinct_values_sample": []},
+                    "note": "Profiling failed for this column in non-strict mode.",
                 }
+                profiles.append(fallback)
 
-        if strict and not out:
+        if strict and not profiles:
             raise DatasetProfilingError(
                 ColumnProfileErrorDetails(
                     column=None,
@@ -154,21 +244,46 @@ class DatasetStateHelpers:
                 )
             )
 
-        return out
+        return {"n_rows": n_rows, "profiles": profiles}
+    
+    @staticmethod
+    def dataset_summary_to_json(
+        summary: DatasetSummary,
+          *,
+        indent: int | None = None,
+        sort_keys: bool = True,
+    ) -> str:
+        """
+        Always returns STRICT valid JSON (no NaN/Inf).
+        Deterministic output by default via sort_keys=True.
+        """
+        payload = json_sanitize(summary)
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=indent,
+            sort_keys=sort_keys,
+            separators=(",", ":") if indent is None else None,
+            allow_nan=False,  # enforce strict JSON
+        )
 
 
-# ---------------------------
-# Validation / extraction
-# ---------------------------
+# =============================================================================
+# Internals
+# =============================================================================
 
 def _validate_params(*, max_categories: int, sample_distinct: int) -> None:
     if max_categories <= 0:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(column=None, reason="max_categories must be > 0.", evidence={"max_categories": max_categories})
+            ColumnProfileErrorDetails(
+                column=None, reason="max_categories must be > 0.", evidence={"max_categories": max_categories}
+            )
         )
     if sample_distinct <= 0:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(column=None, reason="sample_distinct must be > 0.", evidence={"sample_distinct": sample_distinct})
+            ColumnProfileErrorDetails(
+                column=None, reason="sample_distinct must be > 0.", evidence={"sample_distinct": sample_distinct}
+            )
         )
 
 
@@ -179,11 +294,10 @@ def _get_columns(df: Any, *, strict: bool) -> List[Any]:
             ColumnProfileErrorDetails(
                 column=None,
                 reason="Dataset object has no 'columns' attribute; not a DataFrame-like table.",
-                hint="Load the dataset into a pandas DataFrame (or provide an object that exposes .columns and supports df[col]).",
+                hint="Use a pandas DataFrame (recommended) or provide an object exposing .columns and df[col].",
                 evidence={"df_type": type(df).__name__},
             )
         )
-
     try:
         cols = list(raw_cols)
     except Exception as e:
@@ -195,21 +309,14 @@ def _get_columns(df: Any, *, strict: bool) -> List[Any]:
                 evidence={"df_type": type(df).__name__, "error": repr(e)},
             )
         )
-
-    if strict and len(cols) == 0:
+    if strict and not cols:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(
-                column=None,
-                reason="Dataset has zero columns.",
-                hint="Provide a tabular dataset with at least one column.",
-            )
+            ColumnProfileErrorDetails(column=None, reason="Dataset has zero columns.", hint="Provide at least one column.")
         )
-
     return cols
 
 
 def _safe_n_rows(df: Any, *, strict: bool) -> int:
-    # Prefer pandas-like df.shape[0]
     try:
         shape = getattr(df, "shape", None)
         if shape is not None and len(shape) >= 1:
@@ -222,13 +329,11 @@ def _safe_n_rows(df: Any, *, strict: bool) -> int:
             raise DatasetProfilingError(
                 ColumnProfileErrorDetails(
                     column=None,
-                    reason="Could not read dataset row count (df.shape[0]).",
-                    hint="Ensure df.shape is available and valid (pandas DataFrame recommended).",
+                    reason="Could not read df.shape[0].",
+                    hint="Ensure df.shape is valid (pandas DataFrame recommended).",
                     evidence={"df_type": type(df).__name__, "error": repr(e)},
                 )
             )
-
-    # Fallback to len(df)
     try:
         n = int(len(df))
         if n < 0:
@@ -246,34 +351,29 @@ def _safe_n_rows(df: Any, *, strict: bool) -> int:
 
 
 def _get_series(df: Any, col_key: Any, col_name: str, *, strict: bool) -> Any:
-    # Must support __getitem__ access: df[col]
     try:
         return df[col_key]
     except Exception as e:
         raise DatasetProfilingError(
             ColumnProfileErrorDetails(
                 column=col_name,
-                reason="Could not access column data via df[col].",
-                hint="Ensure the dataset is a DataFrame-like object with column access (pandas DataFrame recommended).",
+                reason="Could not access column via df[col].",
+                hint="Verify the column exists and df supports __getitem__ (pandas DataFrame recommended).",
                 evidence={"col_key": repr(col_key), "df_type": type(df).__name__, "error": repr(e)},
             )
         )
 
 
-def _dtype_to_str(dtypes: Any, col: Any) -> Optional[str]:
+def _dtype_to_str(dtypes: Any, col_key: Any) -> Optional[str]:
     try:
         if dtypes is None:
             return None
-        return str(dtypes[col])
+        return str(dtypes[col_key])
     except Exception:
         return None
 
 
-# ---------------------------
-# Type inference
-# ---------------------------
-
-def _infer_kind(series: Any, dtype_str: Optional[str]) -> str:
+def _infer_kind(series: Any, dtype_str: Optional[str]) -> InferredKind:
     ds = (dtype_str or "").lower()
     if "datetime" in ds or "date" in ds or "timestamp" in ds:
         return "DATETIME"
@@ -283,56 +383,31 @@ def _infer_kind(series: Any, dtype_str: Optional[str]) -> str:
         return "NUMERIC"
     if any(x in ds for x in ("object", "string", "category")):
         return "CATEGORICAL"
-
-    # Minimal fallback inference (not "heuristics about user intent"; just dtype class)
-    try:
-        s = series.dropna() if hasattr(series, "dropna") else series
-        # empty -> OTHER
-        if hasattr(s, "empty") and bool(getattr(s, "empty")):
-            return "OTHER"
-        # try numeric cast
-        if hasattr(s, "astype"):
-            try:
-                s.astype(float)
-                return "NUMERIC"
-            except Exception:
-                return "CATEGORICAL"
-        return "OTHER"
-    except Exception:
-        return "OTHER"
+    # Conservative fallback:
+    return "OTHER"
 
 
-# ---------------------------
-# Missingness / distinct
-# ---------------------------
-
-def _missingness(series: Any, *, n_rows: int, strict: bool) -> Tuple[int, float]:
-    if n_rows < 0:
-        if strict:
-            raise DatasetProfilingError(ColumnProfileErrorDetails(column=None, reason="Invalid row count.", evidence={"n_rows": n_rows}))
-        return 0, 0.0
-
+def _missingness(series: Any, *, n_rows: int) -> Tuple[int, float]:
     try:
         if hasattr(series, "isna"):
             n_missing = int(series.isna().sum())
         elif hasattr(series, "isnull"):
             n_missing = int(series.isnull().sum())
         else:
-            # Non-pandas fallback: treat None as missing
             vals = list(series)
             n_missing = sum(1 for x in vals if x is None)
     except Exception as e:
         raise DatasetProfilingError(
             ColumnProfileErrorDetails(
                 column=None,
-                reason="Could not compute missingness for a column.",
+                reason="Could not compute missingness.",
                 hint="Ensure the column supports isna()/isnull() or is iterable.",
                 evidence={"error": repr(e)},
             )
         )
 
-    missing_rate = (n_missing / n_rows) if n_rows > 0 else 0.0
-    return n_missing, float(missing_rate)
+    rate = (n_missing / n_rows) if n_rows > 0 else 0.0
+    return n_missing, float(rate)
 
 
 def _distinct_count(series: Any) -> Optional[int]:
@@ -344,46 +419,58 @@ def _distinct_count(series: Any) -> Optional[int]:
     return None
 
 
-# ---------------------------
-# Summaries
-# ---------------------------
+def _as_float_or_none(v: Any) -> Optional[float]:
+    try:
+        if v is None:
+            return None
+        fv = float(v)
+        if not math.isfinite(fv):
+            return None
+        return fv
+    except Exception:
+        return None
 
-def _numeric_summary(series: Any, *, compute_quantiles: bool, strict: bool) -> Dict[str, Any]:
+
+def _as_datetime_str(v: Any) -> Optional[str]:
+    try:
+        if v is None:
+            return None
+        if hasattr(v, "isoformat"):
+            return str(v.isoformat())
+        return str(v)
+    except Exception:
+        return None
+
+
+def _numeric_summary(series: Any, *, compute_quantiles: bool) -> NumericSummary:
     try:
         s = series.dropna() if hasattr(series, "dropna") else series
-
-        # coerce to float if possible (pandas)
         if hasattr(s, "astype"):
-            s = s.astype(float)
+            try:
+                s = s.astype(float)
+            except Exception:
+                # If coercion fails, treat as empty numeric summary rather than crashing.
+                return {"min": None, "max": None, "mean": None, "std": None, "quantiles": None}
 
-        # empty
-        if hasattr(s, "empty") and bool(getattr(s, "empty")):
-            return {"min": None, "max": None, "mean": None, "std": None, "quantiles": None}
+        mn = _as_float_or_none(getattr(s, "min", lambda: None)())
+        mx = _as_float_or_none(getattr(s, "max", lambda: None)())
+        mean = _as_float_or_none(getattr(s, "mean", lambda: None)())
+        std = _as_float_or_none(getattr(s, "std", lambda: None)())
 
-        out: Dict[str, Any] = {
-            "min": _safe_scalar(getattr(s, "min", lambda: None)()),
-            "max": _safe_scalar(getattr(s, "max", lambda: None)()),
-            "mean": _safe_scalar(getattr(s, "mean", lambda: None)()),
-            "std": _safe_scalar(getattr(s, "std", lambda: None)()),
-        }
+        quantiles: Optional[Dict[str, float]] = None
+        if compute_quantiles and hasattr(s, "quantile"):
+            qs = [0.05, 0.25, 0.5, 0.75, 0.95]
+            qvals = s.quantile(qs)
+            # pandas Series has .items()
+            items = list(qvals.items()) if hasattr(qvals, "items") else []
+            q_out: Dict[str, float] = {}
+            for k, v in items:
+                fv = _as_float_or_none(v)
+                if fv is not None:
+                    q_out[str(k)] = fv
+            quantiles = q_out or None
 
-        if compute_quantiles:
-            if not hasattr(s, "quantile"):
-                if strict:
-                    raise DatasetProfilingError(
-                        ColumnProfileErrorDetails(column=None, reason="Numeric quantiles requested but column has no .quantile().")
-                    )
-                out["quantiles"] = None
-            else:
-                qs = [0.05, 0.25, 0.5, 0.75, 0.95]
-                qvals = s.quantile(qs)
-                out["quantiles"] = {str(k): _safe_scalar(v) for k, v in _iter_items(qvals)} # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
-        else:
-            out["quantiles"] = None
-
-        return out
-    except DatasetProfilingError:
-        raise
+        return {"min": mn, "max": mx, "mean": mean, "std": std, "quantiles": quantiles}
     except Exception as e:
         raise DatasetProfilingError(
             ColumnProfileErrorDetails(
@@ -395,71 +482,65 @@ def _numeric_summary(series: Any, *, compute_quantiles: bool, strict: bool) -> D
         )
 
 
-def _datetime_summary(series: Any, *, strict: bool) -> Dict[str, Any]:
+def _datetime_summary(series: Any) -> DatetimeSummary:
     try:
         s = series.dropna() if hasattr(series, "dropna") else series
-        if hasattr(s, "empty") and bool(getattr(s, "empty")):
-            return {"min": None, "max": None}
         mn = getattr(s, "min", lambda: None)()
         mx = getattr(s, "max", lambda: None)()
-        return {"min": _safe_datetime_str(mn), "max": _safe_datetime_str(mx)}
+        return {"min": _as_datetime_str(mn), "max": _as_datetime_str(mx)}
     except Exception as e:
         raise DatasetProfilingError(
             ColumnProfileErrorDetails(
                 column=None,
                 reason="Datetime summary failed.",
-                hint="Verify the column is a datetime type or parseable to datetime.",
+                hint="Verify the column is datetime-like.",
                 evidence={"error": repr(e)},
             )
         )
 
 
-def _boolean_summary(series: Any, *, strict: bool) -> Dict[str, Any]:
+def _boolean_summary(series: Any) -> BooleanSummary:
     try:
         if hasattr(series, "value_counts"):
             vc = series.value_counts(dropna=True)
-            counts = {str(k): int(v) for k, v in _iter_items(vc)} # type: ignore
+            items = list(vc.items()) if hasattr(vc, "items") else []
+            counts: Dict[str, int] = {}
+            for k, v in items:
+                counts[str(k)] = int(v)
             return {"counts": counts}
 
-        # Non-pandas fallback: iterate values
         vals = list(series)
-        return {
-            "counts": {
-                "True": sum(1 for x in vals if x is True),
-                "False": sum(1 for x in vals if x is False),
-            }
-        }
+        counts = {"True": sum(1 for x in vals if x is True), "False": sum(1 for x in vals if x is False)}
+        return {"counts": counts}
     except Exception as e:
         raise DatasetProfilingError(
             ColumnProfileErrorDetails(
                 column=None,
                 reason="Boolean summary failed.",
-                hint="Verify the column is boolean or has value_counts().",
+                hint="Verify the column is boolean-like or has value_counts().",
                 evidence={"error": repr(e)},
             )
         )
 
 
-def _categorical_summary(series: Any, *, max_categories: int, strict: bool) -> Dict[str, Any]:
+def _categorical_summary(series: Any, *, max_categories: int) -> CategoricalSummary:
     try:
         if hasattr(series, "value_counts"):
             vc = series.value_counts(dropna=True)
-            items = [(str(k), int(v)) for k, v in _iter_items(vc)] # type: ignore
+            items = list(vc.items()) if hasattr(vc, "items") else []
         else:
             vals = [x for x in list(series) if x is not None]
             freq: Dict[str, int] = {}
             for x in vals:
-                key = str(x)
-                freq[key] = freq.get(key, 0) + 1
+                sx = str(x)
+                freq[sx] = freq.get(sx, 0) + 1
             items = sorted(freq.items(), key=lambda kv: kv[1], reverse=True)
 
-        top = items[:max_categories]
-        other_count = sum(v for _, v in items[max_categories:]) if len(items) > max_categories else 0
+        top_items = items[:max_categories]
+        other_count = sum(int(v) for _, v in items[max_categories:]) if len(items) > max_categories else 0
 
-        return {
-            "top_categories": [{"value": k, "count": v} for k, v in top],
-            "other_count": int(other_count),
-        }
+        top: List[Dict[str, int | str]] = [{"value": str(k), "count": int(v)} for k, v in top_items]
+        return {"top_categories": top, "other_count": int(other_count)}
     except Exception as e:
         raise DatasetProfilingError(
             ColumnProfileErrorDetails(
@@ -471,13 +552,12 @@ def _categorical_summary(series: Any, *, max_categories: int, strict: bool) -> D
         )
 
 
-def _other_summary(series: Any, *, sample_distinct: int, strict: bool) -> Dict[str, Any]:
+def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummary:
     try:
         s = series.dropna() if hasattr(series, "dropna") else [x for x in list(series) if x is not None]
-
         if hasattr(s, "unique"):
-            uniq = s.unique()  # pyright: ignore[reportUnknownVariableType, reportAttributeAccessIssue, reportUnknownMemberType]
-            distinct = [str(x) for x in list(uniq)[:sample_distinct]] # type: ignore
+            uniq: List[Any] = list(s.unique()) # pyright: ignore[reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+            distinct = [str(x) for x in uniq[:sample_distinct]]
         else:
             seen: List[str] = []
             for x in list(s):
@@ -487,7 +567,6 @@ def _other_summary(series: Any, *, sample_distinct: int, strict: bool) -> Dict[s
                 if len(seen) >= sample_distinct:
                     break
             distinct = seen
-
         return {"distinct_values_sample": distinct}
     except Exception as e:
         raise DatasetProfilingError(
@@ -498,46 +577,3 @@ def _other_summary(series: Any, *, sample_distinct: int, strict: bool) -> Dict[s
                 evidence={"error": repr(e)},
             )
         )
-
-
-# ---------------------------
-# Serialization helpers
-# ---------------------------
-
-def _safe_scalar(v: Any) -> Any:
-    try:
-        if v is None:
-            return None
-        if isinstance(v, (int, float, str, bool)):
-            # normalize NaN/Inf to strings for JSON stability if needed
-            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-                return str(v)
-            return v
-        if hasattr(v, "item"):
-            vv = v.item()
-            return _safe_scalar(vv)
-        return str(v)
-    except Exception:
-        return None
-
-
-def _safe_datetime_str(v: Any) -> Optional[str]:
-    try:
-        if v is None:
-            return None
-        if hasattr(v, "isoformat"):
-            return str(v.isoformat())
-        return str(v)
-    except Exception:
-        return None
-
-
-def _iter_items(obj: Any): # pyright: ignore[reportUnknownParameterType]
-    if isinstance(obj, dict):
-        return obj.items() # pyright: ignore[reportUnknownVariableType]
-    if hasattr(obj, "items"):
-        return obj.items()
-    try:
-        return list(obj)
-    except Exception:
-        return [] # pyright: ignore[reportUnknownVariableType]

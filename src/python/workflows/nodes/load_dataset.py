@@ -91,8 +91,6 @@ def make_load_dataset_node(
                 "dataset": {
                     **dataset,
                     "id": dataset_id,
-                    "raw_schema": None,
-                    "summary": None,
                     "load_error": "LOAD_FAILED",
                 },
                 "control": _mk_control(
@@ -127,14 +125,9 @@ def make_load_dataset_node(
         # ---- Success: write schema + summary deterministically ----
         n_rows, n_cols = df.shape
         cols = [str(c) for c in df.columns.tolist()]
-
-        raw_schema: JSONDict = {
-            "columns": [{"name": str(col), "dtype": str(dtype)} for col, dtype in df.dtypes.items()]
-        }
-
         # Summary: column profile (raises on real dataset problems)
         try:
-            summary = DatasetStateHelpers.extract_column_profile(
+            summary = DatasetStateHelpers.extract_dataset_summary(
                 df,
                 max_categories=1000,
                 sample_distinct=1000,
@@ -151,8 +144,6 @@ def make_load_dataset_node(
                 "dataset": {
                     **dataset,
                     "id": dataset_id,
-                    "raw_schema": raw_schema,
-                    "summary": None,
                     "load_error": "SUMMARY_FAILED",
                 },
                 "control": _mk_control(
@@ -199,8 +190,7 @@ def make_load_dataset_node(
             "dataset": {
                 **dataset,
                 "id": dataset_id,
-                "raw_schema": raw_schema,
-                "summary": summary,  # Dict[str, Dict[str, Any]]
+                "summary": summary, 
                 "load_error": None,
             },
             "control": _mk_control(

@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, List, cast
+from typing import Any, Dict, List, Optional, cast
 from uuid import UUID
 
-from python.domain.service.llm_service import  LLMConfig, LLMService
+from python.domain.service.llm_service import LLMConfig, LLMService
 from python.workflows.nodes.prompts.model_selection import (
     PromptInputs,
     get_econml_allowed_estimators,
@@ -20,7 +20,6 @@ from python.workflows.state.conversation_state import (
     ConversationStateHelpers,
 )
 from python.workflows.state.model_selection_state import ModelSelectionState
-from python.workflows.state.validate_protocol_state import ProtocolStaticValidationState, ProtocolValidationReport
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +39,8 @@ def _run(
     llm: LLMService,
     model_name: str,
 ) -> ConversationState:
-    ms: ModelSelectionState = ModelSelectionState()
+    # TypedDict-friendly init
+    ms: ModelSelectionState = cast(ModelSelectionState, {})
     state["model_selection"] = ms
 
     allowed_list = list(get_econml_allowed_estimators())
@@ -48,40 +48,42 @@ def _run(
     ms["allowed_estimators"] = allowed_list
     ms["allowed_estimators_map"] = {fqcn: True for fqcn in allowed_list}
 
-    inference_state = state.get("inference_ready")
-    if inference_state is None:
-        msg = "InferenceReadyState missing from state. Run inference-ready stage is required."
+    inference_state_any = state.get("inference_ready")
+    if not isinstance(inference_state_any, dict):
+        msg = "InferenceReadyState missing from state. Run inference-ready stage first."
         ConversationStateHelpers.append_ai_message(state=state, content=msg)
         return ConversationStateHelpers.set_abort(state=state, action="NONE", msg=msg)
-    
-    dataset_summary = inference_state.get("prepared_dataset").get("summary") if inference_state.get("prepared_dataset") else None
+
+    prepared_ds_any = inference_state_any.get("prepared_dataset")
+    dataset_summary = prepared_ds_any.get("summary") if isinstance(prepared_ds_any, dict) else None
     if dataset_summary is None:
-        msg = "Prepared dataset summary is missing from InferenceReadyState. Run inference-ready stage is required."
+        msg = "Prepared dataset summary missing from InferenceReadyState. Run inference-ready stage first."
         ConversationStateHelpers.append_ai_message(state=state, content=msg)
         return ConversationStateHelpers.set_abort(state=state, action="NONE", msg=msg)
-    
 
-    protocol_obj = state.get("protocol_state") or state.get("protocol") or state.get("protocol_discussion")
+    # Keep protocol around (still useful for model choice rationale)
+    protocol_obj = (
+        state.get("protocol")  # canonical
+        or state.get("protocol_state")  # type: ignore[index]  # legacy / defensive
+        or state.get("protocol_discussion")
+    )
     if protocol_obj is None:
-        return _abort(state, ms, "Protocol state is missing from state. Run protocol compilation is required.")
+        return _abort(state, ms, "Protocol state missing. Run protocol compilation first.")
 
-    validation_state: ProtocolStaticValidationState | None = state.get("protocol_static_validation")
-    if validation_state is None:
-        return _abort(state, ms, "ProtocolStaticValidationState is missing from state. Run protocol validation stage is required.")
-    
-    report : ProtocolValidationReport | None =  validation_state.get("report")
+    # ✅ CHANGED: use inference-ready validation report (not protocol static validation)
+    report = _get_inference_ready_validation_report(state)
     if report is None:
-        return _abort(state, ms, "Protocol validation report is missing from state. Run protocol validation stage is required.")
-    
-    validation_issues: str = "\n".join([
-        f"- {issue.get('description', 'No description')} (severity: {issue.get('severity', 'UNKNOWN')})"
-        for issue in report.get("issues", [])
-    ])
-    
-    inference_str = _normalize_to_text(inference_state)
+        return _abort(
+            state,
+            ms,
+            "Inference-ready validation report missing. Run VALIDATE_INFERENCE_READY_STATIC (and discussion if needed) first.",
+        )
+
+    validation_issues = _format_validation_issues(report)
+
+    inference_str = _normalize_to_text(inference_state_any)
     dataset_str = _normalize_to_text(dataset_summary)
     protocol_str = _normalize_to_text(protocol_obj)
-    
 
     prompt_inputs_base = PromptInputs(
         inference_ready_state_summary=inference_str,
@@ -91,7 +93,7 @@ def _run(
     )
 
     # -------------------------
-    # LLM #1: Prompt 1 (draft) - retry once on failure/empty
+    # LLM #1: draft
     # -------------------------
     try:
         prompt_1 = get_model_selection_prompt_1(prompt_inputs_base)
@@ -110,7 +112,7 @@ def _run(
         return _abort(state, ms, f"Model selection (draft) failed: {e}")
 
     # -------------------------
-    # LLM #2: Prompt 2 (final JSON) - parse/validate; repair once if needed
+    # LLM #2: final JSON
     # -------------------------
     try:
         prompt_inputs_2 = PromptInputs(
@@ -128,14 +130,13 @@ def _run(
             temperature=0.0,
             prompt=prompt_2,
             empty_err="LLM#2 returned empty JSON output",
-            max_attempts=2,  # retry on transport/empty
+            max_attempts=2,
             log_label="MODEL_SELECTION:LLM#2",
         )
         ms["final_json_raw"] = final_json_raw
 
-        # Parse + validate; if fails once, ask for a repair JSON-only output and parse again
-        parsed = None
-        last_err: Exception | None = None
+        parsed: Optional[dict[str, Any]] = None
+        last_err: Optional[Exception] = None
 
         for attempt in range(2):
             try:
@@ -154,7 +155,6 @@ def _run(
             except Exception as e:
                 last_err = e
                 ms["top3_validated"] = False
-                # On first failure, do one “repair” re-ask
                 if attempt == 0:
                     repair_prompt = _build_prompt2_json_repair_prompt(
                         original_prompt=prompt_2,
@@ -167,7 +167,7 @@ def _run(
                         temperature=0.0,
                         prompt=repair_prompt,
                         empty_err="LLM#2 repair returned empty JSON output",
-                        max_attempts=1,  # single shot; we already had retries above
+                        max_attempts=1,
                         log_label="MODEL_SELECTION:LLM#2_REPAIR",
                     )
                     ms["final_json_raw"] = repaired
@@ -182,7 +182,7 @@ def _run(
         return _abort(state, ms, f"Model selection (finalize) failed: {e}")
 
     # -------------------------
-    # LLM #3: Prompt 3 (rationale)
+    # LLM #3: rationale
     # -------------------------
     try:
         prompt_inputs_3 = PromptInputs(
@@ -190,7 +190,7 @@ def _run(
             dataset_summary=dataset_str,
             protocol_state=protocol_str,
             validation_notes=validation_issues,
-            final_selection_json=json.dumps(ms["final_json"], ensure_ascii=False, indent=2), # pyright: ignore[reportTypedDictNotRequiredAccess]
+            final_selection_json=json.dumps(ms["final_json"], ensure_ascii=False, indent=2),  # type: ignore[arg-type]
         )
         prompt_3 = get_model_selection_prompt_3(prompt_inputs_3)
         rationale_text = _llm_call_prompt_retry(
@@ -207,9 +207,50 @@ def _run(
         log.exception("MODEL_SELECTION: LLM#3 failed")
         return _abort(state, ms, f"Model selection (rationale) failed: {e}")
 
-    ConversationStateHelpers.append_ai_message(state=state, content=rationale_text)
-    return ConversationStateHelpers.set_done(state=state, action="NEEDS_INPUT", msg=rationale_text)
+    ConversationStateHelpers.append_ai_message(state=state, content=cast(str, ms.get("rationale_text", "")))
+    return ConversationStateHelpers.set_done(state=state, action="NEEDS_INPUT", msg=cast(str, ms.get("rationale_text", "")))
 
+
+# =============================================================================
+# ✅ inference-ready validation report access
+# =============================================================================
+
+def _get_inference_ready_validation_report(state: ConversationState) -> Optional[Dict[str, Any]]:
+    """
+    Expected convention:
+      state["inference_ready_validation"] = {"report": {status, issues, metrics}}
+    """
+    irv = state.get("inference_ready_validation")  # type: ignore[index]
+    if not isinstance(irv, dict):
+        return None
+    rep = irv.get("report")
+    if not isinstance(rep, dict):
+        return None
+    return cast(Dict[str, Any], rep)
+
+
+def _format_validation_issues(report: Dict[str, Any]) -> str:
+    issues_any = report.get("issues", [])
+    if not isinstance(issues_any, list):
+        return ""
+
+    lines: List[str] = []
+    for it in issues_any:
+        if not isinstance(it, dict):
+            continue
+        # Your issue shape uses "message" (not "description")
+        msg = str(it.get("message") or "No message").strip()
+        sev = str(it.get("severity") or "UNKNOWN").strip()
+        rid = str(it.get("rule_id") or "").strip()
+        head = f"{rid}: " if rid else ""
+        lines.append(f"- {head}{msg} (severity: {sev})")
+
+    return "\n".join(lines)
+
+
+# =============================================================================
+# existing helpers (unchanged)
+# =============================================================================
 
 def _abort(state: ConversationState, ms: ModelSelectionState, msg: str) -> ConversationState:
     ms.setdefault("errors", []).append(msg)
@@ -234,11 +275,9 @@ def _parse_json_strictish(raw: str) -> dict[str, Any]:
     if not s:
         raise ValueError("Empty JSON string")
 
-    # Strip common code fences if model violates the instruction
     s = re.sub(r"^\s*```(?:json)?\s*", "", s, flags=re.IGNORECASE)
     s = re.sub(r"\s*```\s*$", "", s)
 
-    # Try direct
     try:
         parsed = json.loads(s)
         if not isinstance(parsed, dict):
@@ -247,15 +286,12 @@ def _parse_json_strictish(raw: str) -> dict[str, Any]:
     except Exception:
         pass
 
-    # Extract outermost {...}
     start = s.find("{")
     end = s.rfind("}")
     if start == -1 or end == -1 or end <= start:
         raise ValueError("Could not find JSON object boundaries in model output")
 
     candidate = s[start : end + 1]
-
-    # Minor cleanup: remove trailing commas before } or ]
     candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
 
     parsed2 = json.loads(candidate)
@@ -269,11 +305,10 @@ def _extract_and_validate_top3(parsed: dict[str, Any], *, allowed: set[str]) -> 
     if not isinstance(v, list):
         raise ValueError("final_json.selected_top3 is missing or not a list")
 
-    selected = [str(x).strip() for x in v if str(x).strip()] # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+    selected = [str(x).strip() for x in v if str(x).strip()]
     invalid = [x for x in selected if x not in allowed]
     selected = [x for x in selected if x in allowed]
 
-    # Must be exactly 3 unique
     uniq: List[str] = []
     for x in selected:
         if x not in uniq:
@@ -286,14 +321,11 @@ def _extract_and_validate_top3(parsed: dict[str, Any], *, allowed: set[str]) -> 
 
 
 def _build_prompt2_json_repair_prompt(*, original_prompt: str, bad_output: str, error: str) -> str:
-    # Keep it brutally strict: JSON only, same schema, no prose.
     return (
         "Your previous output for Prompt 2 was invalid.\n"
-        f"ERROR: {error}\n"
-        "\n"
+        f"ERROR: {error}\n\n"
         "You MUST output ONLY a valid JSON object matching the required schema.\n"
-        "No markdown. No code fences. No commentary.\n"
-        "\n"
+        "No markdown. No code fences. No commentary.\n\n"
         "=== ORIGINAL PROMPT 2 ===\n"
         + original_prompt
         + "\n\n"
@@ -314,17 +346,16 @@ def _llm_call_prompt_retry(
     max_attempts: int,
     log_label: str,
 ) -> str:
-    last: Exception | None = None
+    last: Optional[Exception] = None
     for attempt in range(1, max_attempts + 1):
         try:
-            out = _llm_call_prompt(
+            return _llm_call_prompt(
                 llm=llm,
                 model_name=model_name,
                 temperature=temperature,
                 prompt=prompt,
                 empty_err=empty_err,
             )
-            return out
         except Exception as e:
             last = e
             log.warning("%s attempt %d/%d failed: %s", log_label, attempt, max_attempts, e)
@@ -341,7 +372,12 @@ def _llm_call_prompt(
     empty_err: str,
 ) -> str:
     cfg = LLMConfig(model=model_name, temperature=temperature)
-    raw = _llm_text(llm, config=cfg, system_prompt="you are causal inference copilot", user_prompt=prompt)
+    raw = _llm_text(
+        llm,
+        config=cfg,
+        system_prompt="you are causal inference copilot",
+        user_prompt=prompt,
+    )
     out = (raw or "").strip()
     if not out:
         raise ValueError(empty_err)
@@ -355,10 +391,10 @@ def _llm_text(
     system_prompt: str,
     user_prompt: str,
 ) -> str:
-        resp = llm.generate( 
-            config=config,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            history=None,
-        ).content
-        return  resp
+    resp = llm.generate(
+        config=config,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        history=None,
+    )
+    return str(cast(Any, resp).content or "")

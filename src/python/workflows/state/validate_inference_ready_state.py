@@ -6,7 +6,7 @@ ValidationSeverity = Literal["FAIL", "WARN"]
 ValidationStatus = Literal["PASS", "WARN", "FAIL"]
 
 
-class ProtocolValidationIssue(TypedDict):
+class InferenceReadyValidationIssue(TypedDict):
     rule_id: str
     severity: ValidationSeverity
     message: str
@@ -14,11 +14,12 @@ class ProtocolValidationIssue(TypedDict):
     fix_hint: str | None
 
 
-class ProtocolValidationReport(TypedDict):
+class InferenceReadyValidationReport(TypedDict):
     status: ValidationStatus
-    issues: List[ProtocolValidationIssue]
+    issues: List[InferenceReadyValidationIssue]
     metrics: Dict[str, Any]
 
 
-class ProtocolStaticValidationState(TypedDict, total=False):
-    report: ProtocolValidationReport
+class InferenceReadyValidationState(TypedDict, total=False):
+    report: InferenceReadyValidationReport
+

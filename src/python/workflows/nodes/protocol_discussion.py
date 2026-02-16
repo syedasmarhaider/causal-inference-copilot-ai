@@ -17,6 +17,7 @@ from python.workflows.state.conversation_state import (
     ConversationState,
     ConversationStateHelpers,
 )
+from python.workflows.state.dataset_state import DatasetStateHelpers
 from python.workflows.state.protocol_discussion_state import ProtocolDiscussionState
 log = logging.getLogger(__name__)
 
@@ -65,10 +66,12 @@ def _run(
         ConversationStateHelpers.append_ai_message(state=state, content="Dataset id is missing. Reload dataset is required")
         return  ConversationStateHelpers.set_abort(state=state, action="NEEDS_INPUT",msg="Dataset id is missing. Reload dataset is required")
     
-    summary = dataset["summary"] # pyright: ignore[reportTypedDictNotRequiredAccess, reportUnknownVariableType]
-    if summary is None:
+    summary_state = dataset.get("summary")
+    if summary_state is None:
         ConversationStateHelpers.append_ai_message(state=state, content="Data summary missing. Reload dataset is required")
         return  ConversationStateHelpers.set_abort(state=state, action="NONE",msg="Data summary missing. Reload dataset is required")
+    
+    summary_string = DatasetStateHelpers.dataset_summary_to_json(summary_state)
     
             
     chat_history_messages = ConversationStateHelpers.chat_history_to_payload(state, k=7)
@@ -76,7 +79,7 @@ def _run(
     payload: dict[str, Any] = { 
         "prev_questions_answers_discussion_state": get_questions(),
         "conversation_messages_till_now":chat_history_messages,
-        "dataset_columns_summary": summary,
+        "dataset_columns_summary": summary_string,
     }
 
     # -------------------------

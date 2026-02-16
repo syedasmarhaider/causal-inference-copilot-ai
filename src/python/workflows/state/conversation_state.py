@@ -13,7 +13,7 @@ from python.workflows.state.model_state import ModelState
 from python.workflows.state.model_selection_state import ModelSelectionState
 from python.workflows.state.protocol_discussion_state import ProtocolDiscussionState
 from python.workflows.state.protocol_state import ProtocolState
-from python.workflows.state.validate_protocol_state import ProtocolStaticValidationState
+from python.workflows.state.validate_inference_ready_state import InferenceReadyValidationState
 
 
 class ConversationState(TypedDict):
@@ -21,7 +21,7 @@ class ConversationState(TypedDict):
     dataset: DatasetState
     protocol_discussion: ProtocolDiscussionState | None
     protocol: ProtocolState | None
-    protocol_static_validation: ProtocolStaticValidationState | None
+    inference_ready_validation: InferenceReadyValidationState | None
     inference_ready : InferenceReadyState | None
     model_selection: ModelSelectionState | None
     model_state: ModelState | None
@@ -174,7 +174,7 @@ def get_init_conversation_state(dataset_id: UUID) -> ConversationState:
         "control": control,
         "dataset": dataset,
         "protocol_discussion": None,
-        "protocol_static_validation": None,
+        "inference_ready_validation": None,
         "messages": messages,
         "protocol": None,
         "inference_ready":None,
