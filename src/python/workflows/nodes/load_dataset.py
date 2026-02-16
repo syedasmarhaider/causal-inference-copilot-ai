@@ -204,9 +204,8 @@ def make_load_dataset_node(
         snapshot_ok: JSONDict = {
             "intent": "LOADED_OK",
             "dataset_preview": {"rows": int(n_rows), "cols": int(n_cols), "columns": cols},
-            # Keep LLM payload small: provide only top-level counts here
             "summary_stats": {
-                "profiled_columns": len(summary),
+                "profiled_columns": summary,
                 "rows": int(n_rows),
                 "cols": int(n_cols),
             },
