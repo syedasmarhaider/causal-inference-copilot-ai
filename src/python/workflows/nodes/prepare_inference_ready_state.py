@@ -127,6 +127,11 @@ def make_prepare_inference_ready_node(
                     ConversationStateHelpers.append_ai_message(state, msg)
                     return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), msg)
 
+            if df.empty or df[T_col].nunique() < 2 or df[Y_col].nunique() < 2:
+                msg = "Prepared dataset has no rows or lacks treatment/outcome variation; cannot proceed to inference-ready state required to re-run compile protocol state."
+                ConversationStateHelpers.append_ai_message(state, msg)
+                return ConversationStateHelpers.set_abort(state, cast(ACTION, "NONE"), msg)
+            
             # 8) Save prepared dataset + profile it
             new_dataset_id = uuid4()
             prepared_dataset = DatasetState()
@@ -138,6 +143,7 @@ def make_prepare_inference_ready_node(
                     compute_quantiles=cfg.compute_quantiles_profile,
                     strict=True,
                 )
+            
             data_repo.save_csv_data(
                 df=df,
                 user_id=user_id,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import logging
 from pathlib import Path
 from typing import Final, Mapping
 from uuid import UUID
@@ -22,6 +21,9 @@ from python.workflows.nodes.model_selection_discussion_node import make_model_se
 from python.workflows.nodes.model_selection_node import make_model_selection_node
 from python.workflows.nodes.prepare_inference_ready_state import make_prepare_inference_ready_node
 from python.workflows.nodes.protocol_discussion import make_protocol_discussion_node
+from python.workflows.nodes.validate_inference_ready import make_validate_inference_ready_node
+from python.workflows.nodes.validate_inference_ready_discussion import make_validate_inference_ready_discussion_node
+from python.workflows.state.conversation_state import ConversationState
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState, get_init_conversation_state
 from python.workflows.state.control_state import  Stage, Status
 from python.workflows.tools.inference.causal_inference_factory import CausalInferenceFactory
@@ -80,9 +82,6 @@ def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
         ),
         "VALIDATE_INFERENCE_READY": make_validate_inference_ready_node(
             data_repo=cfg.data_repo,
-            llm=cfg.llm,
-            model_name=cfg.model_name,
-            causal_factory=causal_factory,
         ),
         "VALIDATE_INFERENCE_READY_DISCUSSION": make_validate_inference_ready_discussion_node(
             llm=cfg.llm,
@@ -155,11 +154,7 @@ class SimpleWorkflow:
         if needs_input:
             control["action_required"] = "NONE"
 
-        self._repo.save(user_id=user_id, conversation_id=conversation_id, state=out_state)
-        logging.warning("State after processing protocol:" + get_string_protocol_state(out_state.get("protocol", None)))
-        inference_ready = out_state.get('inference_ready')
-        inference_ready_summary = get_inference_ready_state_summary(inference_ready) if inference_ready is not None else 'None'
-        logging.warning(f"State after processing protocol: inference_ready={inference_ready_summary}")
+        self._repo.save(user_id=user_id, conversation_id=conversation_id, state=out_state)       
         return WorkflowResponse(
             node_message=node_msg,
             needs_input=needs_input,

@@ -12,7 +12,7 @@ from python.domain.repo.data_repo import DataRepo
 from python.workflows.state.control_state import ACTION
 from python.workflows.state.conversation_state import CallableNodeFunc, ConversationState, ConversationStateHelpers
 from python.workflows.state.inference_ready_state import InferenceReadyState
-from python.workflows.state.validate_inference_ready_state import InferenceReadyValidationIssue, InferenceReadyValidationReport, ValidationSeverity, ValidationStatus
+from python.workflows.state.validate_inference_ready_state import InferenceReadyValidationIssue, InferenceReadyValidationReport, InferenceReadyValidationState, ValidationSeverity, ValidationStatus
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class ValidateInferenceReadyConfig:
 # Public node factory
 # =============================================================================
 
-def make_validate_inference_ready_static_node(*, data_repo: DataRepo) -> CallableNodeFunc:
+def make_validate_inference_ready_node(*, data_repo: DataRepo) -> CallableNodeFunc:
     """
     Validate *InferenceReadyState* + the prepared dataset it references.
 
@@ -212,7 +212,7 @@ def _attach_report(state: ConversationState, report: InferenceReadyValidationRep
     You should add this to ConversationState TypedDict:
         inference_ready_validation: InferenceReadyValidationState | None
     """
-    state["inference_ready_validation"] = cast(InferenceReadyValidationState, {"report": report})  # type: ignore[typeddict-unknown-key]
+    state["inference_ready_validation"] = cast(InferenceReadyValidationState, {"report": report})
 
 
 # =============================================================================
