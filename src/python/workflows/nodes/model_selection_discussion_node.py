@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, List, cast
+from typing import Any, List, Optional, cast
 from uuid import UUID
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
@@ -37,19 +37,35 @@ def _run(
     llm: LLMService,
     model_name: str,
 ) -> ConversationState:
+    # keep signature; silence “unused” in strict lint configs
+    _ = user_id
+    _ = conversation_id
+
     allowed = tuple(get_econml_allowed_estimators())
     allowed_set = set(allowed)
 
-    ms = state.get("model_selection")
-    if ms is None:
-        return _abort(state, "ModelSelectionState missing. Run MODEL_SELECTION first.")
+    ms_any = state.get("model_selection")
+    if not isinstance(ms_any, dict):
+        return _abort(state, "ModelSelectionState missing or invalid. Run MODEL_SELECTION first.")
 
-    selected_top3 =  ms.get("selected_top3") or []
+    # sanitize selected_top3 -> list[str] (unique, allowed, stable)
+    raw_top3 = ms_any.get("selected_top3") or []
+    selected_top3: List[str] = []
+    if isinstance(raw_top3, list):
+        for x in raw_top3:
+            s = str(x).strip()
+            if s and s in allowed_set and s not in selected_top3:
+                selected_top3.append(s)
 
-    mds =  state.get("model_state") or ModelState()
-    state["model_state"] = mds
+    # TypedDict-safe ModelState init (do NOT call ModelState() / ModelState(...))
+    mds_any = state.get("model_state")
+    if isinstance(mds_any, dict):
+        mds = cast(ModelState, mds_any)
+    else:
+        mds = cast(ModelState, {})
+        state["model_state"] = mds
 
-    already = (mds.get("selected_model_fqcn") or "").strip()
+    already = str(mds.get("selected_model_fqcn") or "").strip()
     if already:
         msg = f"Model already selected: {already}"
         ConversationStateHelpers.append_ai_message(state=state, content=msg)
@@ -58,13 +74,14 @@ def _run(
     chat_history = ConversationStateHelpers.chat_history_to_payload(state, k=12)
 
     # -------------------------
-    # LLM #2: extractor (first)
+    # LLM #1: extractor (first)
     # -------------------------
     try:
         extractor_payload: dict[str, Any] = {
             "allowed_estimators": list(allowed),
             "selected_top3": selected_top3,
-            "chat_history": json.dumps(chat_history, ensure_ascii=False),
+            # IMPORTANT: do NOT json.dumps this; _llm_call_text serializes the full payload once.
+            "chat_history": chat_history,
         }
 
         extracted = _llm_call_text(
@@ -78,26 +95,26 @@ def _run(
 
         chosen = _resolve_choice_minimal(extracted, selected_top3=selected_top3, allowed=allowed_set)
         if chosen is not None:
-            state["model_state"] = ModelState(selected_model_fqcn=chosen)
+            state["model_state"] = cast(ModelState, {"selected_model_fqcn": chosen})
             msg = f"Model confirmed: {chosen}"
             ConversationStateHelpers.append_ai_message(state=state, content=msg)
             return ConversationStateHelpers.set_done(state=state, action="NONE", msg=msg)
 
     except Exception as e:
         log.exception("MODEL_SELECTION_DISCUSSION: extractor failed: %s", e)
-        # Continue to LLM#1 discussion message.
+        # Continue to discussion message.
 
     # -------------------------
-    # LLM #1: discussion message (only if not selected)
+    # LLM #2: discussion message (only if not selected)
     # -------------------------
     try:
         discussion_payload: dict[str, Any] = {
             "allowed_estimators": list(allowed),
             "model_selection_output": {
                 "selected_top3": selected_top3,
-                "selection_notes": ms.get("selection_notes"),
-                "unknowns": ms.get("unknowns"),
-                "rationale_text": ms.get("rationale_text"),
+                "selection_notes": ms_any.get("selection_notes"),
+                "unknowns": ms_any.get("unknowns"),
+                "rationale_text": ms_any.get("rationale_text"),
             },
             "chat_history": chat_history,
         }
@@ -117,7 +134,7 @@ def _run(
 
     except Exception as e:
         log.exception("MODEL_SELECTION_DISCUSSION: discussion failed")
-        return _abort(state, f"Model selection discussion failed: {e}")
+        return _abort(state, f"Model selection discussion failed: {e!r}")
 
 
 def _abort(state: ConversationState, msg: str) -> ConversationState:
@@ -125,7 +142,7 @@ def _abort(state: ConversationState, msg: str) -> ConversationState:
     return ConversationStateHelpers.set_abort(state=state, action="NONE", msg=msg)
 
 
-def _resolve_choice_minimal(extracted: str, *, selected_top3: List[str], allowed: set[str]) -> str | None:
+def _resolve_choice_minimal(extracted: str, *, selected_top3: List[str], allowed: set[str]) -> Optional[str]:
     s = (extracted or "").strip()
     if not s or s.upper() == "NONE":
         return None
@@ -135,7 +152,7 @@ def _resolve_choice_minimal(extracted: str, *, selected_top3: List[str], allowed
         return s
 
     # Allow "SELECT: <fqcn>" format
-    m = re.match(r"(?i)^\s*select\s*:\s*(.+)\s*$", s)
+    m = re.match(r"(?i)^\s*select\s*:\s*(.+?)\s*$", s)
     if m:
         candidate = m.group(1).strip()
         return candidate if candidate in allowed else None
@@ -180,17 +197,22 @@ def _llm_text(
     system_prompt: str,
     user_prompt: str,
 ) -> str:
+    """
+    Supports both llm.generate signatures:
+      - generate(config=..., system_prompt=..., user_prompt=...)
+      - generate(config=..., history=[ChatMessage...])
+    """
     try:
         resp = llm.generate(  # type: ignore[call-arg]
             config=config,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
         )
-        return cast(Any, resp).content
+        return str(cast(Any, resp).content or "")
     except TypeError:
         msgs: List[ChatMessage] = []
         if system_prompt:
             msgs.append(ChatMessage(role="system", content=system_prompt))
         msgs.append(ChatMessage(role="user", content=user_prompt))
         resp = llm.generate(config=config, history=msgs)  # type: ignore[arg-type]
-        return cast(Any, resp).content
+        return str(cast(Any, resp).content or "")

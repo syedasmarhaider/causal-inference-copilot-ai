@@ -55,8 +55,18 @@ def _noop(user_id: UUID, conversation_id: UUID, state: ConversationState) -> Con
 
     
 def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
+    # IMPORTANT: build once, reuse (don’t re-create per node)
+    causal_factory = CausalInferenceFactory.create_default(
+        data_repo=cfg.data_repo,
+        models_repo=cfg.models_repo,
+    )
+
     return {
-        "LOAD_DATASET": make_load_dataset_node(data_repo=cfg.data_repo, llm=cfg.llm, model_name=cfg.model_name),
+        "LOAD_DATASET": make_load_dataset_node(
+            data_repo=cfg.data_repo,
+            llm=cfg.llm,
+            model_name=cfg.model_name,
+        ),
         "PROTOCOL_DISCUSSION": make_protocol_discussion_node(
             llm=cfg.llm,
             model_name=cfg.model_name,
@@ -64,46 +74,38 @@ def _build_nodes(cfg: WorkflowConfig) -> Mapping[Stage, CallableNodeFunc]:
         "COMPILE_PROTOCOL": make_compile_protocol_state_node(
             llm=cfg.llm,
             model_name=cfg.model_name,
-        ), 
-        "VALIDATE_PROTOCOL_STATIC": make_validate_protocol_static_node(
-            data_repo=cfg.data_repo,
-            llm=cfg.llm,
-            model_name=cfg.model_name,
-        ),
-        "VALIDATE_PROTOCOL_STATIC_DISCUSSION": make_validate_protocol_discussion_node(
-            llm=cfg.llm,
-            model_name=cfg.model_name,
         ),
         "INFERENCE_READY": make_prepare_inference_ready_node(
             data_repo=cfg.data_repo,
         ),
+        "VALIDATE_INFERENCE_READY": make_validate_inference_ready_node(
+            data_repo=cfg.data_repo,
+            llm=cfg.llm,
+            model_name=cfg.model_name,
+            causal_factory=causal_factory,
+        ),
+        "VALIDATE_INFERENCE_READY_DISCUSSION": make_validate_inference_ready_discussion_node(
+            llm=cfg.llm,
+            model_name=cfg.model_name,
+        ),
         "MODEL_SELECTION": make_model_selection_node(
             llm=cfg.llm,
             model_name=cfg.model_name,
-            
         ),
         "MODEL_SELECTION_DISCUSSION": make_model_selection_discussion_node(
             llm=cfg.llm,
             model_name=cfg.model_name,
-            
         ),
         "MODEL_PARAMS_FIT_DISCUSSION": make_model_params_fit_discussion_node(
             llm=cfg.llm,
             model_name=cfg.model_name,
-            causal_factory = CausalInferenceFactory.create_default(
-              data_repo=cfg.data_repo,
-              models_repo=cfg.models_repo,
-            ),
+            causal_factory=causal_factory,
         ),
         "MODEL_FIT": make_model_fit_node(
-            causal_factory = CausalInferenceFactory.create_default(
-              data_repo=cfg.data_repo,
-              models_repo=cfg.models_repo,
-            ),
+            causal_factory=causal_factory,
         ),
         "DONE": _noop,
     }
-
 
 
 class SimpleWorkflow:

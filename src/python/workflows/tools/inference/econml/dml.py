@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 from uuid import UUID
 
 import pandas as pd
@@ -14,8 +14,6 @@ from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
 from python.workflows.state.inference_ready_state import InferenceReadyState
 from python.workflows.tools.inference.causal_inference import CausalInference
-from python.workflows.tools.inference.models.causal_command import CausalCommand
-from python.workflows.tools.inference.models.causal_result import CausalResult
 from python.workflows.tools.inference.econml.utils import (
     build_from_registry,
     covariates_or_none,
@@ -27,6 +25,8 @@ from python.workflows.tools.inference.econml.utils import (
     unsupported,
     validate_kwargs,
 )
+from python.workflows.tools.inference.models.causal_command import CausalCommand
+from python.workflows.tools.inference.models.causal_result import CausalResult
 
 DML_FQCN = "econml.dml.DML"
 
@@ -48,17 +48,213 @@ _DML_LINEAR_FINAL_ALLOWED: set[str] = {
 }
 
 
+# =============================================================================
+# InferenceReadyState compatibility helpers (old + new shapes)
+# =============================================================================
+
+def _as_str_list(v: Any) -> List[str]:
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return [str(x) for x in v if str(x).strip()]
+    if isinstance(v, tuple):
+        return [str(x) for x in v if str(x).strip()]
+    if isinstance(v, str) and v.strip():
+        return [v.strip()]
+    return []
+
+
+def _get_nested(d: Any, *keys: str) -> Any:
+    cur: Any = d
+    for k in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(k)
+    return cur
+
+
+def _ir_prepared_artifact(ir: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(ir, dict):
+        return None
+    # new shape (preferred)
+    for k in ("prepared_dataset", "prepared_dataset_artifact", "prepared"):
+        v = ir.get(k)
+        if isinstance(v, dict):
+            return cast(Dict[str, Any], v)
+    return None
+
+
+def _ir_dataset_id(ir: Any) -> Optional[Any]:
+    art = _ir_prepared_artifact(ir)
+    if isinstance(art, dict):
+        return art.get("dataset_id")
+    return None
+
+
+def _ir_schema_fingerprint(ir: Any) -> Optional[Any]:
+    art = _ir_prepared_artifact(ir)
+    if isinstance(art, dict):
+        return art.get("schema_fingerprint")
+    return None
+
+
+def _ir_treatment_kind(ir: Any) -> str:
+    v = _get_nested(ir, "treatment", "kind")
+    if isinstance(v, str):
+        return v
+    # legacy fallback
+    v2 = _get_nested(ir, "treatment_kind")
+    return str(v2) if isinstance(v2, str) else ""
+
+
+def _ir_outcome_kind(ir: Any) -> str:
+    v = _get_nested(ir, "outcome", "kind")
+    if isinstance(v, str):
+        return v
+    # legacy fallback
+    v2 = _get_nested(ir, "outcome_kind")
+    return str(v2) if isinstance(v2, str) else ""
+
+
+def _ir_T_col(ir: Any) -> Optional[str]:
+    if not isinstance(ir, dict):
+        return None
+
+    # legacy top-level
+    v = ir.get("T_col")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+
+    # new-ish nested
+    for key in ("T_col", "col", "column", "name"):
+        vv = _get_nested(ir, "treatment", key)
+        if isinstance(vv, str) and vv.strip():
+            return vv.strip()
+
+    # sometimes stored under treatment.prepared.*
+    for key in ("T_col", "col", "column", "name"):
+        vv = _get_nested(ir, "treatment", "prepared", key)
+        if isinstance(vv, str) and vv.strip():
+            return vv.strip()
+
+    return None
+
+
+def _ir_Y_cols(ir: Any) -> List[str]:
+    if not isinstance(ir, dict):
+        return []
+
+    # legacy top-level
+    top = ir.get("Y_cols")
+    out = _as_str_list(top)
+    if out:
+        return out
+
+    # nested outcome
+    for key in ("Y_cols", "cols", "columns"):
+        vv = _get_nested(ir, "outcome", key)
+        out2 = _as_str_list(vv)
+        if out2:
+            return out2
+
+    # single-col outcome
+    for key in ("Y_col", "col", "column", "name"):
+        vv = _get_nested(ir, "outcome", key)
+        out3 = _as_str_list(vv)
+        if out3:
+            return out3
+
+    # sometimes stored under outcome.prepared.*
+    for key in ("Y_cols", "cols", "columns"):
+        vv = _get_nested(ir, "outcome", "prepared", key)
+        out4 = _as_str_list(vv)
+        if out4:
+            return out4
+    for key in ("Y_col", "col", "column", "name"):
+        vv = _get_nested(ir, "outcome", "prepared", key)
+        out5 = _as_str_list(vv)
+        if out5:
+            return out5
+
+    return []
+
+
+def _ir_X_cols(ir: Any) -> List[str]:
+    if not isinstance(ir, dict):
+        return []
+
+    # legacy top-level
+    out = _as_str_list(ir.get("X_cols"))
+    if out:
+        return out
+
+    # common naming in your protocol (effect modifiers)
+    for keyspace in ("effect_modifiers", "effect_modifiers_state", "X", "x"):
+        v = _get_nested(ir, keyspace, "cols")
+        out2 = _as_str_list(v)
+        if out2:
+            return out2
+        v = _get_nested(ir, keyspace, "columns")
+        out3 = _as_str_list(v)
+        if out3:
+            return out3
+
+    # sometimes flattened
+    for key in ("effect_modifiers_cols", "x_cols"):
+        out4 = _as_str_list(ir.get(key))
+        if out4:
+            return out4
+
+    return []
+
+
+def _ir_W_cols(ir: Any) -> List[str]:
+    if not isinstance(ir, dict):
+        return []
+
+    # legacy top-level
+    out = _as_str_list(ir.get("W_cols"))
+    if out:
+        return out
+
+    # common naming in your protocol (covariates)
+    for keyspace in ("covariates", "covariates_state", "W", "w"):
+        v = _get_nested(ir, keyspace, "cols")
+        out2 = _as_str_list(v)
+        if out2:
+            return out2
+        v = _get_nested(ir, keyspace, "columns")
+        out3 = _as_str_list(v)
+        if out3:
+            return out3
+
+    # sometimes flattened
+    for key in ("covariates_cols", "w_cols"):
+        out4 = _as_str_list(ir.get(key))
+        if out4:
+            return out4
+
+    return []
+
+
+def _count_missing(x: Any) -> int:
+    try:
+        if isinstance(x, pd.DataFrame):
+            return int(x.isna().sum().sum())
+        if isinstance(x, pd.Series):
+            return int(x.isna().sum())
+    except Exception:
+        return 0
+    return 0
+
+
 @dataclass(frozen=True)
 class EconMLDMLInference(CausalInference):
     """
-    Stateless runtime for EconML DML:
-    - No user_id / conversation_id / model_id / ir in constructor.
-    - All runtime context comes via execute(...).
-    - Negotiation is via get_input_requirements(..., ir=...).
-
+    EconML DML adapter compatible with evolving InferenceReadyState shapes.
     Contract:
-    - ONLY `options.*` paths are used in requirements and execution.
-    - No `inputs.*` paths anywhere.
+    - Negotiation/execution only use `options.*` paths.
+    - Column resolution always comes from IR (never user-specified column names in options).
     """
 
     data_repo: DataRepo
@@ -76,7 +272,7 @@ class EconMLDMLInference(CausalInference):
     # negotiation contract (knobs only; options.* only)
     # -------------------------
     def get_input_requirements(self, *, cmd: str, ir: InferenceReadyState) -> Dict[str, Any]:
-        if ir["outcome"]["kind"] == "duration":
+        if _ir_outcome_kind(ir) == "duration":
             return {"status": "UNSUPPORTED", "reason": "DML does not support duration outcomes."}
 
         nuisance_choices: List[Any] = ["auto", *sorted(_DML_SUPPORTED.keys())]
@@ -107,7 +303,7 @@ class EconMLDMLInference(CausalInference):
                     {"path": "options.feature_set_key", "prompt": "Which prepared feature set to use", "choices": feature_choices, "default": None},
                 ]
             }
-            if ir["treatment"]["kind"] != "binary":
+            if _ir_treatment_kind(ir) != "binary":
                 req["optional_user"] += [
                     {"path": "options.effect.T0", "prompt": "Baseline treatment value T0", "default": None},
                     {"path": "options.effect.T1", "prompt": "Target treatment value T1", "default": None},
@@ -122,7 +318,7 @@ class EconMLDMLInference(CausalInference):
                     {"path": "options.feature_set_key", "prompt": "Which prepared feature set to use", "choices": feature_choices, "default": None},
                 ]
             }
-            if ir["treatment"]["kind"] != "binary":
+            if _ir_treatment_kind(ir) != "binary":
                 req2["optional_user"] += [
                     {"path": "options.interval.T0", "prompt": "Baseline treatment value T0", "default": None},
                     {"path": "options.interval.T1", "prompt": "Target treatment value T1", "default": None},
@@ -155,7 +351,7 @@ class EconMLDMLInference(CausalInference):
         if command.estimator_fqcn != DML_FQCN:
             return CausalResult(status="UNSUPPORTED", issues=[unsupported("estimator_fqcn", f"Unsupported: {command.estimator_fqcn}")])
 
-        if ir["outcome"]["kind"] == "duration":
+        if _ir_outcome_kind(ir) == "duration":
             return CausalResult(status="UNSUPPORTED", issues=[unsupported("outcome.kind", "Duration outcomes not supported by DML.")])
 
         if command.cmd == "FIT":
@@ -171,36 +367,42 @@ class EconMLDMLInference(CausalInference):
     # internals
     # -------------------------
     def _load_prepared_df(self, *, user_id: UUID, conversation_id: UUID, ir: InferenceReadyState) -> pd.DataFrame:
-        prepared = ir.get("prepared")
-        if not prepared:
-            raise ValueError("InferenceReadyState.prepared missing (not READY).")
+        dataset_id = _ir_dataset_id(ir)
+        if dataset_id is None:
+            raise ValueError("InferenceReadyState missing prepared dataset artifact (dataset_id).")
+
         return self.data_repo.get_csv_data(
             user_id=user_id,
             conversation_id=conversation_id,
-            dataset_id=prepared["dataset_id"],
+            dataset_id=dataset_id,
             limit=None,
         )
 
-    def _choose_feature_set(self, *, ir: InferenceReadyState, key: Optional[str]) -> tuple[List[str], List[str]]:
+    def _choose_feature_set(self, *, ir: InferenceReadyState, key: Optional[str]) -> Tuple[List[str], List[str]]:
+        X_cols = _ir_X_cols(ir)
+        W_cols = _ir_W_cols(ir)
+
         if key is None:
-            if ir["X_cols"] and ir["W_cols"]:
-                return ir["X_cols"], ir["W_cols"]
-            if ir["X_cols"]:
-                return ir["X_cols"], []
-            if ir["W_cols"]:
-                return [], ir["W_cols"]
+            if X_cols and W_cols:
+                return X_cols, W_cols
+            if X_cols:
+                return X_cols, []
+            if W_cols:
+                return [], W_cols
             return [], []
+
         if key not in ("X", "W", "XW"):
             raise ValueError("feature_set_key must be one of: X, W, XW")
-        if key == "X":
-            return ir["X_cols"], []
-        if key == "W":
-            return [], ir["W_cols"]
-        return ir["X_cols"], ir["W_cols"]
 
-    def _derive_discrete_flags(self, *, ir: InferenceReadyState) -> tuple[bool, bool]:
-        discrete_treatment = ir["treatment"]["kind"] in ("binary", "categorical")
-        discrete_outcome = ir["outcome"]["kind"] in ("binary", "categorical")
+        if key == "X":
+            return X_cols, []
+        if key == "W":
+            return [], W_cols
+        return X_cols, W_cols
+
+    def _derive_discrete_flags(self, *, ir: InferenceReadyState) -> Tuple[bool, bool]:
+        discrete_treatment = _ir_treatment_kind(ir) in ("binary", "categorical")
+        discrete_outcome = _ir_outcome_kind(ir) in ("binary", "categorical")
         return discrete_outcome, discrete_treatment
 
     # -------------------------
@@ -218,19 +420,29 @@ class EconMLDMLInference(CausalInference):
         try:
             df = self._load_prepared_df(user_id=user_id, conversation_id=conversation_id, ir=ir)
         except Exception as e:
-            return CausalResult(status="ERROR", issues=[invalid("prepared.dataset_id", f"Failed to load prepared dataset: {e}")])
+            return CausalResult(status="ERROR", issues=[invalid("prepared_dataset.dataset_id", f"Failed to load prepared dataset: {e}")])
 
-        opts: Dict[str, Any] =  command.options or {}
+        opts: Dict[str, Any] = command.options or {}
         init_raw: Dict[str, Any] = cast(Dict[str, Any], opts.get("init") or {})
         fit_raw: Dict[str, Any] = cast(Dict[str, Any], opts.get("fit") or {})
 
         init_allowed = [
-            "model_y", "model_t", "model_final",
-            "featurizer", "treatment_featurizer",
+            "model_y",
+            "model_t",
+            "model_final",
+            "featurizer",
+            "treatment_featurizer",
             "fit_cate_intercept",
-            "discrete_outcome", "discrete_treatment", "categories",
-            "cv", "mc_iters", "mc_agg", "random_state",
-            "allow_missing", "use_ray", "ray_remote_func_options",
+            "discrete_outcome",
+            "discrete_treatment",
+            "categories",
+            "cv",
+            "mc_iters",
+            "mc_agg",
+            "random_state",
+            "allow_missing",
+            "use_ray",
+            "ray_remote_func_options",
         ]
         fit_allowed = ["cache_values", "inference", "sample_weight", "freq_weight", "sample_var", "groups"]
 
@@ -244,11 +456,15 @@ class EconMLDMLInference(CausalInference):
 
         # Columns ONLY from IR
         try:
-            T = resolve_col(df, ir["T_col"], role="T")
+            t_col = _ir_T_col(ir)
+            if not t_col:
+                return CausalResult(status="INVALID", issues=[invalid("ir.treatment", "Missing treatment column in InferenceReadyState.")])
 
-            ycols = ir["Y_cols"]
+            ycols = _ir_Y_cols(ir)
             if not ycols:
-                return CausalResult(status="INVALID", issues=[invalid("ir.Y_cols", "Y_cols is empty.")])
+                return CausalResult(status="INVALID", issues=[invalid("ir.outcome", "Missing outcome column(s) in InferenceReadyState.")])
+
+            T = resolve_col(df, t_col, role="T")
             Y = resolve_cols(df, ycols, role="Y") if len(ycols) > 1 else resolve_col(df, ycols[0], role="Y")
 
             feature_key = cast(Optional[str], opts.get("feature_set_key"))
@@ -257,6 +473,20 @@ class EconMLDMLInference(CausalInference):
             W = covariates_or_none(df, W_cols)
         except Exception as e:
             return CausalResult(status="INVALID", issues=[invalid("state.columns", f"Failed to resolve columns from IR: {e}")])
+
+        # Optional pre-check: fail fast on missing values (common cause of DML fit failure)
+        missing = _count_missing(T) + _count_missing(Y) + _count_missing(X) + _count_missing(W)
+        if missing > 0 and not bool(init_kwargs.get("allow_missing", False)):
+            return CausalResult(
+                status="INVALID",
+                issues=[
+                    invalid(
+                        "prepared_dataset",
+                        f"Input contains missing values (total NaNs across Y/T/X/W = {missing}).",
+                        fix="Ensure inference-ready preparation removes/imputes NaNs in the prepared dataset before FIT.",
+                    )
+                ],
+            )
 
         # Defaults from IR
         discrete_outcome, discrete_treatment = self._derive_discrete_flags(ir=ir)
@@ -267,11 +497,23 @@ class EconMLDMLInference(CausalInference):
         init_kwargs.setdefault("model_final", {"name": "sklearn.linear_model.LinearRegression", "kwargs": {"fit_intercept": False}})
         init_kwargs.setdefault("cv", 2)
 
-        model_y, issue = build_from_registry(_DML_SUPPORTED, init_kwargs.get("model_y"), role_path="options.init.model_y", allow_auto=True, default="auto")
+        model_y, issue = build_from_registry(
+            _DML_SUPPORTED,
+            init_kwargs.get("model_y"),
+            role_path="options.init.model_y",
+            allow_auto=True,
+            default="auto",
+        )
         if issue:
             return CausalResult(status="UNSUPPORTED", issues=[issue])
 
-        model_t, issue = build_from_registry(_DML_SUPPORTED, init_kwargs.get("model_t"), role_path="options.init.model_t", allow_auto=True, default="auto")
+        model_t, issue = build_from_registry(
+            _DML_SUPPORTED,
+            init_kwargs.get("model_t"),
+            role_path="options.init.model_t",
+            allow_auto=True,
+            default="auto",
+        )
         if issue:
             return CausalResult(status="UNSUPPORTED", issues=[issue])
 
@@ -300,12 +542,13 @@ class EconMLDMLInference(CausalInference):
 
         meta: Dict[str, Any] = {
             "estimator_fqcn": DML_FQCN,
-            "prepared_dataset_id": str(ir["prepared"]["dataset_id"]) if ir.get("prepared") else None, # pyright: ignore[reportTypedDictNotRequiredAccess]
-            "schema_fingerprint": ir["prepared"]["schema_fingerprint"] if ir.get("prepared") else None, # pyright: ignore[reportTypedDictNotRequiredAccess]
-            "T_col": ir["T_col"],
-            "Y_cols": list(ir["Y_cols"]),
-            "X_cols_used": X.columns.tolist() if X is not None else [],
-            "W_cols_used": W.columns.tolist() if W is not None else [],
+            "prepared_dataset_id": str(_ir_dataset_id(ir)) if _ir_dataset_id(ir) is not None else None,
+            "schema_fingerprint": _ir_schema_fingerprint(ir),
+            "T_col": t_col,
+            "Y_cols": list(ycols),
+            "X_cols_used": X.columns.tolist() if isinstance(X, pd.DataFrame) else [],
+            "W_cols_used": W.columns.tolist() if isinstance(W, pd.DataFrame) else [],
+            "feature_set_key": opts.get("feature_set_key"),
             "init": json_safe(init_raw),
             "fit": json_safe(fit_kwargs),
         }
@@ -340,27 +583,20 @@ class EconMLDMLInference(CausalInference):
             return CausalResult(status="INVALID", issues=[invalid("model_id", f"Model not found: {model_id}")])
 
         est = rec.model
-        opts: Dict[str, Any] =  command.options or {}
+        opts: Dict[str, Any] = command.options or {}
         effect_opts: Dict[str, Any] = cast(Dict[str, Any], opts.get("effect") or {})
 
         # For non-binary treatments EconML needs a contrast (T0 -> T1).
-        if ir["treatment"]["kind"] == "binary":
+        if _ir_treatment_kind(ir) == "binary":
             T0, T1 = effect_opts.get("T0", 0), effect_opts.get("T1", 1)
         else:
             if "T0" not in effect_opts or "T1" not in effect_opts:
                 return CausalResult(
                     status="NEEDS_INPUT",
-                    issues=[
-                        need(
-                            "options.effect.T0",
-                            "Need T0 and T1 for non-binary treatment.",
-                            required=["options.effect.T0", "options.effect.T1"],
-                        )
-                    ],
+                    issues=[need("options.effect.T0", "Need T0 and T1 for non-binary treatment.", required=["options.effect.T0", "options.effect.T1"])],
                 )
-            T0, T1 = effect_opts["T0"], effect_opts["T1"] # pyright: ignore[reportConstantRedefinition]
+            T0, T1 = effect_opts["T0"], effect_opts["T1"]  # pyright: ignore[reportConstantRedefinition]
 
-        # Xq is ONLY under options.effect.Xq (never command.inputs)
         Xq: Any = effect_opts.get("Xq")
         if Xq is None:
             try:
@@ -395,27 +631,20 @@ class EconMLDMLInference(CausalInference):
             return CausalResult(status="INVALID", issues=[invalid("model_id", f"Model not found: {model_id}")])
 
         est = rec.model
-        opts: Dict[str, Any] =  command.options or {}
+        opts: Dict[str, Any] = command.options or {}
         interval_opts: Dict[str, Any] = cast(Dict[str, Any], opts.get("interval") or {})
         alpha = float(interval_opts.get("alpha", 0.05))
 
-        if ir["treatment"]["kind"] == "binary":
+        if _ir_treatment_kind(ir) == "binary":
             T0, T1 = interval_opts.get("T0", 0), interval_opts.get("T1", 1)
         else:
             if "T0" not in interval_opts or "T1" not in interval_opts:
                 return CausalResult(
                     status="NEEDS_INPUT",
-                    issues=[
-                        need(
-                            "options.interval.T0",
-                            "Need T0 and T1 for non-binary treatment.",
-                            required=["options.interval.T0", "options.interval.T1"],
-                        )
-                    ],
+                    issues=[need("options.interval.T0", "Need T0 and T1 for non-binary treatment.", required=["options.interval.T0", "options.interval.T1"])],
                 )
-            T0, T1 = interval_opts["T0"], interval_opts["T1"] # pyright: ignore[reportConstantRedefinition]
+            T0, T1 = interval_opts["T0"], interval_opts["T1"]  # pyright: ignore[reportConstantRedefinition]
 
-        # Xq is ONLY under options.interval.Xq (never command.inputs)
         Xq: Any = interval_opts.get("Xq")
         if Xq is None:
             try:
