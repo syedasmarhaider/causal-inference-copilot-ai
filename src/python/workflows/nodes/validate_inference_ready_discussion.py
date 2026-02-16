@@ -133,7 +133,7 @@ def _llm_route(*, llm: LLMService, model_name: str, payload: Dict[str, Any], cfg
     if not sys:
         sys = "You are a routing controller. Output only: DONE | ABORT | DISCUSS (+ message)."
 
-    user_prompt = json.dumps(payload, ensure_ascii=False)
+    user_prompt = json.dumps(payload, ensure_ascii=False,default=str)
     if not user_prompt.strip():
         user_prompt = "{}"
 

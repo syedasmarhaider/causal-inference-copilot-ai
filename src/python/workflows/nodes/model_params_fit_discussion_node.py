@@ -296,7 +296,7 @@ def _llm_compose_message(
             model_name=model_name,
             temperature=temperature,
             system_prompt=sys_prompt,
-            user_prompt=json.dumps(payload, ensure_ascii=False),
+            user_prompt=json.dumps(payload, ensure_ascii=False,default=str),
             empty_err="Compose prompt returned empty output.",
         )
     except Exception:

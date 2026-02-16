@@ -182,7 +182,7 @@ def _llm_call_text(
         llm,
         config=cfg,
         system_prompt=system_prompt,
-        user_prompt=json.dumps(user_payload, ensure_ascii=False),
+        user_prompt=json.dumps(user_payload, ensure_ascii=False,default=str),
     )
     out = (raw or "").strip()
     if not out:

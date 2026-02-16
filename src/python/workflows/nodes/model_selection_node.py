@@ -190,7 +190,7 @@ def _run(
             dataset_summary=dataset_str,
             protocol_state=protocol_str,
             validation_notes=validation_issues,
-            final_selection_json=json.dumps(ms["final_json"], ensure_ascii=False, indent=2),  # type: ignore[arg-type]
+            final_selection_json=json.dumps(ms["final_json"], ensure_ascii=False, indent=2,default=str),  # type: ignore[arg-type]
         )
         prompt_3 = get_model_selection_prompt_3(prompt_inputs_3)
         rationale_text = _llm_call_prompt_retry(
@@ -265,7 +265,7 @@ def _normalize_to_text(obj: Any) -> str:
     if isinstance(obj, str):
         return obj
     try:
-        return json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True)
+        return json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True, default=str)
     except TypeError:
         return str(obj)
 
