@@ -2,8 +2,6 @@ from abc import ABC, abstractmethod
 from uuid import UUID
 from typing import Optional
 
-from python.workflows.state.conversation_state import ConversationState
-
 
 class ConversationRepo(ABC):
     @abstractmethod

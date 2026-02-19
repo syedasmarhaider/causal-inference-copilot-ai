@@ -12,7 +12,10 @@ from python.domain.service.llm_service import LLMService
 from python.implementation.repo.inmemory_conversation_repo import InMemoryConversationRepo
 from python.implementation.repo.file_data_repo import FileDataRepo
 from python.implementation.repo.models_repo import FileSystemModelsRepo
-from python.implementation.service.gemini_llm_service import GeminiLLMService
+from python.implementation.service.llms.llm_service_factory import (
+    LLMServiceSettings,
+    make_llm_service,
+)
 
 from python.workflows.graph.simple_flow_entry import SimpleWorkflow, WorkflowConfig
 
@@ -110,7 +113,7 @@ def wire_models_repo() -> ModelsRepo:
     return FileSystemModelsRepo()
 
 def wire_llm() -> LLMService:
-    return GeminiLLMService()
+    return make_llm_service(LLMServiceSettings(provider="openai"))
 
 
 

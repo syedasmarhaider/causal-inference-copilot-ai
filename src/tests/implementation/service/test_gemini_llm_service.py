@@ -3,7 +3,7 @@ from typing import Any, cast
 
 import pytest
 
-from python.implementation.service.gemini_llm_service import (
+from python.implementation.service.llms.langchain_llm_service import (
     GeminiLLMService,
     get_llm_service,
     GEMINI_API_KEY_ENV,

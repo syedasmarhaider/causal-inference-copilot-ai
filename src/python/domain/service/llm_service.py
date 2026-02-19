@@ -1,73 +1,65 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import Any, Dict, List, Literal, Optional, Protocol, Sequence, TypedDict, TypeVar
 
-# ===== JSON-like value used for provider-specific "extra" knobs =====
-JSONScalar: TypeAlias = str | int | float | bool | None
-JSONValue: TypeAlias = JSONScalar | Sequence["JSONValue"] | Mapping[str, "JSONValue"]
-ProviderExtra: TypeAlias = Mapping[str, JSONValue]
+from pydantic import BaseModel
 
+T = TypeVar("T", bound=BaseModel)
 
-
-# ===== Domain types =====
-Role = Literal["system", "user", "assistant", "tool"]
+Role = Literal["user", "assistant"]
 
 
 @dataclass(frozen=True)
 class ChatMessage:
     role: Role
     content: str
-    name: str | None = None
 
 
-
-@dataclass(frozen=True)
-class Usage:
-    prompt_tokens: int | None = None
-    completion_tokens: int | None = None
-    total_tokens: int | None = None
+ProviderExtra = Dict[str, Any]
 
 
 @dataclass(frozen=True)
-class ToolCall:
-    id: str | None
-    type: str  # e.g., "function"
-    arguments: Mapping[str, JSONValue]
+class LLMConfig:
+    model: Optional[str] = None
+    temperature: Optional[float] = 0.2
+    top_p: Optional[float] = 0.95
+    max_tokens: Optional[int] = 60000
+    stop: Optional[List[str]] = None
+    extra: Optional[ProviderExtra] = None
+
+class ToolCall(TypedDict, total=False):
+    id: str
+    name: str
+    args: Dict[str, Any]
 
 
 @dataclass(frozen=True)
 class LLMResponse:
     content: str
     model: str
-    finish_reason: str | None = None
-    usage: Usage = Usage()
-    tool_calls: list[ToolCall] | None = None
-    raw: object | None = None  # provider-specific payload (opaque)
+    finish_reason: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = None
+    raw: Any = None
 
 
-@dataclass(frozen=True)
-class LLMConfig:
-    model: str
-    temperature: float = 0.5
-    max_tokens: int | None = None
-    top_p: float | None = None
-    stop: list[str] | None = None
+class LLMService(Protocol):
+    def generate(
+        self,
+        *,
+        system_prompt: str | None,
+        user_prompt: str,
+        config: LLMConfig,
+        history: Optional[Sequence[ChatMessage]],
+    ) -> LLMResponse: ...
 
-
-# ===== Interfaces (ABCs) =====
-
-
-class LLMService(ABC):
-    @abstractmethod
-    def generate(self, 
-                 *, 
-                 config: LLMConfig,
-                 system_prompt: str,
-                 user_prompt: str,
-                 history: Sequence[ChatMessage] | None) -> LLMResponse: ...
-
-
-class ProviderNotFound(Exception): ...
+    def generate_json(
+        self,
+        *,
+        schema: type[T],
+        system_prompt: str | None,
+        user_prompt: str,
+        config: LLMConfig,
+        history: Optional[Sequence[ChatMessage]],
+        max_attempts: int = 3,
+    ) -> T: ...
