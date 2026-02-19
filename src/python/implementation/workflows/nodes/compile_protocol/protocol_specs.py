@@ -13,7 +13,7 @@ NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length
 
 TimeZeroType = Literal["COLUMN", "CONCEPTUAL"]
 WindowUnit = Literal["minutes", "hours", "days", "weeks", "months", "years"]
-FilterOp = Literal["==", "!=", "in", "not_in", ">=", "<=", ">", "<", "is_null", "not_null"]
+FilterOp = Literal["==", "in", "not_in", ">=", "<=", ">", "<"]
 
 
 # ----------------------------

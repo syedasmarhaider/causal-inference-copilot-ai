@@ -32,11 +32,12 @@ EXCLUSIONS SEMANTICS:
 - "exclusions" are ROWS TO DROP.
 - Do NOT use exclusions to implement treatment/outcome inclusion.
 - If no explicit exclusions -> exclusions: [].
+- Nul/miising values are automatically excluded, do NOT add exclusions for that.
 
 SCHEMA (must match exactly):
 {
   "exclusions": [
-    {"column": string, "op": "=="|"!="|"in"|"not_in"|">="|"<="|">"|"<", "values": [string], "reason": string}
+    {"column": string, "op": "=="|"in"|"not_in"|">="|"<="|">"|"<", "values": [string], "reason": string}
   ],
 
   "time_zero_type": "COLUMN"|"CONCEPTUAL",
@@ -112,7 +113,7 @@ Fix the JSON so that:
 SCHEMA (must match exactly):
 {
   "exclusions": [
-    {"column": string, "op": "=="|"!="|"in"|"not_in"|">="|"<="|">"|"<", "values": [string], "reason": string}
+    {"column": string, "op": "=="|"in"|"not_in"|">="|"<="|">"|"<", "values": [string], "reason": string}
   ],
 
   "time_zero_type": "COLUMN"|"CONCEPTUAL",

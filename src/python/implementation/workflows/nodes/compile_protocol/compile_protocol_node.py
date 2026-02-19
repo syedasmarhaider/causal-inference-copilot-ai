@@ -437,11 +437,7 @@ def _semantic_validate_values_against_dataset_summary(
         k = kind_of(p)
         op = ex.op
         vals = list(ex.values)
-
-        if op in ("is_null", "not_null"):
-            # values ignored
-            continue
-
+        
         if op in (">", ">=", "<", "<="):
             if len(vals) != 1:
                 add_issue(
@@ -486,7 +482,7 @@ def _semantic_validate_values_against_dataset_summary(
             continue
 
         # Membership-like ops
-        if op in ("==", "!=", "in", "not_in"):
+        if op in ("==","in", "not_in"):
             # For categorical/boolean: check membership when possible.
             if k in ("CATEGORICAL", "BOOLEAN"):
                 for j, v in enumerate(vals):

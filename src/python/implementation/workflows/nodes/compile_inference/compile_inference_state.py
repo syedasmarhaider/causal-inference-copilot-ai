@@ -5,24 +5,34 @@ from typing import Any, ClassVar, Dict, Optional, Sequence
 from uuid import UUID
 
 from python.domain.workflows.state import ACTION, State, Status
-from python.implementation.workflows.nodes.compile_inference.inference_ready_payload import InferenceReadyPayloadModel
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
-from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState 
+from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
+
 
 @dataclass(frozen=True)
 class InferenceReadyState(State):
+    """
+    Minimal inference-ready marker state for your pipeline stage "INFERENCE_READY".
+
+    Semantics:
+      - DONE:     clean_dataset_id is set and cleaning_error is not set
+      - ABORTED:  cleaning_error is set (regardless of id)
+      - PENDING:  neither id nor error is set (defensive)
+    """
+
     NAME: ClassVar[str] = "INFERENCE_READY"
 
-    id: Optional[UUID] = None
-    payload: Optional[InferenceReadyPayloadModel] = None
-    inference_error: Optional[str] = None
+    clean_dataset_id: Optional[UUID] = None
+    cleaning_error: Optional[str] = None
     user_message: Optional[str] = None
 
     @property
     def status(self) -> Status:
-        if self.payload is not None:
+        if self.cleaning_error is not None:
+            return "ABORTED"
+        if self.clean_dataset_id is not None:
             return "DONE"
-        return "ABORTED"
+        return "PENDING"
 
     @property
     def message(self) -> Optional[str]:
@@ -30,37 +40,32 @@ class InferenceReadyState(State):
 
     @property
     def error(self) -> Optional[str]:
-        return self.inference_error
+        return self.cleaning_error
 
     @property
     def needs_action(self) -> ACTION:
+        # If this state aborted, the pipeline typically needs user correction/clarification.
+        if self.status == "ABORTED":
+            return "NEEDS_INPUT"
         return "NONE"
 
     def required_states_keys(self) -> Sequence[str]:
+        # Dependency keys are always State.NAME values.
         return [LoadDatasetState.NAME, CompileProtocolState.NAME]
 
     def to_json_dict(self) -> Dict[str, Any]:
         return {
             "name": self.NAME,
-            "id": str(self.id) if self.id else None,
-            "payload": self.payload.model_dump(mode="json") if self.payload else None,
-            "inference_error": self.inference_error,
+            "clean_dataset_id": str(self.clean_dataset_id) if self.clean_dataset_id else None,
+            "cleaning_error": self.cleaning_error,
             "user_message": self.user_message,
         }
 
     @classmethod
     def from_json_dict(cls, payload: Dict[str, Any]) -> "InferenceReadyState":
-        rid = payload.get("id")
-        state_payload = payload.get("payload")
-
-        model: Optional[InferenceReadyPayloadModel] = None
-        if isinstance(state_payload, dict):
-            model = InferenceReadyPayloadModel.model_validate(state_payload)
-
         return cls(
-            id=_parse_uuid(rid),
-            payload=model,
-            inference_error=_as_opt_str(payload.get("inference_error")),
+            clean_dataset_id=_parse_uuid(payload.get("clean_dataset_id")),
+            cleaning_error=_as_opt_str(payload.get("cleaning_error")),
             user_message=_as_opt_str(payload.get("user_message")),
         )
 
