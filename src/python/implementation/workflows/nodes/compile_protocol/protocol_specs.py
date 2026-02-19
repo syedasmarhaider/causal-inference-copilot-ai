@@ -14,7 +14,6 @@ NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length
 TimeZeroType = Literal["COLUMN", "CONCEPTUAL"]
 WindowUnit = Literal["minutes", "hours", "days", "weeks", "months", "years"]
 FilterOp = Literal["==", "!=", "in", "not_in", ">=", "<=", ">", "<", "is_null", "not_null"]
-NumericTransform = Literal["none", "log", "standardize", "minmax"]
 
 
 # ----------------------------
@@ -25,7 +24,6 @@ class ExclusionRuleModel(BaseModel):
     column: NonEmptyStr
     op: FilterOp
     values: List[NonEmptyStr]  # allow empty list for is_null/not_null; items must be non-empty if present
-    reason: NonEmptyStr
 
 
 class BinaryTreatmentSpecModel(BaseModel):
@@ -34,16 +32,12 @@ class BinaryTreatmentSpecModel(BaseModel):
     column: NonEmptyStr
     treated: NonEmptyStr
     control: NonEmptyStr
-    treated_aliases: Optional[List[NonEmptyStr]] = None
-    control_aliases: Optional[List[NonEmptyStr]] = None
-
 
 class ContinuousTreatmentSpecModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     kind: Literal["continuous"]
     column: NonEmptyStr
     unit: Optional[NonEmptyStr] = None
-    transform: Optional[NumericTransform] = None
     clip_min: Optional[float] = None
     clip_max: Optional[float] = None
 
@@ -53,7 +47,6 @@ class CategoricalTreatmentSpecModel(BaseModel):
     kind: Literal["categorical"]
     column: NonEmptyStr
     levels: List[NonEmptyStr] = Field(..., min_length=2)
-    baseline: Optional[NonEmptyStr] = None
 
 
 TreatmentSpecModel = Annotated[
@@ -68,8 +61,6 @@ class BinaryOutcomeSpecModel(BaseModel):
     column: NonEmptyStr
     event: NonEmptyStr
     non_event: NonEmptyStr
-    event_aliases: Optional[List[NonEmptyStr]] = None
-    non_event_aliases: Optional[List[NonEmptyStr]] = None
 
 
 class ContinuousOutcomeSpecModel(BaseModel):
@@ -77,7 +68,6 @@ class ContinuousOutcomeSpecModel(BaseModel):
     kind: Literal["continuous"]
     column: NonEmptyStr
     unit: Optional[NonEmptyStr] = None
-    transform: Optional[NumericTransform] = None
     clip_min: Optional[float] = None
     clip_max: Optional[float] = None
 
@@ -87,7 +77,6 @@ class CategoricalOutcomeSpecModel(BaseModel):
     kind: Literal["categorical"]
     column: NonEmptyStr
     levels: List[NonEmptyStr] = Field(..., min_length=2)
-    baseline: Optional[NonEmptyStr] = None
 
 
 class DurationOutcomeSpecModel(BaseModel):
@@ -97,8 +86,6 @@ class DurationOutcomeSpecModel(BaseModel):
     event_column: NonEmptyStr
     event_value: NonEmptyStr
     censor_value: NonEmptyStr
-    event_aliases: Optional[List[NonEmptyStr]] = None
-    censor_aliases: Optional[List[NonEmptyStr]] = None
 
 
 OutcomeSpecModel = Annotated[
@@ -109,8 +96,7 @@ OutcomeSpecModel = Annotated[
 
 class ProtocolSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    population: NonEmptyStr
+    
     exclusions: List[ExclusionRuleModel]
 
     time_zero_type: TimeZeroType
@@ -128,13 +114,7 @@ class ProtocolSpec(BaseModel):
 
     covariates: List[NonEmptyStr]
     effect_modifiers: List[NonEmptyStr]
-
-    censoring_rules: List[NonEmptyStr]
     experiment_type: NonEmptyStr
-
-    treatment_text: Optional[NonEmptyStr] = None
-    outcome_text: Optional[NonEmptyStr] = None
-
 
 # ----------------------------
 # Validation helpers

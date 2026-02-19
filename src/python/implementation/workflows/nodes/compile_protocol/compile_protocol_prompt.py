@@ -161,3 +161,22 @@ PREVIOUS_JSON:
 VALIDATION_ERRORS:
 {{VALIDATION_ERRORS}}
 """.strip()
+
+
+
+def protocol_validate_through_llm_prompt() -> str:
+    return """You are a STRICT protocol validator.
+  You will see the protcol JSON, the original protocol discussion 
+  text, and the dataset summary.
+  Validate that the JSON is a correct interpretation of the protocol discussion and is semantically consistent with the dataset summary.
+  Check if columes specified exists their types are correct, inclusion crtieria is good.
+  return detail response what is wrong and how to fix it if there are any issues otherwise return only one token "VALID".
+INPUTS:
+PROTOCOL_JSON:
+{{PROTOCOL_JSON}}
+PROTOCOL_DISCUSSION_TEXT:
+{{PROTOCOL_DISCUSSION_TEXT}}
+DATASET_SUMMARY_JSON:
+{{DATASET_SUMMARY_JSON}}
+""".strip()
+  
