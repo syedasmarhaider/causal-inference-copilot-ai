@@ -68,7 +68,7 @@ class LoadDatasetNode(Node):
         previous_state_dependencies: Mapping[str, State],
         user_message: Optional[str],
         router_message: Optional[str],
-        mesages_history: Optional[Sequence[ChatMessage]],
+        messages_history: Optional[Sequence[ChatMessage]],
         state: State,
     ) -> State:
         if not isinstance(state, LoadDatasetState):

@@ -62,7 +62,7 @@ class ProtocolDiscussionNode(Node):
         previous_state_dependencies: Mapping[str, State],
         user_message: Optional[str],
         router_message: Optional[str],
-        mesages_history: Optional[Sequence[ChatMessage]],
+        messages_history: Optional[Sequence[ChatMessage]],
         state: State,
     ) -> State:
         if not isinstance(state, ProtocolDiscussionState):
@@ -73,7 +73,7 @@ class ProtocolDiscussionNode(Node):
         assert summary_state is not None
 
         summary_string = DatasetStateHelpers.dataset_summary_to_json(summary_state)
-        latest_12_messages = mesages_history[-12:] if mesages_history else None
+        latest_12_messages = messages_history[-12:] if messages_history else None
 
         payload: dict[str, Any] = {
             "prev_questions_answers_discussion_state": get_questions(),

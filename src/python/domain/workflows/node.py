@@ -31,6 +31,6 @@ class Node(ABC):
         previous_state_dependencies: Mapping[str, State],
         user_message: Optional[str],
         router_message: Optional[str],
-        mesages_history: Optional[Sequence[ChatMessage]],
+        messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         raise NotImplementedError
