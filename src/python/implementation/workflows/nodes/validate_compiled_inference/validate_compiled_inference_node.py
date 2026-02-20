@@ -19,12 +19,10 @@ from python.implementation.workflows.nodes.validate_compiled_inference.validate_
     ValidateCompiledInferenceDeps,
 )
 from python.implementation.workflows.nodes.validate_compiled_inference.validate_compile_inference_state import (
-    InferenceReadyValidationIssueModel,
     InferenceReadyValidationPayloadModel,
     ValidateCompiledInferenceState,
 )
 
-# Validation utilities (assumed implemented)
 from python.implementation.workflows.nodes.validate_compiled_inference.validate_compiled_inference_utils import (  # noqa: E501
     ValidationIssue,
     compute_arm_masks,
@@ -48,6 +46,7 @@ from python.implementation.workflows.nodes.validate_compiled_inference.validate_
     validate_treatment_variation,
     validate_WX_presence,
 )
+from python.implementation.workflows.utils.validation import ValidationIssueModel
 
 log = logging.getLogger(__name__)
 
@@ -223,8 +222,8 @@ class ValidateCompiledInferenceNode(Node):
             # ----------------------------
             # Normalize issues -> pydantic models
             # ----------------------------
-            issue_models: List[InferenceReadyValidationIssueModel] = [
-                InferenceReadyValidationIssueModel.model_validate(it) for it in all_issues
+            issue_models: List[ValidationIssueModel] = [
+                ValidationIssueModel.model_validate(it) for it in all_issues
             ]
             has_fail = any(i.severity == "FAIL" for i in issue_models)
 
@@ -298,7 +297,7 @@ class ValidateCompiledInferenceNode(Node):
             has_fail=True,
         )
 
-        issue_models = [InferenceReadyValidationIssueModel.model_validate(x) for x in safe_issues]
+        issue_models = [ValidationIssueModel.model_validate(x) for x in safe_issues]
         payload = InferenceReadyValidationPayloadModel(
             issues=issue_models,
             validation_error=validation_error,

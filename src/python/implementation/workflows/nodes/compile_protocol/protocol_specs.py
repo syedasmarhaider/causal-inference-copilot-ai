@@ -4,13 +4,12 @@ from collections.abc import Mapping
 from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from pydantic.types import StringConstraints
+
+from python.implementation.workflows.utils.validation import NonEmptyStr
 
 # ----------------------------
 # Core types
 # ----------------------------
-NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-
 TimeZeroType = Literal["COLUMN", "CONCEPTUAL"]
 WindowUnit = Literal["minutes", "hours", "days", "weeks", "months", "years"]
 FilterOp = Literal["==", "in", "not_in", ">=", "<=", ">", "<"]
