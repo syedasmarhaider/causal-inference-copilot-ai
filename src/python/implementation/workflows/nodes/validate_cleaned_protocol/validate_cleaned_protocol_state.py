@@ -10,10 +10,7 @@ from python.implementation.workflows.nodes.compile_protocol.compile_protocol_sta
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
 
-# =============================================================================
-# Payloads (strict, payload-only; NO embedded "name")
-# =============================================================================
-class CleanProtocolValidationPayloadModel(BaseModel):
+class ValidateCleanProtocolPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     issues: List[ValidationIssueModel] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
@@ -31,18 +28,6 @@ class CleanProtocolValidationPayloadModel(BaseModel):
         raise TypeError("validation_error/user_message must be str|null")
 
 
-class ValidateCleanProtocolPayloadModel(BaseModel):
-    """
-    Payload for VALIDATE_CLEAN_PROTOCOL state.
-    """
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    validation: Optional[CleanProtocolValidationPayloadModel] = None
-
-
-# =============================================================================
-# State wrapper (payload-only storage; derives interface fields)
-# =============================================================================
 class ValidateCleanProtocolState(State):
     NAME: ClassVar[str] = "VALIDATE_CLEAN_PROTOCOL"
 
@@ -55,23 +40,18 @@ class ValidateCleanProtocolState(State):
 
     @property
     def status(self) -> Status:
-        # Preserve your existing semantics:
-        # - If validation exists and has any FAIL issue => ABORTED
-        # - Otherwise DONE (including when validation is None)
-        v = self.payload.validation
-        if v is not None and any(i.severity == "FAIL" for i in v.issues):
+        # ABORTED if any FAIL issue; else DONE
+        if any(i.severity == "FAIL" for i in self.payload.issues):
             return "ABORTED"
         return "DONE"
 
     @property
     def message(self) -> Optional[str]:
-        v = self.payload.validation
-        return v.user_message if v is not None else None
+        return self.payload.user_message
 
     @property
     def error(self) -> Optional[str]:
-        v = self.payload.validation
-        return v.validation_error if v is not None else None
+        return self.payload.validation_error
 
     @property
     def needs_action(self) -> ACTION:
@@ -81,6 +61,7 @@ class ValidateCleanProtocolState(State):
         return (CompileProtocolState.NAME, CleanProtocolState.NAME)
 
     def to_json_dict(self) -> Dict[str, Any]:
+        # payload-only dict (outer store keyed by state name)
         return self.payload.model_dump(mode="json")
 
     @classmethod
