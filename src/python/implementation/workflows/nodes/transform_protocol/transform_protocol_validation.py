@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from collections import defaultdict
+from typing import Any, DefaultDict, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from python.implementation.workflows.utils.validation import ValidationIssueModel
+from python.implementation.workflows.utils.validation import ValidationIssueModel, ValidationSeverity
 
-Severity = Literal["WARN", "FAIL"]
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_specs import TransformedProtocolSpec
 
 
 def _issue(
     *,
-    severity: Severity,
+     severity: ValidationSeverity,
     message: str,
     evidence: Optional[Dict[str, Any]] = None,
     fix_hint: Optional[str] = None,
@@ -759,7 +759,7 @@ def validate_id_like_features_in_controls(
                 )
 
     if flagged:
-        sev: Severity = "FAIL"
+        sev: ValidationSeverity = "FAIL"
         if max_allowed_id_like > 0 and len(flagged) <= int(max_allowed_id_like):
             sev = "WARN"
 
@@ -780,23 +780,6 @@ def validate_id_like_features_in_controls(
         )
 
     return issues
-
-
-from __future__ import annotations
-
-from typing import Any, DefaultDict, Dict, List, Literal, Optional, Tuple
-from collections import defaultdict
-
-import numpy as np
-import pandas as pd
-
-from python.implementation.workflows.utils.validation import ValidationIssueModel
-from python.implementation.workflows.nodes.transform_protocol.transform_protocol_specs import TransformedProtocolSpec
-
-Severity = Literal["WARN", "FAIL"]
-
-
-# assumes you already have _issue(...) defined above
 
 
 # =============================================================================
@@ -888,7 +871,7 @@ def validate_constant_or_near_constant_controls(
     if not constant_like:
         return issues
 
-    sev: Severity = "WARN"
+    sev: ValidationSeverity = "WARN"
     if max_constant_allowed is not None and len(constant_like) > int(max_constant_allowed):
         sev = "FAIL"
 
@@ -993,7 +976,7 @@ def validate_dimensionality_caps(
                 if len(sample_cols[str(src)]) < 10:
                     sample_cols[str(src)].append(col)
 
-        too_big = [
+        too_big: List[Dict[str, Any]] = [
             {"source_raw": k, "n_features": int(v), "cols_sample": sample_cols[k]}
             for k, v in counts.items()
             if int(v) > int(max_features_per_source_raw)
