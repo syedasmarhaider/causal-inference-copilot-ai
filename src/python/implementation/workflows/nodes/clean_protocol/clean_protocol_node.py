@@ -74,14 +74,14 @@ class CleanProtocolNode(Node):
         conversation_id: UUID,
         state: State,
         tool_factory: Optional[ToolFactory],
-        previous_state_dependencies: Mapping[str, State],
+        previous_state_dependencies: Mapping[str, Any],
         user_message: Optional[str],
         router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         try:
             deps = CleanProtocolDeps.from_loaded(previous_state_dependencies)
-            dataset_id = deps.load_dataset.id
+            dataset_id = deps.load_dataset.payload.id
             if dataset_id is None:
                 return CleanProtocolState(
                     payload=CleanProtocolPayloadModel(

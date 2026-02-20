@@ -23,7 +23,7 @@ from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cl
     ValidateCleanProtocolDeps,
 )
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import (
-    CleanProtocolValidationPayloadModel,
+    ValidateCleanProtocolPayloadModel,
     ValidateCleanProtocolState,
 )
 
@@ -88,8 +88,8 @@ class ValidateCleanProtocolNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         state: State,
-        tool_factory: Optional[ToolFactory],  # not used here; kept for interface
-        previous_state_dependencies: Mapping[str, State],
+        tool_factory: Optional[ToolFactory],  
+        previous_state_dependencies: Mapping[str, Any],
         user_message: Optional[str],
         router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
@@ -100,9 +100,9 @@ class ValidateCleanProtocolNode(Node):
             # ----------------------------
             # Guardrails: upstream sanity
             # ----------------------------
-            proto = deps.compile_protocol.protocol
+            proto = deps.compile_protocol.payload.protocol
             assert proto is not None, "CleanProtocolState must have a compiled protocol for validation."
-            clean_id = deps.clean_protocol.clean_dataset_id
+            clean_id = deps.clean_protocol.payload.clean_dataset_id
             assert clean_id is not None, "CleanProtocolState must have a clean_dataset_id for validation."
             # ----------------------------
             # Load cleaned dataframe
@@ -239,7 +239,7 @@ class ValidateCleanProtocolNode(Node):
                 has_fail=has_fail,
             )
 
-            payload = CleanProtocolValidationPayloadModel(
+            payload = ValidateCleanProtocolPayloadModel(
                 issues=issue_models,
                 validation_error=None,
                 user_message=msg,
@@ -302,7 +302,7 @@ class ValidateCleanProtocolNode(Node):
         )
 
         issue_models = [ValidationIssueModel.model_validate(x) for x in safe_issues]
-        payload = CleanProtocolValidationPayloadModel(
+        payload = ValidateCleanProtocolPayloadModel(
             issues=issue_models,
             validation_error=validation_error,
             user_message=msg,

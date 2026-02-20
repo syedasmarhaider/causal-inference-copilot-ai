@@ -8,10 +8,11 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from python.domain.workflows.state import ACTION, State, Status
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
+from python.implementation.workflows.utils.utils import uuid_from_any
 
 
 # =============================================================================
-# Payload (strict)
+# Payload (strict, payload-only)
 # =============================================================================
 class CleanProtocolPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -28,35 +29,27 @@ class CleanProtocolPayloadModel(BaseModel):
         if isinstance(v, str):
             s = v.strip()
             return s if s else None
-        return None
+        raise TypeError("cleaning_error/user_message must be str|null")
 
     @field_validator("clean_dataset_id", mode="before")
     @classmethod
     def _parse_uuid(cls, v: Any) -> Optional[UUID]:
-        if v is None:
-            return None
-        if isinstance(v, UUID):
-            return v
-        if isinstance(v, str):
-            s = v.strip()
-            if not s:
-                return None
-            return UUID(s)
-        raise TypeError("clean_dataset_id must be UUID, UUID string, or null")
+        # Use your project-wide parser (handles UUID|str|None safely)
+        return uuid_from_any(v)
 
 
 # =============================================================================
-# State wrapper (payload-only, NO embedded name)
+# State wrapper (payload-only, NO embedded name in JSON)
 # =============================================================================
 class CleanProtocolState(State):
     NAME: ClassVar[str] = "CLEAN_PROTOCOL"
 
     def __init__(self, payload: CleanProtocolPayloadModel) -> None:
         self.payload = payload
-        
+
     @property
     def name(self) -> str:
-        return self.NAME    
+        return self.NAME
 
     @property
     def status(self) -> Status:
