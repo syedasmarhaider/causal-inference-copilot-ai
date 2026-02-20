@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union, cast
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 import pandas as pd
@@ -21,7 +21,6 @@ EncodingType = Literal[
     "ordinal_map",     
     "ordinal_map_idx",
     "to_numeric",
-    "fillna",
     "log1p",
     "standardize",
     "minmax",
@@ -58,7 +57,6 @@ DESCRIPTIONS: Dict[EncodingType, str] = {
         "Optional: start(int), drop(list[int]). Recommended."
     ),
     "to_numeric": "Coerce to numeric; invalid values can become NaN. Params (optional): errors('coerce'|'raise').",
-    "fillna": "Fill missing values with a constant sentinel. Params (required): value(any JSON scalar).",
     "log1p": "Numeric -> log(1+x). Params (optional): allow_negative(bool).",
     "standardize": "Z-score: (x-mean)/std. Params (optional): ddof(int), eps(float).",
     "minmax": "Scale into [0,1]. Params (optional): eps(float).",
@@ -73,7 +71,7 @@ DESCRIPTIONS: Dict[EncodingType, str] = {
 # =============================================================================
 class SupportedEncodingsModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    encodings: List[EncodingType] = Field(default_factory=list)
+    encodings: List[EncodingType] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
 
 
 def get_supported_encodings_model() -> SupportedEncodingsModel:
@@ -86,7 +84,6 @@ def get_supported_encodings_model() -> SupportedEncodingsModel:
             "ordinal_map",
             "ordinal_map_idx",
             "to_numeric",
-            "fillna",
             "log1p",
             "standardize",
             "minmax",
@@ -146,7 +143,7 @@ CatIdx = conint(ge=0)
 class BinaryMapIdxParams(_BaseParams):
     pos: List[int] = Field(..., min_length=1)
     neg: List[int] = Field(..., min_length=1)
-    drop: List[int] = Field(default_factory=list)
+    drop: List[int] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
 
 
 class BinaryMapIdxSpec(_BaseSpec):
@@ -170,7 +167,7 @@ class OrdinalMapSpec(_BaseSpec):
 class OrdinalMapIdxParams(_BaseParams):
     order: List[int] = Field(..., min_length=1)
     start: int = 0
-    drop: List[int] = Field(default_factory=list)
+    drop: List[int] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
 
 
 class OrdinalMapIdxSpec(_BaseSpec):
@@ -186,17 +183,6 @@ class ToNumericParams(_BaseParams):
 class ToNumericSpec(_BaseSpec):
     encoding: Literal["to_numeric"]
     params: Optional[ToNumericParams] = None
-
-
-# ---- fillna
-class FillNaParams(_BaseParams):
-    # Keep JSON-safe types. If you truly need object values, widen this.
-    value: Union[int, float, str, bool]
-
-
-class FillNaSpec(_BaseSpec):
-    encoding: Literal["fillna"]
-    params: FillNaParams
 
 
 # ---- log1p
@@ -249,7 +235,6 @@ EncodingSpec = Union[
     OrdinalMapSpec,
     OrdinalMapIdxSpec,
     ToNumericSpec,
-    FillNaSpec,
     Log1pSpec,
     StandardizeSpec,
     MinMaxSpec,
@@ -354,9 +339,6 @@ def apply_encoding(
     if isinstance(spec, ToNumericSpec):
         return _encode_to_numeric(df=df, column=column, params=spec.params)
 
-    if isinstance(spec, FillNaSpec):
-        return _encode_fillna(df=df, column=column, params=spec.params)
-
     if isinstance(spec, Log1pSpec):
         return _encode_log1p(df=df, column=column, params=spec.params)
 
@@ -366,7 +348,7 @@ def apply_encoding(
     if isinstance(spec, MinMaxSpec):
         return _encode_minmax(df=df, column=column, params=spec.params)
 
-    if isinstance(spec, DateTimeToEpochSpec):
+    if isinstance(spec, DateTimeToEpochSpec): # pyright: ignore[reportUnnecessaryIsInstance]
         return _encode_datetime_to_epoch_seconds(df=df, column=column, params=spec.params)
 
     # Unreachable if EncodingSpec union stays in sync
@@ -676,28 +658,6 @@ def _encode_to_numeric(
 
     return out, FeatureMapModel(produced_columns={column: [column]}), []
 
-
-def _encode_fillna(
-    *,
-    df: pd.DataFrame,
-    column: str,
-    params: FillNaParams,
-) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
-    out = df.copy()
-    try:
-        out[column] = out[column].fillna(params.value)
-    except Exception as e:  # noqa: BLE001
-        return df.copy(), FeatureMapModel(), [
-            _issue(
-                severity="FAIL",
-                message=f"fillna failed for '{column}': {e}",
-                evidence={"column": column, "value": params.value},
-            )
-        ]
-
-    return out, FeatureMapModel(produced_columns={column: [column]}), []
-
-
 def _encode_log1p(
     *,
     df: pd.DataFrame,
@@ -827,7 +787,7 @@ def _encode_datetime_to_epoch_seconds(
         dt = pd.to_datetime(out[column], errors=p.errors, utc=True)
 
         # int64 nanoseconds since epoch; NaT is min int64
-        ns = dt.view("int64").astype("float64")
+        ns = dt.astype("int64").astype("float64")
         ns[ns <= -9e18] = np.nan
 
         if p.unit == "s":

@@ -10,12 +10,12 @@ from python.implementation.workflows.nodes.load_dataset.load_dataset_state impor
 
 
 @dataclass(frozen=True)
-class CompileInferenceDeps(StateDep):
+class CleanProtocolDeps(StateDep):
     load_dataset: LoadDatasetState
     compile_protocol: CompileProtocolState
 
     @classmethod
-    def from_loaded(cls, loaded: Mapping[str, State]) -> "CompileInferenceDeps":
+    def from_loaded(cls, loaded: Mapping[str, State]) -> "CleanProtocolDeps":
         ld = loaded.get(LoadDatasetState.NAME)
         if not isinstance(ld, LoadDatasetState):
             raise ValueError(

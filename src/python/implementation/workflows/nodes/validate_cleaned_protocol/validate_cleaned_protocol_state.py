@@ -6,7 +6,7 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional, Sequence
 from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.workflows.state import ACTION, State, Status
-from python.implementation.workflows.nodes.compile_inference.compile_inference_state import CompileInferenceState
+from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
@@ -15,7 +15,7 @@ ValidationStatus = Literal["PASS", "WARN", "FAIL"]
 
 
 
-class InferenceReadyValidationPayloadModel(BaseModel):
+class CleanProtocolValidationPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     issues: List[ValidationIssueModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
     validation_error: Optional[str] = None
@@ -23,9 +23,9 @@ class InferenceReadyValidationPayloadModel(BaseModel):
 
 
 @dataclass(frozen=True)
-class ValidateCompiledInferenceState(State):
-    NAME: ClassVar[str] = "VALIDATE_COMPILED_INFERENCE"
-    payload: Optional[InferenceReadyValidationPayloadModel] = None
+class ValidateCleanProtocolState(State):
+    NAME: ClassVar[str] = "VALIDATE_CLEAN_PROTOCOL"
+    payload: Optional[CleanProtocolValidationPayloadModel] = None
 
     @property
     def status(self) -> Status:
@@ -47,7 +47,7 @@ class ValidateCompiledInferenceState(State):
         return "NONE"
 
     def required_states_keys(self) -> Sequence[str]:
-        return [CompileProtocolState.NAME, CompileInferenceState.NAME]
+        return [CompileProtocolState.NAME, CleanProtocolState.NAME]
 
     def to_json_dict(self) -> Dict[str, Any]:
         return {
@@ -56,9 +56,9 @@ class ValidateCompiledInferenceState(State):
         }
 
     @classmethod
-    def from_json_dict(cls, payload: Dict[str, Any]) -> "ValidateCompiledInferenceState":
+    def from_json_dict(cls, payload: Dict[str, Any]) -> "ValidateCleanProtocolState":
         raw = payload.get("payload")
-        model = InferenceReadyValidationPayloadModel.model_validate(raw) if isinstance(raw, dict) else None
+        model = CleanProtocolValidationPayloadModel.model_validate(raw) if isinstance(raw, dict) else None
         return cls(
                 payload=model,
        )

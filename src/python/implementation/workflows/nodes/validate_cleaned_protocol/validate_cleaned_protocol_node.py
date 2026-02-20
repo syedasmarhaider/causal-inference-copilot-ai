@@ -14,16 +14,20 @@ from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory  # kept for Node.run signature
 
-from python.implementation.workflows.nodes.validate_compiled_inference.validate_compile_inference_prompts import system_prompt_validate_compiled_inference, validate_compiled_inference_get_info
-from python.implementation.workflows.nodes.validate_compiled_inference.validate_compiled_inference_deps import (
-    ValidateCompiledInferenceDeps,
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_prompts import (
+    system_prompt_validate_cleaned_protocol,
+    validate_cleaned_protocol_get_info,
 )
-from python.implementation.workflows.nodes.validate_compiled_inference.validate_compile_inference_state import (
-    InferenceReadyValidationPayloadModel,
-    ValidateCompiledInferenceState,
+    
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_deps import (
+    ValidateCleanProtocolDeps,
+)
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import (
+    CleanProtocolValidationPayloadModel,
+    ValidateCleanProtocolState,
 )
 
-from python.implementation.workflows.nodes.validate_compiled_inference.validate_compiled_inference_utils import (  # noqa: E501
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_utils import (  # noqa: E501
     ValidationIssue,
     compute_arm_masks,
     extract_key_columns,
@@ -52,7 +56,7 @@ log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class ValidateCompiledInferenceNode(Node):
+class ValidateCleanProtocolNode(Node):
     """
     Pre-transform validation over the *cleaned, filtered* dataset and compiled ProtocolSpec.
 
@@ -67,7 +71,7 @@ class ValidateCompiledInferenceNode(Node):
     llm: LLMService
     model_name: str
 
-    NAME: ClassVar[str] = ValidateCompiledInferenceState.NAME
+    NAME: ClassVar[str] = ValidateCleanProtocolState.NAME
 
     @property
     def name(self) -> str:
@@ -75,7 +79,7 @@ class ValidateCompiledInferenceNode(Node):
 
     @classmethod
     def get_info(cls) -> str:
-        return validate_compiled_inference_get_info()
+        return validate_cleaned_protocol_get_info()
 
 
     def run(
@@ -91,15 +95,15 @@ class ValidateCompiledInferenceNode(Node):
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         try:
-            deps = ValidateCompiledInferenceDeps.from_loaded(previous_state_dependencies)
+            deps = ValidateCleanProtocolDeps.from_loaded(previous_state_dependencies)
 
             # ----------------------------
             # Guardrails: upstream sanity
             # ----------------------------
             proto = deps.compile_protocol.protocol
-            assert proto is not None, "CompileProtocolState must have a compiled protocol for validation."
-            clean_id = deps.compile_inference.clean_dataset_id
-            assert clean_id is not None, "CompileInferenceState must have a clean_dataset_id for validation."
+            assert proto is not None, "CleanProtocolState must have a compiled protocol for validation."
+            clean_id = deps.clean_protocol.clean_dataset_id
+            assert clean_id is not None, "CleanProtocolState must have a clean_dataset_id for validation."
             # ----------------------------
             # Load cleaned dataframe
             # ----------------------------
@@ -235,12 +239,12 @@ class ValidateCompiledInferenceNode(Node):
                 has_fail=has_fail,
             )
 
-            payload = InferenceReadyValidationPayloadModel(
+            payload = CleanProtocolValidationPayloadModel(
                 issues=issue_models,
                 validation_error=None,
                 user_message=msg,
             )
-            return ValidateCompiledInferenceState(payload=payload)
+            return ValidateCleanProtocolState(payload=payload)
 
         except ValidationError as e:
             return self._abort(
@@ -279,7 +283,7 @@ class ValidateCompiledInferenceNode(Node):
         messages_history: Optional[Sequence[ChatMessage]],
         validation_error: str,
         issues: List[Dict[str, Any]],
-    ) -> ValidateCompiledInferenceState:
+    ) -> ValidateCleanProtocolState:
         safe_issues = issues or [
             {
                 "severity": "FAIL",
@@ -298,12 +302,12 @@ class ValidateCompiledInferenceNode(Node):
         )
 
         issue_models = [ValidationIssueModel.model_validate(x) for x in safe_issues]
-        payload = InferenceReadyValidationPayloadModel(
+        payload = CleanProtocolValidationPayloadModel(
             issues=issue_models,
             validation_error=validation_error,
             user_message=msg,
         )
-        return ValidateCompiledInferenceState(payload=payload)
+        return ValidateCleanProtocolState(payload=payload)
 
     def _protocol_summary(self, proto: Any, key_cols: Any) -> Dict[str, Any]:
         return {
@@ -348,7 +352,7 @@ class ValidateCompiledInferenceNode(Node):
         issues: List[Dict[str, Any]],
         has_fail: bool,
     ) -> Optional[str]:
-        system = system_prompt_validate_compiled_inference()
+        system = system_prompt_validate_cleaned_protocol()
         history_only_last_4_messages = messages_history[-4:] if messages_history else None
         payload = { # pyright: ignore[reportUnknownVariableType]
             "has_fail": bool(has_fail),

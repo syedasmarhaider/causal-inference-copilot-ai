@@ -47,6 +47,7 @@ class TransformProtocol(State):
     @property
     def needs_action(self) -> ACTION:
         return "NONE"
+    
 
     def required_states_keys(self) -> Sequence[str]:
         return [CompileProtocolState.NAME, CompileInferenceState.NAME]

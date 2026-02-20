@@ -15,9 +15,10 @@ from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 
-from python.implementation.workflows.nodes.compile_inference.compile_inference_deps import CompileInferenceDeps
+from python.implementation.workflows.nodes.clean_protocol.clean_protocol_deps import CleanProtocolDeps
 
-from python.implementation.workflows.nodes.compile_inference.compile_inference_state import CompileInferenceState
+from python.implementation.workflows.nodes.clean_protocol.clean_protocol_prompts import get_clean_protocol_node_info
+from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
     BinaryOutcomeSpecModel,
     BinaryTreatmentSpecModel,
@@ -36,9 +37,9 @@ log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class CompileInferenceNode(Node):
+class CleanProtocolNode(Node):
     """
-    Compile / clean dataset into an "inference-ready" dataset artifact:
+    Clean dataset into an "inference-ready" dataset artifact:
 
       1) Drop cols to required-by-protocol
       2) Normalize missing sentinels + global null purge + exclusions
@@ -50,7 +51,7 @@ class CompileInferenceNode(Node):
     No LLM, deterministic.
     """
 
-    NAME: ClassVar[str] = CompileInferenceState.NAME
+    NAME: ClassVar[str] = CleanProtocolState.NAME
 
     data_repo: DataRepo
 
@@ -64,11 +65,7 @@ class CompileInferenceNode(Node):
 
     @classmethod
     def get_info(cls) -> str:
-        return (
-            "CompileInferenceNode: prepares an inference-ready dataset by dropping to protocol-required columns, "
-            "purging missing values, applying exclusions, enforcing treatment/outcome domains, and persisting a cleaned "
-            "dataset artifact. Returns INFERENCE_READY state with clean_dataset_id."
-        )
+        return get_clean_protocol_node_info()
 
     def run(
         self,
@@ -83,10 +80,10 @@ class CompileInferenceNode(Node):
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         try:
-            deps = CompileInferenceDeps.from_loaded(previous_state_dependencies)
+            deps = CleanProtocolDeps.from_loaded(previous_state_dependencies)
             dataset_id = deps.load_dataset.id
             if dataset_id is None:
-                return CompileInferenceState(
+                return CleanProtocolState(
                     clean_dataset_id=None,
                     cleaning_error="LOAD_DATASET.id is missing; cannot load data.",
                     user_message="Dataset id missing. Re-run LOAD_DATASET.",
@@ -94,7 +91,7 @@ class CompileInferenceNode(Node):
 
             compiled_protocol = _require_compiled_protocol(deps.compile_protocol)
             if compiled_protocol is None:
-                return CompileInferenceState(
+                return CleanProtocolState(
                     clean_dataset_id=None,
                     cleaning_error="COMPILE_PROTOCOL produced no protocol.",
                     user_message="Protocol missing. Re-run COMPILE_PROTOCOL.",
@@ -107,7 +104,7 @@ class CompileInferenceNode(Node):
                 limit=None,
             )
             if df.empty:
-                return CompileInferenceState(
+                return CleanProtocolState(
                     clean_dataset_id=None,
                     cleaning_error=f"Dataset is empty (dataset_id={dataset_id}).",
                     user_message="Dataset is empty; cannot prepare inference-ready data.",
@@ -151,7 +148,7 @@ class CompileInferenceNode(Node):
                     excl_summary=excl_summary,
                     domain_summary=domain_summary,
                 )
-                return CompileInferenceState(
+                return CleanProtocolState(
                     clean_dataset_id=None,
                     cleaning_error=feas_err,
                     user_message=msg,
@@ -178,15 +175,15 @@ class CompileInferenceNode(Node):
                 excl_summary=excl_summary,
                 domain_summary=domain_summary,
             )
-            return CompileInferenceState(
+            return CleanProtocolState(
                 clean_dataset_id=clean_id,
                 cleaning_error=None,
                 user_message=msg_ok,
             )
 
         except Exception as e:
-            log.exception("CompileInferenceNode failed")
-            return CompileInferenceState(
+            log.exception("CleanProtocolNode failed")
+            return CleanProtocolState(
                 clean_dataset_id=None,
                 cleaning_error=f"Compile inference failed: {e!r}",
                 user_message=f"Compile inference failed: {e!r}",

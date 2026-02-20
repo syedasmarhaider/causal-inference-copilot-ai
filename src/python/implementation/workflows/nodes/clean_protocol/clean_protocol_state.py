@@ -10,9 +10,9 @@ from python.implementation.workflows.nodes.load_dataset.load_dataset_state impor
 
 
 @dataclass(frozen=True)
-class CompileInferenceState(State):
+class CleanProtocolState(State):
     """
-    Minimal inference-ready marker state for your pipeline stage "COMPILE_INFERENCE".
+    Minimal inference-ready marker state for your pipeline stage "CLEAN_PROTOCOL".
 
     Semantics:
       - DONE:     clean_dataset_id is set and cleaning_error is not set
@@ -20,7 +20,7 @@ class CompileInferenceState(State):
       - PENDING:  neither id nor error is set (defensive)
     """
 
-    NAME: ClassVar[str] = "COMPILE_INFERENCE"
+    NAME: ClassVar[str] = "CLEAN_PROTOCOL"
 
     clean_dataset_id: Optional[UUID] = None
     cleaning_error: Optional[str] = None
@@ -61,7 +61,7 @@ class CompileInferenceState(State):
         }
 
     @classmethod
-    def from_json_dict(cls, payload: Dict[str, Any]) -> "CompileInferenceState":
+    def from_json_dict(cls, payload: Dict[str, Any]) -> "CleanProtocolState":
         return cls(
             clean_dataset_id=_parse_uuid(payload.get("clean_dataset_id")),
             cleaning_error=_as_opt_str(payload.get("cleaning_error")),
