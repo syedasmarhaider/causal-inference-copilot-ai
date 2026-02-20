@@ -16,7 +16,7 @@ from python.implementation.service.llms.langchain_llm_service import (
 MAX_TIMEOUT_S: float = 300.0  # 5 minutes
 
 
-Provider = Literal["openai", "gemini"]
+Provider = Literal["gemini"]
 
 
 @dataclass(frozen=True)
@@ -29,8 +29,8 @@ class LLMServiceSettings:
     """
     backend: Literal["langchain"] = "langchain"
 
-    provider: Provider = "openai"
-    model: str = "gpt-4o-mini"
+    provider: Provider = "gemini"
+    model: str = "gemini-2.5-flash"
 
     timeout_s: float = 300.0
     hard_deadline_s: Optional[float] = 300.0
@@ -64,23 +64,8 @@ def _build_chat_model(*, provider: Provider, model: str, timeout_s: float, max_r
     """
     Build a LangChain chat model instance.
 
-    Supports OpenAI and Gemini through LangChain chat providers.
+    Supports Gemini through LangChain chat providers.
     """
-    if provider == "openai":
-        # pip install langchain-openai
-        from langchain_openai import ChatOpenAI
-
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("Missing API key. Set OPENAI_API_KEY.")
-
-        return ChatOpenAI(
-            model=model,
-            api_key=api_key,
-            timeout=timeout_s,
-            max_retries=max_retries,
-        )
-
     if provider == "gemini":
         # pip install langchain-google-genai
         from langchain_google_genai import ChatGoogleGenerativeAI

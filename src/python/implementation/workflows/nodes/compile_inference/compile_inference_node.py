@@ -16,8 +16,8 @@ from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 
 from python.implementation.workflows.nodes.compile_inference.compile_inference_deps import CompileInferenceDeps
-from python.implementation.workflows.nodes.compile_inference.compile_inference_state import InferenceReadyState
 
+from python.implementation.workflows.nodes.compile_inference.compile_inference_state import CompileInferenceState
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
     BinaryOutcomeSpecModel,
     BinaryTreatmentSpecModel,
@@ -29,6 +29,7 @@ from python.implementation.workflows.nodes.compile_protocol.protocol_specs impor
     ExclusionRuleModel,
     ProtocolSpec,
 )
+from python.implementation.workflows.utils.utils import BOOL_FALSE, BOOL_TRUE
 
 
 log = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ class CompileInferenceNode(Node):
     No LLM, deterministic.
     """
 
-    NAME: ClassVar[str] = InferenceReadyState.NAME
+    NAME: ClassVar[str] = CompileInferenceState.NAME
 
     data_repo: DataRepo
 
@@ -85,7 +86,7 @@ class CompileInferenceNode(Node):
             deps = CompileInferenceDeps.from_loaded(previous_state_dependencies)
             dataset_id = deps.load_dataset.id
             if dataset_id is None:
-                return InferenceReadyState(
+                return CompileInferenceState(
                     clean_dataset_id=None,
                     cleaning_error="LOAD_DATASET.id is missing; cannot load data.",
                     user_message="Dataset id missing. Re-run LOAD_DATASET.",
@@ -93,7 +94,7 @@ class CompileInferenceNode(Node):
 
             compiled_protocol = _require_compiled_protocol(deps.compile_protocol)
             if compiled_protocol is None:
-                return InferenceReadyState(
+                return CompileInferenceState(
                     clean_dataset_id=None,
                     cleaning_error="COMPILE_PROTOCOL produced no protocol.",
                     user_message="Protocol missing. Re-run COMPILE_PROTOCOL.",
@@ -106,7 +107,7 @@ class CompileInferenceNode(Node):
                 limit=None,
             )
             if df.empty:
-                return InferenceReadyState(
+                return CompileInferenceState(
                     clean_dataset_id=None,
                     cleaning_error=f"Dataset is empty (dataset_id={dataset_id}).",
                     user_message="Dataset is empty; cannot prepare inference-ready data.",
@@ -150,7 +151,7 @@ class CompileInferenceNode(Node):
                     excl_summary=excl_summary,
                     domain_summary=domain_summary,
                 )
-                return InferenceReadyState(
+                return CompileInferenceState(
                     clean_dataset_id=None,
                     cleaning_error=feas_err,
                     user_message=msg,
@@ -177,7 +178,7 @@ class CompileInferenceNode(Node):
                 excl_summary=excl_summary,
                 domain_summary=domain_summary,
             )
-            return InferenceReadyState(
+            return CompileInferenceState(
                 clean_dataset_id=clean_id,
                 cleaning_error=None,
                 user_message=msg_ok,
@@ -185,7 +186,7 @@ class CompileInferenceNode(Node):
 
         except Exception as e:
             log.exception("CompileInferenceNode failed")
-            return InferenceReadyState(
+            return CompileInferenceState(
                 clean_dataset_id=None,
                 cleaning_error=f"Compile inference failed: {e!r}",
                 user_message=f"Compile inference failed: {e!r}",
@@ -242,7 +243,7 @@ def _feasibility_error(df: pd.DataFrame, protocol: ProtocolSpec) -> Optional[str
         nunq = int(df[tcol].nunique(dropna=True))
         if nunq < 2:
             return f"Categorical treatment column '{tcol}' has <2 levels present after filtering."
-    elif isinstance(ts, ContinuousTreatmentSpecModel):
+    elif isinstance(ts, ContinuousTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         nunq = int(df[tcol].nunique(dropna=True))
         if nunq < 2:
             return f"Continuous treatment column '{tcol}' has <=1 unique value after filtering."
@@ -265,7 +266,7 @@ def _feasibility_error(df: pd.DataFrame, protocol: ProtocolSpec) -> Optional[str
         nunq = int(df[ycol].nunique(dropna=True))
         if nunq < 2:
             return f"Categorical outcome column '{ycol}' has <2 levels present after filtering."
-    elif isinstance(ys, ContinuousOutcomeSpecModel):
+    elif isinstance(ys, ContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         ycol = ys.column
         nunq = int(df[ycol].nunique(dropna=True))
         if nunq < 2:
@@ -336,7 +337,7 @@ def _render_failure_message(
     # Optional: include first few exclusion rules audit rows
     applied = excl_summary.get("applied", [])
     if isinstance(applied, list) and applied:
-        preview = applied[:5]
+        preview = applied[:5] # pyright: ignore[reportUnknownVariableType]
         parts.append(f"- exclusions_applied_preview: {preview}")
 
     return "\n".join(parts)
@@ -431,11 +432,6 @@ def edit_df_drop_cols_expect_required(
 
 # exclusions
 
-# Strict boolean tokens only (NO y/n)
-_BOOL_TRUE = {"true", "1", "yes"}
-_BOOL_FALSE = {"false", "0", "no"}
-
-
 def _normalize_missing_sentinels(
     df: pd.DataFrame,
     *,
@@ -466,9 +462,9 @@ def _normalize_missing_sentinels(
 
 def _parse_bool_token_strict(v: str) -> Optional[bool]:
     s = v.strip().casefold()
-    if s in _BOOL_TRUE:
+    if s in BOOL_TRUE:
         return True
-    if s in _BOOL_FALSE:
+    if s in BOOL_FALSE:
         return False
     return None
 
@@ -495,7 +491,7 @@ def _coerce_literals_for_series(s: pd.Series, values: Sequence[str]) -> List[Any
             b = _parse_bool_token_strict(raw)
             if b is None:
                 raise ValueError(
-                    f"Invalid boolean literal {raw!r}. Allowed: {sorted(_BOOL_TRUE | _BOOL_FALSE)} (no y/n)."
+                    f"Invalid boolean literal {raw!r}. Allowed: {sorted(BOOL_TRUE | BOOL_FALSE)} (no y/n)."
                 )
             out.append(b)
         return out
@@ -540,7 +536,7 @@ def apply_null_purge_then_exclusions(
     n0 = int(df.shape[0])
 
     cur = _normalize_missing_sentinels(df, missing_sentinels=missing_sentinels)
-    cur = cur.dropna(axis=0, how="any").copy()
+    cur = cur.dropna(axis=0, how="any").copy() # pyright: ignore[reportUnknownMemberType]
 
     n_after_nulls = int(cur.shape[0])
     applied: List[Dict[str, Any]] = []
@@ -710,7 +706,7 @@ def apply_treatment_outcome_domain_keep(
         if allowed_t is not None:
             n_before = int(cur.shape[0])
             if dropna_on_domain_cols:
-                cur = cur.dropna(axis=0, how="any", subset=[tcol]).copy()
+                cur = cur.dropna(axis=0, how="any", subset=[tcol]).copy() # pyright: ignore[reportUnknownMemberType]
             mask_keep = _mask_keep_in_domain(cur[tcol], allowed_t)
             cur = cur.loc[mask_keep].copy()
             n_after = int(cur.shape[0])
@@ -742,7 +738,7 @@ def apply_treatment_outcome_domain_keep(
                 # event_column plus duration_column are logically required for survival analysis
                 dcol = ys.duration_column
                 subset = [ecol] + ([dcol] if dcol in cur.columns else [])
-                cur = cur.dropna(axis=0, how="any", subset=subset).copy()
+                cur = cur.dropna(axis=0, how="any", subset=subset).copy() # pyright: ignore[reportUnknownMemberType]
 
             mask_keep = _mask_keep_in_domain(cur[ecol], allowed_y)
             cur = cur.loc[mask_keep].copy()
@@ -776,7 +772,7 @@ def apply_treatment_outcome_domain_keep(
             if allowed_y2 is not None:
                 n_before = int(cur.shape[0])
                 if dropna_on_domain_cols:
-                    cur = cur.dropna(axis=0, how="any", subset=[ycol]).copy()
+                    cur = cur.dropna(axis=0, how="any", subset=[ycol]).copy() # pyright: ignore[reportUnknownMemberType]
 
                 mask_keep = _mask_keep_in_domain(cur[ycol], allowed_y2)
                 cur = cur.loc[mask_keep].copy()

@@ -89,7 +89,7 @@ class LangChainLLMService(LLMService):
             attempt_cfg = config if attempt == 1 else self._deterministic_config(config)
 
             ai = self._invoke_with_retries(messages=msgs, config=attempt_cfg)
-            text = self._content_to_str(ai.content).strip()
+            text = self._content_to_str(ai.content).strip() # pyright: ignore[reportUnknownMemberType]
             last_text = text
 
             try:
