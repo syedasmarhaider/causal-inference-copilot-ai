@@ -34,7 +34,7 @@ class InferenceReadyValidationPayloadModel(BaseModel):
 
 @dataclass(frozen=True)
 class ValidateCompiledInferenceState(State):
-    NAME: ClassVar[str] = "VALIDATE_INFERENCE_READY"
+    NAME: ClassVar[str] = "VALIDATE_COMPILED_INFERENCE"
     payload: Optional[InferenceReadyValidationPayloadModel] = None
 
     @property

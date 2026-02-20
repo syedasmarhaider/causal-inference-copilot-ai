@@ -36,7 +36,8 @@ class ValidateCompiledInferenceNode(Node):
 
     data_repo: DataRepo
 
-    NAME: ClassVar[str] = ValidateCompiledInferenceState.NAME
+    # TODO: Fix late r
+    NAME: ClassVar[str] = 'FIX NAME LATER'
 
     @property
     def name(self) -> str:
