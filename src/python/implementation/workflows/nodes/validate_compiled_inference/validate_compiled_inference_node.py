@@ -3,17 +3,51 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, cast
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence
 from uuid import UUID
 
-import pandas as pd
 from pydantic import ValidationError
 
 from python.domain.repo.data_repo import DataRepo
-from python.domain.service.llm_service import ChatMessage
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
-from python.domain.workflows.tool_factory import ToolFactory
+from python.domain.workflows.tool_factory import ToolFactory  # kept for Node.run signature
+
+from python.implementation.workflows.nodes.validate_compiled_inference.validate_compile_inference_prompts import system_prompt_validate_compiled_inference, validate_compiled_inference_get_info
+from python.implementation.workflows.nodes.validate_compiled_inference.validate_compiled_inference_deps import (
+    ValidateCompiledInferenceDeps,
+)
+from python.implementation.workflows.nodes.validate_compiled_inference.validate_compile_inference_state import (
+    InferenceReadyValidationIssueModel,
+    InferenceReadyValidationPayloadModel,
+    ValidateCompiledInferenceState,
+)
+
+# Validation utilities (assumed implemented)
+from python.implementation.workflows.nodes.validate_compiled_inference.validate_compiled_inference_utils import (  # noqa: E501
+    ValidationIssue,
+    compute_arm_masks,
+    extract_key_columns,
+    overlap_propensity_proxy,
+    overlap_support_check,
+    profile_feature_block,
+    select_modeling_view,
+    validate_column_list_invariants,
+    validate_feature_cardinality,
+    validate_feature_constantness,
+    validate_feature_missingness,
+    validate_feature_type_risks,
+    validate_min_rows,
+    validate_outcome_domain_integrity,
+    validate_outcome_missingness,
+    validate_outcome_variation,
+    validate_time_zero_semantics,
+    validate_treatment_domain_integrity,
+    validate_treatment_missingness,
+    validate_treatment_variation,
+    validate_WX_presence,
+)
 
 log = logging.getLogger(__name__)
 
@@ -21,23 +55,20 @@ log = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ValidateCompiledInferenceNode(Node):
     """
-    Loads the cleaned dataset produced by COMPILE_INFERENCE and runs pre-transform validations
-    against the compiled ProtocolSpec.
+    Pre-transform validation over the *cleaned, filtered* dataset and compiled ProtocolSpec.
 
-    - On FAIL issues: returns VALIDATE_COMPILED_INFERENCE with FAIL issues (pipeline ABORT).
-    - On only WARN or no issues: returns DONE with an actionable user message.
-    - On unexpected exceptions: returns ABORT with a synthetic FAIL + validation_error.
-
-    Notes:
-    - This node does not transform/encode. It validates raw, post-filtered data.
-    - It attempts to use an LLM (via ToolFactory) to produce a user-facing summary.
-      If unavailable, it falls back to a deterministic summarizer.
+    Output:
+      - Returns InferenceReadyValidationState with payload. State.status will be:
+          DONE    if no FAIL issues
+          ABORTED if any FAIL issues
+      - On server/internal errors: returns ABORTED with a synthetic FAIL issue + validation_error.
     """
 
     data_repo: DataRepo
+    llm: LLMService
+    model_name: str
 
-    # TODO: Fix late r
-    NAME: ClassVar[str] = 'FIX NAME LATER'
+    NAME: ClassVar[str] = ValidateCompiledInferenceState.NAME
 
     @property
     def name(self) -> str:
@@ -45,10 +76,8 @@ class ValidateCompiledInferenceNode(Node):
 
     @classmethod
     def get_info(cls) -> str:
-        return (
-            "Validate compiled inference inputs (clean dataset + compiled protocol) prior to transform/encoding. "
-            "Produces FAIL/WARN issues and a user-facing summary."
-        )
+        return validate_compiled_inference_get_info()
+
 
     def run(
         self,
@@ -56,7 +85,7 @@ class ValidateCompiledInferenceNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         state: State,
-        tool_factory: Optional[ToolFactory],
+        tool_factory: Optional[ToolFactory],  # not used here; kept for interface
         previous_state_dependencies: Mapping[str, State],
         user_message: Optional[str],
         router_message: Optional[str],
@@ -66,58 +95,12 @@ class ValidateCompiledInferenceNode(Node):
             deps = ValidateCompiledInferenceDeps.from_loaded(previous_state_dependencies)
 
             # ----------------------------
-            # Guardrails: upstream state sanity
+            # Guardrails: upstream sanity
             # ----------------------------
             proto = deps.compile_protocol.protocol
-            if proto is None or deps.compile_protocol.compile_error:
-                return self._abort(
-                    tool_factory=tool_factory,
-                    messages_history=messages_history,
-                    validation_error="CompileProtocolState missing protocol or has compile_error.",
-                    issues=[
-                        {
-                            "severity": "FAIL",
-                            "message": "Protocol is not available for validation.",
-                            "evidence": {
-                                "compile_error": deps.compile_protocol.compile_error,
-                                "compile_issues": deps.compile_protocol.compile_issues,
-                            },
-                            "fix_hint": "Fix protocol compilation first (COMPILE_PROTOCOL).",
-                        }
-                    ],
-                )
-
-            if deps.compile_inference.cleaning_error is not None:
-                return self._abort(
-                    tool_factory=tool_factory,
-                    messages_history=messages_history,
-                    validation_error="CompileInferenceState indicates cleaning_error.",
-                    issues=[
-                        {
-                            "severity": "FAIL",
-                            "message": "Clean dataset is not available because dataset cleaning failed.",
-                            "evidence": {"cleaning_error": deps.compile_inference.cleaning_error},
-                            "fix_hint": "Fix dataset cleaning in COMPILE_INFERENCE before running validation.",
-                        }
-                    ],
-                )
-
+            assert proto is not None, "CompileProtocolState must have a compiled protocol for validation."
             clean_id = deps.compile_inference.clean_dataset_id
-            if clean_id is None:
-                return self._abort(
-                    tool_factory=tool_factory,
-                    messages_history=messages_history,
-                    validation_error="CompileInferenceState missing clean_dataset_id.",
-                    issues=[
-                        {
-                            "severity": "FAIL",
-                            "message": "Clean dataset id is missing; cannot load data for validation.",
-                            "evidence": {"clean_dataset_id": None},
-                            "fix_hint": "Ensure COMPILE_INFERENCE saves a cleaned dataset_id.",
-                        }
-                    ],
-                )
-
+            assert clean_id is not None, "CompileInferenceState must have a clean_dataset_id for validation."
             # ----------------------------
             # Load cleaned dataframe
             # ----------------------------
@@ -127,16 +110,14 @@ class ValidateCompiledInferenceNode(Node):
                 dataset_id=clean_id,
                 limit=None,
             )
-            if not isinstance(df, pd.DataFrame):
-                raise TypeError(f"DataRepo.get_csv_data returned {type(df).__name__}, expected DataFrame.")
-
+            
             # ----------------------------
             # Build modeling view and validate
             # ----------------------------
             key_cols = extract_key_columns(proto)
             view = select_modeling_view(df, key_cols, include_time_zero=True, copy=True)
 
-            all_issues: List[Dict[str, Any]] = []
+            all_issues: List[ValidationIssue] = []
             metrics: Dict[str, Any] = {
                 "clean_dataset_id": str(clean_id),
                 "n_rows": int(view.shape[0]),
@@ -221,7 +202,6 @@ class ValidateCompiledInferenceNode(Node):
                 all_issues.extend(issues)
                 metrics["overlap_support"] = m
 
-                # Optional: propensity proxy (binary only)
                 issues, m = overlap_propensity_proxy(
                     view,
                     W_cols=key_cols.W_cols,
@@ -231,28 +211,24 @@ class ValidateCompiledInferenceNode(Node):
                 all_issues.extend(issues)
                 metrics["propensity_proxy"] = m
             except Exception as e:
-                # Overlap diagnostics are non-fatal if the earlier basics already produced FAIL/WARN.
                 all_issues.append(
                     {
-                        "severity": "WARN",
-                        "message": "Overlap diagnostics failed to run (non-fatal).",
+                        "severity": "FAIL",
+                        "message": "Overlap diagnostics failed to run.",
                         "evidence": {"error": repr(e)},
                         "fix_hint": "Inspect treatment column typing and feature columns; overlap diagnostics require valid arm masks.",
                     }
                 )
 
             # ----------------------------
-            # Normalize into Pydantic issues
+            # Normalize issues -> pydantic models
             # ----------------------------
-            issue_models: List[InferenceReadyValidationIssueModel] = []
-            for it in all_issues:
-                issue_models.append(InferenceReadyValidationIssueModel.model_validate(it))
-
+            issue_models: List[InferenceReadyValidationIssueModel] = [
+                InferenceReadyValidationIssueModel.model_validate(it) for it in all_issues
+            ]
             has_fail = any(i.severity == "FAIL" for i in issue_models)
 
-            # User-facing message: LLM if possible, else deterministic
             msg = self._make_user_message(
-                tool_factory=tool_factory,
                 messages_history=messages_history,
                 protocol_summary=self._protocol_summary(proto, key_cols),
                 metrics=metrics,
@@ -265,12 +241,10 @@ class ValidateCompiledInferenceNode(Node):
                 validation_error=None,
                 user_message=msg,
             )
-            return InferenceReadyValidationState(payload=payload)
+            return ValidateCompiledInferenceState(payload=payload)
 
         except ValidationError as e:
-            # Pydantic parse/validation failure inside our own models.
             return self._abort(
-                tool_factory=tool_factory,
                 messages_history=messages_history,
                 validation_error=f"Pydantic validation error: {e.errors()}",
                 issues=[
@@ -284,7 +258,6 @@ class ValidateCompiledInferenceNode(Node):
             )
         except Exception as e:
             return self._abort(
-                tool_factory=tool_factory,
                 messages_history=messages_history,
                 validation_error=repr(e),
                 issues=[
@@ -304,13 +277,10 @@ class ValidateCompiledInferenceNode(Node):
     def _abort(
         self,
         *,
-        tool_factory: Optional[ToolFactory],
         messages_history: Optional[Sequence[ChatMessage]],
         validation_error: str,
         issues: List[Dict[str, Any]],
-    ) -> InferenceReadyValidationState:
-        # Ensure abort always triggers ABORTED in your State.status property:
-        # it only checks FAIL issues, so we ALWAYS include at least one FAIL issue.
+    ) -> ValidateCompiledInferenceState:
         safe_issues = issues or [
             {
                 "severity": "FAIL",
@@ -321,7 +291,6 @@ class ValidateCompiledInferenceNode(Node):
         ]
 
         msg = self._make_user_message(
-            tool_factory=tool_factory,
             messages_history=messages_history,
             protocol_summary=None,
             metrics={"validation_error": validation_error},
@@ -330,16 +299,14 @@ class ValidateCompiledInferenceNode(Node):
         )
 
         issue_models = [InferenceReadyValidationIssueModel.model_validate(x) for x in safe_issues]
-
         payload = InferenceReadyValidationPayloadModel(
             issues=issue_models,
             validation_error=validation_error,
             user_message=msg,
         )
-        return InferenceReadyValidationState(payload=payload)
+        return ValidateCompiledInferenceState(payload=payload)
 
     def _protocol_summary(self, proto: Any, key_cols: Any) -> Dict[str, Any]:
-        # Keep this JSON-friendly (LLM prompt + debugging).
         return {
             "treatment_col": key_cols.treatment_col,
             "outcome_cols": list(key_cols.outcome_cols),
@@ -352,59 +319,39 @@ class ValidateCompiledInferenceNode(Node):
     def _make_user_message(
         self,
         *,
-        tool_factory: Optional[ToolFactory],
         messages_history: Optional[Sequence[ChatMessage]],
         protocol_summary: Optional[Dict[str, Any]],
         metrics: Dict[str, Any],
         issues: List[Dict[str, Any]],
         has_fail: bool,
     ) -> str:
-        # Try LLM first; fallback to deterministic summary.
+        # LLM first; deterministic fallback.
         try:
-            llm_text = self._try_llm_summary(
-                tool_factory=tool_factory,
+            txt = self._try_llm_summary(
                 messages_history=messages_history,
                 protocol_summary=protocol_summary,
                 metrics=metrics,
                 issues=issues,
                 has_fail=has_fail,
             )
-            if isinstance(llm_text, str) and llm_text.strip():
-                return llm_text.strip()
+            if isinstance(txt, str) and txt.strip():
+                return txt.strip()
         except Exception:
             pass
-
         return self._fallback_summary(issues=issues, has_fail=has_fail)
 
     def _try_llm_summary(
         self,
         *,
-        tool_factory: Optional[ToolFactory],
         messages_history: Optional[Sequence[ChatMessage]],
         protocol_summary: Optional[Dict[str, Any]],
         metrics: Dict[str, Any],
         issues: List[Dict[str, Any]],
         has_fail: bool,
     ) -> Optional[str]:
-        if tool_factory is None:
-            return None
-
-        llm = self._resolve_llm(tool_factory)
-        if llm is None:
-            return None
-
-        system = (
-            "You are a rigorous assistant for a causal inference pipeline.\n"
-            "Task: produce a short, actionable validation report for the user.\n"
-            "Rules:\n"
-            "- If there are FAIL issues: clearly say the pipeline must stop and list the top blockers.\n"
-            "- If only WARN: say validation passed with warnings and list what will happen next.\n"
-            "- Keep it compact: 6–12 bullet points.\n"
-            "- Mention treatment/outcome/W/X/time_zero when relevant.\n"
-            "- Use concrete fix hints (copy the provided fix_hint when useful).\n"
-        )
-
-        payload = {
+        system = system_prompt_validate_compiled_inference()
+        history_only_last_4_messages = messages_history[-4:] if messages_history else None
+        payload = { # pyright: ignore[reportUnknownVariableType]
             "has_fail": bool(has_fail),
             "protocol_summary": protocol_summary,
             "metrics": metrics,
@@ -416,55 +363,18 @@ class ValidateCompiledInferenceNode(Node):
             "Return plain text (no JSON).\n\n"
             f"INPUT:\n{json.dumps(payload, ensure_ascii=False)[:60000]}"
         )
-
-        msgs: List[ChatMessage] = []
-        msgs.append(cast(ChatMessage, {"role": "system", "content": system}))
-        msgs.append(cast(ChatMessage, {"role": "user", "content": user}))
-
-        # Minimal context carry-over (optional)
-        if messages_history:
-            # Keep a small tail only (don’t blow up tokens)
-            tail = list(messages_history)[-4:]
-            for m in tail:
-                msgs.append(m)
-
-        # Duck-typed call: support multiple llm method names.
-        for fn_name in ("generate", "chat", "complete", "__call__"):
-            fn = getattr(llm, fn_name, None)
-            if callable(fn):
-                out = fn(msgs)
-                if isinstance(out, str):
-                    return out
-                # Some APIs return dict-like objects
-                if isinstance(out, dict) and isinstance(out.get("content"), str):
-                    return cast(str, out["content"])
-                if hasattr(out, "content") and isinstance(getattr(out, "content"), str):
-                    return cast(str, getattr(out, "content"))
-
-        return None
-
-    def _resolve_llm(self, tool_factory: ToolFactory) -> Optional[Any]:
-        # Best-effort resolver without hard-coding your concrete ToolFactory shape.
-        for attr in (
-            "llm",
-            "llm_service",
-            "get_llm",
-            "get_llm_service",
-            "create_llm",
-            "create_llm_service",
-        ):
-            v = getattr(tool_factory, attr, None)
-            if callable(v):
-                try:
-                    return v()
-                except Exception:
-                    continue
-            if v is not None:
-                return v
-        return None
+        
+        config = LLMConfig(model=self.model_name, temperature=0.7)
+        resp = self.llm.generate(
+            system_prompt=system,
+            user_prompt=user,
+            config=config,
+            history=history_only_last_4_messages,
+        )
+        
+        return resp.content
 
     def _fallback_summary(self, *, issues: List[Dict[str, Any]], has_fail: bool) -> str:
-        # Deterministic, always available.
         fails = [x for x in issues if str(x.get("severity")) == "FAIL"]
         warns = [x for x in issues if str(x.get("severity")) == "WARN"]
 
@@ -487,6 +397,6 @@ class ValidateCompiledInferenceNode(Node):
                 lines.append(f"{i}. {msg}")
 
         if not has_fail:
-            lines.append("Next: run TRANSFORM (encoding/typing) and then the post-transform validation stage.")
+            lines.append("Next: run TRANSFORM (encoding/typing) and then post-transform validation.")
 
         return "\n".join(lines)
