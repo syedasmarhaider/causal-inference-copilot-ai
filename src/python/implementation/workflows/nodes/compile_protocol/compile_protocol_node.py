@@ -16,7 +16,7 @@ from python.domain.workflows.tool_factory import ToolFactory
 
 from python.implementation.workflows.nodes.compile_protocol import compile_protocol_prompt
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_deps import CompileProtocolDeps
-from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
+from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolPayloadModel, CompileProtocolState
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CategoricalOutcomeSpecModel, CategoricalTreatmentSpecModel, ContinuousOutcomeSpecModel, ContinuousTreatmentSpecModel, DurationOutcomeSpecModel, ProtocolSpec
 from python.implementation.workflows.nodes.load_dataset.load_dataset_utils import ColumnProfile, DatasetSummary
 from python.implementation.workflows.utils.utils import json_sanitize
@@ -52,18 +52,18 @@ class CompileProtocolNode(Node):
         conversation_id: UUID,
         state: State,
         tool_factory: Optional[ToolFactory],
-        previous_state_dependencies: Mapping[str, State],
+        previous_state_dependencies: Mapping[str, Any],
         user_message: Optional[str],
         router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         deps = CompileProtocolDeps.from_loaded(previous_state_dependencies)
         ld = deps.load_dataset
-        ds_summary: DatasetSummary | None = ld.summary
-        assert ds_summary is not None  
-        protocol_text = _extract_protocol_text(deps)
-        if protocol_text is None:
-            raise AssertionError("Protocol discussion text is required for protocol compilation.")
+        ds_summary: DatasetSummary | None = ld.payload.summary
+        assert ds_summary is not None, "CompileProtocolNode requires dataset summary from LoadDatasetState"  
+        protocol_discussion = deps.protocol_discussion.payload.discussion
+        if len(protocol_discussion.strip()) < 10:
+            raise ValueError("CompileProtocolNode requires non-empty protocol discussion from ProtocolDiscussionState")
         
         last_json: str = ""
         last_errors: List[str] = []
@@ -72,7 +72,7 @@ class CompileProtocolNode(Node):
         for attempt in range(1, max(1, self.max_attempts) + 1):
             prompt = _build_prompt(
                 attempt=attempt,
-                protocol_text=protocol_text,
+                protocol_text=protocol_discussion,
                 dataset_summary=ds_summary,
                 previous_json=last_json,
                 validation_errors=last_errors,
@@ -100,7 +100,7 @@ class CompileProtocolNode(Node):
                     llm=self.llm,
                     model_name=self.model_name,
                     protocol=protocol_model,
-                    protocol_discussion=protocol_text,
+                    protocol_discussion=protocol_discussion,
                     dataset_summary=ds_summary,
                 )
                 
@@ -111,13 +111,15 @@ class CompileProtocolNode(Node):
                     continue
 
                 # Store protocol as JSON dict for deterministic state serialization
-                return CompileProtocolState(
-                    protocol=protocol_model,
-                    compile_error=None,
-                    compile_issues=None,
-                    user_message="Protocol compiled successfully.",
+                return CompileProtocolState( 
+                    payload=CompileProtocolPayloadModel(
+                        protocol=protocol_model,
+                        compile_error=None,
+                        compile_issues=None,
+                        user_message="Protocol compiled successfully.",
+                    )
                 )
-
+                
             except ValidationError as ve:
                 # Safety: if the parser returns something but Pydantic validation fails
                 issues = _pydantic_error_to_issues(ve)
@@ -134,10 +136,12 @@ class CompileProtocolNode(Node):
 
         err_text = _format_errors(last_errors, last_json)
         return CompileProtocolState(
-            protocol=None,
-            compile_error=err_text,
-            compile_issues=last_issues or None,
-            user_message="Failed to compile a valid protocol. Lets discuss the specs again.",
+            payload=CompileProtocolPayloadModel(
+                protocol=None,
+                compile_error=err_text,
+                compile_issues=last_issues or None,
+                user_message="Failed to compile a valid protocol. Lets discuss the specs again.",
+            )
         )
 
 
@@ -185,30 +189,7 @@ def _validate_through_llm(
         history=None,
     ).content
     
-    
-                    
-    
-    
-    
 
-
-# =============================================================================
-# protocol text extraction
-# =============================================================================
-
-def _extract_protocol_text(deps: CompileProtocolDeps) -> Optional[str]:
-    """
-    This is the only part that depends on how your ProtocolDiscussionState is shaped.
-    It tries common fields; if none exist/valid, it returns None (caller asserts).
-    """
-    pd = deps.protocol_discussion
-    for attr in ("discussion", "protocol_text", "summary", "text"):
-        v = getattr(pd, attr, None)
-        if isinstance(v, str):
-            s = v.strip()
-            if s:
-                return s
-    return None
 
 # =============================================================================
 # prompt builder

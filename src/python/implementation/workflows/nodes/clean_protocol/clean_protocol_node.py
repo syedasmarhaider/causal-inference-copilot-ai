@@ -18,7 +18,7 @@ from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_deps import CleanProtocolDeps
 
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_prompts import get_clean_protocol_node_info
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
+from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolPayloadModel, CleanProtocolState
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
     BinaryOutcomeSpecModel,
     BinaryTreatmentSpecModel,
@@ -84,17 +84,21 @@ class CleanProtocolNode(Node):
             dataset_id = deps.load_dataset.id
             if dataset_id is None:
                 return CleanProtocolState(
-                    clean_dataset_id=None,
-                    cleaning_error="LOAD_DATASET.id is missing; cannot load data.",
-                    user_message="Dataset id missing. Re-run LOAD_DATASET.",
+                    payload=CleanProtocolPayloadModel(
+                        clean_dataset_id=None,
+                        cleaning_error="LOAD_DATASET.id is missing; cannot load data.",
+                        user_message="Dataset id missing. Re-run LOAD_DATASET.",
+                    )
                 )
 
             compiled_protocol = _require_compiled_protocol(deps.compile_protocol)
             if compiled_protocol is None:
                 return CleanProtocolState(
-                    clean_dataset_id=None,
-                    cleaning_error="COMPILE_PROTOCOL produced no protocol.",
-                    user_message="Protocol missing. Re-run COMPILE_PROTOCOL.",
+                    payload=CleanProtocolPayloadModel(
+                        clean_dataset_id=None,
+                        cleaning_error="COMPILE_PROTOCOL produced no protocol.",
+                        user_message="Protocol missing. Re-run COMPILE_PROTOCOL.",
+                    )
                 )
 
             df = self.data_repo.get_csv_data(
@@ -105,9 +109,11 @@ class CleanProtocolNode(Node):
             )
             if df.empty:
                 return CleanProtocolState(
-                    clean_dataset_id=None,
-                    cleaning_error=f"Dataset is empty (dataset_id={dataset_id}).",
-                    user_message="Dataset is empty; cannot prepare inference-ready data.",
+                    payload=CleanProtocolPayloadModel(
+                        clean_dataset_id=None,
+                        cleaning_error=f"Dataset is empty (dataset_id={dataset_id}).",
+                        user_message="Dataset is empty; cannot prepare inference-ready data.",
+                    )
                 )
 
             n_rows_0 = int(df.shape[0])
@@ -149,9 +155,11 @@ class CleanProtocolNode(Node):
                     domain_summary=domain_summary,
                 )
                 return CleanProtocolState(
-                    clean_dataset_id=None,
-                    cleaning_error=feas_err,
-                    user_message=msg,
+                    payload=CleanProtocolPayloadModel(
+                        clean_dataset_id=None,
+                        cleaning_error=feas_err,
+                        user_message=msg,
+                    )
                 )
 
             # 5) Save cleaned dataset
@@ -176,17 +184,21 @@ class CleanProtocolNode(Node):
                 domain_summary=domain_summary,
             )
             return CleanProtocolState(
-                clean_dataset_id=clean_id,
-                cleaning_error=None,
-                user_message=msg_ok,
+                payload=CleanProtocolPayloadModel(
+                    clean_dataset_id=clean_id,
+                    cleaning_error=None,
+                    user_message=msg_ok,
+                )
             )
 
         except Exception as e:
             log.exception("CleanProtocolNode failed")
             return CleanProtocolState(
-                clean_dataset_id=None,
-                cleaning_error=f"Compile inference failed: {e!r}",
-                user_message=f"Compile inference failed: {e!r}",
+                payload=CleanProtocolPayloadModel(
+                    clean_dataset_id=None,
+                    cleaning_error=f"Compile inference failed: {e!r}",
+                    user_message=f"Compile inference failed: {e!r}",
+                )
             )
 
 

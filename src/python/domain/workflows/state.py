@@ -9,6 +9,8 @@ ACTION = Literal["NONE", "NEEDS_INPUT"]
 
 class State(ABC):
     
+    
+    @property
     @abstractmethod
     def name(self) -> str:
         raise NotImplementedError

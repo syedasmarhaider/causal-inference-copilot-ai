@@ -1,92 +1,90 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, Optional, Sequence
 from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from python.domain.workflows.state import ACTION, State, Status
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
 
 
-@dataclass(frozen=True)
-class CleanProtocolState(State):
-    """
-    Minimal inference-ready marker state for your pipeline stage "CLEAN_PROTOCOL".
-
-    Semantics:
-      - DONE:     clean_dataset_id is set and cleaning_error is not set
-      - ABORTED:  cleaning_error is set (regardless of id)
-      - PENDING:  neither id nor error is set (defensive)
-    """
-
-    NAME: ClassVar[str] = "CLEAN_PROTOCOL"
+# =============================================================================
+# Payload (strict)
+# =============================================================================
+class CleanProtocolPayloadModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     clean_dataset_id: Optional[UUID] = None
     cleaning_error: Optional[str] = None
     user_message: Optional[str] = None
 
+    @field_validator("cleaning_error", "user_message", mode="before")
+    @classmethod
+    def _empty_str_to_none(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            s = v.strip()
+            return s if s else None
+        return None
+
+    @field_validator("clean_dataset_id", mode="before")
+    @classmethod
+    def _parse_uuid(cls, v: Any) -> Optional[UUID]:
+        if v is None:
+            return None
+        if isinstance(v, UUID):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            return UUID(s)
+        raise TypeError("clean_dataset_id must be UUID, UUID string, or null")
+
+
+# =============================================================================
+# State wrapper (payload-only, NO embedded name)
+# =============================================================================
+class CleanProtocolState(State):
+    NAME: ClassVar[str] = "CLEAN_PROTOCOL"
+
+    def __init__(self, payload: CleanProtocolPayloadModel) -> None:
+        self.payload = payload
+        
+    @property
+    def name(self) -> str:
+        return self.NAME    
+
     @property
     def status(self) -> Status:
-        if self.cleaning_error is not None:
+        if self.payload.cleaning_error is not None:
             return "ABORTED"
-        if self.clean_dataset_id is not None:
+        if self.payload.clean_dataset_id is not None:
             return "DONE"
         return "PENDING"
 
     @property
     def message(self) -> Optional[str]:
-        return self.user_message
+        return self.payload.user_message
 
     @property
     def error(self) -> Optional[str]:
-        return self.cleaning_error
+        return self.payload.cleaning_error
 
     @property
     def needs_action(self) -> ACTION:
-        # If this state aborted, the pipeline typically needs user correction/clarification.
-        if self.status == "ABORTED":
-            return "NEEDS_INPUT"
         return "NONE"
 
     def required_states_keys(self) -> Sequence[str]:
-        return [LoadDatasetState.NAME, CompileProtocolState.NAME]
+        return (LoadDatasetState.NAME, CompileProtocolState.NAME)
 
     def to_json_dict(self) -> Dict[str, Any]:
-        return {
-            "name": self.NAME,
-            "clean_dataset_id": str(self.clean_dataset_id) if self.clean_dataset_id else None,
-            "cleaning_error": self.cleaning_error,
-            "user_message": self.user_message,
-        }
+        return self.payload.model_dump(mode="json")
 
     @classmethod
     def from_json_dict(cls, payload: Dict[str, Any]) -> "CleanProtocolState":
-        return cls(
-            clean_dataset_id=_parse_uuid(payload.get("clean_dataset_id")),
-            cleaning_error=_as_opt_str(payload.get("cleaning_error")),
-            user_message=_as_opt_str(payload.get("user_message")),
-        )
-
-
-def _as_opt_str(v: Any) -> Optional[str]:
-    if isinstance(v, str):
-        s = v.strip()
-        return s if s else None
-    return None
-
-
-def _parse_uuid(v: Any) -> Optional[UUID]:
-    if v is None:
-        return None
-    if isinstance(v, UUID):
-        return v
-    if isinstance(v, str):
-        s = v.strip()
-        if not s:
-            return None
-        try:
-            return UUID(s)
-        except Exception:
-            return None
-    return None
+        model = CleanProtocolPayloadModel.model_validate(payload)
+        return cls(model)

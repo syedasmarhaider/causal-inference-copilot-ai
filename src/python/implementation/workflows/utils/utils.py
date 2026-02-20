@@ -58,6 +58,10 @@ def uuid_from_any(v: Any) -> Optional[UUID]:
 def uuid_to_str(v: Optional[UUID]) -> Optional[str]:
     return str(v) if v is not None else None
 
+def safe_err(e: Exception, limit: int = 500) -> str:
+    s = str(e).strip()
+    return s[:limit] if s else e.__class__.__name__
+
 
 BOOL_TRUE = {"true", "1", "yes"}
 BOOL_FALSE = {"false", "0", "no"}

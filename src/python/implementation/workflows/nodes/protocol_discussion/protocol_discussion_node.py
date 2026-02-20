@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 import json
 import logging
-from dataclasses import replace
 from typing import Any, ClassVar, Optional, Sequence
 from uuid import UUID
 
@@ -15,6 +14,7 @@ from python.implementation.workflows.nodes.load_dataset.load_dataset_utils impor
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import ProtocolDiscussionDeps
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import get_protocol_discussion_confirmation_prompt, get_protocol_discussion_readiness_prompt, get_protocol_discussion_system_prompt, get_questions
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
+from python.implementation.workflows.utils.utils import safe_err
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class ProtocolDiscussionNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         tool_factory: Optional[ToolFactory],
-        previous_state_dependencies: Mapping[str, State],
+        previous_state_dependencies: Mapping[str, Any],
         user_message: Optional[str],
         router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
@@ -69,7 +69,7 @@ class ProtocolDiscussionNode(Node):
             raise TypeError(f"{self.name}: expected ProtocolDiscussionState, got {type(state).__name__}")
 
         d = ProtocolDiscussionDeps.from_loaded(previous_state_dependencies)
-        summary_state = d.load_dataset.summary
+        summary_state = d.load_dataset.payload.summary
         assert summary_state is not None
 
         summary_string = DatasetStateHelpers.dataset_summary_to_json(summary_state)
@@ -96,16 +96,17 @@ class ProtocolDiscussionNode(Node):
                 history=latest_12_messages,
             )
         except Exception as e:
-            log.exception("PROTOCOL_DISCUSSION: LLM#1 failed")
-            return replace(
-                state,
-                error_message=f"Protocol discussion update failed: {e}",
-                node_message="Protocol discussion update failed. Retrying...",
-                action="NONE",
-                node_status="PENDING",
-            )
+           new_payload = state.payload.model_copy(
+                update={
+                "error_message": f"Protocol discussion update failed: {safe_err(e)}",
+                "node_message": "Protocol discussion update failed. Retrying...",
+                "action": "NONE",
+                "node_status": "PENDING",
+              }
+             )
+           return ProtocolDiscussionState(new_payload)
 
-        state = replace(state, discussion=updated_discussion)
+        state.payload.discussion = updated_discussion
 
         # -------------------------
         # LLM #2: User-facing message
@@ -122,13 +123,12 @@ class ProtocolDiscussionNode(Node):
             )
         except Exception as e:
             log.exception("PROTOCOL_DISCUSSION: LLM#2 failed, using fallback")
-            return replace(
-                state,
-                error_message=f"Protocol discussion user facing message failed: {e}",
-                node_message="Protocol discussion user facing message failed. Retrying...",
-                action="NONE",
-                node_status="PENDING",
-            )
+            state.payload.node_message = "faild to generate user-facing message, but discussion updated. Retying..."
+            state.payload.error_message = f"Protocol discussion user facing message failed: {safe_err(e)}"
+            state.payload.action = "NONE"
+            state.payload.node_status = "PENDING"
+            return state
+
 
         # -------------------------
         # LLM #3: Readiness token
@@ -146,36 +146,27 @@ class ProtocolDiscussionNode(Node):
             token = (token or "").strip().splitlines()[0].strip().split()[0].strip().upper()
         except Exception as e:
             log.exception("PROTOCOL_DISCUSSION: LLM#3 failed; defaulting to PENDING")
-            return replace(
-                state,
-                error_message=f"Protocol discussion readiness check failed: {e}",
-                node_message="Protocol discussion readiness check failed. Retrying...",
-                action="NONE",
-                node_status="PENDING",
-            )
+            state.payload.node_message = " (failed to confirm readiness, but discussion updated. Retrying...)"
+            state.payload.error_message = f"Protocol discussion readiness check failed: {safe_err(e)}"
+            state.payload.action = "NONE"
+            state.payload.node_status = "PENDING"
+            return state
 
         if token == "READY":
-            return replace(
-                state,
-                node_message=node_msg,
-                error_message=None,
-                action="NONE",
-                node_status="DONE",
-            )
-
-        if token == "ABORT":
-            return replace(
-                state,
-                node_message=f"Protocol discussion aborted: {token}",
-                error_message=token,
-                action="NONE",
-                node_status="ABORTED",
-            )
+            state.payload.node_message = "Protocol Confirmed, ready to proceed to next step"
+            state.payload.error_message = None
+            state.payload.action = "NONE"
+            state.payload.node_status = "DONE"
             
-        return replace(
-            state,
-            node_message=node_msg,
-            error_message=None,
-            action="NEEDS_INPUT",
-            node_status="PENDING",
-        )
+        if token == "ABORT":
+            state.payload.node_message = f"Protocol discussion aborted: {token}"
+            state.payload.error_message = token
+            state.payload.action = "NONE"
+            state.payload.node_status = "ABORTED"
+            return state
+        
+        state.payload.node_message = node_msg
+        state.payload.error_message = None
+        state.payload.action = "NEEDS_INPUT"
+        state.payload.node_status = "PENDING"
+        return state

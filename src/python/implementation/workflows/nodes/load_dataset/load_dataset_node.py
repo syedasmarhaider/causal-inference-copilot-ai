@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
-from dataclasses import replace
-from typing import ClassVar, Optional, Sequence
+from typing import Any, ClassVar, Optional, Sequence
 from uuid import UUID
 
 from python.domain.repo.data_repo import DataRepo
@@ -12,7 +11,7 @@ from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.load_dataset.load_dataset_prompts import load_dataset_node_info, load_dataset_system_prompt
-from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
+from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetPayloadModel, LoadDatasetState
 from python.implementation.workflows.nodes.load_dataset.load_dataset_utils import DatasetProfilingError, DatasetStateHelpers
 from python.implementation.workflows.utils.utils import DEFAULT_MODEL_GEMNI, JSONDict
 
@@ -65,7 +64,7 @@ class LoadDatasetNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         tool_factory: Optional[ToolFactory],
-        previous_state_dependencies: Mapping[str, State],
+        previous_state_dependencies: Mapping[str, Any],
         user_message: Optional[str],
         router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
@@ -74,14 +73,17 @@ class LoadDatasetNode(Node):
         if not isinstance(state, LoadDatasetState):
             raise TypeError(f"{self.name}: expected LoadDatasetState, got {type(state).__name__}")
         
-        if state.id is None:
-            return replace(
-                state,
-                load_error="dataset_id missing",
-                user_message= "Dataset ID is missing. Please re-upload or select a dataset.",
+        if state.payload.id is None:
+            return LoadDatasetState(
+                payload=LoadDatasetPayloadModel(
+                    id=None,
+                    summary=None,
+                    load_error="dataset_id missing",
+                    user_message="Dataset ID is missing. Please re-upload or select a dataset.",
+                )
             )
 
-        dataset_id = state.id
+        dataset_id = state.payload.id
 
         # ---- Load dataframe ----
         try:
@@ -99,11 +101,13 @@ class LoadDatasetNode(Node):
                 "context": {"router_message": router_message, "user_message": user_message},
             }
             msg = _llm_message_strict(self._llm, model_name=self._model_name, snapshot=snapshot)
-            return replace(
-                state,
-                summary=None,
-                load_error=str(e),
-                user_message=msg,
+            return LoadDatasetState(
+                payload=LoadDatasetPayloadModel(
+                    id=dataset_id,
+                    summary=None,
+                    load_error=str(e),
+                    user_message=msg,
+                )
             )
 
         # ---- Profile summary (user-actionable failures handled) ----
@@ -134,11 +138,13 @@ class LoadDatasetNode(Node):
                 "context": {"router_message": router_message, "user_message": user_message},
             }
             msg = _llm_message_strict(self._llm, model_name=self._model_name, snapshot=snapshot)
-            return replace(
-                state,
-                summary=None,
-                load_error=str(pe),
-                user_message=msg,
+            return LoadDatasetState(
+                payload=LoadDatasetPayloadModel(
+                    id=state.payload.id,
+                    summary=None,
+                    load_error=str(pe),
+                    user_message=msg,
+                )
             )
 
         # ---- Success message ----
@@ -154,10 +160,12 @@ class LoadDatasetNode(Node):
         msg_ok = _llm_message_strict(self._llm, model_name=self._model_name, snapshot=snapshot_ok)
 
         final_msg = f"{_format_columns_block(cols)}\n\n{msg_ok}".strip()
-
-        return replace(
-            state,
-            summary=summary,
-            load_error=None,
-            user_message=final_msg,
+        
+        return LoadDatasetState(
+            payload=LoadDatasetPayloadModel(
+                id=state.payload.id,
+                summary=summary,
+                load_error=None,
+                user_message=final_msg,
+            )
         )

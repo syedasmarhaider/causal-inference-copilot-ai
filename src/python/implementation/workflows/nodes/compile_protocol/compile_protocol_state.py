@@ -1,87 +1,102 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, cast
 
-from python.domain.workflows.state import ACTION, Status, State
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from python.domain.workflows.state import ACTION, State, Status
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import ProtocolSpec
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
 from python.implementation.workflows.utils.utils import json_sanitize
 
 
-@dataclass(frozen=True)
-class CompileProtocolState(State):
-    NAME: ClassVar[str] = "COMPILE_PROTOCOL"
+class CompileProtocolPayloadModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     protocol: Optional[ProtocolSpec] = None
     compile_error: Optional[str] = None
     compile_issues: Optional[List[Dict[str, Any]]] = None
     user_message: Optional[str] = None
 
+    @field_validator("compile_error", "user_message", mode="before")
+    @classmethod
+    def _empty_str_to_none(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            s = v.strip()
+            return s if s else None
+        raise TypeError("compile_error/user_message must be str|null")
+
+    @field_validator("compile_issues", mode="before")
+    @classmethod
+    def _validate_issues(cls, v: Any) -> Optional[List[Dict[str, Any]]]:
+        if v is None:
+            return None
+        if not isinstance(v, list):
+            raise TypeError("compile_issues must be list[dict]|null")
+        if any(not isinstance(x, dict) for x in v): # pyright: ignore[reportUnknownVariableType]
+            raise TypeError("compile_issues must be list[dict]|null")
+        return cast(List[Dict[str, Any]], v)
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def _validate_protocol(cls, v: Any) -> Optional[ProtocolSpec]:
+        if v is None:
+            return None
+        if not isinstance(v, dict):
+            raise TypeError("protocol must be object|null")
+        # ProtocolSpec is a TypedDict-style object in your code; keep as-is.
+        return cast(ProtocolSpec, v)
+
+
+# =============================================================================
+# State wrapper (payload-only storage; derives interface fields)
+# =============================================================================
+class CompileProtocolState(State):
+    NAME: ClassVar[str] = "COMPILE_PROTOCOL"
+
+    def __init__(self, payload: CompileProtocolPayloadModel) -> None:
+        self.payload = payload
+
+    @property
+    def name(self) -> str:
+        return self.NAME
+
     @property
     def status(self) -> Status:
-        if self.protocol is not None:
+        # Preserve your existing semantics:
+        # DONE only when protocol exists and no compile error; otherwise ABORTED.
+        if self.payload.protocol is not None and self.payload.compile_error is None:
             return "DONE"
         return "ABORTED"
 
     @property
     def message(self) -> Optional[str]:
-        msg = (self.user_message or "").strip()
-        return msg or None
+        return self.payload.user_message
 
     @property
     def error(self) -> Optional[str]:
-        err = (self.compile_error or "").strip()
-        return err or None
+        return self.payload.compile_error
 
     @property
     def needs_action(self) -> ACTION:
         return "NONE"
 
     def required_states_keys(self) -> Sequence[str]:
-        return [LoadDatasetState.NAME, ProtocolDiscussionState.NAME]
+        return (LoadDatasetState.NAME, ProtocolDiscussionState.NAME)
 
     def to_json_dict(self) -> Dict[str, Any]:
-        return {
-            "name": self.NAME,
-            "protocol": None if self.protocol is None else json_sanitize(self.protocol),
-            "compile_error": self.compile_error,
-            "compile_issues": None if self.compile_issues is None else json_sanitize(self.compile_issues),
-            "user_message": self.user_message,
-        }
+        out: Dict[str, Any] = self.payload.model_dump(mode="json")
+        if self.payload.protocol is not None:
+            out["protocol"] = json_sanitize(cast(Any, self.payload.protocol))
+        if self.payload.compile_issues is not None:
+            out["compile_issues"] = json_sanitize(cast(Any, self.payload.compile_issues))
+
+        return out
 
     @classmethod
     def from_json_dict(cls, payload: Dict[str, Any]) -> "CompileProtocolState":
-        name = payload.get("name")
-        if name is not None and name != cls.NAME:
-            raise ValueError(f"CompileProtocolState.from_json_dict: name mismatch: {name!r} != {cls.NAME!r}")
-
-        protocol_val = payload.get("protocol")
-        compile_error_val = payload.get("compile_error")
-        compile_issues_val = payload.get("compile_issues")
-        user_message_val = payload.get("user_message")
-
-        if compile_error_val is not None and not isinstance(compile_error_val, str):
-            raise ValueError("CompileProtocolState.from_json_dict: compile_error must be str|null")
-
-        if user_message_val is not None and not isinstance(user_message_val, str):
-            raise ValueError("CompileProtocolState.from_json_dict: user_message must be str|null")
-
-        if compile_issues_val is not None:
-            if not isinstance(compile_issues_val, list) or any(not isinstance(x, dict) for x in compile_issues_val): # pyright: ignore[reportUnknownVariableType]
-                raise ValueError("CompileProtocolState.from_json_dict: compile_issues must be list[dict]|null")
-
-        protocol_spec: Optional[ProtocolSpec]
-        if protocol_val is None:
-            protocol_spec = None
-        else:
-            if not isinstance(protocol_val, dict):
-                raise ValueError("CompileProtocolState.from_json_dict: protocol must be object|null")
-            protocol_spec = cast(ProtocolSpec, protocol_val)
-
-        return cls(
-            protocol=protocol_spec,
-            compile_error=compile_error_val,
-            compile_issues=cast(Optional[List[Dict[str, Any]]], compile_issues_val),
-            user_message=user_message_val,
-        )
+        model = CompileProtocolPayloadModel.model_validate(payload)
+        return cls(model)

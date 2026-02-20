@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Mapping
-
-from python.domain.workflows.state import State
+from collections.abc import Mapping
+from typing import Any
 
 
 class StateDep(ABC):
-    
     @classmethod
     @abstractmethod
-    def from_loaded(cls, loaded: Mapping[str, State]) -> "StateDep":
+    def from_loaded(cls, loaded: Mapping[str, Any]) -> "StateDep":
         """
-        Build a strongly-typed deps object from already-loaded states.
-        Must validate types and raise if missing/invalid.
+        loaded: { state_name: payload_or_state_or_other }
+        Each deps class must validate/normalize what it needs.
         """
         raise NotImplementedError

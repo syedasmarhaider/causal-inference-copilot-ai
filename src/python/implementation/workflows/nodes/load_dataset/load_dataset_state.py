@@ -1,87 +1,80 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, Optional, Sequence, cast
 from uuid import UUID
 
-from python.domain.workflows.state import ACTION, Status, State
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from python.domain.workflows.state import ACTION, State, Status
 from python.implementation.workflows.nodes.load_dataset.load_dataset_utils import DatasetSummary
-from python.implementation.workflows.utils.utils import json_sanitize, uuid_from_any, uuid_to_str
+from python.implementation.workflows.utils.utils import json_sanitize, uuid_from_any
 
+class LoadDatasetPayloadModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-@dataclass(frozen=True)
-class LoadDatasetState(State):
-    NAME: ClassVar[str] = "LOAD_DATASET"
     id: Optional[UUID] = None
     summary: Optional[DatasetSummary] = None
     load_error: Optional[str] = None
     user_message: Optional[str] = None
-    
+
+    @field_validator("load_error", "user_message", mode="before")
+    @classmethod
+    def _empty_str_to_none(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            s = v.strip()
+            return s if s else None
+        return None
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _parse_uuid(cls, v: Any) -> Optional[UUID]:
+        # accept UUID | str | None
+        return uuid_from_any(v)
+
+
+class LoadDatasetState(State):
+    NAME: ClassVar[str] = "LOAD_DATASET"
+
+    def __init__(self, payload: LoadDatasetPayloadModel) -> None:
+        self.payload = payload
+
+    # ---- required by State ABC ----
+    @property
+    def name(self) -> str:
+        return self.NAME
 
     @property
     def status(self) -> Status:
-        if self.load_error:
+        if self.error is not None:
             return "ABORTED"
-        if self.summary is not None:
+        if self.payload.summary is not None:
             return "DONE"
         return "PENDING"
 
     @property
     def message(self) -> Optional[str]:
-        if self.user_message is None:
-            return None
-        msg = self.user_message.strip()
-        return msg or None
+        return self.payload.user_message
 
     @property
     def error(self) -> Optional[str]:
-        if self.load_error is None:
-            return None
-        err = self.load_error.strip()
-        return err or None
+        return self.payload.load_error
 
     @property
     def needs_action(self) -> ACTION:
         return "NEEDS_INPUT" if self.error is not None else "NONE"
-    
-    def required_states_keys(self) -> Sequence[str]:
-        return []
 
+    def required_states_keys(self) -> Sequence[str]:
+        return ()
 
     def to_json_dict(self) -> Dict[str, Any]:
-        return {
-            "name": self.NAME,
-            "id": uuid_to_str(self.id),
-            "summary": None if self.summary is None else json_sanitize(self.summary),
-            "load_error": self.load_error,
-            "user_message": self.user_message,
-        }
+        d = self.payload.model_dump(mode="json")
+        if self.payload.summary is not None:
+            d["summary"] = json_sanitize(cast(Any, self.payload.summary))
+        return d
 
     @classmethod
     def from_json_dict(cls, payload: Dict[str, Any]) -> "LoadDatasetState":
-        name = payload.get("name")
-        if name is not None and name != cls.NAME:
-            raise ValueError(f"LoadDatasetState.from_json_dict: name mismatch: {name!r} != {cls.NAME!r}")
-
-        id_val = payload.get("id")
-        summary_val = payload.get("summary")
-        load_error_val = payload.get("load_error")
-        user_message_val = payload.get("user_message")
-
-        if load_error_val is not None and not isinstance(load_error_val, str):
-            raise ValueError("LoadDatasetState.from_json_dict: load_error must be str|null")
-
-        if summary_val is not None and not isinstance(summary_val, dict):
-            raise ValueError("LoadDatasetState.from_json_dict: summary must be object|null")
-
-        if user_message_val is not None and not isinstance(user_message_val, str):
-            raise ValueError("LoadDatasetState.from_json_dict: user_message must be str|null")
-        
-        summary = cast(Optional[DatasetSummary], summary_val)
-
-        return cls(
-            id=uuid_from_any(id_val),
-            summary=summary,
-            load_error= load_error_val,
-            user_message= user_message_val,
-        )
+        model = LoadDatasetPayloadModel.model_validate(payload)
+        return cls(model)
