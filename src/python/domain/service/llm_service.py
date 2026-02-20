@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
 
-Role = Literal["user", "assistant"]
+Role = Literal["user", "assistant","system"]
 
 
 @dataclass(frozen=True)

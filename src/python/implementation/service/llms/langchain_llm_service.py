@@ -147,6 +147,8 @@ class LangChainLLMService(LLMService):
                     msgs.append(HumanMessage(content=h.content))
                 elif h.role == "assistant":
                     msgs.append(AIMessage(content=h.content))
+                elif h.role == "system":
+                    msgs.append(SystemMessage(content=h.content))    
         msgs.append(HumanMessage(content=user_prompt))
         return msgs
 
