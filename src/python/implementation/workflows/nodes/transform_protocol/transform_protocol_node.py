@@ -27,6 +27,7 @@ from python.implementation.workflows.nodes.transform_protocol.transform_protocol
     build_encoding_plan_user_prompt_template,
     build_transformed_protocol_system_prompt,
     build_transformed_protocol_user_prompt_template,
+    get_transform_protocol_node_info,
 )
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_specs import (
     EncodingType,
@@ -91,7 +92,7 @@ class TransformProtocolNode(Node):
 
     @classmethod
     def get_info(cls) -> str:
-        return "Transform protocol node: encoding plan -> apply -> transformed spec -> validate (with whole-pipeline retries)."
+        return get_transform_protocol_node_info()
 
     def run(
         self,
@@ -139,7 +140,7 @@ class TransformProtocolNode(Node):
         # Profile once (no need to reprofile every attempt)
         # ------------------------------------------------------------------
         try:
-            dataset_summary: DatasetSummaryModel = DatasetProfilingStateTool.extract_dataset_summary(
+            clean_dataset_summary: DatasetSummaryModel = DatasetProfilingStateTool.extract_dataset_summary(
                 df_clean,
                 max_categories=self.profiling_max_categories,
                 sample_distinct=self.profiling_sample_distinct,
@@ -169,7 +170,7 @@ class TransformProtocolNode(Node):
             plan, plan_issues = llm_generate_encoding_plan_from_protocol_and_summary(
                 llm=self.llm,
                 protocol=protocol,
-                dataset_summary=dataset_summary,
+                dataset_summary=clean_dataset_summary,
                 supported_encodings=None,
                 llm_config=LLMConfig(temperature=0.4),
                 history=retry_hist,
@@ -195,7 +196,7 @@ class TransformProtocolNode(Node):
             df_after, feature_map, apply_issues = apply_encoding_plan(
                 df=df_clean,
                 plan=plan,
-                dataset_summary=dataset_summary,
+                dataset_summary=clean_dataset_summary,
                 fail_fast=self.fail_fast_apply,
             )
             attempt_issues.extend(apply_issues)
@@ -266,8 +267,9 @@ class TransformProtocolNode(Node):
                 error=None,
                 transformed_dataset_id=str(transformed_dataset_id),
                 transformed_spec=spec,
-                issues=all_issues + attempt_issues,
-                transformed_dataset_summary=json_sanitize(dataset_summary.model_dump(mode="python")),
+                issues=attempt_issues,
+                cleaned_dataset_id=str(clean_dataset_id),
+                cleaned_dataset_summary=clean_dataset_summary,
                 user_message=user_message,
             )
             return TransformProtocolState(payload)
@@ -280,7 +282,6 @@ class TransformProtocolNode(Node):
             transformed_dataset_id=None,
             transformed_spec=None,
             issues=all_issues,
-            transformed_dataset_summary=json_sanitize(dataset_summary.model_dump(mode="python")),
             user_message=user_message,
         )
         return TransformProtocolState(payload)

@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+def get_transform_protocol_node_info() -> str:
+    return (
+        "Transforms the protocol spec to match the transformed dataset. and make inference ready for user validation\n"
+        "This includes updating column references and encoding decisions based on the feature map.\n"
+        "The node runs after the dataset has been transformed and a feature map is available.\n"
+        "The output is a TransformedProtocolSpec that can be used for downstream modeling.\n"
+    )
+
 def build_encoding_plan_system_prompt() -> str:
     return (
         "You are a data-encoding planner for causal inference pipelines.\n"

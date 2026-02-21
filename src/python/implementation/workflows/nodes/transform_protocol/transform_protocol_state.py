@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 from python.domain.workflows.state import ACTION, State, Status
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
+from python.implementation.workflows.tools.data.data_profiling_tool import DatasetSummaryModel
 from python.implementation.workflows.utils.validation import (
     NonEmptyStr,
     ValidationIssueModel,
@@ -22,12 +23,13 @@ class TransformProtocolPayloadModel(BaseModel):
 
     error: Optional[NonEmptyStr] = None
 
-    transformed_dataset_id: Optional[NonEmptyStr] = None
+    transformed_dataset_id: Optional[UUID] = None
     transformed_spec: Optional[TransformedProtocolSpec] = None
 
     issues: List[ValidationIssueModel] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
-
-    transformed_dataset_summary: Dict[str, Any] = Field(default_factory=dict)
+   
+    cleaned_dataset_id: Optional[UUID] = None
+    cleaned_dataset_summary: DatasetSummaryModel
     user_message: Optional[NonEmptyStr] = None
 
     @computed_field  # type: ignore[misc]
@@ -58,11 +60,13 @@ class TransformProtocolState(State):
             return "ABORTED"
         if (
             self.payload.transformed_dataset_id
+            and self.payload.cleaned_dataset_id
+            and self.payload.cleaned_dataset_summary
             and self.payload.transformed_spec is not None
             and self.payload.validation_status != "FAIL"
         ):
             return "DONE"
-        return "PENDING"
+        raise ValueError("TransformProtocolState status is indeterminate due to missing fields or FAIL validation status")
 
     @property
     def message(self) -> Optional[str]:
