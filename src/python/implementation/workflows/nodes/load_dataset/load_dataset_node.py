@@ -38,7 +38,6 @@ def _format_columns_block(cols: list[str]) -> str:
 
 class LoadDatasetNode(Node):
     NAME: ClassVar[str] = LoadDatasetState.NAME
-
     def __init__(
         self,
         *,
