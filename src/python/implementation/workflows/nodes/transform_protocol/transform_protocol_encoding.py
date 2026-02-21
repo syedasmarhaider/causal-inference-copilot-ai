@@ -31,7 +31,7 @@ EncodingType = Literal[
 # =============================================================================
 # LLM-facing descriptions (stable + explicit)
 # =============================================================================
-DESCRIPTIONS: Dict[EncodingType, str] = {
+_DESCRIPTIONS: Dict[EncodingType, str] = {
     "drop": "Drop the column entirely. Params: none.",
     "one_hot": (
         "Categorical -> dummy columns. Example: 'Sex' => Sex__M, Sex__F (+ optional NaN indicator). "
@@ -94,7 +94,7 @@ def get_supported_encodings_model() -> SupportedEncodingsModel:
 
 def get_encoding_models_with_description() -> str:
     allowed = get_supported_encodings_model().encodings
-    return "\n".join(f"- {enc}: {DESCRIPTIONS[enc]}" for enc in allowed)
+    return "\n".join(f"- {enc}: {_DESCRIPTIONS[enc]}" for enc in allowed)
 
 
 # =============================================================================

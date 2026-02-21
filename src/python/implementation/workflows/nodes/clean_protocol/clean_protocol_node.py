@@ -73,7 +73,7 @@ class CleanProtocolNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         state: State,
-        tool_factory: Optional[ToolFactory],
+        tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, Any],
         user_message: Optional[str],
         router_message: Optional[str],
