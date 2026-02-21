@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence
+from typing import Any, ClassVar, Mapping, Optional, Sequence
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,32 +11,20 @@ from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 
-from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
 from python.implementation.workflows.nodes.confirm_transformed_protocol.confirm_transformed_protocol_deps import ConfirmTransformedProtocolDeps
+from python.implementation.workflows.nodes.confirm_transformed_protocol.confirm_transformed_protocol_prompts import confirm_transformed_protocol_node_info, llm1_fail_system_prompt, llm2_warn_system_prompt, llm3_decision_system_prompt
 from python.implementation.workflows.nodes.confirm_transformed_protocol.confirm_transformed_protocol_state import (
     ConfirmTransformedProtocolPayloadModel,
     ConfirmTransformedProtocolState,
 )
-from python.implementation.workflows.nodes.transform_protocol.transform_protocol_state import TransformProtocolState
 from python.implementation.workflows.utils.utils import json_sanitize
 
-from python.implementation.workflows.nodes.confirm_transformed_protocol.confirm_transformed_protocol_prompts import (
-    confirm_transformed_protocol_node_fail_prompt,
-    confirm_decision_system_prompt,
-    confirm_decision_user_prompt_template,
-    confirm_discussion_system_prompt,
-    confirm_discussion_user_prompt_template,
-    confirm_transformed_protocol_node_info,
-    discuss_decision_user_prompt_template,
-)
 
 
 class _DecisionModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    user_accepted: bool
+    user_accepted: Optional[bool] = None
     user_message: str = Field(..., min_length=1)
-    error_message: Optional[str] = None
-    improvement_instructions: Optional[str] = None
     
 
 @dataclass(frozen=True)
@@ -77,7 +65,7 @@ class ConfirmTransformedProtocolNode(Node):
         if has_fail:
             issues_json = json_sanitize([i.model_dump(mode="json") for i in clean_dataset_validation_issues + transform_validation_issues])
             user_prompt= "\n\nValidation issues:\n" + issues_json
-            system_prompt = confirm_transformed_protocol_node_fail_prompt()
+            system_prompt = llm1_fail_system_prompt()
             
             msg = _call_llm_for_discussion(self.llm, self.model_name, None, system_prompt, user_prompt)
             return ConfirmTransformedProtocolState(
@@ -91,21 +79,46 @@ class ConfirmTransformedProtocolNode(Node):
         has_warn = any(i.severity == "WARN" for i in clean_dataset_validation_issues) or any(i.severity == "WARN" for i in transform_validation_issues)
         if has_warn:
             issues_json = json_sanitize([i.model_dump(mode="json") for i in clean_dataset_validation_issues + transform_validation_issues])
-            system_prompt = confirm_decision_system_prompt()
-            user_prompt = discuss_decision_user_prompt_template().format(issues=issues_json)
+            system_prompt = llm2_warn_system_prompt()
+            user_prompt = "\n\nValidation issues:\n" + issues_json
             message_for_user = _call_llm_for_discussion(self.llm, self.model_name, messages_history, system_prompt, user_prompt)
+            last_10_messages = messages_history[-10:] if messages_history else None
             
-            self.llm.generate_json(
-                system_prompt=confirm_decision_system_prompt(),
-                user_prompt=confirm_decision_user_prompt_template().format(issues=issues_json),
-                config=LLMConfig(model=self.model_name, temperature=0.7),
-                history=messages_history[-10:] if messages_history else None,
-                response_model=_DecisionModel,
+            user_decsion = self.llm.generate_json(
+                schema=_DecisionModel,
+                system_prompt=llm3_decision_system_prompt(),
+                user_prompt=user_prompt + "\n\nAssistant explanation:\n" + message_for_user + "\n\nUser reply:\n" + (user_message),
+                config=LLMConfig(model=self.model_name, temperature=0.0),
+                history=last_10_messages
+            )
             
+            if user_decsion.user_accepted is not None and user_decsion.user_accepted is True:
+                return ConfirmTransformedProtocolState(
+                    ConfirmTransformedProtocolPayloadModel(
+                        user_accepted=True,
+                        user_message=user_decsion.user_message,
+                        error_message=None,
+                    )
+                )
+                
+            if user_decsion.user_accepted is not None and user_decsion.user_accepted is False:
+                 return ConfirmTransformedProtocolState(
+                    ConfirmTransformedProtocolPayloadModel(
+                        user_accepted=False,
+                        user_message=user_decsion.user_message,
+                        error_message=issues_json + "\n\nAssistant explanation:\n" + message_for_user,
+                    )
+                )   
+             
             
-        
-        
-        
+            return ConfirmTransformedProtocolState(
+                ConfirmTransformedProtocolPayloadModel(
+                    user_accepted=None,
+                    user_message=message_for_user,
+                    error_message=None,
+                )
+            )    
+            
         else:
             return ConfirmTransformedProtocolState(
                 ConfirmTransformedProtocolPayloadModel(

@@ -28,9 +28,9 @@ class ConfirmTransformedProtocolState(State):
 
     @property
     def status(self) -> Status:
-        if self.error is not None:
+        if self.error is not None or (self.payload.user_accepted is not None and self.payload.user_accepted is False):
             return "ABORTED"
-        if self.payload.user_accepted is True:
+        if self.payload.user_accepted and self.payload.user_accepted is True:
             return "DONE"
         return "PENDING"
 
