@@ -82,7 +82,7 @@ class LLMAssistedRouterRouter(Router):
 
 
 def _decision_on_aborted_state(
-    *, 
+    *,
     llm: LLMService,
     model_name: str,
     current_state: State,
@@ -91,26 +91,58 @@ def _decision_on_aborted_state(
     user_message: Optional[str],
     messages_history: Sequence[ChatMessage],
 ) -> NextDecision:
+    last_10_messages: list[ChatMessage] = list(messages_history[-10:]) if messages_history else []
     
-        last_10_messages: list[ChatMessage] = list(messages_history[-10:]) if messages_history else []
-        prompt = _node_prompt_for_router()
-        prompt_filled = prompt.substitute(
-            current_node_name=current_state.name,
-            current_node_error=current_state.error or "",
-            user_message=user_message or "",
-            next_state_names_map=json.dumps(get_next_state_names_map, ensure_ascii=False),
-            node_name_to_description_map=json.dumps(get_node_name_to_description_map, ensure_ascii=False),
+    prev_map: dict[str, str] = {
+        nxt: cur for cur, nxt in get_next_state_names_map.items() if nxt is not None
+    }
+
+    allowed_prev: set[str] = set()
+    cursor = current_state.name
+    while cursor in prev_map:
+        cursor = prev_map[cursor]
+        allowed_prev.add(cursor)
+
+    if not allowed_prev:
+        allowed_prev = {current_state.name}
+        
+    prompt = _node_prompt_for_router()
+    prompt_filled = prompt.substitute(
+        current_node_name=current_state.name,
+        current_node_error=current_state.error or "null",
+        user_message=user_message or "null",
+        next_state_names_map=json.dumps(dict(get_next_state_names_map), ensure_ascii=False),
+        node_name_to_description_map=json.dumps(dict(get_node_name_to_description_map), ensure_ascii=False),
+        allowed_previous_states=json.dumps(sorted(allowed_prev), ensure_ascii=False),
+    )
+
+    decision = llm.generate_json(
+        config=LLMConfig(model=model_name, temperature=0.3),
+        system_prompt="Decide fallback state (must be previous). Output STRICT JSON matching schema.",
+        user_prompt=prompt_filled,
+        history=last_10_messages,
+        schema=NextDecision,
+        max_attempts=3,
+    )
+
+    chosen = decision.state_name
+
+    # ---- validation: must not be None ----
+    if not chosen:
+        raise ValueError(f"LLM failed to select a state for aborted '{current_state.name}'. Got empty/null response.\n\nLLM message:\n{decision.router_message_for_node or ''}"
+        )
+
+    # ---- validation: membership ----
+    if chosen not in get_node_name_to_description_map or chosen not in get_next_state_names_map:
+        raise ValueError(f"LLM selected invalid state '{chosen}' for aborted '{current_state.name}'. It must be a key in next_state_names_map and node_name_to_description_map.\n\nLLM message:\n{decision.router_message_for_node or ''}"
+        )
+
+    # ---- validation: previous constraint ----
+    if chosen not in allowed_prev:
+        raise ValueError(f"LLM selected state '{chosen}' which is not a previous state of '{current_state.name}' for recovery. Allowed previous states are: {sorted(allowed_prev)}.\n\nLLM message:\n{decision.router_message_for_node or ''}"
         )
         
-        return llm.generate_json(
-            config=LLMConfig(model=model_name, temperature=0.3),
-            system_prompt="Decide fallback node",
-            user_prompt=prompt_filled,
-            history=last_10_messages,
-            schema=NextDecision,
-            max_attempts=3,
-        )
-        
+    return decision
         
 
 
@@ -128,16 +160,16 @@ Inputs (some may be null)
 - user_message: $user_message
 - next_state_names_map: $next_state_names_map
 - node_name_to_description_map: $node_name_to_description_map
+- allowed_previous_states: $allowed_previous_states
 
 Hard Rules
-1) You MUST select exactly ONE next_node_name from the available_nodes list.
-2) The selected next_node_name MUST be a previous node relative to current_node_name (i.e., earlier stage).
-3) If current_node_error is null, use user_message and messages_history to infer the best recovery step.
-4) If user_message and messages_history are null/empty, pick the safest closest previous node and instruct it to re-derive/validate prerequisites.
+1) You MUST select exactly ONE state_name from allowed_previous_states.
+2) The selected state_name MUST be a key in node_name_to_description_map.
+3) Prefer the closest previous state that can fix the error with minimal rollback.
 
 Output (STRICT JSON ONLY; no extra text)
 {
-  "next_node_name": "<one node name from available_nodes>",
+  "state_name": "<one state name from allowed_previous_states>",
   "router_message_for_node": "<detailed message for the selected node>"
 }
 """.strip()

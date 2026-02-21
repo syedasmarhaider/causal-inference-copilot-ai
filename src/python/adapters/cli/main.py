@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-from python.domain.repo.conversation_repo import ConversationRepo
+from python.domain.repo.workflow_state_repo import ConversationRepo
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
 from python.domain.service.llm_service import LLMService

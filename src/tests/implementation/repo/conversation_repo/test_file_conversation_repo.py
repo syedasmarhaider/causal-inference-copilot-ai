@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from python.domain.repo.conversation_repo import (
+from python.domain.repo.workflow_state_repo import (
     Conversation,
     Fact,
     GlobalScope,
