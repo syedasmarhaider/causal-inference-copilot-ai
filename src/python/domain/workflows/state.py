@@ -47,3 +47,8 @@ class State(ABC):
     @abstractmethod
     def from_json_dict(cls, payload: Dict[str, Any]) -> "State":
         raise NotImplementedError
+    
+    @classmethod
+    @abstractmethod
+    def init_empty(cls) -> "State":
+        raise NotImplementedError

@@ -100,3 +100,7 @@ class CompileProtocolState(State):
     def from_json_dict(cls, payload: Dict[str, Any]) -> "CompileProtocolState":
         model = CompileProtocolPayloadModel.model_validate(payload)
         return cls(model)
+    
+    @classmethod
+    def init_empty(cls) -> "CompileProtocolState":
+        return cls(CompileProtocolPayloadModel())

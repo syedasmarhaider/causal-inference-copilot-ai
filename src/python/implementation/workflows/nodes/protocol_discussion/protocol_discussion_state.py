@@ -76,3 +76,7 @@ class ProtocolDiscussionState(State):
     def from_json_dict(cls, payload: Dict[str, Any]) -> "ProtocolDiscussionState":
         model = ProtocolDiscussionPayloadModel.model_validate(payload)
         return cls(model)
+    
+    @classmethod
+    def init_empty(cls) -> "ProtocolDiscussionState":
+        return cls(ProtocolDiscussionPayloadModel())

@@ -42,3 +42,7 @@ class NoopDoneState(State):
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> "NoopDoneState":
         return cls()
+    
+    @classmethod
+    def init_empty(cls) -> "NoopDoneState":
+        return cls()

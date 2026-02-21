@@ -68,3 +68,7 @@ class ValidateCleanProtocolState(State):
     def from_json_dict(cls, payload: Dict[str, Any]) -> "ValidateCleanProtocolState":
         model = ValidateCleanProtocolPayloadModel.model_validate(payload)
         return cls(model)
+    
+    @classmethod
+    def init_empty(cls) -> "ValidateCleanProtocolState":
+        return cls(ValidateCleanProtocolPayloadModel())

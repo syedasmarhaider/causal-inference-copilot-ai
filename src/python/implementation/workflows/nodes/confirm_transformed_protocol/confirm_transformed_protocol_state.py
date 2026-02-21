@@ -56,3 +56,7 @@ class ConfirmTransformedProtocolState(State):
     def from_json_dict(cls, payload: Dict[str, Any]) -> "ConfirmTransformedProtocolState":
         model = ConfirmTransformedProtocolPayloadModel.model_validate(payload)
         return cls(model)
+    
+    @classmethod
+    def init_empty(cls) -> "ConfirmTransformedProtocolState":
+        return cls(ConfirmTransformedProtocolPayloadModel())
