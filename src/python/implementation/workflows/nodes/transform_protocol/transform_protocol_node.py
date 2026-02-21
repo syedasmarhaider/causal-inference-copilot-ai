@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import json
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
+from uuid import UUID, uuid4
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from python.domain.service.llm_service import LLMConfig, LLMService
+from python.domain.repo.data_repo import DataRepo
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
+from python.domain.workflows.node import Node
+from python.domain.workflows.state import State
+from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import ProtocolSpec
+from python.implementation.workflows.nodes.transform_protocol.transform_protocol_deps import TransformProtocolDeps
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_encoding import (
     EncodingSpec,
     FeatureMapModel,
@@ -25,14 +32,258 @@ from python.implementation.workflows.nodes.transform_protocol.transform_protocol
     EncodingType,
     TransformedProtocolSpec,
 )
+from python.implementation.workflows.nodes.transform_protocol.transform_protocol_state import TransformProtocolPayloadModel, TransformProtocolState
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_validation import validate_binary_and_one_hot_invariants, validate_constant_or_near_constant_controls, validate_dimensionality_caps, validate_encoding_postconditions, validate_id_like_features_in_controls, validate_input_columns_exist_and_are_unambiguous, validate_model_inputs_are_numeric_dtypes, validate_treatment_outcome_domains_by_kind
 from python.implementation.workflows.tools.data.data_profiling_tool import (
     CategoricalColumnProfileModel,
+    DatasetProfilingStateTool,
     DatasetSummaryModel,
 )
 from python.implementation.workflows.utils.validation import ValidationIssueModel, ValidationSeverity
 from python.implementation.workflows.utils.utils import json_sanitize
 
+
+
+
+def _repair_messages_from_issues(
+    *,
+    attempt: int,
+    stage: str,
+    issues: List[ValidationIssueModel],
+) -> List[ChatMessage]:
+    """
+    Minimal “propagate error” into next attempt.
+    Kept small: only FAIL issues + up to N.
+    """
+    fails = [x for x in issues if x.severity == "FAIL"]
+    sample = (fails or issues)[:10]
+    payload = { # pyright: ignore[reportUnknownVariableType]
+        "attempt": attempt,
+        "stage": stage,
+        "n_issues": len(issues),
+        "issues_sample": [x.model_dump(mode="json") for x in sample],
+        "instruction": "On the next attempt, fix the JSON output to satisfy schema and constraints. Output JSON only.",
+    }
+    return [ChatMessage(role="system", content=f"REPAIR_CONTEXT={payload}")]
+
+
+@dataclass(frozen=True)
+class TransformProtocolNode(Node):
+    NAME: ClassVar[str] = TransformProtocolState.NAME
+
+    llm: LLMService
+    data_repo: DataRepo
+    model_name: str
+
+    # global retry count for the WHOLE pipeline
+    max_attempts: int = 2
+
+    # knobs for deterministic steps
+    profiling_max_categories: int = 50
+    profiling_sample_distinct: int = 50
+    fail_fast_apply: bool = False
+    fail_fast_validate: bool = False
+    validation_policy: Optional["TransformValidationPolicy"] = None  # optional
+
+    @property
+    def name(self) -> str:
+        return self.NAME
+
+    @classmethod
+    def get_info(cls) -> str:
+        return "Transform protocol node: encoding plan -> apply -> transformed spec -> validate (with whole-pipeline retries)."
+
+    def run(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        state: State,
+        tool_factory: ToolFactory,
+        previous_state_dependencies: Mapping[str, Any],
+        user_message: Optional[str],
+        router_message: Optional[str],
+        messages_history: Optional[Sequence[ChatMessage]],
+    ) -> State:
+        # ------------------------------------------------------------------
+        # Dependencies
+        # ------------------------------------------------------------------
+        
+        deps = TransformProtocolDeps.from_loaded(previous_state_dependencies)
+        clean_state= deps.clean_protocol
+        compile_state = deps.compile_protocol
+        clean_dataset_id = clean_state.payload.clean_dataset_id
+        assert clean_dataset_id is not None, "CleanProtocolState.payload.clean_dataset_id is required for TransformProtocolNode"
+        protocol = compile_state.payload.protocol
+        assert protocol is not None, "CompileProtocolState.payload.protocol is required for TransformProtocolNode"
+
+
+        # ------------------------------------------------------------------
+        # Load dataset once (no need to reload every attempt)
+        # ------------------------------------------------------------------
+        try:
+            df_clean: pd.DataFrame = self.data_repo.get_csv_data(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                dataset_id=clean_dataset_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            return TransformProtocolState(
+                TransformProtocolPayloadModel(
+                    error=f"Failed to read clean dataset: {e}",
+                    user_message=user_message,
+                )
+            )
+
+        # ------------------------------------------------------------------
+        # Profile once (no need to reprofile every attempt)
+        # ------------------------------------------------------------------
+        try:
+            dataset_summary: DatasetSummaryModel = DatasetProfilingStateTool.extract_dataset_summary(
+                df_clean,
+                max_categories=self.profiling_max_categories,
+                sample_distinct=self.profiling_sample_distinct,
+                compute_quantiles=True,
+                strict=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            return TransformProtocolState(
+                TransformProtocolPayloadModel(
+                    error=f"Dataset profiling failed: {e}",
+                    user_message=user_message,
+                )
+            )
+            
+        retry_hist: List[ChatMessage] = []  # accumulates repair context across attempts
+        all_issues: List[ValidationIssueModel] = []
+        last_error: Optional[str] = None
+
+        # ==================================================================
+        # WHOLE-PIPELINE retry loop
+        # ==================================================================
+        for attempt in range(1, max(1, int(self.max_attempts)) + 1):
+            attempt_issues: List[ValidationIssueModel] = []
+            last_error = None
+
+            # ---------- Stage 1: encoding plan ----------
+            plan, plan_issues = llm_generate_encoding_plan_from_protocol_and_summary(
+                llm=self.llm,
+                protocol=protocol,
+                dataset_summary=dataset_summary,
+                supported_encodings=None,
+                llm_config=LLMConfig(temperature=0.4),
+                history=retry_hist,
+                max_attempts=2,  
+            )
+            attempt_issues.extend(plan_issues)
+            retry_as_there_a_issue = any(x.severity == "FAIL" for x in plan_issues)
+            if retry_as_there_a_issue:
+                last_error = f"Attempt {attempt}: encoding plan generation had issues."
+                retry_hist.extend(_repair_messages_from_issues(attempt=attempt, stage="ENCODING_PLAN", issues=plan_issues))
+                all_issues.extend(attempt_issues)
+                continue
+                
+                
+
+            if plan is None:
+                last_error = f"Attempt {attempt}: encoding plan generation failed."
+                retry_hist.extend(_repair_messages_from_issues(attempt=attempt, stage="ENCODING_PLAN", issues=attempt_issues))
+                all_issues.extend(attempt_issues)
+                continue
+
+            # ---------- Stage 2: apply encoding ----------
+            df_after, feature_map, apply_issues = apply_encoding_plan(
+                df=df_clean,
+                plan=plan,
+                dataset_summary=dataset_summary,
+                fail_fast=self.fail_fast_apply,
+            )
+            attempt_issues.extend(apply_issues)
+
+            if any(_is_fail(x) for x in apply_issues):
+                last_error = f"Attempt {attempt}: encoding application failed."
+                retry_hist.extend(_repair_messages_from_issues(attempt=attempt, stage="APPLY_ENCODING", issues=apply_issues))
+                all_issues.extend(attempt_issues)
+                continue
+
+            # ---------- Stage 3: transformed protocol spec ----------
+            spec, spec_issues = llm_generate_transformed_protocol_spec(
+                llm=self.llm,
+                protocol=protocol,
+                df_after=df_after,
+                feature_map=feature_map,
+                history=retry_hist,
+                llm_config=LLMConfig(temperature=0.2),
+                max_attempts=1,  # node controls attempts
+            )
+            attempt_issues.extend(spec_issues)
+
+            if spec is None:
+                last_error = f"Attempt {attempt}: transformed spec generation failed."
+                retry_hist.extend(_repair_messages_from_issues(attempt=attempt, stage="TRANSFORMED_SPEC", issues=spec_issues or attempt_issues))
+                all_issues.extend(attempt_issues)
+                continue
+
+            # ---------- Stage 4: validations ----------
+            val_issues = run_transform_validations(
+                df_after=df_after,
+                spec=spec,
+                policy=self.validation_policy,
+                fail_fast=self.fail_fast_validate,
+            )
+            attempt_issues.extend(val_issues)
+
+            if any(_is_fail(x) for x in val_issues):
+                last_error = f"Attempt {attempt}: validation failed."
+                # This is the most useful feedback for the LLM on the next attempt
+                retry_hist.extend(_repair_messages_from_issues(attempt=attempt, stage="VALIDATION", issues=val_issues))
+                all_issues.extend(attempt_issues)
+                continue
+
+            # ---------- Stage 5: persist + success ----------
+            try:
+                transformed_dataset_id = uuid4()
+                self.data_repo.save_csv_data(
+                    df=df_after,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    dataset_id=transformed_dataset_id,
+                )
+                
+            except Exception as e:  # noqa: BLE001
+                last_error = f"Attempt {attempt}: failed to persist transformed dataset: {e}"
+                persist_issue = _issue(
+                    severity="FAIL",
+                    message=str(last_error),
+                    evidence={"attempt": attempt},
+                )
+                attempt_issues.append(persist_issue)
+                all_issues.extend(attempt_issues)
+                continue
+
+            # SUCCESS
+            payload = TransformProtocolPayloadModel(
+                error=None,
+                transformed_dataset_id=str(transformed_dataset_id),
+                transformed_spec=spec,
+                issues=all_issues + attempt_issues,
+                transformed_dataset_summary=json_sanitize(dataset_summary.model_dump(mode="python")),
+                user_message=user_message,
+            )
+            return TransformProtocolState(payload)
+
+        # ==================================================================
+        # Exhausted attempts
+        # ==================================================================
+        payload = TransformProtocolPayloadModel(
+            error=last_error or "Transform pipeline failed after retries.",
+            transformed_dataset_id=None,
+            transformed_spec=None,
+            issues=all_issues,
+            transformed_dataset_summary=json_sanitize(dataset_summary.model_dump(mode="python")),
+            user_message=user_message,
+        )
+        return TransformProtocolState(payload)
 
 # =============================================================================
 # LLM output schema (strict)
@@ -144,7 +395,7 @@ def llm_generate_encoding_plan_from_protocol_and_summary(
     dataset_summary: DatasetSummaryModel,
     supported_encodings: Optional[Sequence[EncodingType]] = None,
     llm_config: Optional[LLMConfig] = None,
-    history: Optional[List[Dict[str, Any]]] = None,
+    history: Optional[Sequence[ChatMessage]] = None,
     max_attempts: int = 2,
 ) -> Tuple[Optional[EncodingPlanModel], List[ValidationIssueModel]]:
     if not dataset_summary.profiles:
@@ -194,7 +445,7 @@ def llm_generate_encoding_plan_from_protocol_and_summary(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             config=cfg,
-            history=None,
+            history=history,
             max_attempts=max_attempts,
         )
     except Exception as e:  # noqa: BLE001
@@ -362,6 +613,7 @@ def llm_generate_transformed_protocol_spec(
     df_after: pd.DataFrame,
     feature_map: FeatureMapModel,
     llm_config: Optional[LLMConfig] = None,
+    history: Optional[Sequence[ChatMessage]] = None,
     max_attempts: int = 2,
 ) -> Tuple[Optional[TransformedProtocolSpec], List[ValidationIssueModel]]:
     df_cols = [str(c) for c in list(df_after.columns)]
@@ -400,7 +652,7 @@ def llm_generate_transformed_protocol_spec(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             config=cfg,
-            history=None,
+            history=history,
             max_attempts=max_attempts,
         )
     except Exception as e:  # noqa: BLE001
