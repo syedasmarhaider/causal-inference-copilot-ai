@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, ClassVar, Dict, List, Optional, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from python.domain.workflows.state import ACTION, State, Status
+from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
+from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
 from python.implementation.workflows.utils.validation import (
     NonEmptyStr,
     ValidationIssueModel,
@@ -15,33 +17,7 @@ from python.implementation.workflows.nodes.transform_protocol.transform_protocol
 )
 
 
-class ValidationPayloadModel(BaseModel):
-    """
-    Static validator output payload.
-    """
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    issues: List[ValidationIssueModel] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
-    status: ValidationStatus = "PASS"
-
-    @model_validator(mode="after")
-    def _compute_status(self) -> "ValidationPayloadModel":
-        has_fail = any(i.severity == "FAIL" for i in self.issues)
-        has_warn = any(i.severity == "WARN" for i in self.issues)
-        if has_fail:
-            self.status = "FAIL"
-        elif has_warn:
-            self.status = "WARN"
-        else:
-            self.status = "PASS"
-        return self
-
-
-class TransformProtocolStatePayloadModel(BaseModel):
-    """
-    Payload-only state content. No status/needs_action/message stored here;
-    they are derived by the State wrapper.
-    """
+class TransformProtocolPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     error: Optional[NonEmptyStr] = None
@@ -49,69 +25,65 @@ class TransformProtocolStatePayloadModel(BaseModel):
     transformed_dataset_id: Optional[NonEmptyStr] = None
     transformed_spec: Optional[TransformedProtocolSpec] = None
 
-    validation: ValidationPayloadModel = Field(default_factory=ValidationPayloadModel)
-    transformed_dataset_summary: Dict[str, Any] = Field(default_factory=dict)
+    issues: List[ValidationIssueModel] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
 
-    # optional human-facing message (typically produced by LLM)
+    transformed_dataset_summary: Dict[str, Any] = Field(default_factory=dict)
     user_message: Optional[NonEmptyStr] = None
+
+    @computed_field  # type: ignore[misc]
+    @property
+    def validation_status(self) -> ValidationStatus:
+        has_fail = any(i.severity == "FAIL" for i in self.issues)
+        has_warn = any(i.severity == "WARN" for i in self.issues)
+        if has_fail:
+            return "FAIL"
+        if has_warn:
+            return "WARN"
+        return "PASS"
 
 
 class TransformProtocolState(State):
-    """
-    Constructible wrapper over payload.
-    State interface fields are derived deterministically from payload.
-    """
+    NAME: ClassVar[str] = "TRANSFORM_PROTOCOL"
 
-    def __init__(self, payload: TransformProtocolStatePayloadModel) -> None:
-        self._payload = payload
+    def __init__(self, payload: TransformProtocolPayloadModel) -> None:
+        self.payload = payload
 
     @property
-    def payload(self) -> TransformProtocolStatePayloadModel:
-        return self._payload
+    def name(self) -> str:
+        return self.NAME
 
     @property
     def status(self) -> Status:
-        # Deterministic stage status rules:
-        # - error => ABORTED
-        # - otherwise, if we have produced the required outputs => DONE
-        # - else => PENDING
-        if self._payload.error:
+        if self.payload.error:
             return "ABORTED"
-
         if (
-            self._payload.transformed_dataset_id
-            and self._payload.transformed_spec is not None
-            and self._payload.validation.status != "FAIL"
+            self.payload.transformed_dataset_id
+            and self.payload.transformed_spec is not None
+            and self.payload.validation_status != "FAIL"
         ):
             return "DONE"
-
         return "PENDING"
 
     @property
     def message(self) -> Optional[str]:
-        # Prefer user_message if present; otherwise None.
-        return self._payload.user_message
+        return self.payload.user_message
 
     @property
     def error(self) -> Optional[str]:
-        return self._payload.error
+        return self.payload.error
 
     @property
     def needs_action(self) -> ACTION:
-        # Transform stage is automatic. If you later want human intervention when FAIL,
-        # set NEEDS_INPUT on validation FAIL and return that here.
-        if self._payload.validation.status == "FAIL":
-            return "NEEDS_INPUT"
         return "NONE"
 
     def required_states_keys(self) -> Sequence[str]:
-        return ("dataset_state", "compile_protocol_state")
+        return [CleanProtocolState.NAME, CompileProtocolState.NAME]
 
     def to_json_dict(self) -> Dict[str, Any]:
-        # Store ONLY payload in JSON.
-        return self._payload.model_dump(mode="json")
+        # payload-only
+        return self.payload.model_dump(mode="json")
 
     @classmethod
     def from_json_dict(cls, payload: Dict[str, Any]) -> "TransformProtocolState":
-        model = TransformProtocolStatePayloadModel.model_validate(payload)
+        model = TransformProtocolPayloadModel.model_validate(payload)
         return cls(model)

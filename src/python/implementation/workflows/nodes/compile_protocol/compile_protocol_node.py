@@ -4,7 +4,7 @@ from datetime import datetime
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Set, Tuple, cast
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -18,8 +18,7 @@ from python.implementation.workflows.nodes.compile_protocol import compile_proto
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_deps import CompileProtocolDeps
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolPayloadModel, CompileProtocolState
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CategoricalOutcomeSpecModel, CategoricalTreatmentSpecModel, ContinuousOutcomeSpecModel, ContinuousTreatmentSpecModel, DurationOutcomeSpecModel, ProtocolSpec
-from python.implementation.workflows.nodes.load_dataset.load_dataset_utils import ColumnProfile, DatasetSummary
-from python.implementation.workflows.utils.utils import json_sanitize
+from python.implementation.workflows.tools.data.data_profiling_tool import DatasetProfilingStateTool, DatasetSummaryModel
 
 log = logging.getLogger(__name__)
 
@@ -51,20 +50,22 @@ class CompileProtocolNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         state: State,
-        tool_factory: Optional[ToolFactory],
+        tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, Any],
         user_message: Optional[str],
         router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
+        dataset_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))
         deps = CompileProtocolDeps.from_loaded(previous_state_dependencies)
         ld = deps.load_dataset
-        ds_summary: DatasetSummary | None = ld.payload.summary
+        ds_summary: DatasetSummaryModel | None = ld.payload.summary
         assert ds_summary is not None, "CompileProtocolNode requires dataset summary from LoadDatasetState"  
         protocol_discussion = deps.protocol_discussion.payload.discussion
         if len(protocol_discussion.strip()) < 10:
             raise ValueError("CompileProtocolNode requires non-empty protocol discussion from ProtocolDiscussionState")
         
+        dataset_summary_json_str = dataset_profiling_tool.dataset_summary_to_json(ds_summary) # sanity check for serializability
         last_json: str = ""
         last_errors: List[str] = []
         last_issues: List[Dict[str, Any]] = []
@@ -73,7 +74,7 @@ class CompileProtocolNode(Node):
             prompt = _build_prompt(
                 attempt=attempt,
                 protocol_text=protocol_discussion,
-                dataset_summary=ds_summary,
+                dataset_summary_json_str=dataset_summary_json_str,
                 previous_json=last_json,
                 validation_errors=last_errors,
                 router_message=router_message,
@@ -101,7 +102,7 @@ class CompileProtocolNode(Node):
                     model_name=self.model_name,
                     protocol=protocol_model,
                     protocol_discussion=protocol_discussion,
-                    dataset_summary=ds_summary,
+                    dataset_summary_json_str=dataset_summary_json_str,
                 )
                 
                 
@@ -174,12 +175,12 @@ def _validate_through_llm(
     model_name: str,
     protocol: ProtocolSpec, 
     protocol_discussion: str, 
-    dataset_summary: DatasetSummary):
+    dataset_summary_json_str: str):
     user_prompt = compile_protocol_prompt.protocol_validate_through_llm_prompt().replace("{{PROTOCOL_JSON}}",
     json.dumps(protocol.model_dump(mode="json"),
     ensure_ascii=False)).replace("{{PROTOCOL_DISCUSSION}}",
     protocol_discussion).replace("{{DATASET_SUMMARY_JSON}}", 
-    json.dumps(json_sanitize(dict(dataset_summary)), ensure_ascii=False))
+    dataset_summary_json_str)
     
     llm_config = LLMConfig(model=model_name, temperature=0.0)
     return llm.generate(
@@ -199,13 +200,11 @@ def _build_prompt(
     *,
     attempt: int,
     protocol_text: str,
-    dataset_summary: Mapping[str, Any],
+    dataset_summary_json_str: str,
     previous_json: str,
     validation_errors: List[str],
     router_message: Optional[str],
 ) -> str:
-    ds_json = json.dumps(json_sanitize(dict(dataset_summary)), ensure_ascii=False)
-
     appendix = ""
     if router_message:
         appendix = "\n\nROUTER_MESSAGE:\n" + router_message.strip()
@@ -214,14 +213,14 @@ def _build_prompt(
         return (
             compile_protocol_prompt.compile_protocol_prompt()
             .replace("{{PROTOCOL_TEXT}}", protocol_text)
-            .replace("{{DATASET_SUMMARY_JSON}}", ds_json)
+            .replace("{{DATASET_SUMMARY_JSON}}", dataset_summary_json_str)
             + appendix
         )
 
     return (
         compile_protocol_prompt.compile_protocol_repair_prompt()
         .replace("{{PROTOCOL_TEXT}}", protocol_text)
-        .replace("{{DATASET_SUMMARY_JSON}}", ds_json)
+        .replace("{{DATASET_SUMMARY_JSON}}", dataset_summary_json_str)
         .replace("{{PREVIOUS_JSON}}", previous_json or "{}")
         .replace(
             "{{VALIDATION_ERRORS}}",
@@ -236,29 +235,28 @@ def _build_prompt(
 # =============================================================================
 
 def _semantic_validate_values_against_dataset_summary(
-    protocol: ProtocolSpec,
-    dataset_summary: DatasetSummary,
+    protocol: "ProtocolSpec",
+    dataset_summary: "DatasetSummaryModel",
 ) -> List[Dict[str, Any]]:
     """
-    Validate protocol *value literals* against DatasetSummary profiles.
+    Validate protocol *value literals* against DatasetSummaryModel profiles.
 
-    Produces structured issues:
+    Issues format:
       {path, message, type, input, severity, evidence?}
 
-    Notes:
-    - For CATEGORICAL columns, DatasetSummary only contains top_categories + other_count.
-      So membership checks are:
-        * ERROR if the categorical domain appears fully captured (other_count==0 and distinct_count == len(top_categories))
-        * WARNING otherwise (value may exist but not in top sample)
-    - For BOOLEAN columns, uses summary.counts keys + common boolean tokens.
-    - For NUMERIC/DATETIME columns, enforces operator/value arity and parseability where reasonable.
+    Membership rules:
+    - CATEGORICAL: only top_categories + other_count exist
+        * ERROR if domain is fully captured (other_count==0 and distinct_count == len(top_categories))
+        * WARNING otherwise (profile truncated; value may still exist)
+    - BOOLEAN: counts keys + common boolean tokens
+    - NUMERIC/DATETIME: operator/value arity and parseability
     """
 
-    profiles = dataset_summary.get("profiles")
-    by_name: Dict[str, ColumnProfile] = {}
-    for p in profiles:
-        n = p.get("name")
-        by_name[n.strip()] =  p
+    by_name: Dict[str, Any] = {}
+    for p in dataset_summary.profiles:
+        n = getattr(p, "name", None)
+        if isinstance(n, str) and n.strip():
+            by_name[n.strip()] = p
 
     issues: List[Dict[str, Any]] = []
 
@@ -282,12 +280,16 @@ def _semantic_validate_values_against_dataset_summary(
             out["evidence"] = evidence
         issues.append(out)
 
-    def prof(col: str) -> Optional[ColumnProfile]:
-        return by_name.get(col)
+    def prof(col: str) -> Optional[Any]:
+        return by_name.get(col.strip())
 
-    def kind_of(p: ColumnProfile) -> str:
-        k = p.get("inferred_kind")
-        return k
+    def kind_of(p: Any) -> str:
+        k = getattr(p, "inferred_kind", "OTHER")
+        return str(k)
+
+    def dtype_of(p: Any) -> Optional[str]:
+        dt = getattr(p, "dtype", None)
+        return str(dt) if isinstance(dt, str) else None
 
     def norm(s: str) -> str:
         return s.strip().casefold()
@@ -295,48 +297,50 @@ def _semantic_validate_values_against_dataset_summary(
     # -------------------------
     # Domain extraction helpers
     # -------------------------
-    def categorical_domain(p: ColumnProfile) -> Tuple[Set[str], bool, Dict[str, Any]]:
+    def categorical_domain(p: Any) -> Tuple[Set[str], bool, Dict[str, Any]]:
         """
         Returns (observed_norm_set, is_domain_complete, evidence)
+
+        Domain "complete" only if we can strongly infer it:
+          other_count == 0 and distinct_count == len(top_categories)
         """
-        distinct = p.get("distinct_count")
+        distinct = getattr(p, "distinct_count", None)
         distinct_i = distinct if isinstance(distinct, int) else None
 
-        summary = p.get("summary")
-        top = None
-        other_count_raw = None
-        top = summary.get("top_categories")
-        other_count_raw = summary.get("other_count")
-        other_count = other_count_raw if isinstance(other_count_raw, int) else None
+        summary = getattr(p, "summary", None)
+        top = getattr(summary, "top_categories", None) if summary is not None else None
+        other = getattr(summary, "other_count", None) if summary is not None else None
+        other_i = other if isinstance(other, int) else None
+
         obs: Set[str] = set()
-        if top is not None:
-            for item in top:
-                if isinstance(item, dict):
-                   v = item.get("value") # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-                   if v is not None:
-                        obs.add(norm(str(v))) # pyright: ignore[reportUnknownArgumentType]
+        top_count = 0
+        if isinstance(top, list):
+            top_count = len(top) # pyright: ignore[reportUnknownArgumentType]
+            for item in top: # pyright: ignore[reportUnknownVariableType]
+                v = getattr(item, "value", None) # pyright: ignore[reportUnknownArgumentType]
+                if v is not None:
+                    obs.add(norm(str(v)))
 
-        # Domain is "complete" only if we can strongly infer it.
-        # With your profiler: if other_count==0 and distinct_count == len(top_categories), then fully captured.
         complete = False
-        if other_count is not None and distinct_i is not None:
-            complete = (other_count == 0) and (distinct_i == len(obs))
+        if other_i is not None and distinct_i is not None:
+            complete = (other_i == 0) and (distinct_i == top_count)
 
-        ev = { # pyright: ignore[reportUnknownVariableType]
+        ev: Dict[str, Any] = {
             "distinct_count": distinct_i,
-            "top_count": len(obs),
-            "other_count": other_count,
+            "top_count": top_count,
+            "other_count": other_i,
         }
-        
-        return obs, complete, ev # pyright: ignore[reportUnknownVariableType]
+        return obs, complete, ev
 
-    def boolean_domain(p: ColumnProfile) -> Tuple[Set[str], Dict[str, Any]]:
-        summary = p.get("summary")
+    def boolean_domain(p: Any) -> Tuple[Set[str], Dict[str, Any]]:
+        summary = getattr(p, "summary", None)
+        counts = getattr(summary, "counts", None) if summary is not None else None
+
         counts_keys: List[str] = []
-        counts = summary.get("counts")
         if isinstance(counts, dict):
-            counts_keys = [norm(str(k)) for k in counts.keys() if isinstance(k, str)] # pyright: ignore[reportUnknownVariableType]
-        obs = set(counts_keys)
+            counts_keys = [norm(str(k)) for k in counts.keys()] # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType]
+
+        obs: Set[str] = set(counts_keys)
         obs |= {"true", "false", "1", "0", "yes", "no", "t", "f", "y", "n"}
         return obs, {"counts_keys": sorted(list(set(counts_keys)))}
 
@@ -350,7 +354,6 @@ def _semantic_validate_values_against_dataset_summary(
             return None
 
     def parse_iso_datetime(v: str) -> Optional[datetime]:
-        # Best-effort; your summary stores isoformat-ish strings.
         try:
             return datetime.fromisoformat(v)
         except Exception:
@@ -380,8 +383,10 @@ def _semantic_validate_values_against_dataset_summary(
             else:
                 add_issue(
                     path=path,
-                    message=f"{label} value not found in profiled top categories for {col!r}: {value!r} "
-                            f"(profile may be truncated; value could still exist)",
+                    message=(
+                        f"{label} value not found in profiled top categories for {col!r}: {value!r} "
+                        f"(profile may be truncated; value could still exist)"
+                    ),
                     typ="value_not_in_profile_sample",
                     val=value,
                     severity="WARNING",
@@ -403,7 +408,7 @@ def _semantic_validate_values_against_dataset_summary(
                 )
             return
 
-        # NUMERIC/DATETIME/OTHER: membership not checkable via summary (no category domain).
+        # NUMERIC/DATETIME/OTHER: membership not checkable via summary
         return
 
     # -------------------------
@@ -413,12 +418,12 @@ def _semantic_validate_values_against_dataset_summary(
         col = ex.column
         p = prof(col)
         if p is None:
-            continue  # missing column is handled by your column-existence validator
+            continue
 
         k = kind_of(p)
         op = ex.op
         vals = list(ex.values)
-        
+
         if op in (">", ">=", "<", "<="):
             if len(vals) != 1:
                 add_issue(
@@ -439,7 +444,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_numeric_threshold",
                         val=v0,
                         severity="ERROR",
-                        evidence={"column": col, "inferred_kind": k, "dtype": p.get("dtype")},
+                        evidence={"column": col, "inferred_kind": k, "dtype": dtype_of(p)},
                     )
             elif k == "DATETIME":
                 if parse_iso_datetime(v0) is None:
@@ -449,7 +454,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_datetime_threshold",
                         val=v0,
                         severity="ERROR",
-                        evidence={"column": col, "inferred_kind": k, "dtype": p.get("dtype")},
+                        evidence={"column": col, "inferred_kind": k, "dtype": dtype_of(p)},
                     )
             else:
                 add_issue(
@@ -458,13 +463,11 @@ def _semantic_validate_values_against_dataset_summary(
                     typ="op_incompatible_with_column_kind",
                     val=op,
                     severity="ERROR",
-                    evidence={"column": col, "inferred_kind": k, "dtype": p.get("dtype")},
+                    evidence={"column": col, "inferred_kind": k, "dtype": dtype_of(p)},
                 )
             continue
 
-        # Membership-like ops
-        if op in ("==","in", "not_in"):
-            # For categorical/boolean: check membership when possible.
+        if op in ("==", "in", "not_in"):
             if k in ("CATEGORICAL", "BOOLEAN"):
                 for j, v in enumerate(vals):
                     check_value_membership_if_possible(
@@ -474,7 +477,6 @@ def _semantic_validate_values_against_dataset_summary(
                         label="Exclusion",
                     )
             elif k == "NUMERIC":
-                # Ensure parseable numbers (no membership check)
                 for j, v in enumerate(vals):
                     if parse_float(v) is None:
                         add_issue(
@@ -483,7 +485,7 @@ def _semantic_validate_values_against_dataset_summary(
                             typ="invalid_numeric_value",
                             val=v,
                             severity="ERROR",
-                            evidence={"column": col, "dtype": p.get("dtype")},
+                            evidence={"column": col, "dtype": dtype_of(p)},
                         )
             elif k == "DATETIME":
                 for j, v in enumerate(vals):
@@ -494,7 +496,7 @@ def _semantic_validate_values_against_dataset_summary(
                             typ="invalid_datetime_value",
                             val=v,
                             severity="ERROR",
-                            evidence={"column": col, "dtype": p.get("dtype")},
+                            evidence={"column": col, "dtype": dtype_of(p)},
                         )
 
     # -------------------------
@@ -508,7 +510,6 @@ def _semantic_validate_values_against_dataset_summary(
         if p is not None:
             k = kind_of(p)
 
-            # treated/control must differ
             if norm(ts.treated) == norm(ts.control):
                 add_issue(
                     path="treatment_spec",
@@ -518,7 +519,6 @@ def _semantic_validate_values_against_dataset_summary(
                     severity="ERROR",
                 )
 
-            # Compatibility + membership checks
             if k == "BOOLEAN":
                 if not is_bool_literal(ts.treated):
                     add_issue(
@@ -527,7 +527,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_boolean_literal",
                         val=ts.treated,
                         severity="ERROR",
-                        evidence={"column": tcol, "dtype": p.get("dtype")},
+                        evidence={"column": tcol, "dtype": dtype_of(p)},
                     )
                 if not is_bool_literal(ts.control):
                     add_issue(
@@ -536,7 +536,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_boolean_literal",
                         val=ts.control,
                         severity="ERROR",
-                        evidence={"column": tcol, "dtype": p.get("dtype")},
+                        evidence={"column": tcol, "dtype": dtype_of(p)},
                     )
             elif k == "NUMERIC":
                 if parse_float(ts.treated) is None:
@@ -546,7 +546,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_numeric_literal",
                         val=ts.treated,
                         severity="ERROR",
-                        evidence={"column": tcol, "dtype": p.get("dtype")},
+                        evidence={"column": tcol, "dtype": dtype_of(p)},
                     )
                 if parse_float(ts.control) is None:
                     add_issue(
@@ -555,7 +555,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_numeric_literal",
                         val=ts.control,
                         severity="ERROR",
-                        evidence={"column": tcol, "dtype": p.get("dtype")},
+                        evidence={"column": tcol, "dtype": dtype_of(p)},
                     )
             elif k == "CATEGORICAL":
                 check_value_membership_if_possible(col=tcol, path="treatment_spec.treated", value=ts.treated, label="Treatment")
@@ -567,24 +567,22 @@ def _semantic_validate_values_against_dataset_summary(
                     typ="column_kind_mismatch",
                     val={"column": tcol, "inferred_kind": k},
                     severity="ERROR",
-                    evidence={"dtype": p.get("dtype")},
+                    evidence={"dtype": dtype_of(p)},
                 )
 
     elif isinstance(ts, CategoricalTreatmentSpecModel):
         tcol = ts.column
         p = prof(tcol)
-        if p is not None:
-            k = kind_of(p)
-            if k != "CATEGORICAL":
-                add_issue(
-                    path="treatment_spec.column",
-                    message=f"Categorical treatment requires CATEGORICAL column, got {k!r} for {tcol!r}",
-                    typ="column_kind_mismatch",
-                    val={"column": tcol, "inferred_kind": k},
-                    severity="ERROR",
-                    evidence={"dtype": p.get("dtype")},
-                )
-        # membership checks against dataset (if possible)
+        if p is not None and kind_of(p) != "CATEGORICAL":
+            add_issue(
+                path="treatment_spec.column",
+                message=f"Categorical treatment requires CATEGORICAL column, got {kind_of(p)!r} for {tcol!r}",
+                typ="column_kind_mismatch",
+                val={"column": tcol, "inferred_kind": kind_of(p)},
+                severity="ERROR",
+                evidence={"dtype": dtype_of(p)},
+            )
+
         for j, lvl in enumerate(ts.levels):
             check_value_membership_if_possible(col=tcol, path=f"treatment_spec.levels.{j}", value=lvl, label="Treatment level")
 
@@ -598,8 +596,11 @@ def _semantic_validate_values_against_dataset_summary(
                 typ="column_kind_mismatch",
                 val={"column": tcol, "inferred_kind": kind_of(p)},
                 severity="ERROR",
-                evidence={"dtype": p.get("dtype")},
+                evidence={"dtype": dtype_of(p)},
             )
+            
+    else:
+        raise ValueError(f"Unknown treatment_spec type: {type(ts).__name__}")        
 
         if ts.clip_min is not None and ts.clip_max is not None and ts.clip_min > ts.clip_max:
             add_issue(
@@ -638,7 +639,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_boolean_literal",
                         val=ys.event,
                         severity="ERROR",
-                        evidence={"column": ycol, "dtype": p.get("dtype")},
+                        evidence={"column": ycol, "dtype": dtype_of(p)},
                     )
                 if not is_bool_literal(ys.non_event):
                     add_issue(
@@ -647,7 +648,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_boolean_literal",
                         val=ys.non_event,
                         severity="ERROR",
-                        evidence={"column": ycol, "dtype": p.get("dtype")},
+                        evidence={"column": ycol, "dtype": dtype_of(p)},
                     )
             elif k == "NUMERIC":
                 if parse_float(ys.event) is None:
@@ -657,7 +658,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_numeric_literal",
                         val=ys.event,
                         severity="ERROR",
-                        evidence={"column": ycol, "dtype": p.get("dtype")},
+                        evidence={"column": ycol, "dtype": dtype_of(p)},
                     )
                 if parse_float(ys.non_event) is None:
                     add_issue(
@@ -666,7 +667,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_numeric_literal",
                         val=ys.non_event,
                         severity="ERROR",
-                        evidence={"column": ycol, "dtype": p.get("dtype")},
+                        evidence={"column": ycol, "dtype": dtype_of(p)},
                     )
             elif k == "CATEGORICAL":
                 check_value_membership_if_possible(col=ycol, path="outcome_spec.event", value=ys.event, label="Outcome")
@@ -678,7 +679,7 @@ def _semantic_validate_values_against_dataset_summary(
                     typ="column_kind_mismatch",
                     val={"column": ycol, "inferred_kind": k},
                     severity="ERROR",
-                    evidence={"dtype": p.get("dtype")},
+                    evidence={"dtype": dtype_of(p)},
                 )
 
     elif isinstance(ys, CategoricalOutcomeSpecModel):
@@ -691,10 +692,8 @@ def _semantic_validate_values_against_dataset_summary(
                 typ="column_kind_mismatch",
                 val={"column": ycol, "inferred_kind": kind_of(p)},
                 severity="ERROR",
-                evidence={"dtype": p.get("dtype")},
+                evidence={"dtype": dtype_of(p)},
             )
-
-
 
         for j, lvl in enumerate(ys.levels):
             check_value_membership_if_possible(col=ycol, path=f"outcome_spec.levels.{j}", value=lvl, label="Outcome level")
@@ -709,7 +708,7 @@ def _semantic_validate_values_against_dataset_summary(
                 typ="column_kind_mismatch",
                 val={"column": ycol, "inferred_kind": kind_of(p)},
                 severity="ERROR",
-                evidence={"dtype": p.get("dtype")},
+                evidence={"dtype": dtype_of(p)},
             )
 
         if ys.clip_min is not None and ys.clip_max is not None and ys.clip_min > ys.clip_max:
@@ -733,8 +732,10 @@ def _semantic_validate_values_against_dataset_summary(
                 typ="column_kind_mismatch",
                 val={"column": dcol, "inferred_kind": kind_of(dp)},
                 severity="ERROR",
-                evidence={"dtype": dp.get("dtype")},
+                evidence={"dtype": dtype_of(dp)},
             )
+    else:
+        raise ValueError(f"Unknown outcome_spec type: {type(ys).__name__}")       
 
         ep = prof(ecol)
         if ep is not None:
@@ -757,7 +758,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_boolean_literal",
                         val=ys.event_value,
                         severity="ERROR",
-                        evidence={"column": ecol, "dtype": ep.get("dtype")},
+                        evidence={"column": ecol, "dtype": dtype_of(ep)},
                     )
                 if not is_bool_literal(ys.censor_value):
                     add_issue(
@@ -766,7 +767,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_boolean_literal",
                         val=ys.censor_value,
                         severity="ERROR",
-                        evidence={"column": ecol, "dtype": ep.get("dtype")},
+                        evidence={"column": ecol, "dtype": dtype_of(ep)},
                     )
             elif k == "NUMERIC":
                 if parse_float(ys.event_value) is None:
@@ -776,7 +777,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_numeric_literal",
                         val=ys.event_value,
                         severity="ERROR",
-                        evidence={"column": ecol, "dtype": ep.get("dtype")},
+                        evidence={"column": ecol, "dtype": dtype_of(ep)},
                     )
                 if parse_float(ys.censor_value) is None:
                     add_issue(
@@ -785,7 +786,7 @@ def _semantic_validate_values_against_dataset_summary(
                         typ="invalid_numeric_literal",
                         val=ys.censor_value,
                         severity="ERROR",
-                        evidence={"column": ecol, "dtype": ep.get("dtype")},
+                        evidence={"column": ecol, "dtype": dtype_of(ep)},
                     )
             elif k == "CATEGORICAL":
                 check_value_membership_if_possible(col=ecol, path="outcome_spec.event_value", value=ys.event_value, label="Outcome event_value")
@@ -797,9 +798,9 @@ def _semantic_validate_values_against_dataset_summary(
                     typ="column_kind_mismatch",
                     val={"column": ecol, "inferred_kind": k},
                     severity="ERROR",
-                    evidence={"dtype": ep.get("dtype")},
+                    evidence={"dtype": dtype_of(ep)},
                 )
-                
+
     return issues
 
 # =============================================================================

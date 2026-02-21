@@ -4,6 +4,7 @@ from typing import List, Literal, Optional, Set
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from python.implementation.workflows.nodes.transform_protocol.transform_protocol_encoding import EncodingType
 from python.implementation.workflows.utils.validation import NonEmptyStr
 
 
@@ -18,21 +19,6 @@ FeatureKind = Literal[
     "count",       # non-negative integer-ish
     "unknown",     # fallback when you cannot classify
 ]
-
-EncodingType = Literal[
-    "drop",
-    "one_hot",
-    "binary_map",
-    "binary_map_idx",
-    "ordinal_map",
-    "ordinal_map_idx",
-    "to_numeric",
-    "log1p",
-    "standardize",
-    "minmax",
-    "datetime_to_epoch_seconds",
-]
-
 
 class ColumnRefModel(BaseModel):
     """

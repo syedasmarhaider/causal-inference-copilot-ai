@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Optional
 
 class ToolFactory(ABC):
     @abstractmethod
@@ -9,7 +9,7 @@ class ToolFactory(ABC):
         raise NotImplementedError
     
     @abstractmethod
-    def get_tool_info(self, name: str) -> Optional[str]:
+    def get_tool_info(self, name: str) -> str:
         raise NotImplementedError
     
     @abstractmethod
@@ -17,5 +17,9 @@ class ToolFactory(ABC):
         raise NotImplementedError
     
     @abstractmethod
-    def get_tool(self, name: str) -> Optional[object]:
+    def has_tool(self, name: str) -> bool:
+        raise NotImplementedError
+    
+    @abstractmethod
+    def get_tool(self, name: str) -> Any:
         raise NotImplementedError 

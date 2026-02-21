@@ -3,17 +3,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 import json
 import logging
-from typing import Any, ClassVar, Optional, Sequence
+from typing import Any, ClassVar, Optional, Sequence, cast
 from uuid import UUID
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
-from python.implementation.workflows.nodes.load_dataset.load_dataset_utils import DatasetStateHelpers
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import ProtocolDiscussionDeps
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import get_protocol_discussion_confirmation_prompt, get_protocol_discussion_readiness_prompt, get_protocol_discussion_system_prompt, get_questions
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
+from python.implementation.workflows.tools.data.data_profiling_tool import DatasetProfilingStateTool
 from python.implementation.workflows.utils.utils import safe_err
 
 log = logging.getLogger(__name__)
@@ -58,13 +58,14 @@ class ProtocolDiscussionNode(Node):
         *,
         user_id: UUID,
         conversation_id: UUID,
-        tool_factory: Optional[ToolFactory],
+        tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, Any],
         user_message: Optional[str],
         router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
         state: State,
     ) -> State:
+        data_set_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))
         if not isinstance(state, ProtocolDiscussionState):
             raise TypeError(f"{self.name}: expected ProtocolDiscussionState, got {type(state).__name__}")
 
@@ -72,7 +73,7 @@ class ProtocolDiscussionNode(Node):
         summary_state = d.load_dataset.payload.summary
         assert summary_state is not None
 
-        summary_string = DatasetStateHelpers.dataset_summary_to_json(summary_state)
+        summary_string = data_set_profiling_tool.dataset_summary_to_json(summary_state)
         latest_12_messages = messages_history[-12:] if messages_history else None
 
         payload: dict[str, Any] = {

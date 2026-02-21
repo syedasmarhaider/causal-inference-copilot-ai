@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
-from typing import Any, ClassVar, Optional, Sequence
+from typing import Any, ClassVar, Optional, Sequence, cast
 from uuid import UUID
 
 from python.domain.repo.data_repo import DataRepo
@@ -12,7 +12,7 @@ from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.load_dataset.load_dataset_prompts import load_dataset_node_info, load_dataset_system_prompt
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetPayloadModel, LoadDatasetState
-from python.implementation.workflows.nodes.load_dataset.load_dataset_utils import DatasetProfilingError, DatasetStateHelpers
+from python.implementation.workflows.tools.data.data_profiling_tool import DatasetProfilingError, DatasetProfilingStateTool
 from python.implementation.workflows.utils.utils import DEFAULT_MODEL_GEMNI, JSONDict
 
 
@@ -63,13 +63,15 @@ class LoadDatasetNode(Node):
         *,
         user_id: UUID,
         conversation_id: UUID,
-        tool_factory: Optional[ToolFactory],
+        tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, Any],
         user_message: Optional[str],
         router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
         state: State,
     ) -> State:
+        
+        data_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))        
         if not isinstance(state, LoadDatasetState):
             raise TypeError(f"{self.name}: expected LoadDatasetState, got {type(state).__name__}")
         
@@ -112,7 +114,7 @@ class LoadDatasetNode(Node):
 
         # ---- Profile summary (user-actionable failures handled) ----
         try:
-            summary = DatasetStateHelpers.extract_dataset_summary(
+            summary = data_profiling_tool.extract_dataset_summary(
                 df,
                 max_categories=1000,
                 sample_distinct=1000,

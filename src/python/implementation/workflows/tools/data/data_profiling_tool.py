@@ -2,24 +2,28 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict, NotRequired
-from typing import Any, Dict, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from python.implementation.workflows.utils.utils import json_sanitize
 
+# =============================================================================
+# Errors (structured + parseable)
+# =============================================================================
 
-# TODO: later convert this to tool
-@dataclass(frozen=True)
-class ColumnProfileErrorDetails:
-    column: Optional[str]
+
+class ColumnProfileErrorDetailsModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    column: Optional[str] = None
     reason: str
     hint: Optional[str] = None
     evidence: Optional[Dict[str, Any]] = None
 
 
 class DatasetProfilingError(RuntimeError):
-    def __init__(self, details: ColumnProfileErrorDetails):
+    def __init__(self, details: ColumnProfileErrorDetailsModel):
         self.details = details
         msg = details.reason
         if details.column:
@@ -30,116 +34,154 @@ class DatasetProfilingError(RuntimeError):
 
 
 # =============================================================================
-# Typed output schema (discriminated union, NO invalid overrides)
+# Pydantic output schema (discriminated union)
 # =============================================================================
 
 InferredKind = Literal["NUMERIC", "DATETIME", "BOOLEAN", "CATEGORICAL", "OTHER"]
 
 
-class NumericSummary(TypedDict):
-    min: Optional[float]
-    max: Optional[float]
-    mean: Optional[float]
-    std: Optional[float]
-    quantiles: Optional[Dict[str, float]]  # e.g. {"0.05": 1.2, "0.5": 3.4}
+class NumericSummaryModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    min: Optional[float] = None
+    max: Optional[float] = None
+    mean: Optional[float] = None
+    std: Optional[float] = None
+    quantiles: Optional[Dict[str, float]] = None  # {"0.05": 1.2, ...}
 
 
-class DatetimeSummary(TypedDict):
-    min: Optional[str]  # isoformat-ish
-    max: Optional[str]
+class DatetimeSummaryModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    min: Optional[str] = None  # isoformat-ish
+    max: Optional[str] = None
 
 
-class BooleanSummary(TypedDict):
+class BooleanSummaryModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     counts: Dict[str, int]  # keys are stringified values
 
 
-class CategoricalSummary(TypedDict):
-    top_categories: List[Dict[str, int | str]]  # [{"value": "...", "count": 123}, ...]
+class CategoryCountModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: str
+    count: int
+
+
+class CategoricalSummaryModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    top_categories: List[CategoryCountModel]
     other_count: int
 
 
-class OtherSummary(TypedDict):
+class OtherSummaryModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     distinct_values_sample: List[str]
 
 
-class ColumnProfileCommon(TypedDict):
-    # Name is stored here => deterministic list, no duplicated "columns" list needed.
+class ColumnProfileCommonModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     name: str
-    dtype: Optional[str]
+    dtype: Optional[str] = None
     n_rows: int
     n_missing: int
     missing_rate: float
-    distinct_count: Optional[int]
-    note: NotRequired[str]  # only used in non-strict mode on failures
+    distinct_count: Optional[int] = None
+    note: Optional[str] = None  # only used in non-strict mode fallbacks
 
 
-class NumericColumnProfile(ColumnProfileCommon):
+class NumericColumnProfileModel(ColumnProfileCommonModel):
     inferred_kind: Literal["NUMERIC"]
-    summary: NumericSummary
+    summary: NumericSummaryModel
 
 
-class DatetimeColumnProfile(ColumnProfileCommon):
+class DatetimeColumnProfileModel(ColumnProfileCommonModel):
     inferred_kind: Literal["DATETIME"]
-    summary: DatetimeSummary
+    summary: DatetimeSummaryModel
 
 
-class BooleanColumnProfile(ColumnProfileCommon):
+class BooleanColumnProfileModel(ColumnProfileCommonModel):
     inferred_kind: Literal["BOOLEAN"]
-    summary: BooleanSummary
+    summary: BooleanSummaryModel
 
 
-class CategoricalColumnProfile(ColumnProfileCommon):
+class CategoricalColumnProfileModel(ColumnProfileCommonModel):
     inferred_kind: Literal["CATEGORICAL"]
-    summary: CategoricalSummary
+    summary: CategoricalSummaryModel
 
 
-class OtherColumnProfile(ColumnProfileCommon):
+class OtherColumnProfileModel(ColumnProfileCommonModel):
     inferred_kind: Literal["OTHER"]
-    summary: OtherSummary
+    summary: OtherSummaryModel
 
 
-ColumnProfile = (
-    NumericColumnProfile
-    | DatetimeColumnProfile
-    | BooleanColumnProfile
-    | CategoricalColumnProfile
-    | OtherColumnProfile
-)
+ColumnProfileModel = Union[
+    NumericColumnProfileModel,
+    DatetimeColumnProfileModel,
+    BooleanColumnProfileModel,
+    CategoricalColumnProfileModel,
+    OtherColumnProfileModel,
+]
+
+# Discriminator annotation (pydantic v2)
+DiscriminatedColumnProfile = Annotated[ColumnProfileModel, Field(discriminator="inferred_kind")]
 
 
-class DatasetSummary(TypedDict):
+class DatasetSummaryModel(BaseModel):
+    """
+    Deterministic order: profiles follow df.columns order.
+    """
+    model_config = ConfigDict(extra="forbid")
+
     n_rows: int
-    profiles: List[ColumnProfile]  # deterministic order = df.columns order
+    profiles: List[DiscriminatedColumnProfile] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
 
 
 # =============================================================================
-# Public API
+# Public API (STATE-style profiling tool; no constructor; pure funcs)
 # =============================================================================
 
-class DatasetStateHelpers:
+class DatasetProfilingStateTool:
+    """
+    "State tool" API:
+      - extract_dataset_summary(df, ...) -> DatasetSummaryModel
+      - dataset_summary_to_json(summary, ...) -> strict JSON (no NaN/Inf)
+      - dataset_summary_from_json(payload) -> DatasetSummaryModel
+    """
+    
+    @staticmethod
+    def get_tool_name() -> str:
+        return "DATA_PROFILING_TOOL"
+    
+
     @staticmethod
     def extract_dataset_summary(
         df: Any,
         *,
-        max_categories: int = 30,
+        max_categories: int = 50,
         sample_distinct: int = 50,
         compute_quantiles: bool = True,
         strict: bool = True,
-    ) -> DatasetSummary:
+    ) -> DatasetSummaryModel:
         _validate_params(max_categories=max_categories, sample_distinct=sample_distinct)
 
         cols = _get_columns(df, strict=strict)
         n_rows = _safe_n_rows(df, strict=strict)
         dtypes = getattr(df, "dtypes", None)
 
-        profiles: List[ColumnProfile] = []
+        profiles: List[DiscriminatedColumnProfile] = []
 
         for col_key in cols:
             name = str(col_key).strip()
             if not name:
                 if strict:
                     raise DatasetProfilingError(
-                        ColumnProfileErrorDetails(
+                        ColumnProfileErrorDetailsModel(
                             column=None,
                             reason="Dataset contains an empty column name.",
                             hint="Rename the column to a non-empty string.",
@@ -156,87 +198,89 @@ class DatasetStateHelpers:
                 n_missing, missing_rate = _missingness(s, n_rows=n_rows)
                 distinct = _distinct_count(s)
 
-                base: ColumnProfileCommon = {
-                    "name": name,
-                    "dtype": dtype_str,
-                    "n_rows": n_rows,
-                    "n_missing": n_missing,
-                    "missing_rate": missing_rate,
-                    "distinct_count": distinct,
-                }
+                base = ColumnProfileCommonModel(
+                    name=name,
+                    dtype=dtype_str,
+                    n_rows=n_rows,
+                    n_missing=n_missing,
+                    missing_rate=missing_rate,
+                    distinct_count=distinct,
+                )
 
                 if kind == "NUMERIC":
-                    numeric_prof: NumericColumnProfile = {
-                        **base,
-                        "inferred_kind": "NUMERIC",
-                        "summary": _numeric_summary(s, compute_quantiles=compute_quantiles),
-                    }
-                    profiles.append(numeric_prof)
-
+                    profiles.append(
+                        NumericColumnProfileModel(
+                            **base.model_dump(),
+                            inferred_kind="NUMERIC",
+                            summary=_numeric_summary(s, compute_quantiles=compute_quantiles),
+                        )
+                    )
                 elif kind == "DATETIME":
-                    datetime_prof: DatetimeColumnProfile = {
-                        **base,
-                        "inferred_kind": "DATETIME",
-                        "summary": _datetime_summary(s),
-                    }
-                    profiles.append(datetime_prof)
-
+                    profiles.append(
+                        DatetimeColumnProfileModel(
+                            **base.model_dump(),
+                            inferred_kind="DATETIME",
+                            summary=_datetime_summary(s),
+                        )
+                    )
                 elif kind == "BOOLEAN":
-                    boolean_prof: BooleanColumnProfile = {
-                        **base,
-                        "inferred_kind": "BOOLEAN",
-                        "summary": _boolean_summary(s),
-                    }
-                    profiles.append(boolean_prof)
-
+                    profiles.append(
+                        BooleanColumnProfileModel(
+                            **base.model_dump(),
+                            inferred_kind="BOOLEAN",
+                            summary=_boolean_summary(s),
+                        )
+                    )
                 elif kind == "CATEGORICAL":
-                    categorical_prof: CategoricalColumnProfile = {
-                        **base,
-                        "inferred_kind": "CATEGORICAL",
-                        "summary": _categorical_summary(s, max_categories=max_categories),
-                    }
-                    profiles.append(categorical_prof)
-
+                    profiles.append(
+                        CategoricalColumnProfileModel(
+                            **base.model_dump(),
+                            inferred_kind="CATEGORICAL",
+                            summary=_categorical_summary(s, max_categories=max_categories),
+                        )
+                    )
                 else:
-                    other_prof: OtherColumnProfile = {
-                        **base,
-                        "inferred_kind": "OTHER",
-                        "summary": _other_summary(s, sample_distinct=sample_distinct),
-                    }
-                    profiles.append(other_prof)
+                    profiles.append(
+                        OtherColumnProfileModel(
+                            **base.model_dump(),
+                            inferred_kind="OTHER",
+                            summary=_other_summary(s, sample_distinct=sample_distinct),
+                        )
+                    )
 
             except DatasetProfilingError:
                 if strict:
                     raise
-                # Non-strict: emit a valid profile with a note.
-                fallback: OtherColumnProfile = {
-                    "name": name,
-                    "dtype": _dtype_to_str(dtypes, col_key),
-                    "n_rows": n_rows,
-                    "n_missing": 0,
-                    "missing_rate": 0.0,
-                    "distinct_count": None,
-                    "inferred_kind": "OTHER",
-                    "summary": {"distinct_values_sample": []},
-                    "note": "Profiling failed for this column in non-strict mode.",
-                }
-                profiles.append(fallback)
+                # Non-strict fallback: still a VALID profile
+                profiles.append(
+                    OtherColumnProfileModel(
+                        name=name,
+                        dtype=_dtype_to_str(dtypes, col_key),
+                        n_rows=n_rows,
+                        n_missing=0,
+                        missing_rate=0.0,
+                        distinct_count=None,
+                        inferred_kind="OTHER",
+                        summary=OtherSummaryModel(distinct_values_sample=[]),
+                        note="Profiling failed for this column in non-strict mode.",
+                    )
+                )
 
         if strict and not profiles:
             raise DatasetProfilingError(
-                ColumnProfileErrorDetails(
+                ColumnProfileErrorDetailsModel(
                     column=None,
                     reason="No columns could be profiled.",
                     hint="Verify the dataset is tabular and contains at least one named column.",
                 )
             )
 
-        return {"n_rows": n_rows, "profiles": profiles}
-    
+        return DatasetSummaryModel(n_rows=n_rows, profiles=profiles)
+
     @staticmethod
     def dataset_summary_to_json(
-        summary: DatasetSummary,
-          *,
+        summary: DatasetSummaryModel,
+        *,
         indent: int | None = None,
         sort_keys: bool = True,
     ) -> str:
@@ -244,32 +288,41 @@ class DatasetStateHelpers:
         Always returns STRICT valid JSON (no NaN/Inf).
         Deterministic output by default via sort_keys=True.
         """
-        payload = json_sanitize(summary)
+        payload = json_sanitize(summary.model_dump(mode="python"))
         return json.dumps(
             payload,
             ensure_ascii=False,
             indent=indent,
             sort_keys=sort_keys,
             separators=(",", ":") if indent is None else None,
-            allow_nan=False,  # enforce strict JSON
+            allow_nan=False,
         )
+
+    @staticmethod
+    def dataset_summary_from_json(payload: str) -> DatasetSummaryModel:
+        data = json.loads(payload)
+        return DatasetSummaryModel.model_validate(data)
 
 
 # =============================================================================
-# Internals
+# Internals (logic preserved from your reference)
 # =============================================================================
 
 def _validate_params(*, max_categories: int, sample_distinct: int) -> None:
     if max_categories <= 0:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(
-                column=None, reason="max_categories must be > 0.", evidence={"max_categories": max_categories}
+            ColumnProfileErrorDetailsModel(
+                column=None,
+                reason="max_categories must be > 0.",
+                evidence={"max_categories": max_categories},
             )
         )
     if sample_distinct <= 0:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(
-                column=None, reason="sample_distinct must be > 0.", evidence={"sample_distinct": sample_distinct}
+            ColumnProfileErrorDetailsModel(
+                column=None,
+                reason="sample_distinct must be > 0.",
+                evidence={"sample_distinct": sample_distinct},
             )
         )
 
@@ -278,7 +331,7 @@ def _get_columns(df: Any, *, strict: bool) -> List[Any]:
     raw_cols = getattr(df, "columns", None)
     if raw_cols is None:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(
+            ColumnProfileErrorDetailsModel(
                 column=None,
                 reason="Dataset object has no 'columns' attribute; not a DataFrame-like table.",
                 hint="Use a pandas DataFrame (recommended) or provide an object exposing .columns and df[col].",
@@ -289,7 +342,7 @@ def _get_columns(df: Any, *, strict: bool) -> List[Any]:
         cols = list(raw_cols)
     except Exception as e:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(
+            ColumnProfileErrorDetailsModel(
                 column=None,
                 reason="Could not iterate dataset columns.",
                 hint="Ensure df.columns is iterable.",
@@ -298,7 +351,11 @@ def _get_columns(df: Any, *, strict: bool) -> List[Any]:
         )
     if strict and not cols:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(column=None, reason="Dataset has zero columns.", hint="Provide at least one column.")
+            ColumnProfileErrorDetailsModel(
+                column=None,
+                reason="Dataset has zero columns.",
+                hint="Provide at least one column.",
+            )
         )
     return cols
 
@@ -314,7 +371,7 @@ def _safe_n_rows(df: Any, *, strict: bool) -> int:
     except Exception as e:
         if strict:
             raise DatasetProfilingError(
-                ColumnProfileErrorDetails(
+                ColumnProfileErrorDetailsModel(
                     column=None,
                     reason="Could not read df.shape[0].",
                     hint="Ensure df.shape is valid (pandas DataFrame recommended).",
@@ -328,7 +385,7 @@ def _safe_n_rows(df: Any, *, strict: bool) -> int:
         return n
     except Exception as e:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(
+            ColumnProfileErrorDetailsModel(
                 column=None,
                 reason="Could not determine dataset row count.",
                 hint="Ensure df implements __len__ or provides df.shape.",
@@ -342,7 +399,7 @@ def _get_series(df: Any, col_key: Any, col_name: str, *, strict: bool) -> Any:
         return df[col_key]
     except Exception as e:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(
+            ColumnProfileErrorDetailsModel(
                 column=col_name,
                 reason="Could not access column via df[col].",
                 hint="Verify the column exists and df supports __getitem__ (pandas DataFrame recommended).",
@@ -370,7 +427,6 @@ def _infer_kind(series: Any, dtype_str: Optional[str]) -> InferredKind:
         return "NUMERIC"
     if any(x in ds for x in ("object", "string", "category")):
         return "CATEGORICAL"
-    # Conservative fallback:
     return "OTHER"
 
 
@@ -385,7 +441,7 @@ def _missingness(series: Any, *, n_rows: int) -> Tuple[int, float]:
             n_missing = sum(1 for x in vals if x is None)
     except Exception as e:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(
+            ColumnProfileErrorDetailsModel(
                 column=None,
                 reason="Could not compute missingness.",
                 hint="Ensure the column supports isna()/isnull() or is iterable.",
@@ -429,15 +485,16 @@ def _as_datetime_str(v: Any) -> Optional[str]:
         return None
 
 
-def _numeric_summary(series: Any, *, compute_quantiles: bool) -> NumericSummary:
+def _numeric_summary(series: Any, *, compute_quantiles: bool) -> NumericSummaryModel:
     try:
         s = series.dropna() if hasattr(series, "dropna") else series
+
         if hasattr(s, "astype"):
             try:
                 s = s.astype(float)
             except Exception:
-                # If coercion fails, treat as empty numeric summary rather than crashing.
-                return {"min": None, "max": None, "mean": None, "std": None, "quantiles": None}
+                # Preserve your old behavior: don't crash; emit empty numeric stats.
+                return NumericSummaryModel()
 
         mn = _as_float_or_none(getattr(s, "min", lambda: None)())
         mx = _as_float_or_none(getattr(s, "max", lambda: None)())
@@ -448,19 +505,19 @@ def _numeric_summary(series: Any, *, compute_quantiles: bool) -> NumericSummary:
         if compute_quantiles and hasattr(s, "quantile"):
             qs = [0.05, 0.25, 0.5, 0.75, 0.95]
             qvals = s.quantile(qs)
-            # pandas Series has .items()
             items = list(qvals.items()) if hasattr(qvals, "items") else []
-            q_out: Dict[str, float] = {}
+
+            out: Dict[str, float] = {}
             for k, v in items:
                 fv = _as_float_or_none(v)
                 if fv is not None:
-                    q_out[str(k)] = fv
-            quantiles = q_out or None
+                    out[str(k)] = fv
+            quantiles = out or None
 
-        return {"min": mn, "max": mx, "mean": mean, "std": std, "quantiles": quantiles}
+        return NumericSummaryModel(min=mn, max=mx, mean=mean, std=std, quantiles=quantiles)
     except Exception as e:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(
+            ColumnProfileErrorDetailsModel(
                 column=None,
                 reason="Numeric summary failed.",
                 hint="Verify the column is numeric or coercible to float.",
@@ -469,15 +526,15 @@ def _numeric_summary(series: Any, *, compute_quantiles: bool) -> NumericSummary:
         )
 
 
-def _datetime_summary(series: Any) -> DatetimeSummary:
+def _datetime_summary(series: Any) -> DatetimeSummaryModel:
     try:
         s = series.dropna() if hasattr(series, "dropna") else series
         mn = getattr(s, "min", lambda: None)()
         mx = getattr(s, "max", lambda: None)()
-        return {"min": _as_datetime_str(mn), "max": _as_datetime_str(mx)}
+        return DatetimeSummaryModel(min=_as_datetime_str(mn), max=_as_datetime_str(mx))
     except Exception as e:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(
+            ColumnProfileErrorDetailsModel(
                 column=None,
                 reason="Datetime summary failed.",
                 hint="Verify the column is datetime-like.",
@@ -486,7 +543,7 @@ def _datetime_summary(series: Any) -> DatetimeSummary:
         )
 
 
-def _boolean_summary(series: Any) -> BooleanSummary:
+def _boolean_summary(series: Any) -> BooleanSummaryModel:
     try:
         if hasattr(series, "value_counts"):
             vc = series.value_counts(dropna=True)
@@ -494,14 +551,17 @@ def _boolean_summary(series: Any) -> BooleanSummary:
             counts: Dict[str, int] = {}
             for k, v in items:
                 counts[str(k)] = int(v)
-            return {"counts": counts}
+            return BooleanSummaryModel(counts=counts)
 
         vals = list(series)
-        counts = {"True": sum(1 for x in vals if x is True), "False": sum(1 for x in vals if x is False)}
-        return {"counts": counts}
+        counts = {
+            "True": sum(1 for x in vals if x is True),
+            "False": sum(1 for x in vals if x is False),
+        }
+        return BooleanSummaryModel(counts=counts)
     except Exception as e:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(
+            ColumnProfileErrorDetailsModel(
                 column=None,
                 reason="Boolean summary failed.",
                 hint="Verify the column is boolean-like or has value_counts().",
@@ -510,7 +570,7 @@ def _boolean_summary(series: Any) -> BooleanSummary:
         )
 
 
-def _categorical_summary(series: Any, *, max_categories: int) -> CategoricalSummary:
+def _categorical_summary(series: Any, *, max_categories: int) -> CategoricalSummaryModel:
     try:
         if hasattr(series, "value_counts"):
             vc = series.value_counts(dropna=True)
@@ -526,11 +586,11 @@ def _categorical_summary(series: Any, *, max_categories: int) -> CategoricalSumm
         top_items = items[:max_categories]
         other_count = sum(int(v) for _, v in items[max_categories:]) if len(items) > max_categories else 0
 
-        top: List[Dict[str, int | str]] = [{"value": str(k), "count": int(v)} for k, v in top_items]
-        return {"top_categories": top, "other_count": int(other_count)}
+        top = [CategoryCountModel(value=str(k), count=int(v)) for k, v in top_items]
+        return CategoricalSummaryModel(top_categories=top, other_count=int(other_count))
     except Exception as e:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(
+            ColumnProfileErrorDetailsModel(
                 column=None,
                 reason="Categorical summary failed.",
                 hint="Verify the column is categorical/string-like or iterable.",
@@ -539,11 +599,12 @@ def _categorical_summary(series: Any, *, max_categories: int) -> CategoricalSumm
         )
 
 
-def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummary:
+def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummaryModel:
     try:
         s = series.dropna() if hasattr(series, "dropna") else [x for x in list(series) if x is not None]
+
         if hasattr(s, "unique"):
-            uniq: List[Any] = list(s.unique()) # pyright: ignore[reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+            uniq: List[Any] = list(s.unique()) # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownArgumentType]
             distinct = [str(x) for x in uniq[:sample_distinct]]
         else:
             seen: List[str] = []
@@ -554,10 +615,11 @@ def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummary:
                 if len(seen) >= sample_distinct:
                     break
             distinct = seen
-        return {"distinct_values_sample": distinct}
+
+        return OtherSummaryModel(distinct_values_sample=distinct)
     except Exception as e:
         raise DatasetProfilingError(
-            ColumnProfileErrorDetails(
+            ColumnProfileErrorDetailsModel(
                 column=None,
                 reason="Other-type summary failed.",
                 hint="Verify the column is iterable or provides .unique().",
