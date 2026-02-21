@@ -1,32 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Optional, Protocol, Sequence
+from typing import Any, Mapping, Optional, Sequence, Type
 from uuid import UUID
 
-from python.domain.repo.data_repo import DataRepo
-from python.domain.repo.models_repo import ModelsRepo
-from python.domain.service.llm_service import ChatMessage, LLMService
+from python.domain.repo.workflow_state_repo import WorkflowStateRepo
+from python.domain.service.llm_service import ChatMessage
 from python.domain.workflows.node import Node
 from python.domain.workflows.route import Router
 from python.domain.workflows.state import State, Status
-
-from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
-from python.implementation.workflows.nodes.noop_done.noop_done_state import NoopDoneState
-
-from python.implementation.workflows.router.llm_assisted_router import (
-    LLMAssistedRouterRouter,
-    init_all_nodoes_with_name_as_key,
-)
-
+from python.domain.workflows.tool_factory import ToolFactory
 
 Stage = str
+
 
 @dataclass(frozen=True)
 class WorkflowRequest:
     user_id: UUID
     conversation_id: UUID
-    user_message: Optional[str]
+    user_message: Optional[str]  # raw user text
 
 
 @dataclass(frozen=True)
@@ -37,208 +29,216 @@ class WorkflowResponse:
     current_stage_status: Status
 
 
-# -----------------------------
-# Stores (pointer + per-state payloads + history)
-# -----------------------------
-
-class StagePointerStore(Protocol):
-    def load_current_stage_name(self, *, user_id: UUID, conversation_id: UUID) -> Optional[str]: ...
-    def save_current_stage_name(self, *, user_id: UUID, conversation_id: UUID, stage_name: Optional[str]) -> None: ...
-
-
-class StateStore(Protocol):
-    def load_state(self, *, user_id: UUID, conversation_id: UUID, state_name: str) -> Optional[State]: ...
-    def save_state(self, *, user_id: UUID, conversation_id: UUID, state: State) -> None: ...
-
-
-class HistoryStore(Protocol):
-    def load_history(self, *, user_id: UUID, conversation_id: UUID, limit: int = 50) -> Sequence[ChatMessage]: ...
-
-
-# -----------------------------
-# Workflow App (ONE node execution per request)
-# -----------------------------
-
 class WorkflowApp:
     def __init__(
         self,
         *,
+        repo: WorkflowStateRepo,
         router: Router,
-        nodes_by_name: Mapping[str, Node],  # expects node.name == State.NAME
-        pointer_store: StagePointerStore,
-        state_store: StateStore,
-        history_store: HistoryStore,
-        empty_state_factory: callable,      # (state_name: str) -> State
-        initial_stage_name: str = LoadDatasetState.NAME,
-        done_stage_name: str = NoopDoneState.NAME,
+        nodes_by_state_name: Mapping[str, Node],
+        state_classes_by_name: Mapping[str, Type[State]],
+        tool_factory: ToolFactory,
+        initial_state_name: str,
+        done_state_name: str,
+        history_limit: int = 30,
+        max_steps_per_call: int = 1,
+        persist_assistant_messages: bool = True,
     ) -> None:
-        self._router = router
-        self._nodes_by_name = nodes_by_name
-        self._pointer_store = pointer_store
-        self._state_store = state_store
-        self._history_store = history_store
-        self._empty_state_factory = empty_state_factory
-        self._initial_stage_name = initial_stage_name
-        self._done_stage_name = done_stage_name
+        if max_steps_per_call <= 0:
+            raise ValueError("max_steps_per_call must be >= 1")
 
-    def handle(self, req: WorkflowRequest) -> WorkflowResponse:
-        # 1) load stage pointer (ONLY NAME is stored)
-        stage_name = self._pointer_store.load_current_stage_name(
+        self._repo = repo
+        self._router = router
+        self._nodes = dict(nodes_by_state_name)
+        self._state_classes = dict(state_classes_by_name)
+        self._tool_factory = tool_factory
+
+        self._initial_state_name = initial_state_name
+        self._done_state_name = done_state_name
+        self._history_limit = history_limit
+        self._max_steps_per_call = max_steps_per_call
+        self._persist_assistant_messages = persist_assistant_messages
+
+        # sanity: ensure we can build initial/done states
+        self._require_state_class(self._initial_state_name)
+        self._require_state_class(self._done_state_name)
+
+    def invoke(self, req: WorkflowRequest) -> WorkflowResponse:
+        if req.user_message is not None and req.user_message.strip():
+            self._repo.append_message(
+                user_id=req.user_id,
+                conversation_id=req.conversation_id,
+                message=ChatMessage(role="user", content=req.user_message),
+            )
+
+        active_name = self._repo.load_active_state_name(
             user_id=req.user_id,
             conversation_id=req.conversation_id,
         )
-        if stage_name is None:
-            stage_name = self._initial_stage_name
-            self._pointer_store.save_current_stage_name(
+        
+        if not active_name:
+            active_name = self._initial_state_name
+            self._repo.store_active_state_name(
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
-                stage_name=stage_name,
+                state_name=active_name,
             )
 
         # 2) load current state payload (or init empty)
-        current_state = self._state_store.load_state(
+        current_state = self._repo.load_state(
             user_id=req.user_id,
             conversation_id=req.conversation_id,
-            state_name=stage_name,
+            state_name=active_name,
         )
+        
         if current_state is None:
-            current_state = self._empty_state_factory(stage_name)
-            self._state_store.save_state(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                state=current_state,
-            )
+            current_state = self._init_empty_state(active_name)
+            self._repo.store_state(user_id=req.user_id, conversation_id=req.conversation_id, state=current_state)
 
-        # 3) load history (pass-through; do NOT format)
-        history = self._history_store.load_history(
+        history = self._repo.load_message_history(
             user_id=req.user_id,
             conversation_id=req.conversation_id,
-            limit=50,
+            limit=self._history_limit,
         )
 
-        # 4) router decides which stage to execute next
+        # 4) run up to N nodes
+        user_message_for_step: Optional[str] = req.user_message
+        last_router_message: 
+        
+
         decision = self._router.decide_next(
-            current_state=current_state,
-            user_message=req.user_message,
-            messages_history=history,
+                current_state=current_state,
+                user_message=user_message_for_step,
+                messages_history=history,
         )
+            last_router_message = decision.router_message_for_node
 
-        # If router says "finished/blocked"
-        if decision.state_name is None:
-            # mark workflow done (pointer only)
-            self._pointer_store.save_current_stage_name(
+            # finished / blocked
+            if decision.state_name is None:
+                done_state = self._ensure_done_state(req.user_id, req.conversation_id)
+                return WorkflowResponse(
+                    node_message=last_router_message or done_state.message,
+                    needs_input=(done_state.needs_action == "NEEDS_INPUT"),
+                    current_stage=done_state.name,
+                    current_stage_status=done_state.status,
+                )
+
+            state_name_to_run = decision.state_name
+
+            # ensure state exists
+            state_to_run = self._repo.load_state(
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
-                stage_name=self._done_stage_name,
+                state_name=state_name_to_run,
             )
-            done_state = self._state_store.load_state(
+            if state_to_run is None:
+                state_to_run = self._init_empty_state(state_name_to_run)
+                self._repo.store_state(user_id=req.user_id, conversation_id=req.conversation_id, state=state_to_run)
+
+            # deps for node/state_to_run
+            deps = self._load_deps(
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
-                state_name=self._done_stage_name,
-            ) or self._empty_state_factory(self._done_stage_name)
-
-            self._state_store.save_state(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                state=done_state,
+                required=state_to_run.required_states_keys(),
             )
 
-            return WorkflowResponse(
-                node_message=decision.router_message_for_node or done_state.message,
-                needs_input=(done_state.needs_action == "NEEDS_INPUT"),
-                current_stage=done_state.name,
-                current_stage_status=done_state.status,
-            )
+            node = self._nodes.get(state_name_to_run)
+            if node is None:
+                raise KeyError(f"WorkflowApp: no node registered for state_name={state_name_to_run!r}")
 
-        next_stage = decision.state_name
-
-        # 5) load/ensure the state we are about to execute
-        state_to_run = self._state_store.load_state(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
-            state_name=next_stage,
-        )
-        if state_to_run is None:
-            state_to_run = self._empty_state_factory(next_stage)
-            self._state_store.save_state(
+            new_state = node.run(
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
                 state=state_to_run,
+                tool_factory=self._tool_factory,
+                previous_state_dependencies=deps,
+                user_message=user_message_for_step,
+                router_message=decision.router_message_for_node,
+                messages_history=history,
             )
 
-        # 6) load dependencies required by the state-to-run (pass states directly)
-        deps: dict[str, object] = {}
-        for dep_name in state_to_run.required_states_keys():
-            dep_state = self._state_store.load_state(
+            # persist state + pointer (ONLY NAME)
+            self._repo.store_state(user_id=req.user_id, conversation_id=req.conversation_id, state=new_state)
+            self._repo.store_active_state_name(
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
+                state_name=new_state.name,
+            )
+
+            # optionally append assistant message (what user sees)
+            if self._persist_assistant_messages and new_state.message:
+                self._repo.append_message(
+                    user_id=req.user_id,
+                    conversation_id=req.conversation_id,
+                    message=ChatMessage(role="assistant", content=new_state.message),
+                )
+                # refresh history for subsequent steps in same call
+                history = self._repo.load_message_history(
+                    user_id=req.user_id,
+                    conversation_id=req.conversation_id,
+                    limit=self._history_limit,
+                )
+
+            current_state = new_state
+            user_message_for_step = None  # only first node sees the incoming user_message
+
+            # stop if blocked or not auto-advancable
+            if current_state.needs_action == "NEEDS_INPUT":
+                break
+            if current_state.status == "ABORTED":
+                break
+            if current_state.status != "DONE":
+                break
+            # else DONE: loop may continue if max_steps_per_call > 1
+
+        return WorkflowResponse(
+            node_message=current_state.message or last_router_message,
+            needs_input=(current_state.needs_action == "NEEDS_INPUT"),
+            current_stage=current_state.name,
+            current_stage_status=current_state.status,
+        )
+
+    # ------------------------
+    # helpers
+    # ------------------------
+
+    def _require_state_class(self, state_name: str) -> None:
+        if state_name not in self._state_classes:
+            raise KeyError(f"WorkflowApp: missing State class for state_name={state_name!r}")
+
+    def _init_empty_state(self, state_name: str) -> State:
+        cls = self._state_classes.get(state_name)
+        if cls is None:
+            raise KeyError(f"WorkflowApp: no State class registered for state_name={state_name!r}")
+        st = cls.init_empty()
+        if st.name != state_name:
+            raise ValueError(f"init_empty() returned name={st.name!r}, expected={state_name!r}")
+        return st
+
+    def _load_deps(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        required: Sequence[str],
+    ) -> Mapping[str, Any]:
+        deps: dict[str, Any] = {}
+        for dep_name in required:
+            dep_state = self._repo.load_state(
+                user_id=user_id,
+                conversation_id=conversation_id,
                 state_name=dep_name,
             )
             if dep_state is not None:
                 deps[dep_name] = dep_state
+        return deps
 
-        # 7) execute node for that stage
-        try:
-            node = self._nodes_by_name[next_stage]
-        except KeyError as e:
-            raise KeyError(f"WorkflowApp: no node registered for stage/state '{next_stage}'") from e
+    def _ensure_done_state(self, user_id: UUID, conversation_id: UUID) -> State:
+        # pointer -> DONE
+        self._repo.store_active_state_name(user_id=user_id, conversation_id=conversation_id, state_name=self._done_state_name)
 
-        new_state = node.run(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
-            state=state_to_run,
-            tool_factory=None,  # <-- pass your real ToolFactory instance if you have one
-            previous_state_dependencies=deps,
-            user_message=req.user_message,
-            router_message=decision.router_message_for_node,
-            messages_history=history,
-        )
-
-        # 8) persist state payload + persist pointer (ONLY NAME)
-        self._state_store.save_state(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
-            state=new_state,
-        )
-        self._pointer_store.save_current_stage_name(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
-            stage_name=new_state.name,
-        )
-
-        return WorkflowResponse(
-            node_message=new_state.message or decision.router_message_for_node,
-            needs_input=(new_state.needs_action == "NEEDS_INPUT"),
-            current_stage=new_state.name,
-            current_stage_status=new_state.status,
-        )
-
-
-# -----------------------------
-# Initializer (wires router + nodes; you plug real stores + empty_state_factory)
-# -----------------------------
-
-def init_workflow_app(
-    *,
-    llm: LLMService,
-    data_repo: DataRepo,
-    models_repo: ModelsRepo,
-    pointer_store: StagePointerStore,
-    state_store: StateStore,
-    history_store: HistoryStore,
-    empty_state_factory: callable,  # (state_name: str) -> State
-    model_name: Optional[str] = None,
-) -> WorkflowApp:
-    router = LLMAssistedRouterRouter(llm=llm, model_name=model_name)
-    nodes_by_name = init_all_nodoes_with_name_as_key(llm=llm, data_repo=data_repo, models_repo=models_repo)
-
-    return WorkflowApp(
-        router=router,
-        nodes_by_name=nodes_by_name,
-        pointer_store=pointer_store,
-        state_store=state_store,
-        history_store=history_store,
-        empty_state_factory=empty_state_factory,
-        initial_stage_name=LoadDatasetState.NAME,
-        done_stage_name=NoopDoneState.NAME,
-    )
+        st = self._repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name=self._done_state_name)
+        if st is None:
+            st = self._init_empty_state(self._done_state_name)
+            self._repo.store_state(user_id=user_id, conversation_id=conversation_id, state=st)
+        return st

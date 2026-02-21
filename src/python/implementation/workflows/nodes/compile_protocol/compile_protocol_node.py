@@ -53,7 +53,6 @@ class CompileProtocolNode(Node):
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, Any],
         user_message: Optional[str],
-        router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         dataset_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))
@@ -77,7 +76,6 @@ class CompileProtocolNode(Node):
                 dataset_summary_json_str=dataset_summary_json_str,
                 previous_json=last_json,
                 validation_errors=last_errors,
-                router_message=router_message,
             )
             
             attempt_history = messages_history if attempt == 1 else None
@@ -203,12 +201,8 @@ def _build_prompt(
     dataset_summary_json_str: str,
     previous_json: str,
     validation_errors: List[str],
-    router_message: Optional[str],
 ) -> str:
     appendix = ""
-    if router_message:
-        appendix = "\n\nROUTER_MESSAGE:\n" + router_message.strip()
-
     if attempt == 1:
         return (
             compile_protocol_prompt.compile_protocol_prompt()

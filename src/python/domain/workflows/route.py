@@ -21,7 +21,6 @@ class Router(ABC):
         self,
         *,
         current_state: Optional[State],
-        user_message: Optional[str],
         messages_history: Sequence[ChatMessage],
     ) -> NextDecision:
         raise NotImplementedError
