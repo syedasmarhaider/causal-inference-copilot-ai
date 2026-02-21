@@ -113,6 +113,8 @@ class TransformProtocolNode(Node):
         deps = TransformProtocolDeps.from_loaded(previous_state_dependencies)
         clean_state= deps.clean_protocol
         compile_state = deps.compile_protocol
+        validate_clean_protcol = deps.validate_cleaned_protocol
+        clean_dataset_validation_issues = validate_clean_protcol.payload.issues
         clean_dataset_id = clean_state.payload.clean_dataset_id
         assert clean_dataset_id is not None, "CleanProtocolState.payload.clean_dataset_id is required for TransformProtocolNode"
         protocol = compile_state.payload.protocol
@@ -265,10 +267,11 @@ class TransformProtocolNode(Node):
             # SUCCESS
             payload = TransformProtocolPayloadModel(
                 error=None,
-                transformed_dataset_id=str(transformed_dataset_id),
+                transformed_dataset_id=transformed_dataset_id,
                 transformed_spec=spec,
-                issues=attempt_issues,
-                cleaned_dataset_id=str(clean_dataset_id),
+                transformation_issues=attempt_issues,
+                cleaned_dataset_validation_issues=clean_dataset_validation_issues,
+                cleaned_dataset_id=clean_dataset_id,
                 cleaned_dataset_summary=clean_dataset_summary,
                 user_message=user_message,
             )
@@ -281,7 +284,7 @@ class TransformProtocolNode(Node):
             error=last_error or "Transform pipeline failed after retries.",
             transformed_dataset_id=None,
             transformed_spec=None,
-            issues=all_issues,
+            transformation_issues=all_issues,
             user_message=user_message,
         )
         return TransformProtocolState(payload)

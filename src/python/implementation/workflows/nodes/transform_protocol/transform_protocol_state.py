@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict, List, Optional, Sequence
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.workflows.state import ACTION, State, Status
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import ValidateCleanProtocolState
 from python.implementation.workflows.tools.data.data_profiling_tool import DatasetSummaryModel
 from python.implementation.workflows.utils.validation import (
     NonEmptyStr,
     ValidationIssueModel,
-    ValidationStatus,
 )
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_specs import (
     TransformedProtocolSpec,
@@ -26,22 +27,12 @@ class TransformProtocolPayloadModel(BaseModel):
     transformed_dataset_id: Optional[UUID] = None
     transformed_spec: Optional[TransformedProtocolSpec] = None
 
-    issues: List[ValidationIssueModel] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    transformation_issues: List[ValidationIssueModel] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
    
     cleaned_dataset_id: Optional[UUID] = None
-    cleaned_dataset_summary: DatasetSummaryModel
+    cleaned_dataset_summary: Optional[DatasetSummaryModel] = None
+    cleaned_dataset_validation_issues : List[ValidationIssueModel] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     user_message: Optional[NonEmptyStr] = None
-
-    @computed_field  # type: ignore[misc]
-    @property
-    def validation_status(self) -> ValidationStatus:
-        has_fail = any(i.severity == "FAIL" for i in self.issues)
-        has_warn = any(i.severity == "WARN" for i in self.issues)
-        if has_fail:
-            return "FAIL"
-        if has_warn:
-            return "WARN"
-        return "PASS"
 
 
 class TransformProtocolState(State):
@@ -63,7 +54,6 @@ class TransformProtocolState(State):
             and self.payload.cleaned_dataset_id
             and self.payload.cleaned_dataset_summary
             and self.payload.transformed_spec is not None
-            and self.payload.validation_status != "FAIL"
         ):
             return "DONE"
         raise ValueError("TransformProtocolState status is indeterminate due to missing fields or FAIL validation status")
@@ -81,7 +71,7 @@ class TransformProtocolState(State):
         return "NONE"
 
     def required_states_keys(self) -> Sequence[str]:
-        return [CleanProtocolState.NAME, CompileProtocolState.NAME]
+        return [CleanProtocolState.NAME, CompileProtocolState.NAME,ValidateCleanProtocolState.NAME]
 
     def to_json_dict(self) -> Dict[str, Any]:
         # payload-only
