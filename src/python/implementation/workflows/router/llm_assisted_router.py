@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
+from string import Template
 from typing import Optional, Sequence
 
 from python.domain.repo.data_repo import DataRepo
@@ -32,10 +34,10 @@ class LLMAssistedRouterRouter(Router):
         self,
         *,
         llm: LLMService,
-        config: Optional[LLMConfig] = None,
+        model_name: Optional[str] = None,
     ) -> None:
         self._llm = llm
-        self._config = config or LLMConfig(temperature=0.0)
+        self._model_name = model_name or DEFAULT_MODEL_GEMNI
         self._next_state_names_map: Mapping[str, Optional[str]] = init_next_state_names()
         self._node_name_to_description_map: Mapping[str, str] = get_node_name_with_description()
 
@@ -60,27 +62,86 @@ class LLMAssistedRouterRouter(Router):
                     state_name=next_name,
                     router_message_for_node=None,
             )
-
-        # Aborted -> LLM remediation later (stub for now)
+            
+            
         if status == "ABORTED":
-            return NextDecision(
-                state_name=current_state.name,
-                router_message_for_node="State aborted. LLM remediation routing not implemented yet.",
+            return _decision_on_aborted_state(
+                llm=self._llm,
+                model_name=self._model_name,
+                current_state=current_state,
+                get_next_state_names_map=self._next_state_names_map,
+                get_node_name_to_description_map=self._node_name_to_description_map,
+                user_message=user_message,
+                messages_history=messages_history,
             )
-
+            
+            
         raise ValueError(f"Router: unexpected status={status!r} for state={current_state.name!r}")
 
 
 
-def _node_prompt_for_router(node_name: str) -> str:
-    return f"{node_name}: {get_node_name_with_description().get(node_name, 'No description available')}"
-    """You are a router that decides the next node in a workflow.
-    "Current node is aborted. Given the node error message returned
-     other node descriptions, and user message, 
-     decide which node should run next to best recover from the error. 
-     node should always be selected from the node given list and always be prev node from the current node.
-     Compose a detailed message for node selected by you to understand the context and error and fix it.
-     Output should be only name of the selected node and message for the node in JSON format with keys"""
+
+def _decision_on_aborted_state(
+    *, 
+    llm: LLMService,
+    model_name: str,
+    current_state: State,
+    get_next_state_names_map: Mapping[str, Optional[str]],
+    get_node_name_to_description_map: Mapping[str, str],
+    user_message: Optional[str],
+    messages_history: Sequence[ChatMessage],
+) -> NextDecision:
+    
+        last_10_messages: list[ChatMessage] = list(messages_history[-10:]) if messages_history else []
+        prompt = _node_prompt_for_router()
+        prompt_filled = prompt.substitute(
+            current_node_name=current_state.name,
+            current_node_error=current_state.error or "",
+            user_message=user_message or "",
+            next_state_names_map=json.dumps(get_next_state_names_map, ensure_ascii=False),
+            node_name_to_description_map=json.dumps(get_node_name_to_description_map, ensure_ascii=False),
+        )
+        
+        return llm.generate_json(
+            config=LLMConfig(model=model_name, temperature=0.3),
+            system_prompt="Decide fallback node",
+            user_prompt=prompt_filled,
+            history=last_10_messages,
+            schema=NextDecision,
+            max_attempts=3,
+        )
+        
+        
+
+
+def _node_prompt_for_router() -> Template:
+    return Template(
+        """
+You are an LLM-assisted workflow router.
+
+Goal
+- The current node is ABORTED. Choose the next node to run to best recover.
+
+Inputs (some may be null)
+- current_node_name: $current_node_name
+- current_node_error: $current_node_error
+- user_message: $user_message
+- next_state_names_map: $next_state_names_map
+- node_name_to_description_map: $node_name_to_description_map
+
+Hard Rules
+1) You MUST select exactly ONE next_node_name from the available_nodes list.
+2) The selected next_node_name MUST be a previous node relative to current_node_name (i.e., earlier stage).
+3) If current_node_error is null, use user_message and messages_history to infer the best recovery step.
+4) If user_message and messages_history are null/empty, pick the safest closest previous node and instruct it to re-derive/validate prerequisites.
+
+Output (STRICT JSON ONLY; no extra text)
+{
+  "next_node_name": "<one node name from available_nodes>",
+  "router_message_for_node": "<detailed message for the selected node>"
+}
+""".strip()
+    )
 
         
 
