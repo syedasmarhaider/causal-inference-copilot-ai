@@ -1,20 +1,35 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
-from typing import Any, Dict, List,  Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import ProtocolSpec
-from python.implementation.workflows.nodes.transform_protocol.transform_protocol_encoding import EncodingSpec, FeatureMapModel, apply_encoding, get_encoding_models_with_description
-from python.implementation.workflows.nodes.transform_protocol.transform_protocol_prompts import build_encoding_plan_system_prompt, build_encoding_plan_user_prompt_template, build_transformed_protocol_system_prompt, build_transformed_protocol_user_prompt_template
+from python.implementation.workflows.nodes.transform_protocol.transform_protocol_encoding import (
+    EncodingSpec,
+    FeatureMapModel,
+    apply_encoding,
+    get_encoding_models_with_description,
+)
+from python.implementation.workflows.nodes.transform_protocol.transform_protocol_prompts import (
+    build_encoding_plan_system_prompt,
+    build_encoding_plan_user_prompt_template,
+    build_transformed_protocol_system_prompt,
+    build_transformed_protocol_user_prompt_template,
+)
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_specs import (
     EncodingType,
     TransformedProtocolSpec,
 )
-from python.implementation.workflows.tools.data.data_profiling_tool import CategoricalColumnProfileModel, DatasetSummaryModel
+from python.implementation.workflows.nodes.transform_protocol.transform_protocol_validation import validate_binary_and_one_hot_invariants, validate_constant_or_near_constant_controls, validate_dimensionality_caps, validate_encoding_postconditions, validate_id_like_features_in_controls, validate_input_columns_exist_and_are_unambiguous, validate_model_inputs_are_numeric_dtypes, validate_treatment_outcome_domains_by_kind
+from python.implementation.workflows.tools.data.data_profiling_tool import (
+    CategoricalColumnProfileModel,
+    DatasetSummaryModel,
+)
 from python.implementation.workflows.utils.validation import ValidationIssueModel, ValidationSeverity
 from python.implementation.workflows.utils.utils import json_sanitize
 
@@ -89,6 +104,21 @@ def _extract_columns(dataset_summary: DatasetSummaryModel) -> List[str]:
     return cols
 
 
+
+# TODO: fix later
+def _encoding_catalog_with_idx_semantics() -> str:
+    base = get_encoding_models_with_description()
+    return (
+        f"{base}\n"
+        "\n"
+        "IMPORTANT index semantics for *_idx encodings:\n"
+        "- For binary_map_idx / ordinal_map_idx, indices refer to the order of "
+        "dataset_summary.profiles[*].summary.top_categories.\n"
+        "- Index 0 -> top_categories[0].value, index 1 -> top_categories[1].value, etc.\n"
+        "- This is a TOP-K list only (not necessarily the full domain).\n"
+    )
+
+
 def _build_user_prompt(
     *,
     columns: List[str],
@@ -138,9 +168,11 @@ def llm_generate_encoding_plan_from_protocol_and_summary(
         ]
 
     roles = _infer_roles_from_protocol(protocol)
-    encoding_catalog = get_encoding_models_with_description()
+
+    encoding_catalog = _encoding_catalog_with_idx_semantics()
+
     system_prompt = build_encoding_plan_system_prompt()
-    
+
     protocol_obj: Dict[str, Any] = protocol.model_dump(mode="json")
     summary_obj: Dict[str, Any] = json_sanitize(dataset_summary.model_dump(mode="python"))
 
@@ -163,7 +195,7 @@ def llm_generate_encoding_plan_from_protocol_and_summary(
             user_prompt=user_prompt,
             config=cfg,
             history=None,
-            max_attempts=max_attempts
+            max_attempts=max_attempts,
         )
     except Exception as e:  # noqa: BLE001
         return None, [
@@ -213,21 +245,43 @@ def llm_generate_encoding_plan_from_protocol_and_summary(
     return plan, []
 
 
-
-def _is_fail(issue: ValidationIssueModel) -> bool:
-    return issue.severity == "FAIL"
-
-
+# =============================================================================
+# LLM output schema + validation for transformed protocol spec
+# =============================================================================
 def _categories_in_order_from_summary(
     *,
     dataset_summary: DatasetSummaryModel,
     column: str,
 ) -> Optional[List[str]]:
-
     for p in dataset_summary.profiles:
         if getattr(p, "name", None) == column and isinstance(p, CategoricalColumnProfileModel):
             top = p.summary.top_categories
             return [c.value for c in top]
+    return None
+
+
+def _warn_if_idx_on_truncated_topk(
+    *,
+    dataset_summary: DatasetSummaryModel,
+    column: str,
+    encoding: str,
+) -> Optional[ValidationIssueModel]:
+    """
+    ONLY CHANGE (w.r.t #4): warn when *_idx is used but categorical profile is truncated.
+    This makes the risk explicit without changing behavior.
+    """
+    for p in dataset_summary.profiles:
+        if getattr(p, "name", None) == column and isinstance(p, CategoricalColumnProfileModel):
+            other = int(p.summary.other_count)
+            top_k = len(p.summary.top_categories)
+            if other > 0:
+                return _issue(
+                    severity="WARN",
+                    message=f"{encoding} uses indices into top_categories only; '{column}' has truncated categorical profile (other_count>0).",
+                    evidence={"column": column, "encoding": encoding, "top_k": top_k, "other_count": other},
+                    fix_hint="Prefer label-based mapping or increase profiling max_categories/store a full categories list.",
+                )
+            return None
     return None
 
 
@@ -252,18 +306,6 @@ def apply_encoding_plan(
     dataset_summary: DatasetSummaryModel,
     fail_fast: bool = False,
 ) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
-    """
-    Applies EncodingPlanModel.decisions sequentially.
-
-    Returns:
-      (transformed_df, feature_map, issues)
-
-    Behavior:
-    - Never mutates input df.
-    - Applies in plan order (deterministic).
-    - For *_idx encodings, passes categories_in_order from dataset_summary.
-    - Aggregates issues across columns.
-    """
     out = df.copy()
     fmap = FeatureMapModel()
     issues: List[ValidationIssueModel] = []
@@ -271,18 +313,25 @@ def apply_encoding_plan(
     for d in plan.decisions:
         col = d.column
         spec: EncodingSpec = d.spec
+        enc = getattr(spec, "encoding", type(spec).__name__)
 
         if col not in out.columns:
             miss = ValidationIssueModel(
                 severity="FAIL",
                 message=f"Encoding plan refers to missing column '{col}'.",
-                evidence={"column": col, "encoding": getattr(spec, "encoding", type(spec).__name__)},
+                evidence={"column": col, "encoding": enc},
                 fix_hint="Ensure plan columns come from dataset summary and are applied before dropping/renaming.",
             )
             issues.append(miss)
             if fail_fast:
                 return out, fmap, issues
             continue
+
+        # ONLY CHANGE (w.r.t #4): warn when *_idx indices are top-K and domain is truncated
+        if enc in ("binary_map_idx", "ordinal_map_idx"):
+            w = _warn_if_idx_on_truncated_topk(dataset_summary=dataset_summary, column=col, encoding=enc)
+            if w is not None:
+                issues.append(w)
 
         cats: Optional[Sequence[str]] = _categories_in_order_from_summary(
             dataset_summary=dataset_summary,
@@ -315,13 +364,6 @@ def llm_generate_transformed_protocol_spec(
     llm_config: Optional[LLMConfig] = None,
     max_attempts: int = 2,
 ) -> Tuple[Optional[TransformedProtocolSpec], List[ValidationIssueModel]]:
-    """
-    LLM step ONLY:
-    - produce schema-valid TransformedProtocolSpec
-    - do NOT enforce column existence/overlap invariants here (that’s the next validation gate)
-
-    We still provide df_after_columns + feature_map to reduce hallucination.
-    """
     df_cols = [str(c) for c in list(df_after.columns)]
     if not df_cols:
         return None, [
@@ -337,7 +379,12 @@ def llm_generate_transformed_protocol_spec(
 
     protocol_json = json.dumps(protocol.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     df_cols_json = json.dumps(df_cols, ensure_ascii=False)
-    fmap_json = json.dumps(json_sanitize(feature_map.model_dump(mode="python")), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    fmap_json = json.dumps(
+        json_sanitize(feature_map.model_dump(mode="python")),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
     user_prompt = tmpl.format(
         protocol_json=protocol_json,
@@ -365,5 +412,164 @@ def llm_generate_transformed_protocol_spec(
                 fix_hint="Check schema mismatch; reduce prompt size; ensure JSON-only instruction.",
             )
         ]
-        
+
     return spec, []
+
+
+
+@dataclass(frozen=True)
+class TransformValidationPolicy:
+    # --- Validation #2
+    allow_bool_inputs: bool = True
+
+    # --- Validation #3
+    binary_allowed_values: tuple[int, int] = (0, 1)
+    min_variance: float = 1e-12
+    duration_min_value: float = 0.0
+
+    # --- Validation #4
+    value_tol: float = 1e-9
+    check_one_hot_group_row_sums: bool = True
+    allow_zero_sum_rows: bool = True
+
+    # --- Validation #5
+    uniqueness_ratio_threshold: float = 0.98
+    max_allowed_id_like: int = 0  # 0 => FAIL if any
+
+    # --- Validation #6
+    controls_min_variance: float = 1e-12
+    max_constant_allowed: Optional[int] = None
+    skip_binary_one_hot_in_constant_check: bool = True
+
+    # --- Validation #7
+    max_total_features: Optional[int] = 5000
+    max_w_features: Optional[int] = None
+    max_x_features: Optional[int] = None
+    max_features_per_source_raw: Optional[int] = None
+
+    # --- Validation #8
+    minmax_tol: float = 1e-6
+    zscore_warn_abs: float = 10.0
+    zscore_fail_abs: Optional[float] = None
+
+
+def _is_fail(issue: ValidationIssueModel) -> bool:
+    return issue.severity == "FAIL"
+
+
+def run_transform_validations(
+    *,
+    df_after: pd.DataFrame,
+    spec: TransformedProtocolSpec,
+    policy: Optional[TransformValidationPolicy] = None,
+    fail_fast: bool = False,
+) -> List[ValidationIssueModel]:
+    """
+    Runs validation suite in deterministic order.
+
+    Order matters:
+      #1 schema referential integrity
+      #2 dtype numeric
+      #3 Y/T domain checks
+      #4 binary/one-hot invariants
+      #5 id-like controls
+      #6 constant-like controls
+      #7 dimensionality caps
+      #8 encoding post-conditions
+
+    If fail_fast=True, returns immediately after first FAIL appears.
+    """
+    pol = policy or TransformValidationPolicy()
+    issues: List[ValidationIssueModel] = []
+
+    def _extend(new_issues: List[ValidationIssueModel]) -> None:
+        nonlocal issues
+        if not new_issues:
+            return
+        issues.extend(new_issues)
+        if fail_fast and any(_is_fail(x) for x in new_issues):
+            raise _StopValidation()
+
+    class _StopValidation(Exception):
+        pass
+
+    try:
+        _extend(
+            validate_input_columns_exist_and_are_unambiguous(
+                df_after=df_after,
+                spec=spec,
+            )
+        )
+
+        _extend(
+            validate_model_inputs_are_numeric_dtypes(
+                df_after=df_after,
+                spec=spec,
+                allow_bool=pol.allow_bool_inputs,
+            )
+        )
+
+        _extend(
+            validate_treatment_outcome_domains_by_kind(
+                df_after=df_after,
+                spec=spec,
+                binary_allowed_values=pol.binary_allowed_values,
+                min_variance=pol.min_variance,
+                duration_min_value=pol.duration_min_value,
+            )
+        )
+
+        _extend(
+            validate_binary_and_one_hot_invariants(
+                df_after=df_after,
+                spec=spec,
+                value_tol=pol.value_tol,
+                check_one_hot_group_row_sums=pol.check_one_hot_group_row_sums,
+                allow_zero_sum_rows=pol.allow_zero_sum_rows,
+            )
+        )
+
+        _extend(
+            validate_id_like_features_in_controls(
+                df_after=df_after,
+                spec=spec,
+                uniqueness_ratio_threshold=pol.uniqueness_ratio_threshold,
+                max_allowed_id_like=pol.max_allowed_id_like,
+            )
+        )
+
+        _extend(
+            validate_constant_or_near_constant_controls(
+                df_after=df_after,
+                spec=spec,
+                min_variance=pol.controls_min_variance,
+                max_constant_allowed=pol.max_constant_allowed,
+                skip_binary_one_hot=pol.skip_binary_one_hot_in_constant_check,
+            )
+        )
+
+        _extend(
+            validate_dimensionality_caps(
+                df_after=df_after,
+                spec=spec,
+                max_total_features=pol.max_total_features,
+                max_w_features=pol.max_w_features,
+                max_x_features=pol.max_x_features,
+                max_features_per_source_raw=pol.max_features_per_source_raw,
+            )
+        )
+
+        _extend(
+            validate_encoding_postconditions(
+                df_after=df_after,
+                spec=spec,
+                minmax_tol=pol.minmax_tol,
+                zscore_warn_abs=pol.zscore_warn_abs,
+                zscore_fail_abs=pol.zscore_fail_abs,
+            )
+        )
+
+    except _StopValidation:
+        pass
+
+    return issues
