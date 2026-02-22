@@ -51,8 +51,6 @@ class ConfirmTransformedProtocolNode(Node):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, Any],
-        user_message: Optional[str],
-        router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         deps = ConfirmTransformedProtocolDeps.from_loaded(previous_state_dependencies)
@@ -87,7 +85,7 @@ class ConfirmTransformedProtocolNode(Node):
             user_decsion = self.llm.generate_json(
                 schema=_DecisionModel,
                 system_prompt=llm3_decision_system_prompt(),
-                user_prompt=user_prompt + "\n\nAssistant explanation:\n" + message_for_user + "\n\nUser reply:\n" + (user_message),
+                user_prompt=user_prompt + "\n\nAssistant explanation:\n" + message_for_user,
                 config=LLMConfig(model=self.model_name, temperature=0.0),
                 history=last_10_messages
             )

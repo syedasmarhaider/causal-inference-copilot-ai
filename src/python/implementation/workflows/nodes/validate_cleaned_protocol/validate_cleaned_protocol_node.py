@@ -90,8 +90,6 @@ class ValidateCleanProtocolNode(Node):
         state: State,
         tool_factory: ToolFactory,  
         previous_state_dependencies: Mapping[str, Any],
-        user_message: Optional[str],
-        router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         try:
@@ -353,7 +351,7 @@ class ValidateCleanProtocolNode(Node):
         has_fail: bool,
     ) -> Optional[str]:
         system = system_prompt_validate_cleaned_protocol()
-        history_only_last_4_messages = messages_history[-4:] if messages_history else None
+        history_only_last_6_messages = messages_history[-6:] if messages_history else None
         payload = { # pyright: ignore[reportUnknownVariableType]
             "has_fail": bool(has_fail),
             "protocol_summary": protocol_summary,
@@ -372,7 +370,7 @@ class ValidateCleanProtocolNode(Node):
             system_prompt=system,
             user_prompt=user,
             config=config,
-            history=history_only_last_4_messages,
+            history=history_only_last_6_messages,
         )
         
         return resp.content

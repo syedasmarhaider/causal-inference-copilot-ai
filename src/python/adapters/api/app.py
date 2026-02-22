@@ -7,21 +7,6 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from python.domain.repo.workflow_state_repo import ConversationRepo
-from python.domain.repo.data_repo import DataRepo
-from python.domain.repo.models_repo import ModelsRepo
-from python.domain.service.llm_service import LLMService
-
-from python.implementation.repo.inmemory_conversation_repo import InMemoryConversationRepo
-from python.implementation.repo.file_data_repo import FileDataRepo
-from python.implementation.repo.models_repo import FileSystemModelsRepo
-from python.implementation.service.llms.llm_service_factory import (
-    LLMServiceSettings,
-    make_llm_service,
-)
-
-from python.workflows.graph.simple_flow_entry import SimpleWorkflow, WorkflowConfig
-
 from python.adapters.api.schemas import (
     CreateConversationRequest,
     CreateConversationResponse,
@@ -29,19 +14,10 @@ from python.adapters.api.schemas import (
     InvokeResponse,
 )
 
+from python.implementation.workflows.depinit import WorkflowSettings, make_workflow_app
+from python.implementation.workflows.workflow_app import WorkflowRequest
+
 log = logging.getLogger(__name__)
-
-def wire_repo() -> ConversationRepo:
-    return InMemoryConversationRepo()
-
-def wire_data_repo() -> DataRepo:
-    return FileDataRepo()
-
-def wire_models_repo() -> ModelsRepo:
-    return FileSystemModelsRepo()
-
-def wire_llm() -> LLMService:
-    return make_llm_service(LLMServiceSettings(provider="openai"))
 
 app = FastAPI(title="Causal Copilot API", version="0.1.0")
 
@@ -55,11 +31,9 @@ app.add_middleware(
 
 logging.basicConfig(level=logging.INFO)
 
-_repo = wire_repo()
-_data_repo = wire_data_repo()
-_llm = wire_llm()
-_cfg = WorkflowConfig(data_repo=_data_repo, llm=_llm, models_repo=wire_models_repo())
-_workflow = SimpleWorkflow(repo=_repo, cfg=_cfg)
+# composition root (new workflow wiring)
+_settings = WorkflowSettings()
+_workflow = make_workflow_app(_settings)
 
 
 @app.get("/healthz")
@@ -82,10 +56,12 @@ async def invoke_once(conversation_id: UUID, req: InvokeRequest):
 
     try:
         resp = await asyncio.to_thread(
-            _workflow.invoke,
-            user_id=req.user_id,
-            conversation_id=conversation_id,
-            user_text=txt,
+            _workflow.handle, 
+            WorkflowRequest(
+                user_id=req.user_id,
+                conversation_id=conversation_id,
+                user_message=txt,
+            ),
         )
     except Exception as e:
         log.exception("invoke failed")
@@ -99,10 +75,3 @@ async def invoke_once(conversation_id: UUID, req: InvokeRequest):
         current_stage=str(resp.current_stage),
         current_stage_status=str(resp.current_stage_status),
     )
-
-
-
-# {
-#   "user_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-#   "conversation_id": "3033d809-9f5f-4bcb-b96d-021d853fdca6"
-# }

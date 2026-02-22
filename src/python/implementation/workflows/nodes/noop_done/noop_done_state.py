@@ -22,8 +22,8 @@ class NoopDoneState(State):
         return "DONE"
 
     @property
-    def message(self) -> Optional[str]:
-        return None
+    def message(self) -> str:
+        return "DONE"
 
     @property
     def error(self) -> Optional[str]:

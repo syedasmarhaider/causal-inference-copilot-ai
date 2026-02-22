@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import json
-from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple, cast
 from uuid import UUID, uuid4
 
 import pandas as pd
@@ -102,14 +102,12 @@ class TransformProtocolNode(Node):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, Any],
-        user_message: Optional[str],
-        router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         # ------------------------------------------------------------------
         # Dependencies
         # ------------------------------------------------------------------
-        
+        data_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))                
         deps = TransformProtocolDeps.from_loaded(previous_state_dependencies)
         clean_state= deps.clean_protocol
         compile_state = deps.compile_protocol
@@ -134,7 +132,7 @@ class TransformProtocolNode(Node):
             return TransformProtocolState(
                 TransformProtocolPayloadModel(
                     error=f"Failed to read clean dataset: {e}",
-                    user_message=user_message,
+                    user_message="Failed to read the cleaned dataset. Please check if the previous steps completed successfully and try again.",
                 )
             )
 
@@ -142,7 +140,7 @@ class TransformProtocolNode(Node):
         # Profile once (no need to reprofile every attempt)
         # ------------------------------------------------------------------
         try:
-            clean_dataset_summary: DatasetSummaryModel = DatasetProfilingStateTool.extract_dataset_summary(
+            clean_dataset_summary: DatasetSummaryModel = data_profiling_tool.extract_dataset_summary(
                 df_clean,
                 max_categories=self.profiling_max_categories,
                 sample_distinct=self.profiling_sample_distinct,
@@ -153,7 +151,7 @@ class TransformProtocolNode(Node):
             return TransformProtocolState(
                 TransformProtocolPayloadModel(
                     error=f"Dataset profiling failed: {e}",
-                    user_message=user_message,
+                    user_message="Failed to profile the cleaned dataset. Please check if the previous steps completed successfully and try again.",
                 )
             )
             
@@ -273,7 +271,7 @@ class TransformProtocolNode(Node):
                 cleaned_dataset_validation_issues=clean_dataset_validation_issues,
                 cleaned_dataset_id=clean_dataset_id,
                 cleaned_dataset_summary=clean_dataset_summary,
-                user_message=user_message,
+                user_message="Transform pipeline succeeded.",
             )
             return TransformProtocolState(payload)
 
@@ -285,7 +283,7 @@ class TransformProtocolNode(Node):
             transformed_dataset_id=None,
             transformed_spec=None,
             transformation_issues=all_issues,
-            user_message=user_message,
+            user_message="Transform pipeline failed after retries. Please check the previous steps and try again.",
         )
         return TransformProtocolState(payload)
 

@@ -11,11 +11,19 @@ from python.domain.workflows.state import State
 
 class NextDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    state_name: Optional[str] = None
+    state_name: str
     router_message_for_node: Optional[str] = None
 
 
 class Router(ABC):
+    @abstractmethod
+    def get_initial_state_name(self) -> str:
+        raise NotImplementedError
+    
+    @abstractmethod
+    def get_done_state_name(self) -> str:
+        raise NotImplementedError
+    
     @abstractmethod
     def decide_next(
         self,

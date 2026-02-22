@@ -59,7 +59,9 @@ class TransformProtocolState(State):
         raise ValueError("TransformProtocolState status is indeterminate due to missing fields or FAIL validation status")
 
     @property
-    def message(self) -> Optional[str]:
+    def message(self) -> str:
+        if self.payload.user_message is None:
+            raise ValueError("TransformProtocolState message is required but missing. State must have user message. Dont call this property if this is not runned in the node context where user_message is guaranteed to be set.")
         return self.payload.user_message
 
     @property

@@ -35,8 +35,6 @@ class NoopDoneNode(Node):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, Any],
-        user_message: Optional[str],
-        router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         return NoopDoneState()

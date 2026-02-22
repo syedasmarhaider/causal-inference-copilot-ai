@@ -11,7 +11,7 @@ from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import ProtocolDiscussionDeps
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import get_protocol_discussion_confirmation_prompt, get_protocol_discussion_readiness_prompt, get_protocol_discussion_system_prompt, get_questions
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import get_protocol_discussion_confirmation_prompt, get_protocol_discussion_get_node_info, get_protocol_discussion_readiness_prompt, get_protocol_discussion_system_prompt, get_questions
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
 from python.implementation.workflows.tools.data.data_profiling_tool import DatasetProfilingStateTool
 from python.implementation.workflows.utils.utils import safe_err
@@ -50,7 +50,7 @@ class ProtocolDiscussionNode(Node):
 
     @classmethod
     def get_info(cls) -> str:
-        return "Runs protocol discussion using dataset summary + chat history."
+        return get_protocol_discussion_get_node_info()
     
 
     def run(
@@ -60,8 +60,6 @@ class ProtocolDiscussionNode(Node):
         conversation_id: UUID,
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, Any],
-        user_message: Optional[str],
-        router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
         state: State,
     ) -> State:
@@ -79,8 +77,6 @@ class ProtocolDiscussionNode(Node):
         payload: dict[str, Any] = {
             "prev_questions_answers_discussion_state": get_questions(),
             "dataset_columns_summary": summary_string,
-            "user_message": user_message,
-            "router_message": router_message,
         }
 
         # -------------------------

@@ -4,6 +4,7 @@ import json
 import math
 from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
+import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
 from python.implementation.workflows.utils.utils import json_sanitize
@@ -154,14 +155,15 @@ class DatasetProfilingStateTool:
       - dataset_summary_from_json(payload) -> DatasetSummaryModel
     """
     
-    @staticmethod
-    def get_tool_name() -> str:
+
+    def get_tool_name(self) -> str:
         return "DATA_PROFILING_TOOL"
     
 
-    @staticmethod
+
     def extract_dataset_summary(
-        df: Any,
+        self,
+        df: pd.DataFrame,
         *,
         max_categories: int = 50,
         sample_distinct: int = 50,
@@ -277,8 +279,7 @@ class DatasetProfilingStateTool:
 
         return DatasetSummaryModel(n_rows=n_rows, profiles=profiles)
 
-    @staticmethod
-    def dataset_summary_to_json(
+    def dataset_summary_to_json(self,
         summary: DatasetSummaryModel,
         *,
         indent: int | None = None,
@@ -298,8 +299,8 @@ class DatasetProfilingStateTool:
             allow_nan=False,
         )
 
-    @staticmethod
-    def dataset_summary_from_json(payload: str) -> DatasetSummaryModel:
+
+    def dataset_summary_from_json(self, payload: str) -> DatasetSummaryModel:
         data = json.loads(payload)
         return DatasetSummaryModel.model_validate(data)
 

@@ -52,7 +52,6 @@ class CompileProtocolNode(Node):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, Any],
-        user_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         dataset_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))
@@ -78,14 +77,12 @@ class CompileProtocolNode(Node):
                 validation_errors=last_errors,
             )
             
-            attempt_history = messages_history if attempt == 1 else None
-
             try:
                 protocol_model = _llm_protocol_model(
                     llm=self.llm,
                     model_name=self.model_name,
                     prompt=prompt,
-                    history=attempt_history,
+                    history=messages_history,
                     json_attempts=max(1, self.json_attempts),
                 )
 

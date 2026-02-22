@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from typing import List
 
+def get_protocol_discussion_get_node_info() -> str:
+  return"""
+    Node for discussing protocol. 
+    In case of errors regarding other protocol this is the best way to revise user choice
+    it discuss what can be the treatment, outcome, population, time support, time zero, and other key protocol components based on user messages and dataset metadata. It also confirms protocol readiness before proceeding to transformation and validation.
+    """.strip()
 
 def get_protocol_discussion_system_prompt() -> str:
     """

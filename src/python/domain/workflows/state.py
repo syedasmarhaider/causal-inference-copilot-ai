@@ -22,7 +22,7 @@ class State(ABC):
 
     @property
     @abstractmethod
-    def message(self) -> Optional[str]:
+    def message(self) -> str:
         raise NotImplementedError
 
     @property

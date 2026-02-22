@@ -64,8 +64,6 @@ class LoadDatasetNode(Node):
         conversation_id: UUID,
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, Any],
-        user_message: Optional[str],
-        router_message: Optional[str],
         messages_history: Optional[Sequence[ChatMessage]],
         state: State,
     ) -> State:
@@ -99,7 +97,7 @@ class LoadDatasetNode(Node):
                 "intent": "LOAD_FAILED",
                 "error": str(e),
                 "hint": "Verify the configured CSV exists and is readable, then try again.",
-                "context": {"router_message": router_message, "user_message": user_message},
+                "context": {},
             }
             msg = _llm_message_strict(self._llm, model_name=self._model_name, snapshot=snapshot)
             return LoadDatasetState(
@@ -136,7 +134,7 @@ class LoadDatasetNode(Node):
                     else None
                 ),
                 "hint": "Fix the dataset schema/format and reload.",
-                "context": {"router_message": router_message, "user_message": user_message},
+                "context": {},
             }
             msg = _llm_message_strict(self._llm, model_name=self._model_name, snapshot=snapshot)
             return LoadDatasetState(
@@ -156,7 +154,6 @@ class LoadDatasetNode(Node):
             "intent": "LOADED_OK",
             "dataset_preview": {"rows": int(n_rows), "cols": int(n_cols), "columns": cols},
             "summary_stats": {"rows": int(n_rows), "cols": int(n_cols)},
-            "context": {"router_message": router_message, "user_message": user_message},
         }
         msg_ok = _llm_message_strict(self._llm, model_name=self._model_name, snapshot=snapshot_ok)
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import json
 from string import Template
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Type
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
@@ -40,12 +40,18 @@ class LLMAssistedRouterRouter(Router):
         self._model_name = model_name or DEFAULT_MODEL_GEMNI
         self._next_state_names_map: Mapping[str, Optional[str]] = init_next_state_names()
         self._node_name_to_description_map: Mapping[str, str] = get_node_name_with_description()
-
+    
+    
+    def get_initial_state_name(self) -> str:
+        return LoadDatasetState.NAME
+    
+    def get_done_state_name(self) -> str:
+        return NoopDoneState.NAME
+    
     def decide_next(
         self,
         *,
         current_state: Optional[State],
-        user_message: Optional[str],
         messages_history: Sequence[ChatMessage],
     ) -> NextDecision:
         if current_state is None:
@@ -57,7 +63,11 @@ class LLMAssistedRouterRouter(Router):
             return NextDecision(state_name=current_state.name, router_message_for_node=None)
         
         if status == "DONE":
+            if current_state.name is NoopDoneState.NAME:
+                return NextDecision(state_name=NoopDoneState.NAME, router_message_for_node=None)  
             next_name = self._next_state_names_map.get(current_state.name)
+            if next_name is None:
+                raise ValueError(f"Router has no next state defined for current state {current_state.name!r} with DONE status.")
             return NextDecision(
                     state_name=next_name,
                     router_message_for_node=None,
@@ -71,7 +81,6 @@ class LLMAssistedRouterRouter(Router):
                 current_state=current_state,
                 get_next_state_names_map=self._next_state_names_map,
                 get_node_name_to_description_map=self._node_name_to_description_map,
-                user_message=user_message,
                 messages_history=messages_history,
             )
             
@@ -88,8 +97,7 @@ def _decision_on_aborted_state(
     current_state: State,
     get_next_state_names_map: Mapping[str, Optional[str]],
     get_node_name_to_description_map: Mapping[str, str],
-    user_message: Optional[str],
-    messages_history: Sequence[ChatMessage],
+    messages_history: Optional[Sequence[ChatMessage]],
 ) -> NextDecision:
     last_10_messages: list[ChatMessage] = list(messages_history[-10:]) if messages_history else []
     
@@ -110,7 +118,6 @@ def _decision_on_aborted_state(
     prompt_filled = prompt.substitute(
         current_node_name=current_state.name,
         current_node_error=current_state.error or "null",
-        user_message=user_message or "null",
         next_state_names_map=json.dumps(dict(get_next_state_names_map), ensure_ascii=False),
         node_name_to_description_map=json.dumps(dict(get_node_name_to_description_map), ensure_ascii=False),
         allowed_previous_states=json.dumps(sorted(allowed_prev), ensure_ascii=False),
@@ -157,7 +164,6 @@ Goal
 Inputs (some may be null)
 - current_node_name: $current_node_name
 - current_node_error: $current_node_error
-- user_message: $user_message
 - next_state_names_map: $next_state_names_map
 - node_name_to_description_map: $node_name_to_description_map
 - allowed_previous_states: $allowed_previous_states
@@ -175,6 +181,18 @@ Output (STRICT JSON ONLY; no extra text)
 """.strip()
     )
 
+
+def build_state_classes_by_name() -> Mapping[str, Type[State]]:
+    return {
+        LoadDatasetState.NAME: LoadDatasetState,
+        ProtocolDiscussionState.NAME: ProtocolDiscussionState,
+        CompileProtocolState.NAME: CompileProtocolState,
+        CleanProtocolState.NAME: CleanProtocolState,
+        ValidateCleanProtocolState.NAME: ValidateCleanProtocolState,
+        TransformProtocolState.NAME: TransformProtocolState,
+        ConfirmTransformedProtocolState.NAME: ConfirmTransformedProtocolState,
+        NoopDoneState.NAME: NoopDoneState,
+    }
         
 
 def init_next_state_names() -> Mapping[str, Optional[str]]:
