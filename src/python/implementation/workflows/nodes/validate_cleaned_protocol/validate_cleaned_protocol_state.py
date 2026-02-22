@@ -62,7 +62,6 @@ class ValidateCleanProtocolState(State):
         return ValidateCleanProtocolDeps.pre_required_states_names()
 
     def to_json_dict(self) -> Dict[str, Any]:
-        # payload-only dict (outer store keyed by state name)
         return self.payload.model_dump(mode="json")
 
     @classmethod

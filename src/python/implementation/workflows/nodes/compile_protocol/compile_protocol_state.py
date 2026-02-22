@@ -7,7 +7,6 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from python.domain.workflows.state import ACTION, State, Status
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_deps import CompileProtocolDeps
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import ProtocolSpec
-from python.implementation.workflows.utils.utils import json_sanitize
 
 
 class CompileProtocolPayloadModel(BaseModel):
@@ -79,11 +78,6 @@ class CompileProtocolState(State):
 
     def to_json_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = self.payload.model_dump(mode="json")
-        if self.payload.protocol is not None:
-            out["protocol"] = json_sanitize(cast(Any, self.payload.protocol))
-        if self.payload.compile_issues is not None:
-            out["compile_issues"] = json_sanitize(cast(Any, self.payload.compile_issues))
-
         return out
 
     @classmethod

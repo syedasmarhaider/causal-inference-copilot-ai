@@ -61,7 +61,7 @@ class ConfirmTransformedProtocolNode(Node):
         
         has_fail = any(i.severity == "FAIL" for i in clean_dataset_validation_issues) or any(i.severity == "FAIL" for i in transform_validation_issues)
         if has_fail:
-            issues_json = json_sanitize([i.model_dump(mode="json") for i in clean_dataset_validation_issues + transform_validation_issues])
+            issues_json = [i.model_dump(mode="json") for i in clean_dataset_validation_issues + transform_validation_issues]
             user_prompt= "\n\nValidation issues:\n" + issues_json
             system_prompt = llm1_fail_system_prompt()
             
@@ -76,7 +76,7 @@ class ConfirmTransformedProtocolNode(Node):
          
         has_warn = any(i.severity == "WARN" for i in clean_dataset_validation_issues) or any(i.severity == "WARN" for i in transform_validation_issues)
         if has_warn:
-            issues_json = json_sanitize([i.model_dump(mode="json") for i in clean_dataset_validation_issues + transform_validation_issues])
+            issues_json = [i.model_dump(mode="json") for i in clean_dataset_validation_issues + transform_validation_issues]
             system_prompt = llm2_warn_system_prompt()
             user_prompt = "\n\nValidation issues:\n" + issues_json
             message_for_user = _call_llm_for_discussion(self.llm, self.model_name, messages_history, system_prompt, user_prompt)

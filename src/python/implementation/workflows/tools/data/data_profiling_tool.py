@@ -7,8 +7,6 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
-from python.implementation.workflows.utils.utils import json_sanitize
-
 # =============================================================================
 # Errors (structured + parseable)
 # =============================================================================
@@ -283,22 +281,8 @@ class DatasetProfilingStateTool:
         summary: DatasetSummaryModel,
         *,
         indent: int | None = None,
-        sort_keys: bool = True,
     ) -> str:
-        """
-        Always returns STRICT valid JSON (no NaN/Inf).
-        Deterministic output by default via sort_keys=True.
-        """
-        payload = json_sanitize(summary.model_dump(mode="python"))
-        return json.dumps(
-            payload,
-            ensure_ascii=False,
-            indent=indent,
-            sort_keys=sort_keys,
-            separators=(",", ":") if indent is None else None,
-            allow_nan=False,
-        )
-
+        return summary.model_dump_json(indent=indent)
 
     def dataset_summary_from_json(self, payload: str) -> DatasetSummaryModel:
         data = json.loads(payload)
