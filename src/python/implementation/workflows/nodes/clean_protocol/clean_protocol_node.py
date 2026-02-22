@@ -23,7 +23,6 @@ from python.implementation.workflows.nodes.compile_protocol.protocol_specs impor
     CategoricalOutcomeSpecModel,
     CategoricalTreatmentSpecModel,
     ContinuousOutcomeSpecModel,
-    ExclusionRuleModel,
     ProtocolSpec,
 )
 from python.implementation.workflows.utils.utils import BOOL_FALSE, BOOL_TRUE
@@ -122,7 +121,7 @@ class CleanProtocolNode(Node):
             # 2) Null purge + exclusions
             df2, excl_summary = apply_null_purge_then_exclusions(
                 df1,
-                list(compiled_protocol.exclusions),
+                protocol=compiled_protocol,
                 missing_sentinels=self.missing_sentinels,
             )
 
@@ -491,7 +490,6 @@ def _coerce_literals_for_series(s: pd.Series, values: Sequence[str]) -> List[Any
 def apply_null_purge_then_exclusions(
     df: pd.DataFrame,
     protocol: ProtocolSpec,
-    exclusions: List[ExclusionRuleModel],
     *,
     missing_sentinels: Sequence[str] = ("na", "nan", "null"),
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
@@ -513,9 +511,7 @@ def apply_null_purge_then_exclusions(
     # KEY NULL PURGE (NOT GLOBAL)
     # ----------------------------
     tcol = protocol.treatment_spec.column
-    ycol = protocol.outcome_spec.column
-
-    required_nonnull: List[str] = [tcol, ycol]
+    required_nonnull: List[str] = [tcol]
     if protocol.time_zero_type == "COLUMN":
         required_nonnull.append(protocol.time_zero)
 
@@ -526,9 +522,9 @@ def apply_null_purge_then_exclusions(
     n_before_nulls = int(cur.shape[0])
     cur = cur.dropna(axis=0, how="any", subset=required_nonnull).copy() # pyright: ignore[reportUnknownMemberType]
     n_after_nulls = int(cur.shape[0])
-
     applied: List[Dict[str, Any]] = []
-
+    
+    exclusions = protocol.exclusions
     for i, rule in enumerate(exclusions):
         col = rule.column
         op = rule.op

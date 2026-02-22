@@ -31,16 +31,10 @@ from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cl
     ValidationIssue,
     # ---- structural / protocol invariants ----
     validate_min_rows,
+    validate_outcome,
     validate_protocol_role_columns_invariants,
     validate_time_zero_semantics_protocol,
-    # ---- treatment ----
-    validate_treatment_missingness_protocol,
-    validate_treatment_domain_integrity_protocol,
-    validate_treatment_variation,
-    # ---- outcome ----
-    validate_outcome_missingness,
-    validate_outcome_domain_integrity,
-    validate_outcome_variation,
+
     # ---- covariates + effect modifiers ----
     validate_covariate_and_effect_modifier_presence,
     validate_covariate_and_effect_modifier_missingness,
@@ -50,6 +44,7 @@ from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cl
     validate_covariate_and_effect_modifier_type_risks,
     # ---- overlap / positivity ----
     validate_overlap_and_positivity,
+    validate_treatment,
 )
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
@@ -148,32 +143,17 @@ class ValidateCleanProtocolNode(Node):
             # =========================================================================
             # 2) Treatment validations (ProtocolSpec-native)
             # =========================================================================
-            issues, m = validate_treatment_missingness_protocol(df=view, protocol=proto)
+            issues, m = validate_treatment(df=view, protocol=proto)
             all_issues.extend(issues)
-            metrics["treatment_missingness"] = m
-
-            issues, m = validate_treatment_domain_integrity_protocol(df=view, protocol=proto)
-            all_issues.extend(issues)
-            metrics["treatment_domain"] = m
-
-            issues, m = validate_treatment_variation(df=view, protocol=proto)
-            all_issues.extend(issues)
-            metrics["treatment_variation"] = m
+            metrics["treatment"] = m
 
             # =========================================================================
             # 3) Outcome validations (ProtocolSpec-native)
             # =========================================================================
-            issues, m = validate_outcome_missingness(df=view, protocol=proto)
+            issues, m = validate_outcome(df=view, protocol=proto)
             all_issues.extend(issues)
-            metrics["outcome_missingness"] = m
+            metrics["outcome"] = m
 
-            issues, m = validate_outcome_domain_integrity(df=view, protocol=proto)
-            all_issues.extend(issues)
-            metrics["outcome_domain"] = m
-
-            issues, m = validate_outcome_variation(df=view, protocol=proto)
-            all_issues.extend(issues)
-            metrics["outcome_variation"] = m
 
             # =========================================================================
             # 4) Covariates / Effect modifiers (ProtocolSpec-native)
