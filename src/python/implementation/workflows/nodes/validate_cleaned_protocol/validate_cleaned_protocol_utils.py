@@ -27,11 +27,9 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, TypedDic
 
 import numpy as np
 
+from python.implementation.workflows.utils.validation import ValidationSeverity
+
 # TODO: move to tools
-
-ValidationSeverity = Literal["WARN", "FAIL"]
-
-
 class ValidationIssue(TypedDict):
     severity: ValidationSeverity
     message: str
@@ -210,12 +208,12 @@ def validate_time_zero_semantics_protocol(
     """
     issues: List[ValidationIssue] = []
 
-    tz_type = getattr(protocol, "time_zero_type", None)
+    tz_type = protocol.time_zero_type
     if tz_type != "COLUMN":
         return issues, {"time_zero_type": tz_type}
 
-    tz = getattr(protocol, "time_zero", None)
-    if not isinstance(tz, str) or not tz.strip():
+    tz = protocol.time_zero
+    if not tz.strip():
         issues.append(
             _issue(
                 severity="FAIL",
@@ -322,10 +320,8 @@ def _treatment_allowed_literals(protocol: ProtocolSpec) -> List[str]:
     ts = protocol.treatment_spec
     if isinstance(ts, BinaryTreatmentSpecModel):
         return [ts.treated, ts.control]
-    if isinstance(ts, CategoricalTreatmentSpecModel):
+    if isinstance(ts, CategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         return list(ts.levels)
-    if isinstance(ts, ContinuousTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        raise ValueError("ContinuousTreatmentSpecModel should not be passed to _treatment_allowed_literals; caller should check type and return None for continuous treatments.")
     # Should not happen if schema is enforced
     raise ValueError(f"Unknown treatment_spec type: {type(ts)}")
 
@@ -414,13 +410,6 @@ def validate_treatment(
                 fix_hint="Exclude rows with missing treatment values upstream.",
             )
         )
-        return issues, metrics
-
-    # -------------------------
-    # Step 2: Continuous treatment => stop after missingness
-    # -------------------------
-    if isinstance(protocol.treatment_spec, ContinuousTreatmentSpecModel):
-        metrics["domain_check"] = "skipped_continuous"
         return issues, metrics
 
     # -------------------------
@@ -601,9 +590,6 @@ def validate_treatment(
     return issues, metrics
 
 
-# =============================================================================
-# 4) Outcome validations (pre-transform; whitelist already applied upstream)
-# =============================================================================
 def _outcome_allowed_literals(protocol: ProtocolSpec) -> List[str] | None:
     """
     Protocol is source of truth for DISCRETE outcome domains.
@@ -611,7 +597,6 @@ def _outcome_allowed_literals(protocol: ProtocolSpec) -> List[str] | None:
     Returns allowed literals:
       - binary      -> [event, non_event]
       - categorical -> levels
-      - duration    -> [event_value, censor_value]   (applies to event_column only)
       - continuous  -> None (no finite literal domain)
     """
     ys = protocol.outcome_spec
@@ -619,7 +604,7 @@ def _outcome_allowed_literals(protocol: ProtocolSpec) -> List[str] | None:
         return [ys.event, ys.non_event]
     if isinstance(ys, CategoricalOutcomeSpecModel):
         return list(ys.levels)
-    if isinstance(ys, ContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
+    if isinstance(ys, ContinuousOutcomeSpecModel):  # pyright: ignore[reportUnnecessaryIsInstance]
         return None
     raise ValueError(f"Unknown outcome_spec type: {type(ys)}")
 
@@ -628,13 +613,12 @@ def validate_outcome(
     *,
     df: pd.DataFrame,
     protocol: ProtocolSpec,
-    # count gates (discrete outcomes + duration event indicator)
+    # count gates (discrete outcomes)
     min_count_per_literal_fail: int = 15,
     # continuous outcome gates
     min_unique_numeric_fail: int = 2,
-    require_strict_numeric: bool = True,   # FAIL if any non-numeric token in continuous/duration duration_column
-    require_non_negative_duration: bool = True,
-    # imbalance gates (discrete outcomes + duration event indicator)
+    require_strict_numeric: bool = True,   # FAIL if any non-numeric token in continuous outcome
+    # imbalance gates (discrete outcomes)
     min_share_fail: float = 0.05,
     max_ratio_fail: float = 20.0,
     min_neff_fail: float = 100.0,          # only used when there are exactly 2 allowed literals
@@ -643,8 +627,8 @@ def validate_outcome(
     STRICT (FAIL-only) outcome validation based on ProtocolSpec outcome_spec.
 
     Shared hard gates:
-      - required column(s) must exist
-      - missingness == 0 on required column(s)
+      - required column must exist
+      - missingness == 0 on required column
       - df must be non-empty
 
     Binary/Categorical:
@@ -655,10 +639,6 @@ def validate_outcome(
     Continuous:
       - numeric-coercible (strict if require_strict_numeric)
       - numeric variability: nunique >= min_unique_numeric_fail
-
-    Duration:
-      - duration_column: numeric-coercible (strict if require_strict_numeric), (optional) non-negative, variability gate
-      - event_column: discrete domain check exactly {event_value, censor_value}, counts threshold, imbalance gates
     """
     issues: List[ValidationIssue] = []
     ys = protocol.outcome_spec
@@ -666,7 +646,6 @@ def validate_outcome(
     # -------------------------
     # Step 0: determine required columns
     # -------------------------
-
     required_cols = [ys.column]
     domain_col = ys.column
 
@@ -688,15 +667,20 @@ def validate_outcome(
         issues.append(
             _issue(
                 severity="FAIL",
-                message="Outcome column(s) referenced by protocol are missing from dataframe.",
+                message="Outcome column referenced by protocol is missing from dataframe.",
                 evidence=metrics,
-                fix_hint="Ensure outcome columns are retained through filtering/column-drop steps and match exactly.",
+                fix_hint="Ensure outcome column is retained through filtering/column-drop steps and matches exactly.",
             )
         )
         return issues, metrics
 
     if n_rows == 0:
-        metrics = {"present": True, "outcome_kind": getattr(ys, "kind", None), "required_cols": required_cols, "n_rows": 0}
+        metrics = {
+            "present": True,
+            "outcome_kind": getattr(ys, "kind", None),
+            "required_cols": required_cols,
+            "n_rows": 0,
+        }
         issues.append(
             _issue(
                 severity="FAIL",
@@ -723,7 +707,6 @@ def validate_outcome(
         "min_count_per_literal_fail": int(min_count_per_literal_fail),
         "min_unique_numeric_fail": int(min_unique_numeric_fail),
         "require_strict_numeric": bool(require_strict_numeric),
-        "require_non_negative_duration": bool(require_non_negative_duration),
         "min_share_fail": float(min_share_fail),
         "max_ratio_fail": float(max_ratio_fail),
         "min_neff_fail": float(min_neff_fail),
@@ -733,7 +716,7 @@ def validate_outcome(
         issues.append(
             _issue(
                 severity="FAIL",
-                message="Outcome must not contain any missing values in required outcome column(s).",
+                message="Outcome must not contain any missing values in the required outcome column.",
                 evidence=metrics,
                 fix_hint="Exclude rows with missing outcome values upstream.",
             )
@@ -792,208 +775,11 @@ def validate_outcome(
         return issues, metrics
 
     # -------------------------
-    # Step 3B: Duration outcome (duration_column + event_column)
-    # -------------------------
-    if isinstance(ys, DurationOutcomeSpecModel):
-        # 3B-1 duration column numeric checks
-        sd = df[ys.duration_column]
-        vd = pd.to_numeric(sd, errors="coerce")
-
-        n_nonmissing_d = int(sd.notna().sum())
-        n_numeric_d = int(vd.notna().sum())
-        n_bad_d = int(n_nonmissing_d - n_numeric_d)
-
-        metrics.update(
-            {
-                "duration_column": ys.duration_column,
-                "duration_dtype": str(sd.dtype),
-                "n_nonmissing_duration": n_nonmissing_d,
-                "n_numeric_duration": n_numeric_d,
-                "n_non_numeric_duration_nonmissing": n_bad_d,
-                "numeric_parse_rate_duration": float(n_numeric_d / max(1, n_nonmissing_d)),
-            }
-        )
-
-        if require_strict_numeric and n_bad_d > 0:
-            bad_mask = vd.isna() & sd.notna()
-            bad_sample = sd.loc[bad_mask].unique().tolist()[:25]
-            issues.append(
-                _issue(
-                    severity="FAIL",
-                    message="Duration column contains non-numeric tokens (data not clean).",
-                    evidence={**metrics, "bad_duration_value_sample": [_safe_display(x) for x in bad_sample]},
-                    fix_hint="Clean duration column to be strictly numeric (e.g., days as float).",
-                )
-            )
-            return issues, metrics
-
-        if require_non_negative_duration:
-            neg_count = int((vd.dropna() < 0).sum())
-            metrics["n_negative_duration"] = neg_count
-            if neg_count > 0:
-                issues.append(
-                    _issue(
-                        severity="FAIL",
-                        message="Duration column contains negative values (invalid for durations).",
-                        evidence=metrics,
-                        fix_hint="Fix parsing/definition so durations are >= 0.",
-                    )
-                )
-                return issues, metrics
-
-        n_unique_d = int(vd.nunique(dropna=True))
-        metrics["n_unique_duration_numeric"] = n_unique_d
-        if n_unique_d < int(min_unique_numeric_fail):
-            issues.append(
-                _issue(
-                    severity="FAIL",
-                    message="Duration column is degenerate (too few unique numeric values).",
-                    evidence=metrics,
-                    fix_hint="Verify duration definition; choose a duration with variability.",
-                )
-            )
-            return issues, metrics
-
-        # 3B-2 event indicator strict discrete checks
-        se = df[ys.event_column]
-        allowed_literals = _outcome_allowed_literals(protocol)  # [event_value, censor_value]
-        if allowed_literals is None:
-            raise ValueError("Duration outcome must define finite literals for event/censor; got None.")
-
-        allowed_unique = list(dict.fromkeys(allowed_literals))
-        allowed_set = set(allowed_unique)
-
-        obs_values = se.unique().tolist()
-        obs_set = set(obs_values)
-
-        unexpected = sorted(list(obs_set - allowed_set), key=lambda x: str(x))
-        missing_allowed = sorted(list(allowed_set - obs_set), key=lambda x: str(x))
-
-        vc = se.value_counts(dropna=True)
-        counts_by_allowed = {a: int(vc.get(a, 0)) for a in allowed_unique}
-
-        metrics.update(
-            {
-                "event_column": ys.event_column,
-                "event_dtype": str(se.dtype),
-                "allowed_literals": list(allowed_literals),
-                "allowed_unique": allowed_unique,
-                "counts_by_allowed": counts_by_allowed,
-                "n_unique_observed_event": int(len(obs_set)),
-                "n_unexpected": int(len(unexpected)),
-                "unexpected": [{"value": _safe_display(v), "count": int(vc.get(v, 0))} for v in unexpected[:50]],
-                "n_missing_allowed": int(len(missing_allowed)),
-                "missing_allowed": [_safe_display(v) for v in missing_allowed[:50]],
-            }
-        )
-
-        if unexpected:
-            issues.append(
-                _issue(
-                    severity="FAIL",
-                    message="Strict protocol violation: duration event_column contains values outside protocol literals (data not normalized).",
-                    evidence=metrics,
-                    fix_hint="Map/filter upstream so event_column values are exactly {event_value, censor_value}.",
-                )
-            )
-            return issues, metrics
-
-        if missing_allowed:
-            issues.append(
-                _issue(
-                    severity="FAIL",
-                    message="Strict protocol violation: duration event_column is missing required protocol literals (event or censor absent).",
-                    evidence=metrics,
-                    fix_hint="Relax filtering or fix mapping so both event and censor values appear (or update protocol literals).",
-                )
-            )
-            return issues, metrics
-
-        # min count per literal gate
-        low_counts = [
-            {"literal": _safe_display(a), "count": counts_by_allowed[a]}
-            for a in allowed_unique
-            if counts_by_allowed[a] < int(min_count_per_literal_fail)
-        ]
-        if low_counts:
-            issues.append(
-                _issue(
-                    severity="FAIL",
-                    message="Strict protocol violation: duration event/censor counts do not meet minimum threshold.",
-                    evidence={**metrics, "low_count_literals": low_counts[:50], "n_low_count": int(len(low_counts))},
-                    fix_hint="Increase cohort size or adjust filters so both event and censor have sufficient support.",
-                )
-            )
-            return issues, metrics
-
-        # imbalance gates on event indicator
-        total = sum(counts_by_allowed.values())
-        shares = {a: counts_by_allowed[a] / total for a in allowed_unique}
-        min_share = min(shares.values())
-        min_count = min(counts_by_allowed.values())
-        max_count = max(counts_by_allowed.values())
-        ratio = (max_count / min_count) if min_count > 0 else float("inf")
-
-        hhi = sum(p * p for p in shares.values())
-        entropy = -sum(p * math.log(p) for p in shares.values() if p > 0.0)
-
-        metrics.update(
-            {
-                "total_in_allowed": int(total),
-                "shares_by_allowed": shares,
-                "min_share": float(min_share),
-                "imbalance_ratio_max_over_min": float(ratio),
-                "hhi": float(hhi),
-                "entropy": float(entropy),
-            }
-        )
-
-        if float(min_share) < float(min_share_fail):
-            issues.append(
-                _issue(
-                    severity="FAIL",
-                    message="Outcome imbalance (duration event indicator): minimum class share is below threshold.",
-                    evidence=metrics,
-                    fix_hint="Adjust cohort/definition so both event and censor have adequate representation.",
-                )
-            )
-            return issues, metrics
-
-        if float(ratio) > float(max_ratio_fail):
-            issues.append(
-                _issue(
-                    severity="FAIL",
-                    message="Outcome imbalance (duration event indicator): max/min count ratio exceeds threshold.",
-                    evidence=metrics,
-                    fix_hint="Adjust cohort/definition so the event indicator is not extremely imbalanced.",
-                )
-            )
-            return issues, metrics
-
-        if len(allowed_unique) == 2 and float(min_neff_fail) > 0.0:
-            a0, a1 = allowed_unique[0], allowed_unique[1]
-            n0, n1 = counts_by_allowed[a0], counts_by_allowed[a1]
-            neff = (2.0 * n0 * n1) / (n0 + n1) if (n0 + n1) > 0 else 0.0
-            metrics["n_eff_harmonic_mean"] = float(neff)
-            if float(neff) < float(min_neff_fail):
-                issues.append(
-                    _issue(
-                        severity="FAIL",
-                        message="Outcome imbalance (duration event indicator): effective sample size is too small.",
-                        evidence=metrics,
-                        fix_hint="Increase cohort size or redefine outcome to raise effective information.",
-                    )
-                )
-                return issues, metrics
-
-        return issues, metrics
-
-    # -------------------------
-    # Step 3C: Binary/Categorical outcome (strict discrete domain)
+    # Step 3B: Binary/Categorical outcome (strict discrete domain)
     # -------------------------
     allowed_literals = _outcome_allowed_literals(protocol)
     if allowed_literals is None:
-        raise ValueError("Non-continuous, non-duration outcome must have finite literal domain; got None.")
+        raise ValueError("Non-continuous outcome must have finite literal domain; got None.")
 
     allowed_unique = list(dict.fromkeys(allowed_literals))
     allowed_set = set(allowed_unique)

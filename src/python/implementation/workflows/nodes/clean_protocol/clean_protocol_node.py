@@ -490,6 +490,7 @@ def _coerce_literals_for_series(s: pd.Series, values: Sequence[str]) -> List[Any
 
 def apply_null_purge_then_exclusions(
     df: pd.DataFrame,
+    protocol: ProtocolSpec,
     exclusions: List[ExclusionRuleModel],
     *,
     missing_sentinels: Sequence[str] = ("na", "nan", "null"),
