@@ -87,7 +87,7 @@ class CleanProtocolNode(Node):
                     )
                 )
 
-            compiled_protocol = _require_compiled_protocol(deps.compile_protocol)
+            compiled_protocol = deps.compile_protocol.payload.protocol
             if compiled_protocol is None:
                 return CleanProtocolState(
                     payload=CleanProtocolPayloadModel(
@@ -196,21 +196,6 @@ class CleanProtocolNode(Node):
                     user_message=f"Compile inference failed: {e!r}",
                 )
             )
-
-
-# =============================================================================
-# Protocol extraction (no guessing of dependency keys; only internal field)
-# =============================================================================
-
-def _require_compiled_protocol(compile_protocol_state: Any) -> Optional[ProtocolSpec]:
-    """
-    CompileProtocolState is expected to carry the compiled ProtocolSpec in `.protocol`.
-
-    If your CompileProtocolState uses a different attribute name, change it here (single source of truth).
-    """
-    proto = getattr(compile_protocol_state, "protocol", None)
-    return proto if isinstance(proto, ProtocolSpec) else None
-
 
 # =============================================================================
 # Feasibility checks (minimal + deterministic)

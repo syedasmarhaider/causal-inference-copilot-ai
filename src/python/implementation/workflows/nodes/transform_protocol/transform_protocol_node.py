@@ -41,7 +41,6 @@ from python.implementation.workflows.tools.data.data_profiling_tool import (
     DatasetSummaryModel,
 )
 from python.implementation.workflows.utils.validation import ValidationIssueModel, ValidationSeverity
-from python.implementation.workflows.utils.utils import json_sanitize
 
 
 
@@ -427,7 +426,7 @@ def llm_generate_encoding_plan_from_protocol_and_summary(
     system_prompt = build_encoding_plan_system_prompt()
 
     protocol_obj: Dict[str, Any] = protocol.model_dump(mode="json")
-    summary_obj: Dict[str, Any] = json_sanitize(dataset_summary.model_dump(mode="python"))
+    summary_obj: Dict[str, Any] = dataset_summary.model_dump(mode="json")
 
     user_prompt = _build_user_prompt(
         columns=columns,
@@ -634,7 +633,7 @@ def llm_generate_transformed_protocol_spec(
     protocol_json = json.dumps(protocol.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     df_cols_json = json.dumps(df_cols, ensure_ascii=False)
     fmap_json = json.dumps(
-        json_sanitize(feature_map.model_dump(mode="python")),
+        feature_map.model_dump(mode="json"),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

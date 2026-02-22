@@ -17,7 +17,7 @@ from python.implementation.workflows.nodes.confirm_transformed_protocol.confirm_
     ConfirmTransformedProtocolPayloadModel,
     ConfirmTransformedProtocolState,
 )
-from python.implementation.workflows.utils.utils import json_sanitize
+
 
 
 
@@ -61,8 +61,8 @@ class ConfirmTransformedProtocolNode(Node):
         
         has_fail = any(i.severity == "FAIL" for i in clean_dataset_validation_issues) or any(i.severity == "FAIL" for i in transform_validation_issues)
         if has_fail:
-            issues_json = [i.model_dump(mode="json") for i in clean_dataset_validation_issues + transform_validation_issues]
-            user_prompt= "\n\nValidation issues:\n" + issues_json
+            issues_json = [i.model_dump_json() for i in clean_dataset_validation_issues + transform_validation_issues]
+            user_prompt= "\n\nValidation issues:\n" + "\n".join(issues_json)
             system_prompt = llm1_fail_system_prompt()
             
             msg = _call_llm_for_discussion(self.llm, self.model_name, None, system_prompt, user_prompt)
@@ -76,9 +76,9 @@ class ConfirmTransformedProtocolNode(Node):
          
         has_warn = any(i.severity == "WARN" for i in clean_dataset_validation_issues) or any(i.severity == "WARN" for i in transform_validation_issues)
         if has_warn:
-            issues_json = [i.model_dump(mode="json") for i in clean_dataset_validation_issues + transform_validation_issues]
+            issues_json = [i.model_dump_json() for i in clean_dataset_validation_issues + transform_validation_issues]
             system_prompt = llm2_warn_system_prompt()
-            user_prompt = "\n\nValidation issues:\n" + issues_json
+            user_prompt = "\n\nValidation issues:\n" + "\n".join(issues_json)
             message_for_user = _call_llm_for_discussion(self.llm, self.model_name, messages_history, system_prompt, user_prompt)
             last_10_messages = messages_history[-10:] if messages_history else None
             
@@ -104,7 +104,7 @@ class ConfirmTransformedProtocolNode(Node):
                     ConfirmTransformedProtocolPayloadModel(
                         user_accepted=False,
                         user_message=user_decsion.user_message,
-                        error_message=issues_json + "\n\nAssistant explanation:\n" + message_for_user,
+                        error_message="\n".join(issues_json) + "\n\nAssistant explanation:\n" + message_for_user,
                     )
                 )   
              

@@ -2042,6 +2042,35 @@ def overlap_summary_univariate(
     }
 
 
+def validate_WX_overlap(key_cols: KeyColumns) -> Tuple[List[ValidationIssue], Dict[str, Any]]:
+    W = list(key_cols.W_cols)
+    X = list(key_cols.X_cols)
+
+    overlap = sorted(set(W).intersection(set(X)))
+
+    m: Dict[str, Any] = {
+        "n_W": len(W),
+        "n_X": len(X),
+        "n_overlap": len(overlap),
+        "overlap_cols": overlap,
+    }
+
+    if not overlap:
+        return [], m
+
+    issues: List[ValidationIssue] = [
+        _issue(
+            severity="WARN",
+            message="W/X overlap detected: some columns appear in both covariates (W) and effect modifiers (X).",
+            evidence=m,
+            fix_hint=(
+                "This is allowed but often redundant. Prefer disjoint sets: keep heterogeneity drivers in X and "
+                "keep pure confounders/controls in W. If intentional, ensure downstream code dedupes W+X lists."
+            ),
+        )
+    ]
+    return issues, m
+
 def overlap_propensity_proxy(
     df: pd.DataFrame,
     *,

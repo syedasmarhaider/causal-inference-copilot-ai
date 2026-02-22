@@ -35,6 +35,7 @@ from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cl
     overlap_support_check,
     profile_feature_block,
     select_modeling_view,
+    validate_WX_overlap,
     validate_column_list_invariants,
     validate_feature_cardinality,
     validate_feature_constantness,
@@ -125,6 +126,10 @@ class ValidateCleanProtocolNode(Node):
                 "n_cols": int(view.shape[1]),
                 "columns": list(map(str, view.columns)),
             }
+            
+            issues, m = validate_WX_overlap(key_cols)
+            all_issues.extend(issues)
+            metrics["wx_overlap"] = m
 
             # 2) Structural invariants
             issues, m = validate_min_rows(view, min_rows_fail=1)
@@ -170,13 +175,11 @@ class ValidateCleanProtocolNode(Node):
 
             W_prof = profile_feature_block(view, key_cols.W_cols, label="W")
             X_prof = profile_feature_block(view, key_cols.X_cols, label="X")
-            WX_prof = profile_feature_block(view, [*key_cols.W_cols, *key_cols.X_cols], label="WX")
 
             metrics["W_profile"] = W_prof.to_dict()
             metrics["X_profile"] = X_prof.to_dict()
-            metrics["WX_profile"] = WX_prof.to_dict()
 
-            for prof in (W_prof, X_prof, WX_prof):
+            for prof in (W_prof, X_prof):
                 issues, m = validate_feature_missingness(prof)
                 all_issues.extend(issues)
                 metrics[f"{prof.label}_missingness"] = m
@@ -258,18 +261,10 @@ class ValidateCleanProtocolNode(Node):
                 ],
             )
         except Exception as e:
-            return self._abort(
-                messages_history=messages_history,
-                validation_error=repr(e),
-                issues=[
-                    {
-                        "severity": "FAIL",
-                        "message": "Server error while validating compiled inference inputs.",
-                        "evidence": {"error": repr(e)},
-                        "fix_hint": "Check server logs and dataset/protocol consistency.",
-                    }
-                ],
-            )
+            logging.exception("Unexpected error in ValidateCleanProtocolNode: %s", repr(e))
+            raise e
+            
+        
 
     # =============================================================================
     # Internals
