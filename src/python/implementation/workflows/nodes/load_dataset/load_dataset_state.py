@@ -12,10 +12,12 @@ from python.implementation.workflows.utils.utils import json_sanitize, uuid_from
 class LoadDatasetPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    id: Optional[UUID] = None
+    # TODO: for now we keep dataset id fixed since we dont have actual dataset loading and this is just for prototyping. In the future when we implement actual dataset loading, we should generate a new UUID for each loaded dataset.
+    id: Optional[UUID] = UUID("486f4975-6cd9-4261-a122-e6b0fc46462d")
     summary: Optional[DatasetSummaryModel] = None
     load_error: Optional[str] = None
-    user_message: Optional[str] = None
+    # TODO: solve this problem later of prerun
+    user_message: Optional[str] = "Not run yet"
 
     @field_validator("load_error", "user_message", mode="before")
     @classmethod
