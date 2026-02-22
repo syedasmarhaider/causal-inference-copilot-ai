@@ -32,14 +32,6 @@ class BinaryTreatmentSpecModel(BaseModel):
     treated: NonEmptyStr
     control: NonEmptyStr
 
-class ContinuousTreatmentSpecModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    kind: Literal["continuous"]
-    column: NonEmptyStr
-    unit: Optional[NonEmptyStr] = None
-    clip_min: Optional[float] = None
-    clip_max: Optional[float] = None
-
 
 class CategoricalTreatmentSpecModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -49,7 +41,7 @@ class CategoricalTreatmentSpecModel(BaseModel):
 
 
 TreatmentSpecModel = Annotated[
-    Union[BinaryTreatmentSpecModel, ContinuousTreatmentSpecModel, CategoricalTreatmentSpecModel],
+    Union[BinaryTreatmentSpecModel, CategoricalTreatmentSpecModel],
     Field(discriminator="kind"),
 ]
 
@@ -78,17 +70,8 @@ class CategoricalOutcomeSpecModel(BaseModel):
     levels: List[NonEmptyStr] = Field(..., min_length=2)
 
 
-class DurationOutcomeSpecModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    kind: Literal["duration"]
-    duration_column: NonEmptyStr
-    event_column: NonEmptyStr
-    event_value: NonEmptyStr
-    censor_value: NonEmptyStr
-
-
 OutcomeSpecModel = Annotated[
-    Union[BinaryOutcomeSpecModel, ContinuousOutcomeSpecModel, CategoricalOutcomeSpecModel, DurationOutcomeSpecModel],
+    Union[BinaryOutcomeSpecModel, ContinuousOutcomeSpecModel, CategoricalOutcomeSpecModel],
     Field(discriminator="kind"),
 ]
 

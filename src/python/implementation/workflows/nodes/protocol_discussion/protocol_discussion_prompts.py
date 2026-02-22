@@ -72,6 +72,7 @@ def get_protocol_discussion_confirmation_prompt() -> str:
     return """
 You are a helpful, precise, clinically-oriented Causal ML Copilot conducting a protocol intake DISCUSSION.
 IMPORTANT: In this step you DO NOT edit PROTOCOL_DISCUSSION. You only talk to the user. Dont invent cols and values stick to values of data summary
+ONLY BINARY AND CATEGORICAL TREATMENT IS SUPPORTED AND BINARY CATEGORICAL AND CONTINUOUS OUTCOME IS SUPPORTED. Dont allow user to chose other than that and say sorry it is not supported and provide nearest alternatives
 
 You will receive:
 - PROTOCOL_DISCUSSION (Q/A document; may be empty/UNCLEAR).

@@ -13,11 +13,9 @@ from python.implementation.workflows.nodes.compile_protocol.protocol_specs impor
     CategoricalOutcomeSpecModel,
     CategoricalTreatmentSpecModel,
     ContinuousOutcomeSpecModel,
-    ContinuousTreatmentSpecModel,
 )
 
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
-    DurationOutcomeSpecModel,
     ProtocolSpec,
 )
 from python.implementation.workflows.utils.utils import BOOL_FALSE, BOOL_TRUE
@@ -92,13 +90,8 @@ def validate_protocol_role_columns_invariants(protocol: ProtocolSpec) -> List[Va
     # -------------------------
     # Outcome columns (duration has two)
     # -------------------------
-    if isinstance(protocol.outcome_spec, DurationOutcomeSpecModel):
-        outcome_cols: List[str] = [
-            protocol.outcome_spec.duration_column,
-            protocol.outcome_spec.event_column,
-        ]
-    else:
-        outcome_cols = [protocol.outcome_spec.column]
+
+    outcome_cols = [protocol.outcome_spec.column]
 
     # -------------------------
     # Covariates / effect modifiers
@@ -626,8 +619,6 @@ def _outcome_allowed_literals(protocol: ProtocolSpec) -> List[str] | None:
         return [ys.event, ys.non_event]
     if isinstance(ys, CategoricalOutcomeSpecModel):
         return list(ys.levels)
-    if isinstance(ys, DurationOutcomeSpecModel):
-        return [ys.event_value, ys.censor_value]
     if isinstance(ys, ContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         return None
     raise ValueError(f"Unknown outcome_spec type: {type(ys)}")
@@ -675,12 +666,9 @@ def validate_outcome(
     # -------------------------
     # Step 0: determine required columns
     # -------------------------
-    if isinstance(ys, DurationOutcomeSpecModel):
-        required_cols = [ys.duration_column, ys.event_column]
-        domain_col = ys.event_column
-    else:
-        required_cols = [ys.column]
-        domain_col = ys.column
+
+    required_cols = [ys.column]
+    domain_col = ys.column
 
     # -------------------------
     # Step 1: presence + empty df

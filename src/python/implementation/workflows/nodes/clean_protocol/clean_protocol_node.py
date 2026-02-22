@@ -23,8 +23,6 @@ from python.implementation.workflows.nodes.compile_protocol.protocol_specs impor
     CategoricalOutcomeSpecModel,
     CategoricalTreatmentSpecModel,
     ContinuousOutcomeSpecModel,
-    ContinuousTreatmentSpecModel,
-    DurationOutcomeSpecModel,
     ExclusionRuleModel,
     ProtocolSpec,
 )
@@ -213,11 +211,7 @@ def _feasibility_error(df: pd.DataFrame, protocol: ProtocolSpec) -> Optional[str
     ys = protocol.outcome_spec
 
     needed = {tcol}
-    if isinstance(ys, DurationOutcomeSpecModel):
-        needed.add(ys.duration_column)
-        needed.add(ys.event_column)
-    else:
-        needed.add(ys.column)
+    needed.add(ys.column)
 
     missing = [c for c in needed if c not in df.columns]
     if missing:
@@ -229,24 +223,15 @@ def _feasibility_error(df: pd.DataFrame, protocol: ProtocolSpec) -> Optional[str
         nunq = int(df[tcol].nunique(dropna=True))
         if nunq < 2:
             return f"Binary treatment column '{tcol}' has <2 unique values after filtering."
-    elif isinstance(ts, CategoricalTreatmentSpecModel):
+    elif isinstance(ts, CategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         nunq = int(df[tcol].nunique(dropna=True))
         if nunq < 2:
             return f"Categorical treatment column '{tcol}' has <2 levels present after filtering."
-    elif isinstance(ts, ContinuousTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        nunq = int(df[tcol].nunique(dropna=True))
-        if nunq < 2:
-            return f"Continuous treatment column '{tcol}' has <=1 unique value after filtering."
     else:
         return f"Unsupported treatment spec kind: {getattr(ts, 'kind', None)!r}"    
 
     # Outcome variability
-    if isinstance(ys, DurationOutcomeSpecModel):
-        ecol = ys.event_column
-        nunq_e = int(df[ecol].nunique(dropna=True))
-        if nunq_e < 2:
-            return f"Duration outcome event column '{ecol}' has <2 unique values after filtering."
-    elif isinstance(ys, BinaryOutcomeSpecModel):
+    if isinstance(ys, BinaryOutcomeSpecModel):
         ycol = ys.column
         nunq = int(df[ycol].nunique(dropna=True))
         if nunq < 2:
@@ -686,10 +671,8 @@ def apply_treatment_outcome_domain_keep(
         allowed_t: Optional[List[str]] = None
         if isinstance(ts, BinaryTreatmentSpecModel):
             allowed_t = [ts.treated, ts.control]
-        elif isinstance(ts, CategoricalTreatmentSpecModel):
+        elif isinstance(ts, CategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
             allowed_t = list(ts.levels)
-        elif isinstance(ts, ContinuousTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-            allowed_t = None  # no whitelist for continuous
         else:
             raise ValueError(f"Unknown treatment_spec kind: {getattr(ts, 'kind', None)!r}")   
 
@@ -714,52 +697,21 @@ def apply_treatment_outcome_domain_keep(
     # ----------------------------
     if keep_outcome_domain:
         ys = compiled_protocol.outcome_spec
-
-        # Duration: whitelist event_column values (event_value/censor_value)
-        if isinstance(ys, DurationOutcomeSpecModel):
-            ecol = ys.event_column
-            if ecol not in cur.columns:
-                raise KeyError(f"Outcome event_column not found in df: {ecol!r}")
-
-            allowed_y = [ys.event_value, ys.censor_value]
-
-            n_before = int(cur.shape[0])
-            if dropna_on_domain_cols:
-                # event_column plus duration_column are logically required for survival analysis
-                dcol = ys.duration_column
-                subset = [ecol] + ([dcol] if dcol in cur.columns else [])
-                cur = cur.dropna(axis=0, how="any", subset=subset).copy() # pyright: ignore[reportUnknownMemberType]
-
-            mask_keep = _mask_keep_in_domain(cur[ecol], allowed_y)
-            cur = cur.loc[mask_keep].copy()
-            n_after = int(cur.shape[0])
-
-            y_summary = {
-                "kind": "duration",
-                "event_column": ecol,
-                "allowed": allowed_y,
-                "n_rows_before": n_before,
-                "n_rows_after": n_after,
-                "n_removed": n_before - n_after,
-            }
-
-        # Non-duration: column-based outcomes
-        else:
-            ycol = ys.column
-            if ycol not in cur.columns:
+        ycol = ys.column
+        if ycol not in cur.columns:
                 raise KeyError(f"Outcome column not found in df: {ycol!r}")
 
-            allowed_y2: Optional[List[str]] = None
-            if isinstance(ys, BinaryOutcomeSpecModel):
+        allowed_y2: Optional[List[str]] = None
+        if isinstance(ys, BinaryOutcomeSpecModel):
                 allowed_y2 = [ys.event, ys.non_event]
-            elif isinstance(ys, CategoricalOutcomeSpecModel):
+        elif isinstance(ys, CategoricalOutcomeSpecModel):
                 allowed_y2 = list(ys.levels)
-            elif isinstance(ys, ContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
+        elif isinstance(ys, ContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
                 allowed_y2 = None  # no whitelist for continuous
-            else:
+        else:
                 raise ValueError(f"Unknown outcome_spec kind: {getattr(ys, 'kind', None)!r}")    
 
-            if allowed_y2 is not None:
+        if allowed_y2 is not None:
                 n_before = int(cur.shape[0])
                 if dropna_on_domain_cols:
                     cur = cur.dropna(axis=0, how="any", subset=[ycol]).copy() # pyright: ignore[reportUnknownMemberType]
