@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import math
 from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, TypedDict
 
@@ -359,6 +360,7 @@ def validate_treatment(
     # -------------------------
     tcol = protocol.treatment_spec.column
     if tcol not in df.columns:
+        logging.warning(f"FUCK Treatment column '{tcol}' not found in dataframe columns: {df.columns.tolist()}")
         metrics = {"treatment_col": tcol, "present": False}
         issues.append(
             _issue(
