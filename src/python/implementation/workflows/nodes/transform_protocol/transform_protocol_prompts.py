@@ -1,88 +1,112 @@
 from __future__ import annotations
 
-def get_transform_protocol_node_info() -> str:
+def get_transform_protcol_info() -> str:
     return (
-        "Transforms the protocol spec to match the transformed dataset. and make inference ready for user validation\n"
-        "This includes updating column references and encoding decisions based on the feature map.\n"
-        "The node runs after the dataset has been transformed and a feature map is available.\n"
-        "The output is a TransformedProtocolSpec that can be used for downstream modeling.\n"
+        "Transform protocol takes the compiled protocol and the cleaned dataset, and produces: \n"
+        "1) a TransformPlan that specifies how to transform each column (e.g., encoding + missingness handling), and \n"
+        "2) a TransformedProtocolSpec that maps the original protocol variables to the transformed features. \n"
+        "3) Run the validaiton on transform protocol and produce user friendly message and issues if there is any problem with the transformed dataset or the spec."
     )
 
-def build_encoding_plan_system_prompt() -> str:
+
+def build_transform_plan_system_prompt() -> str:
     return (
-        "You are a data-encoding planner for causal inference pipelines.\n"
-        "Your job: choose an encoding specification for each column to prepare it for modeling.\n"
-        "You MUST output ONLY valid JSON that conforms exactly to the provided schema.\n"
-        "Do not include explanations outside JSON.\n"
+        "You are a rigorous causal-ML data-preprocessing planner.\n"
+        "Your job: propose a column-wise TransformPlan that is safe, reproducible, and suitable for causal modeling.\n"
         "\n"
         "Hard rules:\n"
-        "- Only reference columns from the provided column list.\n"
-        "- At most one decision per column.\n"
-        "- Do NOT invent new encoding types.\n"
-        "- Prefer encodings that preserve causal interpretability.\n"
-        "- Do not leak target variables into features; treat Y/T columns specially.\n"
+        "- Return ONLY valid JSON that conforms EXACTLY to the provided TransformPlanModel schema.\n"
+        "- No prose, no markdown, no explanations, no keys not in the schema.\n"
+        "- Use ONLY the column names provided in columns_json.\n"
+        "- Do NOT drop rows (row-dropping is disallowed).\n"
+        "- Do NOT invent categories, mappings, or index sets that are not supported by the provided catalogs.\n"
+        "- Do NOT apply any 'cleaning' beyond whitespace stripping (assume the executor only strips whitespace).\n"
+        "- Every column in the plan must be explicitly specified; do not rely on defaults.\n"
+        "\n"
+        "Causal-safety guidance (apply using ONLY the dataset summary):\n"
+        "- Prefer transformations that preserve information and avoid altering the study population.\n"
+        "- Avoid high-cardinality one-hot explosions; use max_categories defensively based on the summary.\n"
+        "- Preserve missingness information when it is non-trivial (e.g., dummy_na or add_missing_indicator),\n"
+        "  unless the summary strongly suggests missingness is negligible.\n"
+        "- If a column is already numeric and well-behaved, prefer minimal transforms.\n"
+        "\n"
+        "If information is insufficient to safely choose an encoding, choose the most conservative option\n"
+        "that keeps information without row drops and without inventing mappings.\n"
     )
 
 
-def build_encoding_plan_user_prompt_template() -> str:
+def build_transform_plan_user_prompt_template() -> str:
     """
-    Template only. NO parsing/serialization here.
-    Caller must format with:
-      {encoding_catalog_text}, {columns_json}, {protocol_json}, {roles_json}, {summary_json}
+    Caller formats with:
+      {encoding_catalog_text}, {missingness_catalog_text}, {columns_json}, {summary_json}, {schema_json}
     """
     return (
-        "You will create an encoding plan for the dataset.\n"
-        "Return ONLY JSON matching the schema.\n"
+        "Create a TransformPlan for causal modeling using ONLY the information below.\n"
+        "Make data-driven choices based on the dataset summary.\n"
         "\n"
-        "Supported encodings (whitelist):\n"
+        "Decision process requirements:\n"
+        "- For each column, choose exactly one encoding spec from the Encoding catalog.\n"
+        "- For each encoding, specify missingness handling ONLY using the allowed missingness fields for that encoding.\n"
+        "- Do NOT drop rows.\n"
+        "- Do NOT invent mappings or category index lists unless the summary provides explicit categories/indices.\n"
+        "- If a categorical column has many unique values, set a conservative max_categories or choose an ordinal strategy\n"
+        "  ONLY if the order is explicitly supported by the summary.\n"
+        "- If a column has missingness, choose an explicit missingness strategy appropriate for that encoding.\n"
+        "\n"
+        "Encodings catalog (allowed encoding specs + fields):\n"
         "{encoding_catalog_text}\n"
         "\n"
-        "Columns (choose ONLY from this list):\n"
+        "Missingness catalog (allowed missingness specs + fields):\n"
+        "{missingness_catalog_text}\n"
+        "\n"
+        "Columns (the ONLY allowed column names):\n"
         "{columns_json}\n"
         "\n"
-        "Protocol (JSON):\n"
-        "{protocol_json}\n"
-        "\n"
-        "Roles (raw columns):\n"
-        "{roles_json}\n"
-        "\n"
-        "Dataset summary (JSON):\n"
+        "Dataset summary (the ONLY data you may use to decide):\n"
         "{summary_json}\n"
         "\n"
-        "Rules for decisions:\n"
-        "- Provide exactly one decision per column you decide to encode.\n"
-        "- Never invent columns.\n"
-        "- For categorical columns: use one-hot only when cardinality is small; otherwise choose an encoding that avoids high dimensionality.\n"
-        "- For boolean columns: keep boolean/binary when possible.\n"
-        "- For numeric columns: keep numeric; consider standardization only if the downstream model benefits.\n"
-        "- For datetime columns: do NOT pass raw timestamps; prefer extracting meaningful parts (year/month/day) only if justified.\n"
-        "- Be conservative: prefer simpler encodings.\n"
+        "Output schema (must match exactly; return ONLY JSON):\n"
+        "{schema_json}\n"
     )
-    
+
+
 def build_transformed_protocol_system_prompt() -> str:
     return (
-        "You output ONLY valid JSON that matches the provided schema.\n"
-        "Use ONLY column names provided in df_after_columns.\n"
-        "Do not invent columns.\n"
-        "Do not include explanations outside JSON.\n"
+        "You are aligning a causal protocol specification to a transformed dataframe.\n"
+        "\n"
+        "Hard rules:\n"
+        "- Return ONLY valid JSON that conforms EXACTLY to the provided output schema.\n"
+        "- No prose, no markdown, no explanations.\n"
+        "- Use ONLY column names present in df_after_columns.\n"
+        "- Do NOT invent features that do not exist in df_after_columns.\n"
+        "- Preserve semantic intent of the original protocol while matching the transformed feature names.\n"
     )
 
 
 def build_transformed_protocol_user_prompt_template() -> str:
     """
-    Template only. Caller formats:
-      {protocol_json}, {df_after_columns_json}, {feature_map_json}
+    Caller formats:
+      {protocol_json}, {df_after_columns_json}, {feature_map_json}, {schema_json}
     """
     return (
-        "Generate a TransformedProtocolSpec for the transformed dataframe.\n"
-        "Return ONLY JSON.\n"
+        "Generate a TransformedProtocolSpec aligned with the transformed dataframe for causal modeling.\n"
+        "Use ONLY the provided inputs.\n"
         "\n"
-        "Original protocol (JSON):\n"
+        "Original protocol (semantic intent):\n"
         "{protocol_json}\n"
         "\n"
-        "df_after_columns (JSON list):\n"
+        "df_after_columns (the ONLY valid output feature names):\n"
         "{df_after_columns_json}\n"
         "\n"
-        "feature_map (JSON):\n"
+        "feature_map (how original columns expanded/changed):\n"
         "{feature_map_json}\n"
-    )    
+        "\n"
+        "Requirements:\n"
+        "- Map protocol variables to the correct transformed columns.\n"
+        "- If a single original column expanded into many features (e.g., one-hot), reference the correct set.\n"
+        "- Do NOT reference any column not in df_after_columns.\n"
+        "- Return ONLY JSON matching the schema.\n"
+        "\n"
+        "Output schema (must match exactly):\n"
+        "{schema_json}\n"
+    )

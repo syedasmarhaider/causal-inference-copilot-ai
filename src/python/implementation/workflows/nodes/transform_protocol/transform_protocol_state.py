@@ -21,6 +21,8 @@ class TransformProtocolPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     error: Optional[NonEmptyStr] = None
+    
+    transform_protocol_plan: Optional[TransformedProtocolSpec] = None
 
     transformed_dataset_id: Optional[UUID] = None
     transformed_spec: Optional[TransformedProtocolSpec] = None

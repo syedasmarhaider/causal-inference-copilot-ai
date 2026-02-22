@@ -1,273 +1,63 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union, cast
+from dataclasses import dataclass
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field, conint
 
-from python.implementation.workflows.utils.validation import ValidationIssueModel
+from python.implementation.workflows.nodes.transform_protocol.transform_protcol_plan import (
+    BinaryMapAsUnknown,
+    BinaryMapErrorIfNA,
+    BinaryMapIdxParams,
+    BinaryMapImputeConstant,
+    BinaryMapImputeToken,
+    BinaryMapParams,
+    DateTimeToEpochParams,
+    IdxAsUnknown,
+    IdxErrorIfNA,
+    IdxImputeIndex,
+    IdxImputeMode,
+    Log1pParams,
+    MinMaxParams,
+    NumericAddMissingIndicator,
+    NumericErrorIfNA,
+    NumericImputeMean,
+    NumericImputeMedian,
+    NumericKeepNA,
+    OneHotDummyNA,
+    OneHotImputeMode,
+    OneHotImputeToken,
+    OneHotParams,
+    OrdinalAsUnknown,
+    OrdinalErrorIfNA,
+    OrdinalImputeMode,
+    OrdinalImputeToken,
+    OrdinalMapIdxParams,
+    OrdinalMapParams,
+    StandardizeParams,
+    ToNumericParams,
+)
+from python.implementation.workflows.utils.validation import (
+    ValidationIssueModel,
+    ValidationSeverity,
+)
+
+
+@dataclass(frozen=True)
+class TransformPlanApplicationError(RuntimeError):
+    message: str
+    evidence: dict[str, Any]
+
+    def __str__(self) -> str:
+        return f"{self.message} | evidence={self.evidence}"
 
 
-# TODO: move to tool
-# =============================================================================
-# Public encoding identifiers
-# =============================================================================
-EncodingType = Literal[
-    "drop",
-    "one_hot",
-    "binary_map",       
-    "binary_map_idx",  
-    "ordinal_map",     
-    "ordinal_map_idx",
-    "to_numeric",
-    "log1p",
-    "standardize",
-    "minmax",
-    "datetime_to_epoch_seconds",
-]
-
-
-# =============================================================================
-# LLM-facing descriptions (stable + explicit)
-# =============================================================================
-_DESCRIPTIONS: Dict[EncodingType, str] = {
-    "drop": "Drop the column entirely. Params: none.",
-    "one_hot": (
-        "Categorical -> dummy columns. Example: 'Sex' => Sex__M, Sex__F (+ optional NaN indicator). "
-        "Params (optional): dummy_na(bool), drop_first(bool), max_categories(int)."
-    ),
-    "binary_map": (
-        "Map categories using explicit mapping dict. Example: {'Never':0,'Former/Current':1}. "
-        "Params (required): mapping(dict[str, int|float]). Optional: allow_unknown(bool). "
-        "WARNING: mapping keys must match dataset category strings EXACTLY."
-    ),
-    "binary_map_idx": (
-        "Map categories to 0/1 using category INDICES from profiling. "
-        "Params (required): pos(list[int]), neg(list[int]). Optional: drop(list[int]). "
-        "Recommended (robust vs label paraphrasing)."
-    ),
-    "ordinal_map": (
-        "Ordered categories -> integers. Example order ['I','II','III','IV'] -> 0..3. "
-        "Params (required): order(list[str]). Optional: start(int), allow_unknown(bool). "
-        "WARNING: order values must match dataset category strings EXACTLY."
-    ),
-    "ordinal_map_idx": (
-        "Ordinal map using category INDICES from profiling. Params (required): order(list[int]). "
-        "Optional: start(int), drop(list[int]). Recommended."
-    ),
-    "to_numeric": "Coerce to numeric; invalid values can become NaN. Params (optional): errors('coerce'|'raise').",
-    "log1p": "Numeric -> log(1+x). Params (optional): allow_negative(bool).",
-    "standardize": "Z-score: (x-mean)/std. Params (optional): ddof(int), eps(float).",
-    "minmax": "Scale into [0,1]. Params (optional): eps(float).",
-    "datetime_to_epoch_seconds": (
-        "Datetime -> epoch seconds (UTC). Params (optional): errors('coerce'|'raise'), unit('s'|'ms'|'us'|'ns')."
-    ),
-}
-
-
-# =============================================================================
-# Catalog model (simple)
-# =============================================================================
-class SupportedEncodingsModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    encodings: List[EncodingType] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
-
-
-def get_supported_encodings_model() -> SupportedEncodingsModel:
-    return SupportedEncodingsModel(
-        encodings=[
-            "drop",
-            "one_hot",
-            "binary_map",
-            "binary_map_idx",
-            "ordinal_map",
-            "ordinal_map_idx",
-            "to_numeric",
-            "log1p",
-            "standardize",
-            "minmax",
-            "datetime_to_epoch_seconds",
-        ]
-    )
-
-
-def get_encoding_models_with_description() -> str:
-    allowed = get_supported_encodings_model().encodings
-    return "\n".join(f"- {enc}: {_DESCRIPTIONS[enc]}" for enc in allowed)
-
-
-# =============================================================================
-# Pydantic specs: LLM outputs THIS (per column)
-# =============================================================================
-class _BaseParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-
-class _BaseSpec(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-# ---- drop
-class DropSpec(_BaseSpec):
-    encoding: Literal["drop"]
-
-
-# ---- one_hot
-class OneHotParams(_BaseParams):
-    dummy_na: bool = True
-    drop_first: bool = False
-    max_categories: Optional[int] = None
-
-
-class OneHotSpec(_BaseSpec):
-    encoding: Literal["one_hot"]
-    params: Optional[OneHotParams] = None
-
-
-# ---- binary_map (dict)
-class BinaryMapParams(_BaseParams):
-    mapping: Dict[str, Union[int, float]] = Field(..., min_length=1)
-    allow_unknown: bool = False
-
-
-class BinaryMapSpec(_BaseSpec):
-    encoding: Literal["binary_map"]
-    params: BinaryMapParams
-
-
-# ---- binary_map_idx (recommended)
-CatIdx = conint(ge=0)
-
-
-class BinaryMapIdxParams(_BaseParams):
-    pos: List[int] = Field(..., min_length=1)
-    neg: List[int] = Field(..., min_length=1)
-    drop: List[int] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
-
-
-class BinaryMapIdxSpec(_BaseSpec):
-    encoding: Literal["binary_map_idx"]
-    params: BinaryMapIdxParams
-
-
-# ---- ordinal_map (label order)
-class OrdinalMapParams(_BaseParams):
-    order: List[str] = Field(..., min_length=1)
-    start: int = 0
-    allow_unknown: bool = False
-
-
-class OrdinalMapSpec(_BaseSpec):
-    encoding: Literal["ordinal_map"]
-    params: OrdinalMapParams
-
-
-# ---- ordinal_map_idx (recommended)
-class OrdinalMapIdxParams(_BaseParams):
-    order: List[int] = Field(..., min_length=1)
-    start: int = 0
-    drop: List[int] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
-
-
-class OrdinalMapIdxSpec(_BaseSpec):
-    encoding: Literal["ordinal_map_idx"]
-    params: OrdinalMapIdxParams
-
-
-# ---- to_numeric
-class ToNumericParams(_BaseParams):
-    errors: Literal["coerce", "raise"] = "coerce"
-
-
-class ToNumericSpec(_BaseSpec):
-    encoding: Literal["to_numeric"]
-    params: Optional[ToNumericParams] = None
-
-
-# ---- log1p
-class Log1pParams(_BaseParams):
-    allow_negative: bool = False
-
-
-class Log1pSpec(_BaseSpec):
-    encoding: Literal["log1p"]
-    params: Optional[Log1pParams] = None
-
-
-# ---- standardize
-class StandardizeParams(_BaseParams):
-    ddof: int = 0
-    eps: float = 1e-12
-
-
-class StandardizeSpec(_BaseSpec):
-    encoding: Literal["standardize"]
-    params: Optional[StandardizeParams] = None
-
-
-# ---- minmax
-class MinMaxParams(_BaseParams):
-    eps: float = 1e-12
-
-
-class MinMaxSpec(_BaseSpec):
-    encoding: Literal["minmax"]
-    params: Optional[MinMaxParams] = None
-
-
-# ---- datetime_to_epoch_seconds
-class DateTimeToEpochParams(_BaseParams):
-    errors: Literal["coerce", "raise"] = "coerce"
-    unit: Literal["s", "ms", "us", "ns"] = "s"
-
-
-class DateTimeToEpochSpec(_BaseSpec):
-    encoding: Literal["datetime_to_epoch_seconds"]
-    params: Optional[DateTimeToEpochParams] = None
-
-
-EncodingSpec = Union[
-    DropSpec,
-    OneHotSpec,
-    BinaryMapSpec,
-    BinaryMapIdxSpec,
-    OrdinalMapSpec,
-    OrdinalMapIdxSpec,
-    ToNumericSpec,
-    Log1pSpec,
-    StandardizeSpec,
-    MinMaxSpec,
-    DateTimeToEpochSpec,
-]
-
-
-# =============================================================================
-# Feature-map (optional but very useful downstream)
-# =============================================================================
-class FeatureMapModel(BaseModel):
-    """
-    produced_columns:
-      raw column -> columns representing it in transformed df.
-
-    dropped:
-      raw columns removed.
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    produced_columns: Dict[str, List[str]] = Field(default_factory=dict)
-    dropped: List[str] = Field(default_factory=list)
-
-
-# =============================================================================
-# Issues helper
-# =============================================================================
 def _issue(
-    *,
-    severity: Literal["WARN", "FAIL"],
     message: str,
-    evidence: Optional[Dict[str, Any]] = None,
-    fix_hint: Optional[str] = None,
+    severity: ValidationSeverity,
+    evidence: dict[str, Any] | None = None,
+    fix_hint: str | None = None,
 ) -> ValidationIssueModel:
     return ValidationIssueModel(
         severity=severity,
@@ -277,537 +67,1386 @@ def _issue(
     )
 
 
-# =============================================================================
-# Deterministic naming helpers (no LLM involvement)
-# =============================================================================
-def _derived_name(column: str, suffix: str) -> str:
-    return f"{column}__{suffix}"
+def _strip_only(x: Any) -> Any:
+    if isinstance(x, str):
+        return x.strip()
+    return x
 
 
-# =============================================================================
-# Public entrypoint: apply a single spec to a single column
-# =============================================================================
-def apply_encoding(
+def apply_one_hot_column(
+    df_to_change: pd.DataFrame,
     *,
-    df: pd.DataFrame,
     column: str,
-    spec: EncodingSpec,
-    # For *_idx encodings, this MUST be supplied from profiling:
-    # categories_in_order[0] corresponds to index 0, etc.
-    categories_in_order: Optional[Sequence[str]] = None,
-) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
+    params: OneHotParams,
+    prefix_sep: str = "__",
+) -> ValidationIssueModel | None:
     """
-    Apply one encoding spec for one column.
+    Applies one-hot encoding IN-PLACE to a single column, per OneHotParams.
 
     Returns:
-      (new_df, feature_map_for_this_column, issues)
+      - None                         => applied successfully, no warnings
+      - ValidationIssueModel("WARN") => applied successfully, but warning emitted
+      - ValidationIssueModel("FAIL") => not applied, df not mutated   (DATA issue)
 
-    Guarantees:
-      - never mutates input df
-      - deterministic output column names for derived numeric transforms
-      - strict validation of required params via Pydantic
+    Raises:
+      - TransformPlanApplicationError => PLAN/LLM issue (invalid plan / incompatible spec)
     """
-    if column not in df.columns:
-        return df.copy(), FeatureMapModel(), [
-            _issue(
+
+    # -------------------------
+    # PLAN/LLM validations
+    # -------------------------
+    if column not in df_to_change.columns:
+        raise TransformPlanApplicationError(
+            f"one_hot: plan references unknown column {column!r}.",
+            evidence={
+                "column": column,
+                "n_columns": int(len(df_to_change.columns)),
+                "columns_sample": list(df_to_change.columns[:50]),
+            },
+        )
+
+    loc = df_to_change.columns.get_loc(column)
+    if not isinstance(loc, int):
+        raise TransformPlanApplicationError(
+            f"one_hot: column name {column!r} is not unique; cannot apply deterministically.",
+            evidence={"column": column, "get_loc_type": str(type(loc))},
+        )
+
+    miss = params.missingness
+    if not isinstance(miss, (OneHotImputeToken, OneHotImputeMode, OneHotDummyNA)):
+        # We explicitly do NOT support dropping rows here.
+        raise TransformPlanApplicationError(
+            "one_hot: unsupported missingness strategy for one_hot (row dropping is disallowed in this stage).",
+            evidence={
+                "column": column,
+                "missingness_type": miss.__class__.__name__,
+                "allowed": ["OneHotDummyNA", "OneHotImputeToken", "OneHotImputeMode"],
+            },
+        )
+
+    # -------------------------
+    # DATA-driven failures/warnings (no mutation yet)
+    # -------------------------
+    return_issue: ValidationIssueModel | None = None
+
+    s0 = df_to_change[column]
+    s = s0.map(_strip_only)
+
+    n_missing = int(pd.isna(s).sum())
+
+    if isinstance(miss, OneHotImputeToken):
+        s = s.fillna(miss.token) # pyright: ignore[reportUnknownMemberType]
+
+    elif isinstance(miss, OneHotImputeMode):
+        non_na = s.dropna()
+        if non_na.empty:
+            return _issue(
+                f"one_hot: impute_mode cannot run because {column!r} has no non-missing values.",
                 severity="FAIL",
-                message=f"Column '{column}' not found.",
-                evidence={"column": column, "encoding": cast(Any, spec).encoding},
-                fix_hint="Fix transform spec column name (case/spelling).",
+                evidence={"column": column, "n_rows": int(len(s0)), "n_missing": n_missing},
+                fix_hint="Use dummy_na or impute_token.",
             )
-        ]
+        vc = non_na.value_counts(dropna=True)
+        max_count = int(vc.max())
+        top = vc[vc == max_count].index.tolist()
+        mode_value = sorted(top, key=lambda x: str(x))[0]
+        s = s.fillna(mode_value) # pyright: ignore[reportUnknownMemberType]
 
-    if isinstance(spec, DropSpec):
-        out = df.drop(columns=[column]).copy()
-        return out, FeatureMapModel(dropped=[column]), []
+    elif isinstance(miss, OneHotDummyNA): # pyright: ignore[reportUnnecessaryIsInstance]
+        pass  # dummy_na=True will represent NA explicitly
 
-    if isinstance(spec, OneHotSpec):
-        return _encode_one_hot(df=df, column=column, params=spec.params)
+    # max_categories (DATA issue)
+    if params.max_categories is not None:
+        n_unique = int(s.dropna().nunique())
+        if n_unique > int(params.max_categories):
+            return _issue(
+                f"one_hot: too many categories in {column!r} (n_unique={n_unique}, max={int(params.max_categories)}).",
+                severity="FAIL",
+                evidence={"column": column, "n_unique_non_na": n_unique, "max_categories": int(params.max_categories)},
+                fix_hint="Increase max_categories or choose ordinal_map/binary_map.",
+            )
 
-    if isinstance(spec, BinaryMapSpec):
-        return _encode_binary_map(df=df, column=column, params=spec.params, categories_in_order=categories_in_order)
+    # Encode (still no mutation)
+    dummy_na_flag = isinstance(miss, OneHotDummyNA)
 
-    if isinstance(spec, BinaryMapIdxSpec):
-        return _encode_binary_map_idx(df=df, column=column, params=spec.params, categories_in_order=categories_in_order)
+    dummies = pd.get_dummies(
+        s,
+        prefix=column,
+        prefix_sep=prefix_sep,
+        dummy_na=dummy_na_flag,
+        drop_first=False,
+    )
 
-    if isinstance(spec, OrdinalMapSpec):
-        return _encode_ordinal_map(df=df, column=column, params=spec.params, categories_in_order=categories_in_order)
-
-    if isinstance(spec, OrdinalMapIdxSpec):
-        return _encode_ordinal_map_idx(df=df, column=column, params=spec.params, categories_in_order=categories_in_order)
-
-    if isinstance(spec, ToNumericSpec):
-        return _encode_to_numeric(df=df, column=column, params=spec.params)
-
-    if isinstance(spec, Log1pSpec):
-        return _encode_log1p(df=df, column=column, params=spec.params)
-
-    if isinstance(spec, StandardizeSpec):
-        return _encode_standardize(df=df, column=column, params=spec.params)
-
-    if isinstance(spec, MinMaxSpec):
-        return _encode_minmax(df=df, column=column, params=spec.params)
-
-    if isinstance(spec, DateTimeToEpochSpec): # pyright: ignore[reportUnnecessaryIsInstance]
-        return _encode_datetime_to_epoch_seconds(df=df, column=column, params=spec.params)
-
-    # Unreachable if EncodingSpec union stays in sync
-    return df.copy(), FeatureMapModel(), [
-        _issue(
+    if dummies.shape[1] == 0:
+        return _issue(
+            f"one_hot: no dummy columns produced for {column!r}.",
             severity="FAIL",
-            message="Unsupported encoding spec type.",
-            evidence={"column": column, "spec_type": type(spec).__name__},
+            evidence={"column": column, "n_unique_non_na": int(s.dropna().nunique()), "n_missing": n_missing},
+            fix_hint="Column may be all-missing or constant; adjust missingness/encoding.",
         )
-    ]
 
+    dummies = dummies.astype("int8")
 
-# =============================================================================
-# Encoding implementations
-# =============================================================================
-def _encode_one_hot(
-    *,
-    df: pd.DataFrame,
-    column: str,
-    params: Optional[OneHotParams],
-) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
-    p = params or OneHotParams()
-    nunique = int(df[column].nunique(dropna=True))
-
-    if p.max_categories is not None and nunique > p.max_categories:
-        return df.copy(), FeatureMapModel(), [
-            _issue(
-                severity="FAIL",
-                message=f"one_hot cardinality too high for '{column}': {nunique} categories.",
-                evidence={"column": column, "nunique": nunique, "max_categories": p.max_categories},
-                fix_hint="Reduce categories (group rare) or use *_map_idx.",
-            )
-        ]
-
-    try:
-        dummies = pd.get_dummies(
-            df[column],
-            prefix=column,
-            prefix_sep="__",
-            dummy_na=p.dummy_na,
-            drop_first=p.drop_first,
+    # drop_first warning
+    if params.drop_first and dummies.shape[1] <= 1:
+        return_issue = _issue(
+            f"one_hot: cannot drop first dummy for {column!r}; only {int(dummies.shape[1])} dummy column(s) produced.",
+            severity="WARN",
+            evidence={"column": column, "n_dummy_cols": int(dummies.shape[1])},
+            fix_hint="Set drop_first=False or verify the column has >1 category.",
         )
-    except Exception as e:  # noqa: BLE001
-        return df.copy(), FeatureMapModel(), [
-            _issue(
-                severity="FAIL",
-                message=f"one_hot failed for '{column}': {e}",
-                evidence={"column": column},
-            )
-        ]
 
-    out = df.copy()
-    out = pd.concat([out.drop(columns=[column]), dummies], axis=1)
+    # drop_first deterministic drop (if possible)
+    if params.drop_first and dummies.shape[1] > 1:
+        cols_sorted = sorted(dummies.columns)
+        to_drop = cols_sorted[0]
 
-    produced =  list(dummies.columns)
-    return out, FeatureMapModel(produced_columns={column: produced}), []
+        if dummy_na_flag:
+            def is_na_dummy(colname: str) -> bool:
+                if not colname.startswith(f"{column}{prefix_sep}"):
+                    return False
+                cat = colname.split(prefix_sep, 1)[1].lower()
+                return cat in {"nan", "<na>"}
+
+            non_na = [c for c in cols_sorted if not is_na_dummy(c)]
+            to_drop = non_na[0] if non_na else cols_sorted[0]
+
+        dummies = dummies.drop(columns=[to_drop])
+
+    # -------------------------
+    # COMMIT (mutate only now)
+    # -------------------------
+    dummies = dummies.reindex(df_to_change.index)
+
+    df_to_change.drop(columns=[column], inplace=True)
+    for i, new_col in enumerate(dummies.columns):
+        df_to_change.insert(loc + i, new_col, dummies[new_col]) # pyright: ignore[reportUnknownMemberType]
+
+    return return_issue
 
 
-def _require_categories(
+def _ensure_column_exists_unique(df: pd.DataFrame, *, column: str, encoder: str) -> int:
+    if column not in df.columns:
+        raise TransformPlanApplicationError(
+            f"{encoder}: plan references unknown column {column!r}.",
+            evidence={
+                "column": column,
+                "n_columns": int(len(df.columns)),
+                "columns_sample": list(df.columns[:50]),
+            },
+        )
+    loc = df.columns.get_loc(column)
+    if not isinstance(loc, int):
+        raise TransformPlanApplicationError(
+            f"{encoder}: column name {column!r} is not unique; cannot apply deterministically.",
+            evidence={"column": column, "get_loc_type": str(type(loc))},
+        )
+    return loc
+
+
+def _apply_numeric_output_missingness(
     *,
-    column: str,
-    categories_in_order: Optional[Sequence[str]],
-    encoding: str,
-) -> Tuple[Optional[List[str]], List[ValidationIssueModel]]:
-    if categories_in_order is None:
-        return None, [
-            _issue(
-                severity="FAIL",
-                message=f"'{encoding}' requires categories_in_order for '{column}', but none was provided.",
-                evidence={"column": column, "encoding": encoding},
-                fix_hint="Pass profiling categories list into apply_encoding(..., categories_in_order=...).",
+    out: pd.Series,
+    output_missingness: Any,
+    base_column: str,
+) -> tuple[pd.Series, Optional[pd.Series], Optional[str], Optional[ValidationIssueModel]]:
+    """
+    Applies NumericMissingnessSpec to an output numeric series.
+    Returns: (out2, indicator_series_or_none, indicator_colname_or_none, warn_issue_or_none)
+    PLAN faults raise. DATA faults return FAIL issue (caller should propagate).
+    """
+    warn_issue: Optional[ValidationIssueModel] = None
+    indicator: Optional[pd.Series] = None
+    indicator_name: Optional[str] = None
+
+    if isinstance(output_missingness, NumericKeepNA):
+        return out, None, None, None
+
+    if isinstance(output_missingness, NumericAddMissingIndicator):
+        suffix = output_missingness.suffix
+        indicator_name = f"{base_column}{suffix}"
+        indicator = out.isna().astype("int8")
+        return out, indicator, indicator_name, None
+
+    if isinstance(output_missingness, NumericErrorIfNA):
+        n_na = int(out.isna().sum())
+        if n_na > 0:
+            return (
+                out,
+                None,
+                None,
+                _issue(
+                    f"numeric_output_missingness: error_if_na but output contains missing values for {base_column!r}.",
+                    severity="FAIL",
+                    evidence={"column": base_column, "n_missing": n_na},
+                    fix_hint="Use keep_na / add_missing_indicator / impute_mean / impute_median.",
+                ),
             )
-        ]
-    return list(categories_in_order), []
+        return out, None, None, None
+
+    if isinstance(output_missingness, (NumericImputeMean, NumericImputeMedian)):
+        non_na = out.dropna()
+        if non_na.empty:
+            return (
+                out,
+                None,
+                None,
+                _issue(
+                    f"numeric_output_missingness: cannot impute because output is all-missing for {base_column!r}.",
+                    severity="FAIL",
+                    evidence={"column": base_column, "n_rows": int(len(out))},
+                    fix_hint="Use add_missing_indicator or keep_na, or fix upstream mapping/unknown_value.",
+                ),
+            )
+
+        fill_value = float(non_na.mean()) if isinstance(output_missingness, NumericImputeMean) else float(non_na.median())
+        out2 = out.fillna(fill_value) # pyright: ignore[reportUnknownMemberType]
+
+        # Optional WARN: imputation occurred
+        if int(out.isna().sum()) > 0:
+            warn_issue = _issue(
+                f"numeric_output_missingness: imputed missing values in {base_column!r}.",
+                severity="WARN",
+                evidence={"column": base_column, "fill_value": fill_value, "n_imputed": int(out.isna().sum())},
+            )
+
+        return out2, None, None, warn_issue
+
+    raise TransformPlanApplicationError(
+        "numeric_output_missingness: unsupported output_missingness type (plan validation failure).",
+        evidence={"column": base_column, "type": output_missingness.__class__.__name__},
+    )
 
 
-def _encode_binary_map(
+def apply_binary_map_column(
+    df_to_change: pd.DataFrame,
     *,
-    df: pd.DataFrame,
     column: str,
     params: BinaryMapParams,
-    categories_in_order: Optional[Sequence[str]],
-) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
+) -> ValidationIssueModel | None:
     """
-    Dict-based mapping. Safer when you also pass categories_in_order and validate keys.
-    Still less robust than *_idx, but supported.
+    Applies BinaryMapParams IN-PLACE to a single column.
+
+    DATA issues => return ValidationIssueModel("FAIL") and do not mutate.
+    PLAN issues => raise TransformPlanApplicationError.
     """
-    issues: List[ValidationIssueModel] = []
-    out = df.copy()
+    loc = _ensure_column_exists_unique(df_to_change, column=column, encoder="binary_map")
 
-    mapping = params.mapping
+    # PLAN checks (fast)
+    if not params.mapping:
+        raise TransformPlanApplicationError("binary_map: mapping must be non-empty.", evidence={"column": column})
 
-    # Optional safety validation if categories are provided:
-    if categories_in_order is not None:
-        cats = set(categories_in_order)
-        bad_keys = sorted([k for k in mapping.keys() if k not in cats])
-        if bad_keys:
-            return df.copy(), FeatureMapModel(), [
-                _issue(
-                    severity="FAIL",
-                    message=f"binary_map mapping contains keys not present in dataset categories for '{column}'.",
-                    evidence={"column": column, "bad_keys": bad_keys, "n_categories": len(cats)},
-                    fix_hint="Use exact category strings from profiling or switch to binary_map_idx.",
-                )
-            ]
+    miss = params.missingness
+    out_miss = params.output_missingness
 
-    mapped = out[column].map(mapping)
+    if isinstance(miss, BinaryMapAsUnknown) and not params.allow_unknown:
+        raise TransformPlanApplicationError(
+            "binary_map: missingness='as_unknown' requires allow_unknown=True.",
+            evidence={"column": column},
+        )
 
-    unknown_mask = out[column].notna() & mapped.isna()
-    if bool(unknown_mask.any()):
-        unknown_values = sorted(set(out[column][unknown_mask].astype(str).tolist()))
-        if params.allow_unknown:
-            issues.append(
-                _issue(
-                    severity="WARN",
-                    message=f"binary_map saw unknown values in '{column}' which were set to NaN.",
-                    evidence={"column": column, "unknown_values": unknown_values},
-                    fix_hint="Extend mapping or use binary_map_idx.",
-                )
+    if isinstance(miss, BinaryMapImputeToken):
+        if miss.token not in params.mapping:
+            raise TransformPlanApplicationError(
+                "binary_map: impute_token token must exist in mapping (LLM plan bug).",
+                evidence={"column": column, "token": miss.token, "mapping_keys_sample": list(params.mapping.keys())[:25]},
             )
+
+    # Stage 1: strip-only
+    s0 = df_to_change[column]
+    s = s0.map(_strip_only)
+
+    is_na = pd.isna(s)
+    n_missing = int(is_na.sum())
+
+    # Stage 2: input missingness handling (NO row drops)
+    missing_output_override: Optional[float] = None
+
+    if isinstance(miss, BinaryMapErrorIfNA):
+        if n_missing > 0:
+            return _issue(
+                f"binary_map: missingness='error_if_na' but {column!r} contains missing values.",
+                severity="FAIL",
+                evidence={"column": column, "n_missing": n_missing},
+                fix_hint="Use impute_token / impute_constant / as_unknown (with allow_unknown=True).",
+            )
+
+    elif isinstance(miss, BinaryMapImputeToken):
+        s = s.fillna(miss.token) # pyright: ignore[reportUnknownMemberType]
+
+    elif isinstance(miss, BinaryMapImputeConstant):
+        missing_output_override = float(miss.value)
+
+    elif isinstance(miss, BinaryMapAsUnknown): # pyright: ignore[reportUnnecessaryIsInstance]
+        # handled at output stage (NA treated as unknown)
+        pass
+
+    else:
+        raise TransformPlanApplicationError(
+            "binary_map: unsupported missingness spec type (plan validation failure).",
+            evidence={"column": column, "missingness_type": miss.__class__.__name__},
+        )
+
+    # Stage 3: map values → numeric
+    out = pd.Series(index=s.index, dtype="float64")
+
+    # Map known categories
+    # Only map strings; anything else is "unknown category"
+    def map_one(v: Any) -> tuple[bool, float]:
+        # returns (known, value)
+        if isinstance(v, str) and v in params.mapping:
+            return True, float(params.mapping[v])
+        return False, float("nan")
+
+    known_mask = pd.Series(False, index=s.index)
+    unknown_mask = pd.Series(False, index=s.index)
+
+    for idx, v in s.items():
+        if pd.isna(v):
+            continue
+        known, val = map_one(v)
+        if known:
+            out.at[idx] = val
+            known_mask.at[idx] = True
         else:
-            return df.copy(), FeatureMapModel(), [
-                _issue(
-                    severity="FAIL",
-                    message=f"binary_map has unmapped values in '{column}'.",
-                    evidence={"column": column, "unknown_values": unknown_values},
-                    fix_hint="Extend mapping, set allow_unknown=True, or use binary_map_idx.",
-                )
-            ]
+            unknown_mask.at[idx] = True
 
-    out[column] = mapped
-    return out, FeatureMapModel(produced_columns={column: [column]}), issues
+    # Handle unknown categories
+    n_unknown = int(unknown_mask.sum())
+    if n_unknown > 0 and not params.allow_unknown:
+        sample = s.loc[unknown_mask].dropna().astype(object).head(25).tolist()
+        return _issue(
+            f"binary_map: encountered unknown categories in {column!r} (allow_unknown=False).",
+            severity="FAIL",
+            evidence={"column": column, "n_unknown": n_unknown, "unknown_sample": sample},
+            fix_hint="Set allow_unknown=True (and optionally unknown_value) or extend mapping.",
+        )
+
+    unknown_value = float(params.unknown_value) if params.unknown_value is not None else float("nan")
+    if n_unknown > 0:
+        out.loc[unknown_mask] = unknown_value
+
+    # Handle missing (NA) after missingness strategy
+    if missing_output_override is not None:
+        out.loc[pd.isna(s)] = missing_output_override
+    elif isinstance(miss, BinaryMapAsUnknown):
+        # treat NA as unknown
+        out.loc[pd.isna(s)] = unknown_value
+    else:
+        # leave as NaN
+        pass
+
+    # Stage 4: output missingness (may add indicator, may impute, may fail)
+    out2, ind, ind_name, out_miss_issue = _apply_numeric_output_missingness(
+        out=out,
+        output_missingness=out_miss,
+        base_column=column,
+    )
+    if out_miss_issue is not None and out_miss_issue.severity == "FAIL":
+        return out_miss_issue
+    warn_issue = out_miss_issue if out_miss_issue is not None and out_miss_issue.severity == "WARN" else None
+
+    # PLAN: indicator column name collision check (before commit)
+    if ind is not None and ind_name is not None:
+        if ind_name in df_to_change.columns and ind_name != column:
+            raise TransformPlanApplicationError(
+                "binary_map: indicator column name already exists; cannot insert safely.",
+                evidence={"column": column, "indicator_name": ind_name},
+            )
+
+    # -------------------------
+    # COMMIT (mutate only now)
+    # -------------------------
+    df_to_change.drop(columns=[column], inplace=True)
+
+    df_to_change.insert(loc, column, out2.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+
+    if ind is not None and ind_name is not None:
+        df_to_change.insert(loc + 1, ind_name, ind.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+
+    return warn_issue
 
 
-def _encode_binary_map_idx(
+def apply_binary_map_idx_column(
+    df_to_change: pd.DataFrame,
     *,
-    df: pd.DataFrame,
     column: str,
     params: BinaryMapIdxParams,
-    categories_in_order: Optional[Sequence[str]],
-) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
-    cats, issues = _require_categories(column=column, categories_in_order=categories_in_order, encoding="binary_map_idx")
-    if cats is None:
-        return df.copy(), FeatureMapModel(), issues
+) -> ValidationIssueModel | None:
+    """
+    Applies BinaryMapIdxParams IN-PLACE to a single column (expects category indices).
 
-    n = len(cats)
-    pos = set(map(int, params.pos))
-    neg = set(map(int, params.neg))
-    drp = set(map(int, params.drop))
+    DATA issues => return ValidationIssueModel("FAIL") and do not mutate.
+    PLAN issues => raise TransformPlanApplicationError.
+    """
+    loc = _ensure_column_exists_unique(df_to_change, column=column, encoder="binary_map_idx")
 
-    bad = [i for i in sorted(pos | neg | drp) if i < 0 or i >= n]
-    if bad:
-        return df.copy(), FeatureMapModel(), [
-            _issue(
-                severity="FAIL",
-                message=f"binary_map_idx has invalid category indices for '{column}': {bad}",
-                evidence={"column": column, "n_categories": n, "bad_indices": bad},
-                fix_hint="Indices must be within [0, n_categories-1] from profiling.",
-            )
-        ]
-
+    # PLAN checks: disjoint sets (defensive)
+    pos, neg, drp = set(params.pos), set(params.neg), set(params.drop)
     inter = (pos & neg) | (pos & drp) | (neg & drp)
     if inter:
-        return df.copy(), FeatureMapModel(), [
-            _issue(
+        raise TransformPlanApplicationError(
+            "binary_map_idx: pos/neg/drop must be disjoint.",
+            evidence={"column": column, "overlap": sorted(inter)},
+        )
+
+    miss = params.missingness
+    out_miss = params.output_missingness
+
+    # Missingness requires allow_unknown if as_unknown
+    if isinstance(miss, IdxAsUnknown) and not params.allow_unknown:
+        raise TransformPlanApplicationError(
+            "binary_map_idx: missingness='as_unknown' requires allow_unknown=True.",
+            evidence={"column": column},
+        )
+
+    if isinstance(miss, IdxImputeIndex) and miss.index in drp:
+        raise TransformPlanApplicationError(
+            "binary_map_idx: impute_index must not be in drop list.",
+            evidence={"column": column, "impute_index": int(miss.index)},
+        )
+
+    # Stage 1: strip-only for strings (mostly irrelevant for idx columns, but harmless)
+    s0 = df_to_change[column]
+    s = s0.map(_strip_only)
+
+    is_na = pd.isna(s)
+    n_missing = int(is_na.sum())
+
+    # Stage 2: missingness on indices (NO row drops)
+    if isinstance(miss, IdxErrorIfNA):
+        if n_missing > 0:
+            return _issue(
+                f"binary_map_idx: missingness='error_if_na' but {column!r} contains missing values.",
                 severity="FAIL",
-                message=f"binary_map_idx sets overlap for '{column}'.",
-                evidence={"column": column, "overlap": sorted(inter)},
-                fix_hint="pos/neg/drop must be disjoint.",
+                evidence={"column": column, "n_missing": n_missing},
+                fix_hint="Use impute_index / impute_mode / as_unknown (with allow_unknown=True).",
             )
-        ]
 
-    mapping: Dict[str, float] = {}
-    for i in pos:
-        mapping[cats[i]] = 1.0
-    for i in neg:
-        mapping[cats[i]] = 0.0
-    for i in drp:
-        mapping[cats[i]] = np.nan
+    elif isinstance(miss, IdxImputeIndex):
+        s = s.fillna(int(miss.index)) # pyright: ignore[reportUnknownMemberType]
 
-    out = df.copy()
-    out[column] = out[column].map(mapping)
-    return out, FeatureMapModel(produced_columns={column: [column]}), []
+    elif isinstance(miss, IdxImputeMode):
+        non_na = s.dropna()
+        if non_na.empty:
+            return _issue(
+                f"binary_map_idx: impute_mode cannot run because {column!r} has no non-missing values.",
+                severity="FAIL",
+                evidence={"column": column, "n_rows": int(len(s0)), "n_missing": n_missing},
+                fix_hint="Use impute_index or as_unknown (allow_unknown=True).",
+            )
+        vc = non_na.value_counts(dropna=True)
+        max_count = int(vc.max())
+        top = vc[vc == max_count].index.tolist()
+        mode_value = sorted(top, key=lambda x: int(x) if isinstance(x, (int, bool)) else str(x))[0]
+        s = s.fillna(mode_value) # pyright: ignore[reportUnknownMemberType]
 
+    elif isinstance(miss, IdxAsUnknown): # pyright: ignore[reportUnnecessaryIsInstance]
+        pass  # NA treated as unknown at output stage
 
-def _encode_ordinal_map(
+    else:
+        raise TransformPlanApplicationError(
+            "binary_map_idx: unsupported missingness spec type (plan validation failure).",
+            evidence={"column": column, "missingness_type": miss.__class__.__name__},
+        )
+
+    # Stage 3: map indices → 0/1/NA
+    out = pd.Series(index=s.index, dtype="float64")
+
+    unknown_mask = pd.Series(False, index=s.index)
+
+    for idx, v in s.items():
+        if pd.isna(v):
+            continue
+
+        # treat numpy ints like ints; reject strings etc as unknown
+        if isinstance(v, (int, bool)):
+            iv = int(v)
+        else:
+            unknown_mask.at[idx] = True
+            continue
+
+        if iv in pos:
+            out.at[idx] = 1.0
+        elif iv in neg:
+            out.at[idx] = 0.0
+        elif iv in drp:
+            out.at[idx] = float("nan")
+        else:
+            unknown_mask.at[idx] = True
+
+    n_unknown = int(unknown_mask.sum())
+    if n_unknown > 0 and not params.allow_unknown:
+        sample = s.loc[unknown_mask].dropna().astype(object).head(25).tolist()
+        return _issue(
+            f"binary_map_idx: encountered unknown indices in {column!r} (allow_unknown=False).",
+            severity="FAIL",
+            evidence={"column": column, "n_unknown": n_unknown, "unknown_sample": sample},
+            fix_hint="Set allow_unknown=True (and optionally unknown_value) or adjust pos/neg/drop lists.",
+        )
+
+    unknown_value = float(params.unknown_value) if params.unknown_value is not None else float("nan")
+    if n_unknown > 0:
+        out.loc[unknown_mask] = unknown_value
+
+    # Handle NA as unknown if configured
+    if isinstance(miss, IdxAsUnknown):
+        out.loc[pd.isna(s)] = unknown_value
+    # else leave NaN
+
+    # Stage 4: output missingness
+    out2, ind, ind_name, out_miss_issue = _apply_numeric_output_missingness(
+        out=out,
+        output_missingness=out_miss,
+        base_column=column,
+    )
+    if out_miss_issue is not None and out_miss_issue.severity == "FAIL":
+        return out_miss_issue
+    warn_issue = out_miss_issue if out_miss_issue is not None and out_miss_issue.severity == "WARN" else None
+
+    if ind is not None and ind_name is not None:
+        if ind_name in df_to_change.columns and ind_name != column:
+            raise TransformPlanApplicationError(
+                "binary_map_idx: indicator column name already exists; cannot insert safely.",
+                evidence={"column": column, "indicator_name": ind_name},
+            )
+
+    # -------------------------
+    # COMMIT
+    # -------------------------
+    df_to_change.drop(columns=[column], inplace=True)
+    df_to_change.insert(loc, column, out2.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+
+    if ind is not None and ind_name is not None:
+        df_to_change.insert(loc + 1, ind_name, ind.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+
+    return warn_issue
+
+def apply_ordinal_map_column(
+    df_to_change: pd.DataFrame,
     *,
-    df: pd.DataFrame,
     column: str,
     params: OrdinalMapParams,
-    categories_in_order: Optional[Sequence[str]],
-) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
-    issues: List[ValidationIssueModel] = []
-    out = df.copy()
+) -> ValidationIssueModel | None:
+    """
+    Applies OrdinalMapParams IN-PLACE to a single column (string categories).
 
-    order = params.order
-    mapping: Dict[str, float] = {v: float(params.start + i) for i, v in enumerate(order)}
+    DATA issues => return ValidationIssueModel("FAIL") and do not mutate.
+    PLAN/LLM issues => raise TransformPlanApplicationError.
 
-    # Optional safety validation if categories are provided:
-    if categories_in_order is not None:
-        cats = set(categories_in_order)
-        bad_vals = sorted([v for v in order if v not in cats])
-        if bad_vals:
-            return df.copy(), FeatureMapModel(), [
-                _issue(
-                    severity="FAIL",
-                    message=f"ordinal_map order contains values not present in dataset categories for '{column}'.",
-                    evidence={"column": column, "bad_values": bad_vals, "n_categories": len(cats)},
-                    fix_hint="Use exact category strings from profiling or switch to ordinal_map_idx.",
-                )
-            ]
+    Row-dropping is NOT supported in this stage.
+    """
+    loc = _ensure_column_exists_unique(df_to_change, column=column, encoder="ordinal_map")
 
-    mapped = out[column].map(mapping)
+    # --- PLAN checks (defensive) ---
+    if len(params.order) != len(set(params.order)):
+        raise TransformPlanApplicationError(
+            "ordinal_map: params.order must not contain duplicates.",
+            evidence={"column": column, "order_len": len(params.order)},
+        )
 
-    unknown_mask = out[column].notna() & mapped.isna()
-    if bool(unknown_mask.any()):
-        unknown_values = sorted(set(out[column][unknown_mask].astype(str).tolist()))
-        if params.allow_unknown:
-            issues.append(
-                _issue(
-                    severity="WARN",
-                    message=f"ordinal_map saw unknown values in '{column}' which were set to NaN.",
-                    evidence={"column": column, "unknown_values": unknown_values},
-                    fix_hint="Extend order list or use ordinal_map_idx.",
-                )
+    miss = params.missingness
+
+    if isinstance(miss, OrdinalAsUnknown) and not params.allow_unknown:
+        raise TransformPlanApplicationError(
+            "ordinal_map: missingness='as_unknown' requires allow_unknown=True.",
+            evidence={"column": column},
+        )
+
+    if not isinstance(miss, (OrdinalAsUnknown, OrdinalErrorIfNA, OrdinalImputeMode, OrdinalImputeToken)):
+        raise TransformPlanApplicationError(
+            "ordinal_map: unsupported missingness type (plan validation failure).",
+            evidence={"column": column, "missingness_type": miss.__class__.__name__},
+        )
+
+    # --- DATA path (no mutation yet) ---
+    return_issue: ValidationIssueModel | None = None
+
+    s0 = df_to_change[column]
+    s = s0.map(_strip_only)
+
+    is_na = pd.isna(s)
+    n_missing = int(is_na.sum())
+
+    effective_order = list(params.order)
+
+    # Missingness handling (no row drops)
+    if isinstance(miss, OrdinalErrorIfNA):
+        if n_missing > 0:
+            return _issue(
+                f"ordinal_map: missingness='error_if_na' but {column!r} contains missing values.",
+                severity="FAIL",
+                evidence={"column": column, "n_missing": n_missing},
+                fix_hint="Use as_unknown (with allow_unknown=True), impute_token, or impute_mode.",
             )
+
+    elif isinstance(miss, OrdinalImputeMode):
+        non_na = s.dropna()
+        if non_na.empty:
+            return _issue(
+                f"ordinal_map: impute_mode cannot run because {column!r} has no non-missing values.",
+                severity="FAIL",
+                evidence={"column": column, "n_rows": int(len(s0)), "n_missing": n_missing},
+                fix_hint="Use impute_token or dummy_na-like strategy (not applicable here), or allow_unknown.",
+            )
+        vc = non_na.value_counts(dropna=True)
+        max_count = int(vc.max())
+        top = vc[vc == max_count].index.tolist()
+        mode_value = sorted(top, key=lambda x: str(x))[0]
+        s = s.fillna(mode_value) # pyright: ignore[reportUnknownMemberType]
+
+    elif isinstance(miss, OrdinalImputeToken):
+        token = miss.token
+        if token not in effective_order:
+            if miss.position == "prepend":
+                effective_order = [token] + effective_order
+            else:
+                effective_order = effective_order + [token]
+        s = s.fillna(token) # pyright: ignore[reportUnknownMemberType]
+
+    elif isinstance(miss, OrdinalAsUnknown): # pyright: ignore[reportUnnecessaryIsInstance]
+        # NA treated as unknown later
+        pass
+
+    # Build mapping dict: category -> code
+    # codes are numeric; use float64 so NaN is representable
+    mapping: dict[str, float] = {cat: float(params.start + i) for i, cat in enumerate(effective_order)}
+
+    out = pd.Series(index=s.index, dtype="float64")
+
+    unknown_mask = pd.Series(False, index=s.index)
+
+    for idx, v in s.items():
+        if pd.isna(v):
+            continue
+
+        if isinstance(v, str) and v in mapping:
+            out.at[idx] = mapping[v]
         else:
-            return df.copy(), FeatureMapModel(), [
-                _issue(
-                    severity="FAIL",
-                    message=f"ordinal_map has values not present in params['order'] for '{column}'.",
-                    evidence={"column": column, "unknown_values": unknown_values},
-                    fix_hint="Extend order list, set allow_unknown=True, or use ordinal_map_idx.",
-                )
-            ]
+            unknown_mask.at[idx] = True
 
-    out[column] = mapped
-    return out, FeatureMapModel(produced_columns={column: [column]}), issues
+    # Unknown categories
+    n_unknown = int(unknown_mask.sum())
+    if n_unknown > 0 and not params.allow_unknown:
+        sample = s.loc[unknown_mask].dropna().astype(object).head(25).tolist()
+        return _issue(
+            f"ordinal_map: encountered unknown categories in {column!r} (allow_unknown=False).",
+            severity="FAIL",
+            evidence={"column": column, "n_unknown": n_unknown, "unknown_sample": sample},
+            fix_hint="Set allow_unknown=True (and optionally unknown_value) or extend params.order.",
+        )
 
+    unknown_value = float(params.unknown_value) if params.unknown_value is not None else float("nan")
+    if n_unknown > 0:
+        out.loc[unknown_mask] = unknown_value
+        return_issue = return_issue or _issue(
+            f"ordinal_map: unknown categories encountered in {column!r}; encoded using unknown_value.",
+            severity="WARN",
+            evidence={"column": column, "n_unknown": n_unknown, "unknown_value": params.unknown_value},
+            fix_hint="If this is unexpected, extend params.order or disable allow_unknown to fail fast.",
+        )
 
-def _encode_ordinal_map_idx(
+    # Missing values: if as_unknown, treat NA as unknown_value; else leave NaN
+    if isinstance(miss, OrdinalAsUnknown) and n_missing > 0:
+        out.loc[is_na] = unknown_value
+        return_issue = return_issue or _issue(
+            f"ordinal_map: missing values in {column!r} treated as unknown.",
+            severity="WARN",
+            evidence={"column": column, "n_missing": n_missing, "unknown_value": params.unknown_value},
+            fix_hint="If missingness should be explicit, consider imputing a token into the order.",
+        )
+
+    # Output missingness (NumericMissingnessSpec)
+    out2, ind, ind_name, out_miss_issue = _apply_numeric_output_missingness(
+        out=out,
+        output_missingness=params.output_missingness,
+        base_column=column,
+    )
+    if out_miss_issue is not None and out_miss_issue.severity == "FAIL":
+        return out_miss_issue
+    if out_miss_issue is not None and out_miss_issue.severity == "WARN":
+        return_issue = return_issue or out_miss_issue
+
+    # PLAN: indicator name collision
+    if ind is not None and ind_name is not None:
+        if ind_name in df_to_change.columns and ind_name != column:
+            raise TransformPlanApplicationError(
+                "ordinal_map: indicator column name already exists; cannot insert safely.",
+                evidence={"column": column, "indicator_name": ind_name},
+            )
+
+    # --- COMMIT ---
+    df_to_change.drop(columns=[column], inplace=True)
+    df_to_change.insert(loc, column, out2.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+
+    if ind is not None and ind_name is not None:
+        df_to_change.insert(loc + 1, ind_name, ind.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+
+    return return_issue
+
+def apply_ordinal_map_idx_column(
+    df_to_change: pd.DataFrame,
     *,
-    df: pd.DataFrame,
     column: str,
     params: OrdinalMapIdxParams,
-    categories_in_order: Optional[Sequence[str]],
-) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
-    cats, issues = _require_categories(column=column, categories_in_order=categories_in_order, encoding="ordinal_map_idx")
-    if cats is None:
-        return df.copy(), FeatureMapModel(), issues
+) -> ValidationIssueModel | None:
+    """
+    Applies OrdinalMapIdxParams IN-PLACE to a single column (category indices).
 
-    n = len(cats)
-    order = list(map(int, params.order))
-    drp = set(map(int, params.drop))
+    DATA issues => return ValidationIssueModel("FAIL") and do not mutate.
+    PLAN/LLM issues => raise TransformPlanApplicationError.
 
-    bad = [i for i in sorted(set(order) | drp) if i < 0 or i >= n]
-    if bad:
-        return df.copy(), FeatureMapModel(), [
-            _issue(
-                severity="FAIL",
-                message=f"ordinal_map_idx has invalid category indices for '{column}': {bad}",
-                evidence={"column": column, "n_categories": n, "bad_indices": bad},
-                fix_hint="Indices must be within [0, n_categories-1] from profiling.",
-            )
-        ]
+    Row-dropping is NOT supported in this stage.
+    """
+    loc = _ensure_column_exists_unique(df_to_change, column=column, encoder="ordinal_map_idx")
 
-    if set(order) & drp:
-        return df.copy(), FeatureMapModel(), [
-            _issue(
-                severity="FAIL",
-                message=f"ordinal_map_idx: 'order' and 'drop' overlap for '{column}'.",
-                evidence={"column": column, "overlap": sorted(set(order) & drp)},
-                fix_hint="order and drop must be disjoint.",
-            )
-        ]
-
-    mapping: Dict[str, float] = {}
-    for j, idx in enumerate(order):
-        mapping[cats[idx]] = float(params.start + j)
-    for idx in drp:
-        mapping[cats[idx]] = np.nan
-
-    out = df.copy()
-    out[column] = out[column].map(mapping)
-    return out, FeatureMapModel(produced_columns={column: [column]}), []
-
-
-def _encode_to_numeric(
-    *,
-    df: pd.DataFrame,
-    column: str,
-    params: Optional[ToNumericParams],
-) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
-    p = params or ToNumericParams()
-    out = df.copy()
-
-    try:
-        out[column] = pd.to_numeric(out[column], errors=p.errors)
-    except Exception as e:  # noqa: BLE001
-        return df.copy(), FeatureMapModel(), [
-            _issue(
-                severity="FAIL",
-                message=f"to_numeric failed for '{column}': {e}",
-                evidence={"column": column, "errors": p.errors},
-            )
-        ]
-
-    return out, FeatureMapModel(produced_columns={column: [column]}), []
-
-def _encode_log1p(
-    *,
-    df: pd.DataFrame,
-    column: str,
-    params: Optional[Log1pParams],
-) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
-    p = params or Log1pParams()
-
-    s = pd.to_numeric(df[column], errors="coerce").astype(float)
-    if not p.allow_negative and bool((s < 0).any()):
-        return df.copy(), FeatureMapModel(), [
-            _issue(
-                severity="FAIL",
-                message=f"log1p requires non-negative values in '{column}'.",
-                evidence={"column": column, "min": float(np.nanmin(s.to_numpy()))},
-                fix_hint="Shift/clip negatives or set allow_negative=True.",
-            )
-        ]
-
-    out = df.copy()
-    new_col = _derived_name(column, "log1p")
-    out[new_col] = np.log1p(s.to_numpy(dtype=float))
-    out = out.drop(columns=[column])
-
-    return out, FeatureMapModel(produced_columns={column: [new_col]}), []
-
-
-def _encode_standardize(
-    *,
-    df: pd.DataFrame,
-    column: str,
-    params: Optional[StandardizeParams],
-) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
-    p = params or StandardizeParams()
-    issues: List[ValidationIssueModel] = []
-
-    s = pd.to_numeric(df[column], errors="coerce").astype(float)
-    x = s.to_numpy(dtype=float)
-
-    mu = float(np.nanmean(x))
-    sigma = float(np.nanstd(x, ddof=p.ddof))
-
-    if not np.isfinite(mu) or not np.isfinite(sigma):
-        return df.copy(), FeatureMapModel(), [
-            _issue(
-                severity="FAIL",
-                message=f"standardize: non-finite mean/std for '{column}'.",
-                evidence={"column": column, "mean": mu, "std": sigma},
-            )
-        ]
-
-    if sigma <= p.eps:
-        issues.append(
-            _issue(
-                severity="WARN",
-                message=f"standardize: near-zero variance in '{column}', output will be ~0.",
-                evidence={"column": column, "std": sigma},
-                fix_hint="Consider dropping constant columns.",
-            )
+    # --- PLAN checks (defensive) ---
+    if len(params.order) != len(set(params.order)):
+        raise TransformPlanApplicationError(
+            "ordinal_map_idx: params.order must not contain duplicates.",
+            evidence={"column": column, "order_len": len(params.order)},
         )
-        sigma = 1.0
 
-    out = df.copy()
-    new_col = _derived_name(column, "z")
-    out[new_col] = (x - mu) / sigma
-    out = out.drop(columns=[column])
-
-    return out, FeatureMapModel(produced_columns={column: [new_col]}), issues
-
-
-def _encode_minmax(
-    *,
-    df: pd.DataFrame,
-    column: str,
-    params: Optional[MinMaxParams],
-) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
-    p = params or MinMaxParams()
-    issues: List[ValidationIssueModel] = []
-
-    s = pd.to_numeric(df[column], errors="coerce").astype(float)
-    x = s.to_numpy(dtype=float)
-
-    mn = float(np.nanmin(x))
-    mx = float(np.nanmax(x))
-    rng = mx - mn
-
-    if not np.isfinite(mn) or not np.isfinite(mx):
-        return df.copy(), FeatureMapModel(), [
-            _issue(
-                severity="FAIL",
-                message=f"minmax: non-finite min/max for '{column}'.",
-                evidence={"column": column, "min": mn, "max": mx},
-            )
-        ]
-
-    if rng <= p.eps:
-        issues.append(
-            _issue(
-                severity="WARN",
-                message=f"minmax: near-zero range in '{column}', output will be ~0.",
-                evidence={"column": column, "min": mn, "max": mx},
-                fix_hint="Consider dropping constant columns.",
-            )
+    inter = set(params.order) & set(params.drop)
+    if inter:
+        raise TransformPlanApplicationError(
+            "ordinal_map_idx: params.order and params.drop must be disjoint.",
+            evidence={"column": column, "overlap": sorted(inter)},
         )
-        rng = 1.0
 
-    out = df.copy()
-    new_col = _derived_name(column, "mm")
-    out[new_col] = (x - mn) / rng
-    out = out.drop(columns=[column])
+    miss = params.missingness
 
-    return out, FeatureMapModel(produced_columns={column: [new_col]}), issues
+    # Missingness requires allow_unknown if as_unknown
+    if isinstance(miss, IdxAsUnknown) and not params.allow_unknown:
+        raise TransformPlanApplicationError(
+            "ordinal_map_idx: missingness='as_unknown' requires allow_unknown=True.",
+            evidence={"column": column},
+        )
 
+    if isinstance(miss, IdxImputeIndex) and int(miss.index) in set(params.drop):
+        raise TransformPlanApplicationError(
+            "ordinal_map_idx: impute_index must not be in drop list.",
+            evidence={"column": column, "impute_index": int(miss.index)},
+        )
 
-def _encode_datetime_to_epoch_seconds(
-    *,
-    df: pd.DataFrame,
-    column: str,
-    params: Optional[DateTimeToEpochParams],
-) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
-    p = params or DateTimeToEpochParams()
-    out = df.copy()
+    if not isinstance(miss, (IdxAsUnknown, IdxErrorIfNA, IdxImputeIndex, IdxImputeMode)): # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TransformPlanApplicationError(
+            "ordinal_map_idx: unsupported missingness type (plan validation failure).",
+            evidence={"column": column, "missingness_type": miss.__class__.__name__},
+        )
 
-    new_col = _derived_name(column, f"epoch_{p.unit}")
+    # --- DATA path (no mutation yet) ---
+    return_issue: ValidationIssueModel | None = None
 
-    try:
-        dt = pd.to_datetime(out[column], errors=p.errors, utc=True)
+    s0 = df_to_change[column]
+    s = s0.map(_strip_only)
 
-        # int64 nanoseconds since epoch; NaT is min int64
-        ns = dt.astype("int64").astype("float64")
-        ns[ns <= -9e18] = np.nan
+    is_na = pd.isna(s)
+    n_missing = int(is_na.sum())
 
-        if p.unit == "s":
-            out[new_col] = ns / 1e9
-        elif p.unit == "ms":
-            out[new_col] = ns / 1e6
-        elif p.unit == "us":
-            out[new_col] = ns / 1e3
+    # Missingness handling (no row drops)
+    if isinstance(miss, IdxErrorIfNA):
+        if n_missing > 0:
+            return _issue(
+                f"ordinal_map_idx: missingness='error_if_na' but {column!r} contains missing values.",
+                severity="FAIL",
+                evidence={"column": column, "n_missing": n_missing},
+                fix_hint="Use impute_index / impute_mode / as_unknown (with allow_unknown=True).",
+            )
+
+    elif isinstance(miss, IdxImputeIndex):
+        s = s.fillna(int(miss.index)) # pyright: ignore[reportUnknownMemberType]
+
+    elif isinstance(miss, IdxImputeMode):
+        non_na = s.dropna()
+        if non_na.empty:
+            return _issue(
+                f"ordinal_map_idx: impute_mode cannot run because {column!r} has no non-missing values.",
+                severity="FAIL",
+                evidence={"column": column, "n_rows": int(len(s0)), "n_missing": n_missing},
+                fix_hint="Use impute_index or as_unknown (allow_unknown=True).",
+            )
+        vc = non_na.value_counts(dropna=True)
+        max_count = int(vc.max())
+        top = vc[vc == max_count].index.tolist()
+        mode_value = sorted(top, key=lambda x: int(x) if isinstance(x, (int, bool)) else str(x))[0]
+        s = s.fillna(mode_value) # pyright: ignore[reportUnknownMemberType]
+
+    elif isinstance(miss, IdxAsUnknown): # pyright: ignore[reportUnnecessaryIsInstance]
+        pass  # NA treated as unknown later
+
+    # Build mapping dict: idx -> code
+    order_pos: dict[int, float] = {int(cat): float(params.start + i) for i, cat in enumerate(params.order)}
+    drop_set = {int(x) for x in params.drop}
+
+    out = pd.Series(index=s.index, dtype="float64")
+    unknown_mask = pd.Series(False, index=s.index)
+
+    for idx, v in s.items():
+        if pd.isna(v):
+            continue
+
+        if isinstance(v, (int, bool)):
+            iv = int(v)
         else:
-            out[new_col] = ns
+            unknown_mask.at[idx] = True
+            continue
 
-        out = out.drop(columns=[column])
+        if iv in drop_set:
+            out.at[idx] = float("nan")
+        elif iv in order_pos:
+            out.at[idx] = order_pos[iv]
+        else:
+            unknown_mask.at[idx] = True
 
-    except Exception as e:  # noqa: BLE001
-        return df.copy(), FeatureMapModel(), [
-            _issue(
-                severity="FAIL",
-                message=f"datetime_to_epoch_seconds failed for '{column}': {e}",
-                evidence={"column": column, "errors": p.errors, "unit": p.unit},
+    # Unknown indices
+    n_unknown = int(unknown_mask.sum())
+    if n_unknown > 0 and not params.allow_unknown:
+        sample = s.loc[unknown_mask].dropna().astype(object).head(25).tolist()
+        return _issue(
+            f"ordinal_map_idx: encountered unknown indices in {column!r} (allow_unknown=False).",
+            severity="FAIL",
+            evidence={"column": column, "n_unknown": n_unknown, "unknown_sample": sample},
+            fix_hint="Set allow_unknown=True (and optionally unknown_value) or extend params.order / adjust params.drop.",
+        )
+
+    unknown_value = float(params.unknown_value) if params.unknown_value is not None else float("nan")
+    if n_unknown > 0:
+        out.loc[unknown_mask] = unknown_value
+        return_issue = return_issue or _issue(
+            f"ordinal_map_idx: unknown indices encountered in {column!r}; encoded using unknown_value.",
+            severity="WARN",
+            evidence={"column": column, "n_unknown": n_unknown, "unknown_value": params.unknown_value},
+            fix_hint="If this is unexpected, extend params.order or disable allow_unknown to fail fast.",
+        )
+
+    # Missing values: if as_unknown, treat NA as unknown_value; else leave NaN
+    if isinstance(miss, IdxAsUnknown) and n_missing > 0:
+        out.loc[is_na] = unknown_value
+        return_issue = return_issue or _issue(
+            f"ordinal_map_idx: missing values in {column!r} treated as unknown.",
+            severity="WARN",
+            evidence={"column": column, "n_missing": n_missing, "unknown_value": params.unknown_value},
+            fix_hint="If missingness should map to a specific index, use impute_index.",
+        )
+
+    # Output missingness
+    out2, ind, ind_name, out_miss_issue = _apply_numeric_output_missingness(
+        out=out,
+        output_missingness=params.output_missingness,
+        base_column=column,
+    )
+    if out_miss_issue is not None and out_miss_issue.severity == "FAIL":
+        return out_miss_issue
+    if out_miss_issue is not None and out_miss_issue.severity == "WARN":
+        return_issue = return_issue or out_miss_issue
+
+    # PLAN: indicator name collision
+    if ind is not None and ind_name is not None:
+        if ind_name in df_to_change.columns and ind_name != column:
+            raise TransformPlanApplicationError(
+                "ordinal_map_idx: indicator column name already exists; cannot insert safely.",
+                evidence={"column": column, "indicator_name": ind_name},
             )
-        ]
 
-    return out, FeatureMapModel(produced_columns={column: [new_col]}), []
+    # --- COMMIT ---
+    df_to_change.drop(columns=[column], inplace=True)
+    df_to_change.insert(loc, column, out2.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+
+    if ind is not None and ind_name is not None:
+        df_to_change.insert(loc + 1, ind_name, ind.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+
+    return return_issue
+
+def apply_to_numeric_column(
+    df_to_change: pd.DataFrame,
+    *,
+    column: str,
+    params: ToNumericParams,
+) -> ValidationIssueModel | None:
+    """
+    Convert a single column to numeric IN-PLACE.
+
+    PLAN/LLM faults => raise TransformPlanApplicationError
+    DATA faults     => return ValidationIssueModel("FAIL") and do not mutate
+    WARN            => return ValidationIssueModel("WARN") and apply
+    """
+    loc = _ensure_column_exists_unique(df_to_change, column=column, encoder="to_numeric")
+
+    # PLAN: missingness must be supported (no row drops)
+    if not isinstance(
+        params.missingness,
+        (NumericKeepNA, NumericAddMissingIndicator, NumericErrorIfNA, NumericImputeMean, NumericImputeMedian),
+    ): # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TransformPlanApplicationError(
+            "to_numeric: unsupported missingness strategy (row dropping disallowed / unknown type).",
+            evidence={"column": column, "missingness_type": params.missingness.__class__.__name__},
+        )
+
+    return_issue: ValidationIssueModel | None = None
+
+    s0 = df_to_change[column].map(_strip_only)
+
+    # Detect coercion failures deterministically
+    coerced = pd.to_numeric(s0, errors="coerce")
+    invalid_mask = (~pd.isna(s0)) & pd.isna(coerced)
+    n_invalid = int(invalid_mask.sum())
+
+    if params.errors == "raise":
+        if n_invalid > 0:
+            sample = s0.loc[invalid_mask].astype(object).head(25).tolist()
+            return _issue(
+                f"to_numeric: errors='raise' but non-numeric values found in {column!r}.",
+                severity="FAIL",
+                evidence={"column": column, "n_invalid": n_invalid, "invalid_sample": sample},
+                fix_hint="Use errors='coerce' or clean upstream / pick a different encoding.",
+            )
+        numeric = pd.to_numeric(s0, errors="raise")  # safe now
+    elif params.errors == "coerce":
+        numeric = coerced
+        if n_invalid > 0:
+            sample = s0.loc[invalid_mask].astype(object).head(25).tolist()
+            return_issue = _issue(
+                f"to_numeric: coerced non-numeric values to NA in {column!r}.",
+                severity="WARN",
+                evidence={"column": column, "n_coerced_to_na": n_invalid, "sample": sample},
+                fix_hint="If this is unexpected, use errors='raise' or clean upstream.",
+            )
+    else:
+        raise TransformPlanApplicationError(
+            "to_numeric: invalid params.errors (plan validation failure).",
+            evidence={"column": column, "errors": str(params.errors)},
+        )
+
+    numeric = numeric.astype("float64")
+
+    # Apply numeric missingness (no mutation yet)
+    out2, ind, ind_name, miss_issue = _apply_numeric_output_missingness(
+        out=numeric,
+        output_missingness=params.missingness,
+        base_column=column,
+    )
+    if miss_issue is not None and miss_issue.severity == "FAIL":
+        return miss_issue
+    if miss_issue is not None and miss_issue.severity == "WARN":
+        return_issue = return_issue or miss_issue
+
+    if ind is not None and ind_name is not None:
+        if ind_name in df_to_change.columns and ind_name != column:
+            raise TransformPlanApplicationError(
+                "to_numeric: indicator column name already exists; cannot insert safely.",
+                evidence={"column": column, "indicator_name": ind_name},
+            )
+
+    # COMMIT
+    df_to_change.drop(columns=[column], inplace=True)
+    df_to_change.insert(loc, column, out2.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+    if ind is not None and ind_name is not None:
+        df_to_change.insert(loc + 1, ind_name, ind.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+
+    return return_issue
+
+
+def apply_log1p_column(
+    df_to_change: pd.DataFrame,
+    *,
+    column: str,
+    params: Log1pParams,
+) -> ValidationIssueModel | None:
+    """
+    Apply log1p transform to a single column IN-PLACE.
+
+    PLAN/LLM faults => raise TransformPlanApplicationError
+    DATA faults     => return ValidationIssueModel("FAIL") and do not mutate
+    WARN            => return ValidationIssueModel("WARN") and apply
+    """
+    loc = _ensure_column_exists_unique(df_to_change, column=column, encoder="log1p")
+
+    if not isinstance(
+        params.missingness,
+        (NumericKeepNA, NumericAddMissingIndicator, NumericErrorIfNA, NumericImputeMean, NumericImputeMedian),
+    ): # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TransformPlanApplicationError(
+            "log1p: unsupported missingness strategy (row dropping disallowed / unknown type).",
+            evidence={"column": column, "missingness_type": params.missingness.__class__.__name__},
+        )
+
+    return_issue: ValidationIssueModel | None = None
+
+    s0 = df_to_change[column].map(_strip_only)
+    numeric = pd.to_numeric(s0, errors="coerce").astype("float64")
+
+    invalid_mask = (~pd.isna(s0)) & pd.isna(numeric)
+    n_invalid = int(invalid_mask.sum())
+    if n_invalid > 0:
+        sample = s0.loc[invalid_mask].astype(object).head(25).tolist()
+        return _issue(
+            f"log1p: non-numeric values found in {column!r}.",
+            severity="FAIL",
+            evidence={"column": column, "n_invalid": n_invalid, "invalid_sample": sample},
+            fix_hint="Run to_numeric first or choose a different encoding.",
+        )
+
+    # Apply numeric missingness BEFORE transform (no mutation yet)
+    num2, ind, ind_name, miss_issue = _apply_numeric_output_missingness(
+        out=numeric,
+        output_missingness=params.missingness,
+        base_column=column,
+    )
+    if miss_issue is not None and miss_issue.severity == "FAIL":
+        return miss_issue
+    if miss_issue is not None and miss_issue.severity == "WARN":
+        return_issue = return_issue or miss_issue
+
+    # Domain checks (DATA)
+    vals = num2.dropna()
+    if not vals.empty:
+        if (vals <= -1.0).any():
+            bad = vals[vals <= -1.0].head(25).tolist()
+            return _issue(
+                f"log1p: values <= -1 found in {column!r} (log1p undefined).",
+                severity="FAIL",
+                evidence={"column": column, "n_bad": int((vals <= -1.0).sum()), "bad_sample": bad},
+                fix_hint="Clip/filter upstream or avoid log1p for this column.",
+            )
+        if not params.allow_negative and (vals < 0.0).any():
+            bad = vals[vals < 0.0].head(25).tolist()
+            return _issue(
+                f"log1p: negative values found in {column!r} but allow_negative=False.",
+                severity="FAIL",
+                evidence={"column": column, "n_negative": int((vals < 0.0).sum()), "negative_sample": bad},
+                fix_hint="Set allow_negative=True or avoid log1p.",
+            )
+
+    transformed = pd.Series(np.log1p(num2), index=num2.index)
+
+    if ind is not None and ind_name is not None:
+        if ind_name in df_to_change.columns and ind_name != column:
+            raise TransformPlanApplicationError(
+                "log1p: indicator column name already exists; cannot insert safely.",
+                evidence={"column": column, "indicator_name": ind_name},
+            )
+
+    # COMMIT
+    df_to_change.drop(columns=[column], inplace=True)
+    df_to_change.insert(loc, column, transformed.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+    if ind is not None and ind_name is not None:
+        df_to_change.insert(loc + 1, ind_name, ind.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+
+    return return_issue
+
+
+def apply_standardize_column(
+    df_to_change: pd.DataFrame,
+    *,
+    column: str,
+    params: StandardizeParams,
+) -> ValidationIssueModel | None:
+    """
+    Standardize a single column IN-PLACE: (x - mean) / std.
+
+    PLAN/LLM faults => raise TransformPlanApplicationError
+    DATA faults     => return ValidationIssueModel("FAIL") and do not mutate
+    WARN            => return ValidationIssueModel("WARN") and apply
+    """
+    loc = _ensure_column_exists_unique(df_to_change, column=column, encoder="standardize")
+
+    if params.ddof < 0:
+        raise TransformPlanApplicationError(
+            "standardize: ddof must be >= 0 (plan validation failure).",
+            evidence={"column": column, "ddof": int(params.ddof)},
+        )
+    if params.eps <= 0:
+        raise TransformPlanApplicationError(
+            "standardize: eps must be > 0 (plan validation failure).",
+            evidence={"column": column, "eps": float(params.eps)},
+        )
+
+    if not isinstance(
+        params.missingness,
+        (NumericKeepNA, NumericAddMissingIndicator, NumericErrorIfNA, NumericImputeMean, NumericImputeMedian),
+    ): # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TransformPlanApplicationError(
+            "standardize: unsupported missingness strategy (row dropping disallowed / unknown type).",
+            evidence={"column": column, "missingness_type": params.missingness.__class__.__name__},
+        )
+
+    return_issue: ValidationIssueModel | None = None
+
+    s0 = df_to_change[column].map(_strip_only)
+    numeric = pd.to_numeric(s0, errors="coerce").astype("float64")
+
+    invalid_mask = (~pd.isna(s0)) & pd.isna(numeric)
+    n_invalid = int(invalid_mask.sum())
+    if n_invalid > 0:
+        sample = s0.loc[invalid_mask].astype(object).head(25).tolist()
+        return _issue(
+            f"standardize: non-numeric values found in {column!r}.",
+            severity="FAIL",
+            evidence={"column": column, "n_invalid": n_invalid, "invalid_sample": sample},
+            fix_hint="Run to_numeric first or choose a different encoding.",
+        )
+
+    # Apply numeric missingness BEFORE transform (no mutation yet)
+    num2, ind, ind_name, miss_issue = _apply_numeric_output_missingness(
+        out=numeric,
+        output_missingness=params.missingness,
+        base_column=column,
+    )
+    if miss_issue is not None and miss_issue.severity == "FAIL":
+        return miss_issue
+    if miss_issue is not None and miss_issue.severity == "WARN":
+        return_issue = return_issue or miss_issue
+
+    vals = num2.dropna()
+    if vals.empty:
+        return _issue(
+            f"standardize: cannot standardize {column!r} because all values are missing after preprocessing.",
+            severity="FAIL",
+            evidence={"column": column, "n_rows": int(len(num2))},
+            fix_hint="Use add_missing_indicator/keep_na or fix upstream missingness.",
+        )
+
+    mean = float(vals.mean())
+    std = float(vals.std(ddof=int(params.ddof)))
+
+    if std < float(params.eps):
+        # near-constant column => standardize to 0 for non-missing values (apply, but WARN)
+        out = num2.copy()
+        out.loc[~out.isna()] = 0.0
+        return_issue = return_issue or _issue(
+            f"standardize: near-constant column {column!r} (std<{params.eps}); set non-missing values to 0.",
+            severity="WARN",
+            evidence={"column": column, "mean": mean, "std": std, "eps": float(params.eps)},
+            fix_hint="Consider dropping the column upstream if it's uninformative.",
+        )
+    else:
+        out = (num2 - mean) / std
+
+    if ind is not None and ind_name is not None:
+        if ind_name in df_to_change.columns and ind_name != column:
+            raise TransformPlanApplicationError(
+                "standardize: indicator column name already exists; cannot insert safely.",
+                evidence={"column": column, "indicator_name": ind_name},
+            )
+
+    # COMMIT
+    df_to_change.drop(columns=[column], inplace=True)
+    df_to_change.insert(loc, column, out.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+    if ind is not None and ind_name is not None:
+        df_to_change.insert(loc + 1, ind_name, ind.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+
+    return return_issue
+
+
+def apply_minmax_column(
+    df_to_change: pd.DataFrame,
+    *,
+    column: str,
+    params: MinMaxParams,
+) -> ValidationIssueModel | None:
+    """
+    MinMax scale a single column IN-PLACE: (x - min) / (max - min).
+
+    PLAN/LLM faults => raise TransformPlanApplicationError
+    DATA faults     => return ValidationIssueModel("FAIL") and do not mutate
+    WARN            => return ValidationIssueModel("WARN") and apply
+    """
+    loc = _ensure_column_exists_unique(df_to_change, column=column, encoder="minmax")
+
+    if params.eps <= 0:
+        raise TransformPlanApplicationError(
+            "minmax: eps must be > 0 (plan validation failure).",
+            evidence={"column": column, "eps": float(params.eps)},
+        )
+
+    if not isinstance(
+        params.missingness,
+        (NumericKeepNA, NumericAddMissingIndicator, NumericErrorIfNA, NumericImputeMean, NumericImputeMedian),
+    ): # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TransformPlanApplicationError(
+            "minmax: unsupported missingness strategy (row dropping disallowed / unknown type).",
+            evidence={"column": column, "missingness_type": params.missingness.__class__.__name__},
+        )
+
+    return_issue: ValidationIssueModel | None = None
+
+    s0 = df_to_change[column].map(_strip_only)
+    numeric = pd.to_numeric(s0, errors="coerce").astype("float64")
+
+    invalid_mask = (~pd.isna(s0)) & pd.isna(numeric)
+    n_invalid = int(invalid_mask.sum())
+    if n_invalid > 0:
+        sample = s0.loc[invalid_mask].astype(object).head(25).tolist()
+        return _issue(
+            f"minmax: non-numeric values found in {column!r}.",
+            severity="FAIL",
+            evidence={"column": column, "n_invalid": n_invalid, "invalid_sample": sample},
+            fix_hint="Run to_numeric first or choose a different encoding.",
+        )
+
+    # Apply numeric missingness BEFORE transform (no mutation yet)
+    num2, ind, ind_name, miss_issue = _apply_numeric_output_missingness(
+        out=numeric,
+        output_missingness=params.missingness,
+        base_column=column,
+    )
+    if miss_issue is not None and miss_issue.severity == "FAIL":
+        return miss_issue
+    if miss_issue is not None and miss_issue.severity == "WARN":
+        return_issue = return_issue or miss_issue
+
+    vals = num2.dropna()
+    if vals.empty:
+        return _issue(
+            f"minmax: cannot scale {column!r} because all values are missing after preprocessing.",
+            severity="FAIL",
+            evidence={"column": column, "n_rows": int(len(num2))},
+            fix_hint="Use add_missing_indicator/keep_na or fix upstream missingness.",
+        )
+
+    vmin = float(vals.min())
+    vmax = float(vals.max())
+    rng = vmax - vmin
+
+    if rng < float(params.eps):
+        # near-constant column => set non-missing to 0, warn
+        out = num2.copy()
+        out.loc[~out.isna()] = 0.0
+        return_issue = return_issue or _issue(
+            f"minmax: near-constant column {column!r} (range<eps); set non-missing values to 0.",
+            severity="WARN",
+            evidence={"column": column, "min": vmin, "max": vmax, "range": rng, "eps": float(params.eps)},
+            fix_hint="Consider dropping the column upstream if it's uninformative.",
+        )
+    else:
+        out = (num2 - vmin) / rng
+
+    if ind is not None and ind_name is not None:
+        if ind_name in df_to_change.columns and ind_name != column:
+            raise TransformPlanApplicationError(
+                "minmax: indicator column name already exists; cannot insert safely.",
+                evidence={"column": column, "indicator_name": ind_name},
+            )
+
+    # COMMIT
+    df_to_change.drop(columns=[column], inplace=True)
+    df_to_change.insert(loc, column, out.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+    if ind is not None and ind_name is not None:
+        df_to_change.insert(loc + 1, ind_name, ind.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+
+    return return_issue
+
+
+def apply_datetime_to_epoch_column(
+    df_to_change: pd.DataFrame,
+    *,
+    column: str,
+    params: DateTimeToEpochParams,
+) -> ValidationIssueModel | None:
+    """
+    Convert datetime column to epoch time IN-PLACE.
+
+    Output unit is params.unit in {"s","ms","us","ns"} (epoch in that unit).
+    Missingness is handled via params.missingness (NumericMissingnessSpec).
+
+    PLAN/LLM faults => raise TransformPlanApplicationError
+    DATA faults     => return ValidationIssueModel("FAIL") and do not mutate
+    WARN            => return ValidationIssueModel("WARN") and apply
+    """
+    loc = _ensure_column_exists_unique(df_to_change, column=column, encoder="datetime_to_epoch")
+
+    if params.unit not in ("s", "ms", "us", "ns"):
+        raise TransformPlanApplicationError(
+            "datetime_to_epoch: invalid unit (plan validation failure).",
+            evidence={"column": column, "unit": str(params.unit)},
+        )
+
+    if not isinstance(
+        params.missingness,
+        (NumericKeepNA, NumericAddMissingIndicator, NumericErrorIfNA, NumericImputeMean, NumericImputeMedian),
+    ): # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TransformPlanApplicationError(
+            "datetime_to_epoch: unsupported missingness strategy (row dropping disallowed / unknown type).",
+            evidence={"column": column, "missingness_type": params.missingness.__class__.__name__},
+        )
+
+    return_issue: ValidationIssueModel | None = None
+
+    s0 = df_to_change[column].map(_strip_only)
+
+    # Parse
+    dt = pd.to_datetime(s0, errors="coerce")
+    invalid_mask = (~pd.isna(s0)) & dt.isna()
+    n_invalid = int(invalid_mask.sum())
+
+    if params.errors == "raise":
+        if n_invalid > 0:
+            sample = s0.loc[invalid_mask].astype(object).head(25).tolist()
+            return _issue(
+                f"datetime_to_epoch: errors='raise' but unparseable datetimes found in {column!r}.",
+                severity="FAIL",
+                evidence={"column": column, "n_invalid": n_invalid, "invalid_sample": sample},
+                fix_hint="Use errors='coerce' or clean upstream / change encoding.",
+            )
+        # re-parse in strict mode (will not fail now)
+        dt = pd.to_datetime(s0, errors="raise")
+    elif params.errors == "coerce":
+        if n_invalid > 0:
+            sample = s0.loc[invalid_mask].astype(object).head(25).tolist()
+            return_issue = _issue(
+                f"datetime_to_epoch: coerced unparseable values to NA in {column!r}.",
+                severity="WARN",
+                evidence={"column": column, "n_coerced_to_na": n_invalid, "sample": sample},
+                fix_hint="If unexpected, use errors='raise' or clean upstream.",
+            )
+    else:
+        raise TransformPlanApplicationError(
+            "datetime_to_epoch: invalid params.errors (plan validation failure).",
+            evidence={"column": column, "errors": str(params.errors)},
+        )
+
+    # Normalize tz-aware to UTC then make tz-naive for integer conversion
+    tz = getattr(dt.dtype, "tz", None)
+    if tz is not None:
+        dt_naive = dt.dt.tz_convert("UTC").dt.tz_localize(None)
+    else:
+        dt_naive = dt
+
+    # Convert to epoch in requested unit
+    # dt_naive is datetime64[ns]; convert to int64 ns since epoch, then to float64
+    ns_int_array: np.ndarray[Any, np.dtype[np.int64]] = dt_naive.values.view("int64") # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType, reportAssignmentType]
+    out_array = ns_int_array.astype("float64")
+    
+    # Create series and set NaN values properly using pandas mask
+    out = pd.Series(out_array, index=dt_naive.index, dtype="float64")
+    out = out.where(~dt_naive.isna(), np.nan)
+
+    denom = {"ns": 1.0, "us": 1_000.0, "ms": 1_000_000.0, "s": 1_000_000_000.0}[params.unit]
+    out = out / denom
+
+    # Apply numeric missingness AFTER conversion (no mutation yet)
+    out2, ind, ind_name, miss_issue = _apply_numeric_output_missingness(
+        out=out,
+        output_missingness=params.missingness,
+        base_column=column,
+    )
+    if miss_issue is not None and miss_issue.severity == "FAIL":
+        return miss_issue
+    if miss_issue is not None and miss_issue.severity == "WARN":
+        return_issue = return_issue or miss_issue
+
+    if ind is not None and ind_name is not None:
+        if ind_name in df_to_change.columns and ind_name != column:
+            raise TransformPlanApplicationError(
+                "datetime_to_epoch: indicator column name already exists; cannot insert safely.",
+                evidence={"column": column, "indicator_name": ind_name},
+            )
+
+    # COMMIT
+    df_to_change.drop(columns=[column], inplace=True)
+    df_to_change.insert(loc, column, out2.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+    if ind is not None and ind_name is not None:
+        df_to_change.insert(loc + 1, ind_name, ind.reindex(df_to_change.index)) # pyright: ignore[reportUnknownMemberType]
+
+    return return_issue
