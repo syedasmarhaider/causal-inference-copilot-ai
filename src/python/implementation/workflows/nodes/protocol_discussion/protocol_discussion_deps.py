@@ -2,27 +2,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Mapping
-from typing import Any
+from typing import Sequence
 
-from python.domain.workflows.state_dep import StateDep
+from python.domain.workflows.state import State
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
 
 
 @dataclass(frozen=True)
-class ProtocolDiscussionDeps(StateDep):
+class ProtocolDiscussionDeps:
     load_dataset: LoadDatasetState
+    
+    @classmethod
+    def pre_required_states_names(cls) -> Sequence[str]:
+        return [LoadDatasetState.NAME]
 
     @classmethod
-    def from_loaded(cls, loaded: Mapping[str, Any]) -> "ProtocolDiscussionDeps":
-        raw = loaded.get(LoadDatasetState.NAME)
-        if raw is None:
+    def from_loaded(cls, loaded: Mapping[str, State]) -> "ProtocolDiscussionDeps":
+        # ---- LoadDatasetState ----
+        ld = loaded.get(LoadDatasetState.NAME)
+        if ld is None:
             raise ValueError(f"ProtocolDiscussionDeps: missing {LoadDatasetState.NAME}")
-        
-        if isinstance(raw, Mapping):
-            ld = LoadDatasetState.from_json_dict(dict(raw)) # pyright: ignore[reportUnknownArgumentType]
-            return cls(load_dataset=ld)
-
-        raise ValueError(
-            f"ProtocolDiscussionDeps: invalid {LoadDatasetState.NAME} "
-            f"(expected payload mapping, got {type(raw).__name__})"
-        )
+        if not isinstance(ld, LoadDatasetState):
+            raise ValueError(
+                f"ProtocolDiscussionDeps: invalid {LoadDatasetState.NAME} "
+                f"(expected LoadDatasetState, got {type(ld).__name__})"
+            )
+        return cls(load_dataset=ld)

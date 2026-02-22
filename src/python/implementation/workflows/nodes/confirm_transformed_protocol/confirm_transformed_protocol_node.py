@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, Mapping, Optional, Sequence
+from typing import ClassVar, Mapping, Optional, Sequence
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -50,7 +50,7 @@ class ConfirmTransformedProtocolNode(Node):
         conversation_id: UUID,
         state: State,
         tool_factory: ToolFactory,
-        previous_state_dependencies: Mapping[str, Any],
+        previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         deps = ConfirmTransformedProtocolDeps.from_loaded(previous_state_dependencies)

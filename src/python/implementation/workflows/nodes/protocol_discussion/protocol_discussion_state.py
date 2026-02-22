@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict, Optional, Sequence
-
 from pydantic import BaseModel, ConfigDict, field_validator
-
 from python.domain.workflows.state import ACTION, State, Status
-from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import ProtocolDiscussionDeps
 
 
 class ProtocolDiscussionPayloadModel(BaseModel):
@@ -68,8 +66,8 @@ class ProtocolDiscussionState(State):
     def needs_action(self) -> ACTION:
         return self.payload.action
 
-    def required_states_keys(self) -> Sequence[str]:
-        return (LoadDatasetState.NAME,)
+    def pre_required_states_names(self) -> Sequence[str]:
+        return  ProtocolDiscussionDeps.pre_required_states_names()
 
     def to_json_dict(self) -> Dict[str, Any]:
         return self.payload.model_dump(mode="json")

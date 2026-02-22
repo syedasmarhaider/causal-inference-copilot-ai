@@ -6,9 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.workflows.state import ACTION, State, Status
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
-from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
-from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import ValidateCleanProtocolState
+from python.implementation.workflows.nodes.transform_protocol.transform_protocol_deps import TransformProtocolDeps
 from python.implementation.workflows.tools.data.data_profiling_tool import DatasetSummaryModel
 from python.implementation.workflows.utils.validation import (
     NonEmptyStr,
@@ -72,8 +70,8 @@ class TransformProtocolState(State):
     def needs_action(self) -> ACTION:
         return "NONE"
 
-    def required_states_keys(self) -> Sequence[str]:
-        return [CleanProtocolState.NAME, CompileProtocolState.NAME,ValidateCleanProtocolState.NAME]
+    def pre_required_states_names(self) -> Sequence[str]:
+        return TransformProtocolDeps.pre_required_states_names()
 
     def to_json_dict(self) -> Dict[str, Any]:
         # payload-only

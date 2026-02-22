@@ -5,9 +5,8 @@ from typing import Any, ClassVar, Dict, List, Optional, Sequence, cast
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from python.domain.workflows.state import ACTION, State, Status
+from python.implementation.workflows.nodes.compile_protocol.compile_protocol_deps import CompileProtocolDeps
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import ProtocolSpec
-from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
 from python.implementation.workflows.utils.utils import json_sanitize
 
 
@@ -86,8 +85,8 @@ class CompileProtocolState(State):
     def needs_action(self) -> ACTION:
         return "NONE"
 
-    def required_states_keys(self) -> Sequence[str]:
-        return (LoadDatasetState.NAME, ProtocolDiscussionState.NAME)
+    def pre_required_states_names(self) -> Sequence[str]:
+        return CompileProtocolDeps.pre_required_states_names()
 
     def to_json_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = self.payload.model_dump(mode="json")

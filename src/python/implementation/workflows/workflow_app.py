@@ -106,23 +106,19 @@ class WorkflowApp:
             )
         
 
-        state_name_to_run = decision.state_name
+        state_name_to_run = decision.state_name 
         state_to_run = self._repo.load_state(
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
                 state_name=state_name_to_run,
             )
+        if current_state.status == "ABORTED" or state_to_run is None:
+            state_to_run = self._init_empty_state(state_name_to_run)
         
-        if state_to_run is None:
-            raise KeyError(f"WorkflowApp: Router decided next state {state_name_to_run!r} but it does not exist in repo for this conversation.")
-
-        
-        
-
         deps = self._load_deps(
             user_id=req.user_id,
             conversation_id=req.conversation_id,
-            required=state_to_run.required_states_keys(),
+            required=state_to_run.pre_required_states_names(),
         )
 
         node = self._nodes.get(state_name_to_run)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
-from typing import Any, ClassVar, Optional, Sequence, cast
+from typing import ClassVar, Optional, Sequence, cast
 from uuid import UUID
 
 from python.domain.repo.data_repo import DataRepo
@@ -63,7 +63,7 @@ class LoadDatasetNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         tool_factory: ToolFactory,
-        previous_state_dependencies: Mapping[str, Any],
+        previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
         state: State,
     ) -> State:

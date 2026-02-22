@@ -89,7 +89,7 @@ class ValidateCleanProtocolNode(Node):
         conversation_id: UUID,
         state: State,
         tool_factory: ToolFactory,  
-        previous_state_dependencies: Mapping[str, Any],
+        previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         try:

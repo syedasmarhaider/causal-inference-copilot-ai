@@ -51,7 +51,7 @@ class CompileProtocolNode(Node):
         conversation_id: UUID,
         state: State,
         tool_factory: ToolFactory,
-        previous_state_dependencies: Mapping[str, Any],
+        previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         dataset_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))

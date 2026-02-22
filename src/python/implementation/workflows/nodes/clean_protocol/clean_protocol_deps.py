@@ -2,48 +2,41 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Mapping
-from typing import Any
+from typing import Sequence
 
-from python.domain.workflows.state_dep import StateDep
+from python.domain.workflows.state import State
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
 
 
 @dataclass(frozen=True)
-class CleanProtocolDeps(StateDep):
+class CleanProtocolDeps:
     load_dataset: LoadDatasetState
     compile_protocol: CompileProtocolState
+    
+    @classmethod
+    def pre_required_states_names(cls) -> Sequence[str]:
+        return (LoadDatasetState.NAME, CompileProtocolState.NAME)
 
     @classmethod
-    def from_loaded(cls, loaded: Mapping[str, Any]) -> "CleanProtocolDeps":
+    def from_loaded(cls, loaded: Mapping[str, State]) -> "CleanProtocolDeps":
         # ---- LoadDatasetState ----
-        raw_ld = loaded.get(LoadDatasetState.NAME)
-        if raw_ld is None:
+        ld = loaded.get(LoadDatasetState.NAME)
+        if ld is None:
             raise ValueError(f"CleanProtocolDeps: missing {LoadDatasetState.NAME}")
-
-        if isinstance(raw_ld, Mapping):
-            ld = LoadDatasetState.from_json_dict(dict(raw_ld))  # pyright: ignore[reportUnknownArgumentType] (payload-only dict)
-        elif isinstance(raw_ld, LoadDatasetState):
-            ld = raw_ld
-        else:
+        if not isinstance(ld, LoadDatasetState):
             raise ValueError(
                 f"CleanProtocolDeps: invalid {LoadDatasetState.NAME} "
-                f"(expected payload mapping or LoadDatasetState, got {type(raw_ld).__name__})"
+                f"(expected LoadDatasetState, got {type(ld).__name__})"
             )
-
+        
         # ---- CompileProtocolState ----
-        raw_cp = loaded.get(CompileProtocolState.NAME)
-        if raw_cp is None:
+        cp = loaded.get(CompileProtocolState.NAME)
+        if cp is None:
             raise ValueError(f"CleanProtocolDeps: missing {CompileProtocolState.NAME}")
-
-        if isinstance(raw_cp, Mapping):
-            cp = CompileProtocolState.from_json_dict(dict(raw_cp))  # pyright: ignore[reportUnknownArgumentType] (payload-only dict)
-        elif isinstance(raw_cp, CompileProtocolState):
-            cp = raw_cp
-        else:
+        if not isinstance(cp, CompileProtocolState):
             raise ValueError(
                 f"CleanProtocolDeps: invalid {CompileProtocolState.NAME} "
-                f"(expected payload mapping or CompileProtocolState, got {type(raw_cp).__name__})"
-            )
-
+                f"(expected CompileProtocolState, got {type(cp).__name__})"
+            )    
         return cls(load_dataset=ld, compile_protocol=cp)

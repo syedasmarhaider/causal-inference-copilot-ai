@@ -36,7 +36,7 @@ class State(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def required_states_keys(self) -> Sequence[str]:
+    def pre_required_states_names(self) -> Sequence[str]:
         raise NotImplementedError
     
     @abstractmethod

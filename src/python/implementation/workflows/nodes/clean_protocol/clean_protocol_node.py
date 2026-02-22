@@ -14,9 +14,7 @@ from python.domain.service.llm_service import ChatMessage
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
-
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_deps import CleanProtocolDeps
-
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_prompts import get_clean_protocol_node_info
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolPayloadModel, CleanProtocolState
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
@@ -74,7 +72,7 @@ class CleanProtocolNode(Node):
         conversation_id: UUID,
         state: State,
         tool_factory: ToolFactory,
-        previous_state_dependencies: Mapping[str, Any],
+        previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         try:

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict, Optional, Sequence, cast
+from typing import Any, ClassVar, Dict, Optional, Sequence
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from python.domain.workflows.state import ACTION, State, Status
 from python.implementation.workflows.tools.data.data_profiling_tool import DatasetSummaryModel
-from python.implementation.workflows.utils.utils import json_sanitize, uuid_from_any
+from python.implementation.workflows.utils.utils import  uuid_from_any
 
 class LoadDatasetPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -69,14 +69,11 @@ class LoadDatasetState(State):
     def needs_action(self) -> ACTION:
         return "NEEDS_INPUT" if self.error is not None else "NONE"
 
-    def required_states_keys(self) -> Sequence[str]:
+    def pre_required_states_names(self) -> Sequence[str]:
         return ()
 
     def to_json_dict(self) -> Dict[str, Any]:
-        d = self.payload.model_dump(mode="json")
-        if self.payload.summary is not None:
-            d["summary"] = json_sanitize(cast(Any, self.payload.summary))
-        return d
+       return self.payload.model_dump(mode="json", exclude_none=True)
 
     @classmethod
     def from_json_dict(cls, payload: Dict[str, Any]) -> "LoadDatasetState":

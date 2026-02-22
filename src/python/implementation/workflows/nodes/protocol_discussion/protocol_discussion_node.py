@@ -24,7 +24,7 @@ def _llm_call_text(
     model_name: str,
     temperature: float,
     system_prompt: str,
-    user_payload: dict[str, Any],
+    user_payload: dict[str, State],
     empty_err: str,
     history: Optional[Sequence[ChatMessage]] = None,
 ) -> str:

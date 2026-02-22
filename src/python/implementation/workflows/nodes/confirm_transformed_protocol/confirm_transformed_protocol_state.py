@@ -5,7 +5,7 @@ from typing import Any, ClassVar, Dict, Optional, Sequence
 from pydantic import BaseModel, ConfigDict
 
 from python.domain.workflows.state import ACTION, State, Status
-from python.implementation.workflows.nodes.transform_protocol.transform_protocol_state import TransformProtocolState
+from python.implementation.workflows.nodes.confirm_transformed_protocol.confirm_transformed_protocol_deps import ConfirmTransformedProtocolDeps
 
 
 class ConfirmTransformedProtocolPayloadModel(BaseModel):
@@ -48,8 +48,8 @@ class ConfirmTransformedProtocolState(State):
     def needs_action(self) -> ACTION:
         return "NEEDS_INPUT" if self.payload.user_accepted is None else "NONE"
 
-    def required_states_keys(self) -> Sequence[str]:
-        return [TransformProtocolState.NAME]
+    def pre_required_states_names(self) -> Sequence[str]:
+        return ConfirmTransformedProtocolDeps.pre_required_states_names()
 
     def to_json_dict(self) -> Dict[str, Any]:
         return self.payload.model_dump(mode="json")

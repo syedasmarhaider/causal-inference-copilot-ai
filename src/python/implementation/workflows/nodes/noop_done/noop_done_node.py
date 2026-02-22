@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Sequence, Any
+from typing import ClassVar, Optional, Sequence
 from uuid import UUID
 from collections.abc import Mapping
 
@@ -34,7 +34,7 @@ class NoopDoneNode(Node):
         conversation_id: UUID,
         state: State,
         tool_factory: ToolFactory,
-        previous_state_dependencies: Mapping[str, Any],
+        previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         return NoopDoneState()

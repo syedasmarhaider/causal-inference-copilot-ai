@@ -5,8 +5,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Sequence
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.workflows.state import ACTION, State, Status
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
-from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_deps import ValidateCleanProtocolDeps
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
 
@@ -59,8 +58,8 @@ class ValidateCleanProtocolState(State):
     def needs_action(self) -> ACTION:
         return "NONE"
 
-    def required_states_keys(self) -> Sequence[str]:
-        return (CompileProtocolState.NAME, CleanProtocolState.NAME)
+    def pre_required_states_names(self) -> Sequence[str]:
+        return ValidateCleanProtocolDeps.pre_required_states_names()
 
     def to_json_dict(self) -> Dict[str, Any]:
         # payload-only dict (outer store keyed by state name)
