@@ -496,8 +496,8 @@ def apply_null_purge_then_exclusions(
     missing_sentinels: Sequence[str] = ("na", "nan", "null"),
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
-    1) Normalize missing sentinels (string columns only) -> pd.NA
-    2) Drop EVERY row with ANY missing in ANY column (global null purge)
+    1) Normalize missing sentinels (string cols only) -> pd.NA
+    2) Drop rows with missing in *required key columns only* (treatment, outcome, time_zero if COLUMN)
     3) Apply exclusions sequentially (remove rows matching each rule)
 
     Supported ops: '==', 'in', 'not_in', '>', '>=', '<', '<='
@@ -508,9 +508,25 @@ def apply_null_purge_then_exclusions(
     n0 = int(df.shape[0])
 
     cur = _normalize_missing_sentinels(df, missing_sentinels=missing_sentinels)
-    cur = cur.dropna(axis=0, how="any").copy() # pyright: ignore[reportUnknownMemberType]
 
+    # ----------------------------
+    # KEY NULL PURGE (NOT GLOBAL)
+    # ----------------------------
+    tcol = protocol.treatment_spec.column
+    ycol = protocol.outcome_spec.column
+
+    required_nonnull: List[str] = [tcol, ycol]
+    if protocol.time_zero_type == "COLUMN":
+        required_nonnull.append(protocol.time_zero)
+
+    missing_req = [c for c in required_nonnull if c not in cur.columns]
+    if missing_req:
+        raise KeyError(f"Required non-null columns missing in df: {missing_req}")
+
+    n_before_nulls = int(cur.shape[0])
+    cur = cur.dropna(axis=0, how="any", subset=required_nonnull).copy() # pyright: ignore[reportUnknownMemberType]
     n_after_nulls = int(cur.shape[0])
+
     applied: List[Dict[str, Any]] = []
 
     for i, rule in enumerate(exclusions):
@@ -521,7 +537,7 @@ def apply_null_purge_then_exclusions(
         if col not in cur.columns:
             raise KeyError(f"Exclusion column not found in df: {col!r}")
 
-        # Arity rules (this is not schema validation; it's required semantics)
+        # Arity rules
         if op in ("==", ">", ">=", "<", "<=") and len(vals) != 1:
             raise ValueError(f"Exclusion {i}: op {op!r} requires exactly 1 value, got {len(vals)}")
         if op in ("in", "not_in") and len(vals) < 1:
@@ -540,13 +556,14 @@ def apply_null_purge_then_exclusions(
             mask = s.isin(coerced)
 
         elif op == "not_in":
-            mask = ~s.isin(coerced)
+            # NA-safe: only exclude rows with a concrete value not in the list
+            mask = s.notna() & (~s.isin(coerced))
 
         elif op in (">", ">=", "<", "<="):
-            # Only allow inequality on numeric/datetime dtypes (no silent coercion of the series)
             if not (ptypes.is_numeric_dtype(s.dtype) or ptypes.is_datetime64_any_dtype(s.dtype)):
-                raise ValueError(f"Exclusion {i}: op {op!r} requires numeric/datetime column, got {s.dtype!r} for {col!r}")
-
+                raise ValueError(
+                    f"Exclusion {i}: op {op!r} requires numeric/datetime column, got {s.dtype!r} for {col!r}"
+                )
             v0 = coerced[0]
             if op == ">":
                 mask = s.gt(v0)
@@ -558,10 +575,8 @@ def apply_null_purge_then_exclusions(
                 mask = s.le(v0)
 
         else:
-            # Should be unreachable because FilterOp restricts it, but keep explicit.
             raise ValueError(f"Unsupported exclusion operator: {op!r}")
 
-        # Exclusion semantics: remove rows that match
         cur = cur.loc[~mask].copy()
 
         n_after = int(cur.shape[0])
@@ -580,8 +595,10 @@ def apply_null_purge_then_exclusions(
     n_final = int(cur.shape[0])
     summary: Dict[str, Any] = {
         "n_rows_before": n0,
-        "n_rows_after_null_purge": n_after_nulls,
-        "n_removed_null_purge": n0 - n_after_nulls,
+        "required_nonnull_cols": required_nonnull,
+        "n_rows_before_key_null_purge": n_before_nulls,
+        "n_rows_after_key_null_purge": n_after_nulls,
+        "n_removed_key_null_purge": n_before_nulls - n_after_nulls,
         "applied": applied,
         "n_rows_after": n_final,
         "total_removed": n0 - n_final,
