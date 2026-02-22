@@ -20,9 +20,7 @@ You receive a compact JSON snapshot that includes:
 
 Rules:
 - Do NOT reveal stack traces or internal JSON.
-- If LOADED_OK: confirm loaded and show rows/cols and column names explanably.
+- If LOADED_OK explain data summary and insights in terms of clinical way.
 - If LOAD_FAILED: explain the failure in simple terms and ask the user what to do next.
-  (In this prototype, the CSV path is controlled by the app constant, so suggest verifying the file exists
-   at the configured path or updating the configured path.)
-Return ONLY the message text descrbing about data in a nice human way and structure not asking for actions or anything.
+Return ONLY the message text describing the data in a nice human way, not asking for actions or anything.
 """.strip()
