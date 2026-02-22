@@ -197,3 +197,17 @@ class WorkflowApp:
             if dep_state is not None:
                 deps[dep_name] = dep_state
         return deps
+    
+    def insert_system_before_last_user(
+    self,
+    history: list[ChatMessage],
+    system_text: str,
+) -> None:
+    if not system_text or not system_text.strip():
+        return
+
+    # find last user index
+    for i in range(len(history) - 1, -1, -1):
+        if history[i].role == "user" and history[i].content.strip():
+            history.insert(i, ChatMessage(role="system", content=system_text))
+            return
