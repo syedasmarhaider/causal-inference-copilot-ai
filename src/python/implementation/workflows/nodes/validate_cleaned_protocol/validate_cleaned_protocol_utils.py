@@ -487,7 +487,7 @@ def validate_treatment_domain_integrity_protocol(
             compare_mode = "bool"
             allowed_set = set(parsed_allowed)  # type: ignore[arg-type]
             obs_set = set(s_nonnull.astype("bool").unique().tolist())
-            unexpected = sorted([repr(x) for x in obs_set if x not in allowed_set])
+            unexpected = sorted([_safe_display(x) for x in obs_set if x not in allowed_set])
             metrics["compare_mode"] = compare_mode
             metrics["n_unique_observed"] = len(obs_set)
 
@@ -511,7 +511,7 @@ def validate_treatment_domain_integrity_protocol(
             allowed_set = set(allowed_num)
             obs_num = pd.to_numeric(s_nonnull, errors="coerce")
             obs_set = set(obs_num.dropna().unique().tolist())
-            unexpected = sorted([_safe_repr(x) for x in obs_set if x not in allowed_set])
+            unexpected = sorted([_safe_display(x) for x in obs_set if x not in allowed_set])
             metrics["compare_mode"] = compare_mode
             metrics["n_unique_observed"] = len(obs_set)
 
@@ -536,7 +536,7 @@ def validate_treatment_domain_integrity_protocol(
             allowed_set = set(allowed_dt)
             obs_dt = pd.to_datetime(s_nonnull, errors="coerce")
             obs_set = set(obs_dt.dropna().unique().tolist())
-            unexpected = sorted([_safe_repr(x) for x in obs_set if x not in allowed_set])
+            unexpected = sorted([_safe_display(x) for x in obs_set if x not in allowed_set])
             metrics["compare_mode"] = compare_mode
             metrics["n_unique_observed"] = len(obs_set)
 
@@ -967,7 +967,7 @@ def validate_outcome_domain_integrity(
         obs = _observed_values_set(s)
         allowed_set = _allowed_values_set_for_series(s, allowed_literals)
 
-        unexpected = sorted(_safe_repr(x) for x in obs if x not in allowed_set)
+        unexpected = sorted(_safe_display(x) for x in obs if x not in allowed_set)
 
         metrics: Dict[str, Any] = {
             "present": True,
@@ -1032,7 +1032,7 @@ def validate_outcome_domain_integrity(
     obs2 = _observed_values_set(s)
     allowed_set2 = _allowed_values_set_for_series(s, allowed_literals)
 
-    unexpected2 = sorted(_safe_repr(x) for x in obs2 if x not in allowed_set2)
+    unexpected2 = sorted(_safe_display(x) for x in obs2 if x not in allowed_set2)
 
     metrics2.update(
         {
@@ -1569,11 +1569,20 @@ def _counts_by_normalized_string(s: pd.Series, allowed_literals: Sequence[str]) 
         out[lit] = int(ss.eq(key).sum())
     return out
 
-def _safe_repr(x: Any) -> str:
+def _safe_display(x: Any) -> str:
+    """
+    Display value for user/debug output WITHOUT introducing quotes.
+    - strings: returned verbatim
+    - everything else: str(x) (never repr)
+    """
+    if x is None:
+        return "null"
+    if isinstance(x, str):
+        return x
     try:
-        return repr(x)
+        return str(x)
     except Exception:
-        return "<unrepr>"
+        return "<unprintable>"
 
 
 # =============================================================================
@@ -3155,7 +3164,7 @@ def validate_overlap_propensity_proxy(
             _issue(
                 severity="WARN",
                 message="Propensity overlap proxy failed to run (non-fatal).",
-                evidence={**metrics, "error": repr(e)},
+                evidence={**metrics, "error": _safe_display(e)},
                 fix_hint="Inspect covariates for numeric issues; you can still rely on univariate overlap checks.",
             )
         )

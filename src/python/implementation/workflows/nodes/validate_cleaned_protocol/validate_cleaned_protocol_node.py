@@ -15,6 +15,7 @@ from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 
+from python.implementation.workflows.nodes.compile_protocol.protocol_specs import ProtocolSpec
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_prompts import (
     system_prompt_validate_cleaned_protocol,
     validate_cleaned_protocol_get_info,
@@ -288,14 +289,9 @@ class ValidateCleanProtocolNode(Node):
     # Internals
     # =============================================================================
 
-    def _select_validation_view(self, df: pd.DataFrame, proto: Any) -> pd.DataFrame:
+    def _select_validation_view(self, df: pd.DataFrame, proto: ProtocolSpec) -> pd.DataFrame:
         required: List[str] = []
-
-        # treatment
-        tcol = getattr(getattr(proto, "treatment_spec", None), "column", None)
-        if isinstance(tcol, str) and tcol.strip():
-            required.append(tcol)
-
+        
         # outcome (duration has 2)
         ospec = getattr(proto, "outcome_spec", None)
         if ospec is not None:
@@ -307,10 +303,6 @@ class ValidateCleanProtocolNode(Node):
                     required.append(dcol)
                 if isinstance(ecol, str) and ecol.strip():
                     required.append(ecol)
-            else:
-                ycol = getattr(ospec, "column", None)
-                if isinstance(ycol, str) and ycol.strip():
-                    required.append(ycol)
 
         # time_zero if column-based
         tz_type = getattr(proto, "time_zero_type", None)
