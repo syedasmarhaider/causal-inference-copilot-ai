@@ -46,7 +46,6 @@ SCHEMA (must match exactly):
 
   "treatment_spec": (
      {"kind":"binary","column":string,"treated_values":[string],"control_values":[string]}
-   | {"kind":"continuous","column":string,"valid_min":number?,"valid_max":number?}
    | {"kind":"categorical","column":string,"included_levels":[string]}
   ),
   "treatment_window_start": string,
@@ -122,7 +121,6 @@ SCHEMA (must match exactly):
 
   "treatment_spec": (
      {"kind":"binary","column":string,"treated_values":[string],"control_values":[string]}
-   | {"kind":"continuous","column":string,"valid_min":number?,"valid_max":number?}
    | {"kind":"categorical","column":string,"included_levels":[string]}
   ),
   "treatment_window_start": string,

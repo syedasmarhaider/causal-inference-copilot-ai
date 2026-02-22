@@ -43,8 +43,6 @@ class CleanProtocolNode(Node):
       4) Basic feasibility checks
       5) Save cleaned dataset -> new dataset_id
       6) Return InferenceReadyState(clean_dataset_id=...)
-
-    No LLM, deterministic.
     """
 
     NAME: ClassVar[str] = CleanProtocolState.NAME
@@ -353,7 +351,7 @@ def edit_df_drop_cols_expect_required(
     required: Set[str] = set()
 
     # time zero
-    if getattr(compiled_protocol, "time_zero_type", None) == "COLUMN":
+    if compiled_protocol.time_zero_type == "COLUMN":
         required.add(compiled_protocol.time_zero)
 
     # exclusions
@@ -365,12 +363,10 @@ def edit_df_drop_cols_expect_required(
 
     # outcome column(s)
     ys = compiled_protocol.outcome_spec
-    # duration has two columns; others have .column
-    if getattr(ys, "kind", None) == "duration":
-        required.add(getattr(ys, "duration_column"))
-        required.add(getattr(ys, "event_column"))
+    if ys.kind in ("binary", "categorical", "continuous"):
+        required.add(ys.column) 
     else:
-        required.add(getattr(ys, "column"))
+        raise ValueError(f"Unsupported outcome_spec kind: {getattr(ys, 'kind', None)!r}")
 
     # covariates / effect modifiers
     required.update(list(compiled_protocol.covariates))
@@ -676,15 +672,14 @@ def apply_treatment_outcome_domain_keep(
         else:
             raise ValueError(f"Unknown treatment_spec kind: {getattr(ts, 'kind', None)!r}")   
 
-        if allowed_t is not None:
-            n_before = int(cur.shape[0])
-            if dropna_on_domain_cols:
-                cur = cur.dropna(axis=0, how="any", subset=[tcol]).copy() # pyright: ignore[reportUnknownMemberType]
-            mask_keep = _mask_keep_in_domain(cur[tcol], allowed_t)
-            cur = cur.loc[mask_keep].copy()
-            n_after = int(cur.shape[0])
+        n_before = int(cur.shape[0])
+        if dropna_on_domain_cols:
+            cur = cur.dropna(axis=0, how="any", subset=[tcol]).copy() # pyright: ignore[reportUnknownMemberType]
+        mask_keep = _mask_keep_in_domain(cur[tcol], allowed_t)
+        cur = cur.loc[mask_keep].copy()
+        n_after = int(cur.shape[0])
 
-            t_summary = {
+        t_summary = {
                 "column": tcol,
                 "allowed": allowed_t,
                 "n_rows_before": n_before,
