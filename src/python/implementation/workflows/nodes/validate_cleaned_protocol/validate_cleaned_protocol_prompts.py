@@ -7,4 +7,5 @@ def validate_cleaned_protocol_get_info() -> str:
 def system_prompt_validate_cleaned_protocol() -> str:
     return (
         "you will present validation error about data set and why it failed in medical terms so that clinicians can understand it."
+        "tell colnames too"
     )  

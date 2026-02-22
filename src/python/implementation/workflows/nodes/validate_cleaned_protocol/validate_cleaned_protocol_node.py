@@ -6,19 +6,19 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence
 from uuid import UUID
 
+import pandas as pd
 from pydantic import ValidationError
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
-from python.domain.workflows.tool_factory import ToolFactory  # kept for Node.run signature
+from python.domain.workflows.tool_factory import ToolFactory
 
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_prompts import (
     system_prompt_validate_cleaned_protocol,
     validate_cleaned_protocol_get_info,
 )
-    
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_deps import (
     ValidateCleanProtocolDeps,
 )
@@ -26,30 +26,29 @@ from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cl
     ValidateCleanProtocolPayloadModel,
     ValidateCleanProtocolState,
 )
-
-from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_utils import (  # noqa: E501
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_utils import (
     ValidationIssue,
-    compute_arm_masks,
-    extract_key_columns,
-    overlap_propensity_proxy,
-    overlap_support_check,
-    profile_feature_block,
-    select_modeling_view,
-    validate_WX_overlap,
-    validate_column_list_invariants,
-    validate_feature_cardinality,
-    validate_feature_constantness,
-    validate_feature_missingness,
-    validate_feature_type_risks,
+    # ---- structural / protocol invariants ----
     validate_min_rows,
-    validate_outcome_domain_integrity,
-    validate_outcome_missingness,
-    validate_outcome_variation,
-    validate_time_zero_semantics,
-    validate_treatment_domain_integrity,
-    validate_treatment_missingness,
+    validate_protocol_role_columns_invariants,
+    validate_time_zero_semantics_protocol,
+    # ---- treatment ----
+    validate_treatment_missingness_protocol,
+    validate_treatment_domain_integrity_protocol,
     validate_treatment_variation,
-    validate_WX_presence,
+    # ---- outcome ----
+    validate_outcome_missingness,
+    validate_outcome_domain_integrity,
+    validate_outcome_variation,
+    # ---- covariates + effect modifiers ----
+    validate_covariate_and_effect_modifier_presence,
+    validate_covariate_and_effect_modifier_missingness,
+    validate_covariate_and_effect_modifier_missingness_by_treatment,
+    validate_covariate_and_effect_modifier_constantness,
+    validate_covariate_and_effect_modifier_high_cardinality_and_id_like,
+    validate_covariate_and_effect_modifier_type_risks,
+    # ---- overlap / positivity ----
+    validate_overlap_and_positivity,
 )
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
@@ -58,16 +57,6 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ValidateCleanProtocolNode(Node):
-    """
-    Pre-transform validation over the *cleaned, filtered* dataset and compiled ProtocolSpec.
-
-    Output:
-      - Returns InferenceReadyValidationState with payload. State.status will be:
-          DONE    if no FAIL issues
-          ABORTED if any FAIL issues
-      - On server/internal errors: returns ABORTED with a synthetic FAIL issue + validation_error.
-    """
-
     data_repo: DataRepo
     llm: LLMService
     model_name: str
@@ -82,14 +71,13 @@ class ValidateCleanProtocolNode(Node):
     def get_info(cls) -> str:
         return validate_cleaned_protocol_get_info()
 
-
     def run(
         self,
         *,
         user_id: UUID,
         conversation_id: UUID,
         state: State,
-        tool_factory: ToolFactory,  
+        tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
@@ -100,9 +88,11 @@ class ValidateCleanProtocolNode(Node):
             # Guardrails: upstream sanity
             # ----------------------------
             proto = deps.compile_protocol.payload.protocol
-            assert proto is not None, "CleanProtocolState must have a compiled protocol for validation."
+            assert proto is not None, "CompileProtocolState must provide a compiled protocol for validation."
+
             clean_id = deps.clean_protocol.payload.clean_dataset_id
-            assert clean_id is not None, "CleanProtocolState must have a clean_dataset_id for validation."
+            assert clean_id is not None, "CleanProtocolState must provide a clean_dataset_id for validation."
+
             # ----------------------------
             # Load cleaned dataframe
             # ----------------------------
@@ -112,42 +102,56 @@ class ValidateCleanProtocolNode(Node):
                 dataset_id=clean_id,
                 limit=None,
             )
-            
+
             # ----------------------------
-            # Build modeling view and validate
+            # Build a minimal validation view (protocol-native)
+            #   - Do NOT rely on legacy KeyColumns/WX machinery.
+            #   - Only retain columns required by ProtocolSpec roles.
             # ----------------------------
-            key_cols = extract_key_columns(proto)
-            view = select_modeling_view(df, key_cols, include_time_zero=True, copy=True)
+            view = self._select_validation_view(df, proto)
 
             all_issues: List[ValidationIssue] = []
             metrics: Dict[str, Any] = {
                 "clean_dataset_id": str(clean_id),
-                "n_rows": int(view.shape[0]),
-                "n_cols": int(view.shape[1]),
-                "columns": list(map(str, view.columns)),
+                "n_rows_df": int(df.shape[0]),
+                "n_cols_df": int(df.shape[1]),
+                "n_rows_view": int(view.shape[0]),
+                "n_cols_view": int(view.shape[1]),
+                "df_columns_unique": bool(df.columns.is_unique),
+                "view_columns_unique": bool(view.columns.is_unique),
+                "view_columns_sample": list(map(str, view.columns[:200])),
             }
-            
-            issues, m = validate_WX_overlap(key_cols)
-            all_issues.extend(issues)
-            metrics["wx_overlap"] = m
 
-            # 2) Structural invariants
-            issues, m = validate_min_rows(view, min_rows_fail=1)
+            # =========================================================================
+            # 0) Protocol-only invariants (no df required)
+            # =========================================================================
+            issues = validate_protocol_role_columns_invariants(proto)
+            all_issues.extend(issues)
+            metrics["protocol_role_invariants"] = {
+                "n_issues": int(len(issues)),
+                "n_fail": int(sum(1 for x in issues if x["severity"] == "FAIL")),
+                "n_warn": int(sum(1 for x in issues if x["severity"] == "WARN")),
+            }
+
+            # =========================================================================
+            # 1) Structural df-backed invariants
+            # =========================================================================
+            issues, m = validate_min_rows(view, min_rows_fail=20)
             all_issues.extend(issues)
             metrics["min_rows"] = m
 
-            all_issues.extend(validate_column_list_invariants(key_cols))
-
-            issues, m = validate_time_zero_semantics(view, proto, key_cols)
+            issues, m = validate_time_zero_semantics_protocol(view, proto)
             all_issues.extend(issues)
             metrics["time_zero"] = m
 
-            # 3) Treatment validations
-            issues, m = validate_treatment_missingness(df=view, protocol=proto)
+            # =========================================================================
+            # 2) Treatment validations (ProtocolSpec-native)
+            # =========================================================================
+            issues, m = validate_treatment_missingness_protocol(df=view, protocol=proto)
             all_issues.extend(issues)
             metrics["treatment_missingness"] = m
 
-            issues, m = validate_treatment_domain_integrity(df=view, protocol=proto)
+            issues, m = validate_treatment_domain_integrity_protocol(df=view, protocol=proto)
             all_issues.extend(issues)
             metrics["treatment_domain"] = m
 
@@ -155,7 +159,9 @@ class ValidateCleanProtocolNode(Node):
             all_issues.extend(issues)
             metrics["treatment_variation"] = m
 
-            # 4) Outcome validations
+            # =========================================================================
+            # 3) Outcome validations (ProtocolSpec-native)
+            # =========================================================================
             issues, m = validate_outcome_missingness(df=view, protocol=proto)
             all_issues.extend(issues)
             metrics["outcome_missingness"] = m
@@ -168,59 +174,62 @@ class ValidateCleanProtocolNode(Node):
             all_issues.extend(issues)
             metrics["outcome_variation"] = m
 
-            # 5) W/X validations
-            issues, m = validate_WX_presence(view, key_cols, require_W=False)
+            # =========================================================================
+            # 4) Covariates / Effect modifiers (ProtocolSpec-native)
+            #    IMPORTANT: keep require_covariates=False to match your prior behavior
+            #    (warn when empty; don't hard-fail).
+            # =========================================================================
+            issues, m = validate_covariate_and_effect_modifier_presence(
+                df=view,
+                protocol=proto,
+                require_covariates=False,
+            )
             all_issues.extend(issues)
-            metrics["wx_presence"] = m
+            metrics["covariate_effect_modifier_presence"] = m
 
-            W_prof = profile_feature_block(view, key_cols.W_cols, label="W")
-            X_prof = profile_feature_block(view, key_cols.X_cols, label="X")
+            issues, m = validate_covariate_and_effect_modifier_missingness(df=view, protocol=proto)
+            all_issues.extend(issues)
+            metrics["covariate_effect_modifier_missingness"] = m
 
-            metrics["W_profile"] = W_prof.to_dict()
-            metrics["X_profile"] = X_prof.to_dict()
+            issues, m = validate_covariate_and_effect_modifier_missingness_by_treatment(df=view, protocol=proto)
+            all_issues.extend(issues)
+            metrics["covariate_effect_modifier_missingness_by_treatment"] = m
 
-            for prof in (W_prof, X_prof):
-                issues, m = validate_feature_missingness(prof)
-                all_issues.extend(issues)
-                metrics[f"{prof.label}_missingness"] = m
+            issues, m = validate_covariate_and_effect_modifier_constantness(df=view, protocol=proto)
+            all_issues.extend(issues)
+            metrics["covariate_effect_modifier_constantness"] = m
 
-                issues, m = validate_feature_constantness(prof)
-                all_issues.extend(issues)
-                metrics[f"{prof.label}_constantness"] = m
+            issues, m = validate_covariate_and_effect_modifier_high_cardinality_and_id_like(df=view, protocol=proto)
+            all_issues.extend(issues)
+            metrics["covariate_effect_modifier_cardinality_idlike"] = m
 
-                issues, m = validate_feature_cardinality(prof)
-                all_issues.extend(issues)
-                metrics[f"{prof.label}_cardinality"] = m
+            issues, m = validate_covariate_and_effect_modifier_type_risks(df=view, protocol=proto)
+            all_issues.extend(issues)
+            metrics["covariate_effect_modifier_type_risks"] = m
 
-                issues, m = validate_feature_type_risks(prof)
-                all_issues.extend(issues)
-                metrics[f"{prof.label}_type_risks"] = m
-
-            # 6) Overlap / positivity diagnostics
+            # =========================================================================
+            # 5) Overlap / positivity (advanced)
+            #    - This uses your ProtocolSpec + cleaned df only.
+            #    - If covariates are empty, we DO NOT fail here (require_covariates=False),
+            #      but overlap diagnostics may be less meaningful.
+            # =========================================================================
             try:
-                arm_masks = compute_arm_masks(view, proto, key_cols)
-                metrics["arm_masks"] = arm_masks.to_dict()
-
-                feat_cols = [*key_cols.W_cols, *key_cols.X_cols]
-                issues, m = overlap_support_check(view, feat_cols=feat_cols, arm_masks=arm_masks)
-                all_issues.extend(issues)
-                metrics["overlap_support"] = m
-
-                issues, m = overlap_propensity_proxy(
-                    view,
-                    W_cols=key_cols.W_cols,
-                    treatment_col=key_cols.treatment_col,
-                    arm_masks=arm_masks,
+                issues, m = validate_overlap_and_positivity(
+                    df=view,
+                    protocol=proto,
+                    require_covariates=False,
+                    use_effect_modifiers_univariate=True,
+                    enable_propensity_proxy=True,
                 )
                 all_issues.extend(issues)
-                metrics["propensity_proxy"] = m
+                metrics["overlap_positivity"] = m
             except Exception as e:
                 all_issues.append(
                     {
                         "severity": "FAIL",
-                        "message": "Overlap diagnostics failed to run.",
+                        "message": "Overlap/positivity diagnostics failed to run.",
                         "evidence": {"error": repr(e)},
-                        "fix_hint": "Inspect treatment column typing and feature columns; overlap diagnostics require valid arm masks.",
+                        "fix_hint": "Inspect treatment typing and feature columns; overlap diagnostics require valid arm masks and non-pathological inputs.",
                     }
                 )
 
@@ -234,7 +243,7 @@ class ValidateCleanProtocolNode(Node):
 
             msg = self._make_user_message(
                 messages_history=messages_history,
-                protocol_summary=self._protocol_summary(proto, key_cols),
+                protocol_summary=self._protocol_summary(proto),
                 metrics=metrics,
                 issues=[i.model_dump(mode="json") for i in issue_models],
                 has_fail=has_fail,
@@ -261,14 +270,77 @@ class ValidateCleanProtocolNode(Node):
                 ],
             )
         except Exception as e:
-            logging.exception("Unexpected error in ValidateCleanProtocolNode: %s", repr(e))
-            raise e
-            
-        
+            log.exception("Unexpected error in ValidateCleanProtocolNode: %s", repr(e))
+            return self._abort(
+                messages_history=messages_history,
+                validation_error=repr(e),
+                issues=[
+                    {
+                        "severity": "FAIL",
+                        "message": "Validation aborted due to an internal error.",
+                        "evidence": {"error": repr(e)},
+                        "fix_hint": "Inspect server logs and the validation node implementation.",
+                    }
+                ],
+            )
 
     # =============================================================================
     # Internals
     # =============================================================================
+
+    def _select_validation_view(self, df: pd.DataFrame, proto: Any) -> pd.DataFrame:
+        required: List[str] = []
+
+        # treatment
+        tcol = getattr(getattr(proto, "treatment_spec", None), "column", None)
+        if isinstance(tcol, str) and tcol.strip():
+            required.append(tcol)
+
+        # outcome (duration has 2)
+        ospec = getattr(proto, "outcome_spec", None)
+        if ospec is not None:
+            okind = getattr(ospec, "kind", None)
+            if okind == "duration":
+                dcol = getattr(ospec, "duration_column", None)
+                ecol = getattr(ospec, "event_column", None)
+                if isinstance(dcol, str) and dcol.strip():
+                    required.append(dcol)
+                if isinstance(ecol, str) and ecol.strip():
+                    required.append(ecol)
+            else:
+                ycol = getattr(ospec, "column", None)
+                if isinstance(ycol, str) and ycol.strip():
+                    required.append(ycol)
+
+        # time_zero if column-based
+        tz_type = getattr(proto, "time_zero_type", None)
+        tz = getattr(proto, "time_zero", None)
+        if tz_type == "COLUMN" and isinstance(tz, str) and tz.strip():
+            required.append(tz)
+
+        # covariates / effect_modifiers
+        covs = list(getattr(proto, "covariates", []) or [])
+        ems = list(getattr(proto, "effect_modifiers", []) or [])
+        for x in covs + ems:
+            if isinstance(x, str) and x.strip():
+                required.append(x)
+
+        # De-dupe while preserving order
+        seen: set[str] = set()
+        dedup: List[str] = []
+        for c in required:
+            if c not in seen:
+                seen.add(c)
+                dedup.append(c)
+
+        # Keep only present cols (missing detection is handled by validators)
+        present = [c for c in dedup if c in df.columns]
+
+        # If none are present, return 0-col view preserving row count/index
+        if not present:
+            return df.iloc[:, :0].copy()
+
+        return df.loc[:, present].copy()
 
     def _abort(
         self,
@@ -302,14 +374,31 @@ class ValidateCleanProtocolNode(Node):
         )
         return ValidateCleanProtocolState(payload=payload)
 
-    def _protocol_summary(self, proto: Any, key_cols: Any) -> Dict[str, Any]:
+    def _protocol_summary(self, proto: Any) -> Dict[str, Any]:
+        # outcome cols summary
+        ospec = getattr(proto, "outcome_spec", None)
+        out_cols: List[str] = []
+        if ospec is not None:
+            if getattr(ospec, "kind", None) == "duration":
+                out_cols = [
+                    str(getattr(ospec, "duration_column", "")),
+                    str(getattr(ospec, "event_column", "")),
+                ]
+                out_cols = [c for c in out_cols if c and c.strip()]
+            else:
+                y = getattr(ospec, "column", None)
+                if isinstance(y, str) and y.strip():
+                    out_cols = [y]
+
         return {
-            "treatment_col": key_cols.treatment_col,
-            "outcome_cols": list(key_cols.outcome_cols),
+            "treatment_col": getattr(getattr(proto, "treatment_spec", None), "column", None),
+            "treatment_kind": getattr(getattr(proto, "treatment_spec", None), "kind", None),
+            "outcome_kind": getattr(ospec, "kind", None) if ospec is not None else None,
+            "outcome_cols": out_cols,
             "time_zero_type": getattr(proto, "time_zero_type", None),
-            "time_zero_col": key_cols.time_zero_col,
-            "n_W": len(list(key_cols.W_cols)),
-            "n_X": len(list(key_cols.X_cols)),
+            "time_zero": getattr(proto, "time_zero", None),
+            "n_covariates": int(len(list(getattr(proto, "covariates", []) or []))),
+            "n_effect_modifiers": int(len(list(getattr(proto, "effect_modifiers", []) or []))),
         }
 
     def _make_user_message(
@@ -321,7 +410,6 @@ class ValidateCleanProtocolNode(Node):
         issues: List[Dict[str, Any]],
         has_fail: bool,
     ) -> str:
-        # LLM first; deterministic fallback.
         try:
             txt = self._try_llm_summary(
                 messages_history=messages_history,
@@ -346,28 +434,25 @@ class ValidateCleanProtocolNode(Node):
         has_fail: bool,
     ) -> Optional[str]:
         system = system_prompt_validate_cleaned_protocol()
-        history_only_last_6_messages = messages_history[-6:] if messages_history else None
-        payload = { # pyright: ignore[reportUnknownVariableType]
+        history_only_last_6 = messages_history[-6:] if messages_history else None
+        payload: Dict[str, Any] = {
             "has_fail": bool(has_fail),
             "protocol_summary": protocol_summary,
             "metrics": metrics,
             "issues": issues,
         }
-
         user = (
             "Generate the user-facing message for these validation results.\n"
             "Return plain text (no JSON).\n\n"
             f"INPUT:\n{json.dumps(payload, ensure_ascii=False)[:60000]}"
         )
-        
         config = LLMConfig(model=self.model_name, temperature=0.7)
         resp = self.llm.generate(
             system_prompt=system,
             user_prompt=user,
             config=config,
-            history=history_only_last_6_messages,
+            history=history_only_last_6,
         )
-        
         return resp.content
 
     def _fallback_summary(self, *, issues: List[Dict[str, Any]], has_fail: bool) -> str:
@@ -377,12 +462,12 @@ class ValidateCleanProtocolNode(Node):
         lines: List[str] = []
         if has_fail:
             lines.append("Validation failed. Fix the following blockers before continuing:")
-            top = fails[:8]
+            top = fails[:10]
         else:
             lines.append("Validation passed.")
             if warns:
                 lines.append("Warnings detected (you can continue, but results may be unstable):")
-            top = warns[:8]
+            top = warns[:10]
 
         for i, it in enumerate(top, start=1):
             msg = str(it.get("message", "")).strip()
@@ -394,5 +479,4 @@ class ValidateCleanProtocolNode(Node):
 
         if not has_fail:
             lines.append("Next: run TRANSFORM (encoding/typing) and then post-transform validation.")
-
         return "\n".join(lines)
