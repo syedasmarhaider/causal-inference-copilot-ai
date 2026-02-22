@@ -199,30 +199,6 @@ ABORT conditions (any one triggers ABORT):
 - Snapshot mode required (no time columns) AND user cannot assert that X precedes Y in real-world semantics (ordering cannot be defended).
 - The user’s inclusion/filtering is inherently post-treatment/selection-based and cannot be reformulated or handled (no defensible censoring/missingness plan).
 
-Essentials that must be complete for READY (unless ABORT):
-- Q1: Causal question defines X and Y.
-- Q2: Study type is exactly "RCT" or "Observational".
-- Q3: Population/eligibility present.
-- Q4: Time support answered (Yes/No/Unknown) and time columns listed if Yes.
-- Q5: Time zero defined:
-    * If Q4=Yes: exact column or deterministic construction rule.
-    * If Q4=No: shared conceptual baseline.
-- Q6: Treatment definition includes column(s) and treated/control levels if binary.
-- Q7: Assignment window relative to t0:
-    * If Q4=Yes: 'at t0' or explicit grace period/window.
-    * If Q4=No: static exposure described conceptually.
-- Q8: Outcome includes column(s), outcome type, and horizon relative to t0:
-    * If Q4=No and outcome type is time-to-event => contradiction => ABORT or PENDING depending on user flexibility.
-- Q9: Censoring/missingness/filters answered.
-- Q10: Covariates
-- Q11: Effect modifiers
-- Q12: If Q4=No, snapshot acknowledgement must be explicitly "Yes" or "No".
-
-Contradictions that force NOT READY:
-- Any time-to-event outcome while Q4=No time support.
-- Time zero references a column not present in metadata (if metadata provided).
-- Treatment and outcome are the same column.
-
 First-time rule:
 - If most A: lines are empty or UNCLEAR, return PENDING regardless of latest user message.
 

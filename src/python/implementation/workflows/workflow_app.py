@@ -157,10 +157,10 @@ class WorkflowApp:
         )
             
         return WorkflowResponse(
-            node_message=current_state.message,
-            needs_input=(current_state.needs_action == "NEEDS_INPUT"),
-            current_stage=current_state.name,
-            current_stage_status=current_state.status,
+            node_message=new_state.message,
+            needs_input=(new_state.needs_action == "NEEDS_INPUT"),
+            current_stage=new_state.name,
+            current_stage_status=new_state.status,
         )
 
     # ------------------------
@@ -197,17 +197,3 @@ class WorkflowApp:
             if dep_state is not None:
                 deps[dep_name] = dep_state
         return deps
-    
-    def insert_system_before_last_user(
-    self,
-    history: list[ChatMessage],
-    system_text: str,
-) -> None:
-    if not system_text or not system_text.strip():
-        return
-
-    # find last user index
-    for i in range(len(history) - 1, -1, -1):
-        if history[i].role == "user" and history[i].content.strip():
-            history.insert(i, ChatMessage(role="system", content=system_text))
-            return

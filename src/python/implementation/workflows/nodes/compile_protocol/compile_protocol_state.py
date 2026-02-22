@@ -39,17 +39,6 @@ class CompileProtocolPayloadModel(BaseModel):
             raise TypeError("compile_issues must be list[dict]|null")
         return cast(List[Dict[str, Any]], v)
 
-    @field_validator("protocol", mode="before")
-    @classmethod
-    def _validate_protocol(cls, v: Any) -> Optional[ProtocolSpec]:
-        if v is None:
-            return None
-        if not isinstance(v, dict):
-            raise TypeError("protocol must be object|null")
-        # ProtocolSpec is a TypedDict-style object in your code; keep as-is.
-        return cast(ProtocolSpec, v)
-
-
 # =============================================================================
 # State wrapper (payload-only storage; derives interface fields)
 # =============================================================================

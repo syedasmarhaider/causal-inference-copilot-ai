@@ -142,18 +142,20 @@ class ProtocolDiscussionNode(Node):
             )
             token = (token or "").strip().splitlines()[0].strip().split()[0].strip().upper()
         except Exception as e:
-            log.exception("PROTOCOL_DISCUSSION: LLM#3 failed; defaulting to PENDING")
             state.payload.node_message = " (failed to confirm readiness, but discussion updated. Retrying...)"
             state.payload.error_message = f"Protocol discussion readiness check failed: {safe_err(e)}"
             state.payload.action = "NONE"
             state.payload.node_status = "PENDING"
             return state
-
+         
+        logging.warning(f"PROTOCOL_DISCUSSION: Readiness token from LLM: '{token}'") 
+         
         if token == "READY":
             state.payload.node_message = "Protocol Confirmed, ready to proceed to next step"
             state.payload.error_message = None
             state.payload.action = "NONE"
             state.payload.node_status = "DONE"
+            return state
             
         if token == "ABORT":
             state.payload.node_message = f"Protocol discussion aborted: {token}"
