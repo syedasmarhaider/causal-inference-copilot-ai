@@ -3,11 +3,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import json
-from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple, cast
+from typing import  ClassVar, List, Optional, Sequence, Tuple, cast
 from uuid import UUID, uuid4
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
@@ -15,57 +14,22 @@ from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import ProtocolSpec
+from python.implementation.workflows.nodes.transform_protocol.transform_protcol_plan import TransformPlanModel, validate_plan_against_df_columns
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_deps import TransformProtocolDeps
-from python.implementation.workflows.nodes.transform_protocol.transform_protocol_encoding import (
-    EncodingSpec,
-    FeatureMapModel,
-    apply_encoding,
-    get_encoding_models_with_description,
-)
-from python.implementation.workflows.nodes.transform_protocol.transform_protocol_prompts import (
-    build_encoding_plan_system_prompt,
-    build_encoding_plan_user_prompt_template,
-    build_transformed_protocol_system_prompt,
-    build_transformed_protocol_user_prompt_template,
-    get_transform_protocol_node_info,
-)
+
+
+from python.implementation.workflows.nodes.transform_protocol.transform_protocol_encoding import apply_encoding_plan
+from python.implementation.workflows.nodes.transform_protocol.transform_protocol_prompts import build_hard_validation_system_prompt, build_transform_plan_system_prompt, build_transform_plan_user_prompt_template, build_transformed_protocol_user_prompt_template, get_transform_protocol_node_info
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_specs import (
-    EncodingType,
     TransformedProtocolSpec,
 )
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_state import TransformProtocolPayloadModel, TransformProtocolState
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_validation import validate_binary_and_one_hot_invariants, validate_constant_or_near_constant_controls, validate_dimensionality_caps, validate_encoding_postconditions, validate_id_like_features_in_controls, validate_input_columns_exist_and_are_unambiguous, validate_model_inputs_are_numeric_dtypes, validate_treatment_outcome_domains_by_kind
 from python.implementation.workflows.tools.data.data_profiling_tool import (
-    CategoricalColumnProfileModel,
     DatasetProfilingStateTool,
     DatasetSummaryModel,
 )
-from python.implementation.workflows.utils.validation import ValidationIssueModel, ValidationSeverity
-
-
-
-
-def _repair_messages_from_issues(
-    *,
-    attempt: int,
-    stage: str,
-    issues: List[ValidationIssueModel],
-) -> List[ChatMessage]:
-    """
-    Minimal “propagate error” into next attempt.
-    Kept small: only FAIL issues + up to N.
-    """
-    fails = [x for x in issues if x.severity == "FAIL"]
-    sample = (fails or issues)[:10]
-    payload = { # pyright: ignore[reportUnknownVariableType]
-        "attempt": attempt,
-        "stage": stage,
-        "n_issues": len(issues),
-        "issues_sample": [x.model_dump(mode="json") for x in sample],
-        "instruction": "On the next attempt, fix the JSON output to satisfy schema and constraints. Output JSON only.",
-    }
-    return [ChatMessage(role="system", content=f"REPAIR_CONTEXT={payload}")]
-
+from python.implementation.workflows.utils.validation import ValidationIssueModel
 
 @dataclass(frozen=True)
 class TransformProtocolNode(Node):
@@ -74,10 +38,7 @@ class TransformProtocolNode(Node):
     llm: LLMService
     data_repo: DataRepo
     model_name: str
-
-    # global retry count for the WHOLE pipeline
-    max_attempts: int = 2
-
+    max_attempts: int = 3
     # knobs for deterministic steps
     profiling_max_categories: int = 50
     profiling_sample_distinct: int = 50
@@ -130,7 +91,11 @@ class TransformProtocolNode(Node):
         except Exception as e:  # noqa: BLE001
             return TransformProtocolState(
                 TransformProtocolPayloadModel(
-                    error=f"Failed to read clean dataset: {e}",
+                    transformation_issues=clean_dataset_validation_issues + [
+                        ValidationIssueModel(
+                            severity="FAIL",
+                            message=f"Failed to load the cleaned dataset: {e}",
+                        )],
                     user_message="Failed to read the cleaned dataset. Please check if the previous steps completed successfully and try again.",
                 )
             )
@@ -149,524 +114,143 @@ class TransformProtocolNode(Node):
         except Exception as e:  # noqa: BLE001
             return TransformProtocolState(
                 TransformProtocolPayloadModel(
-                    error=f"Dataset profiling failed: {e}",
+                    transformation_issues=clean_dataset_validation_issues + [
+                        ValidationIssueModel(
+                            severity="FAIL",
+                            message=f"Failed to profile the cleaned dataset: {e}",
+                        )],
                     user_message="Failed to profile the cleaned dataset. Please check if the previous steps completed successfully and try again.",
                 )
             )
             
-        retry_hist: List[ChatMessage] = []  # accumulates repair context across attempts
-        all_issues: List[ValidationIssueModel] = []
-        last_error: Optional[str] = None
-
-        # ==================================================================
-        # WHOLE-PIPELINE retry loop
-        # ==================================================================
-        for attempt in range(1, max(1, int(self.max_attempts)) + 1):
-            attempt_issues: List[ValidationIssueModel] = []
-            last_error = None
-
-            # ---------- Stage 1: encoding plan ----------
-            plan, plan_issues = llm_generate_encoding_plan_from_protocol_and_summary(
+        # ------------------------------------------------------------------
+        # Main logic: transform + validate in a loop with error propagation
+        # ------------------------------------------------------------------
+        transformed_spec, transformation_issues, final_transformed_spec, df_transformed = transform_and_validate_protocol_spec(
+            llm=self.llm,
+            protocol=protocol,
+            df_after=df_clean,
+            dataset_summary=clean_dataset_summary,
+            max_attempts=self.max_attempts,
+        )
+        
+        if transformed_spec is None or final_transformed_spec is None or (transformation_issues and any(i.severity == "FAIL" for i in transformation_issues)):
+            message = get_message_for_hard_validation_issue(
                 llm=self.llm,
-                protocol=protocol,
-                dataset_summary=clean_dataset_summary,
-                supported_encodings=None,
-                llm_config=LLMConfig(temperature=0.4),
-                history=retry_hist,
-                max_attempts=2,  
+                issue=transformation_issues
             )
-            attempt_issues.extend(plan_issues)
-            retry_as_there_a_issue = any(x.severity == "FAIL" for x in plan_issues)
-            if retry_as_there_a_issue:
-                last_error = f"Attempt {attempt}: encoding plan generation had issues."
-                retry_hist.extend(_repair_messages_from_issues(attempt=attempt, stage="ENCODING_PLAN", issues=plan_issues))
-                all_issues.extend(attempt_issues)
-                continue
-                
-                
-
-            if plan is None:
-                last_error = f"Attempt {attempt}: encoding plan generation failed."
-                retry_hist.extend(_repair_messages_from_issues(attempt=attempt, stage="ENCODING_PLAN", issues=attempt_issues))
-                all_issues.extend(attempt_issues)
-                continue
-
-            # ---------- Stage 2: apply encoding ----------
-            df_after, feature_map, apply_issues = apply_encoding_plan(
-                df=df_clean,
-                plan=plan,
-                dataset_summary=clean_dataset_summary,
-                fail_fast=self.fail_fast_apply,
-            )
-            attempt_issues.extend(apply_issues)
-
-            if any(_is_fail(x) for x in apply_issues):
-                last_error = f"Attempt {attempt}: encoding application failed."
-                retry_hist.extend(_repair_messages_from_issues(attempt=attempt, stage="APPLY_ENCODING", issues=apply_issues))
-                all_issues.extend(attempt_issues)
-                continue
-
-            # ---------- Stage 3: transformed protocol spec ----------
-            spec, spec_issues = llm_generate_transformed_protocol_spec(
-                llm=self.llm,
-                protocol=protocol,
-                df_after=df_after,
-                feature_map=feature_map,
-                history=retry_hist,
-                llm_config=LLMConfig(temperature=0.2),
-                max_attempts=1,  # node controls attempts
-            )
-            attempt_issues.extend(spec_issues)
-
-            if spec is None:
-                last_error = f"Attempt {attempt}: transformed spec generation failed."
-                retry_hist.extend(_repair_messages_from_issues(attempt=attempt, stage="TRANSFORMED_SPEC", issues=spec_issues or attempt_issues))
-                all_issues.extend(attempt_issues)
-                continue
-
-            # ---------- Stage 4: validations ----------
-            val_issues = run_transform_validations(
-                df_after=df_after,
-                spec=spec,
-                policy=self.validation_policy,
-                fail_fast=self.fail_fast_validate,
-            )
-            attempt_issues.extend(val_issues)
-
-            if any(_is_fail(x) for x in val_issues):
-                last_error = f"Attempt {attempt}: validation failed."
-                # This is the most useful feedback for the LLM on the next attempt
-                retry_hist.extend(_repair_messages_from_issues(attempt=attempt, stage="VALIDATION", issues=val_issues))
-                all_issues.extend(attempt_issues)
-                continue
-
-            # ---------- Stage 5: persist + success ----------
-            try:
-                transformed_dataset_id = uuid4()
-                self.data_repo.save_csv_data(
-                    df=df_after,
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    dataset_id=transformed_dataset_id,
+            return TransformProtocolState(
+                TransformProtocolPayloadModel(
+                    user_message=message,
+                    transformation_issues = transformation_issues,
                 )
-                
-            except Exception as e:  # noqa: BLE001
-                last_error = f"Attempt {attempt}: failed to persist transformed dataset: {e}"
-                persist_issue = _issue(
-                    severity="FAIL",
-                    message=str(last_error),
-                    evidence={"attempt": attempt},
-                )
-                attempt_issues.append(persist_issue)
-                all_issues.extend(attempt_issues)
-                continue
-
-            # SUCCESS
-            payload = TransformProtocolPayloadModel(
-                error=None,
-                transformed_dataset_id=transformed_dataset_id,
-                transformed_spec=spec,
-                transformation_issues=attempt_issues,
-                cleaned_dataset_validation_issues=clean_dataset_validation_issues,
+            )
+        
+        new_transformed_dataset_id = uuid4()
+        self.data_repo.save_csv_data(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            dataset_id=new_transformed_dataset_id,
+            df=df_transformed,
+        )
+        
+        return TransformProtocolState(
+            TransformProtocolPayloadModel(
+                transform_protocol_plan=transformed_spec,
+                transformed_dataset_id=new_transformed_dataset_id,
+                transformed_spec=final_transformed_spec,
                 cleaned_dataset_id=clean_dataset_id,
                 cleaned_dataset_summary=clean_dataset_summary,
-                user_message="Transform pipeline succeeded.",
-            )
-            return TransformProtocolState(payload)
-
-        # ==================================================================
-        # Exhausted attempts
-        # ==================================================================
-        payload = TransformProtocolPayloadModel(
-            error=last_error or "Transform pipeline failed after retries.",
-            transformed_dataset_id=None,
-            transformed_spec=None,
-            transformation_issues=all_issues,
-            user_message="Transform pipeline failed after retries. Please check the previous steps and try again.",
-        )
-        return TransformProtocolState(payload)
-
-# =============================================================================
-# LLM output schema (strict)
-# =============================================================================
-
-class ColumnEncodingDecisionModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    column: str = Field(..., min_length=1)
-    spec: EncodingSpec
-    rationale: Optional[str] = None
-
-    @field_validator("column", mode="before")
-    @classmethod
-    def _strip_nonempty(cls, v: Any) -> str:
-        if not isinstance(v, str):
-            raise TypeError("column must be str")
-        s = v.strip()
-        if not s:
-            raise ValueError("column must be non-empty")
-        return s
-
-
-class EncodingPlanModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    decisions: List[ColumnEncodingDecisionModel] = Field(..., min_length=1)
-
-
-# =============================================================================
-# Helper: infer Y/T/W/X raw columns from ProtocolSpec
-# =============================================================================
-
-def _infer_roles_from_protocol(protocol: ProtocolSpec) -> Dict[str, List[str]]:
-    t_col = protocol.treatment_spec.column
-    if protocol.outcome_spec.kind == "duration":
-        y_cols = [protocol.outcome_spec.duration_column, protocol.outcome_spec.event_column]
-    else:
-        y_cols = [protocol.outcome_spec.column]
-
-    w_cols = list(protocol.covariates or [])
-    x_cols = list(protocol.effect_modifiers or [])
-
-    return {"Y": y_cols, "T": [t_col], "W": w_cols, "X": x_cols}
-
-
-def _issue(
-    *,
-    severity: ValidationSeverity,
-    message: str,
-    evidence: Optional[Dict[str, Any]] = None,
-    fix_hint: Optional[str] = None,
-) -> ValidationIssueModel:
-    return ValidationIssueModel(
-        severity=severity,
-        message=message,
-        evidence=evidence or {},
-        fix_hint=fix_hint,
-    )
-
-
-def _extract_columns(dataset_summary: DatasetSummaryModel) -> List[str]:
-    cols: List[str] = []
-    for p in dataset_summary.profiles:
-        n = getattr(p, "name", None)
-        if isinstance(n, str):
-            s = n.strip()
-            if s:
-                cols.append(s)
-    return cols
-
-
-
-# TODO: fix later
-def _encoding_catalog_with_idx_semantics() -> str:
-    base = get_encoding_models_with_description()
-    return (
-        f"{base}\n"
-        "\n"
-        "IMPORTANT index semantics for *_idx encodings:\n"
-        "- For binary_map_idx / ordinal_map_idx, indices refer to the order of "
-        "dataset_summary.profiles[*].summary.top_categories.\n"
-        "- Index 0 -> top_categories[0].value, index 1 -> top_categories[1].value, etc.\n"
-        "- This is a TOP-K list only (not necessarily the full domain).\n"
-    )
-
-
-def _build_user_prompt(
-    *,
-    columns: List[str],
-    roles: Dict[str, List[str]],
-    protocol_json_obj: Dict[str, Any],
-    dataset_summary_json_obj: Dict[str, Any],
-    encoding_catalog: str,
-) -> str:
-    tmpl = build_encoding_plan_user_prompt_template()
-    return tmpl.format(
-        encoding_catalog_text=encoding_catalog,
-        columns_json=json.dumps(columns, ensure_ascii=False),
-        protocol_json=json.dumps(protocol_json_obj, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-        roles_json=json.dumps(roles, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-        summary_json=json.dumps(dataset_summary_json_obj, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-    )
-
-
-def llm_generate_encoding_plan_from_protocol_and_summary(
-    *,
-    llm: LLMService,
-    protocol: ProtocolSpec,
-    dataset_summary: DatasetSummaryModel,
-    supported_encodings: Optional[Sequence[EncodingType]] = None,
-    llm_config: Optional[LLMConfig] = None,
-    history: Optional[Sequence[ChatMessage]] = None,
-    max_attempts: int = 2,
-) -> Tuple[Optional[EncodingPlanModel], List[ValidationIssueModel]]:
-    if not dataset_summary.profiles:
-        return None, [
-            _issue(
-                severity="FAIL",
-                message="Encoding plan: dataset_summary.profiles missing or empty.",
-                evidence={"n_profiles": 0},
-                fix_hint="Provide DatasetSummaryModel with a non-empty profiles list.",
-            )
-        ]
-
-    columns = _extract_columns(dataset_summary)
-    if not columns:
-        return None, [
-            _issue(
-                severity="FAIL",
-                message="Encoding plan: no column names found in dataset_summary.profiles.",
-                fix_hint="Ensure each profile has a non-empty name.",
-            )
-        ]
-
-    roles = _infer_roles_from_protocol(protocol)
-
-    encoding_catalog = _encoding_catalog_with_idx_semantics()
-
-    system_prompt = build_encoding_plan_system_prompt()
-
-    protocol_obj: Dict[str, Any] = protocol.model_dump(mode="json")
-    summary_obj: Dict[str, Any] = dataset_summary.model_dump(mode="json")
-
-    user_prompt = _build_user_prompt(
-        columns=columns,
-        roles=roles,
-        protocol_json_obj=protocol_obj,
-        dataset_summary_json_obj=summary_obj,
-        encoding_catalog=encoding_catalog,
-    )
-
-    cfg = llm_config or LLMConfig(
-        temperature=0.4,
-    )
-
-    try:
-        plan = llm.generate_json(
-            schema=EncodingPlanModel,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            config=cfg,
-            history=history,
-            max_attempts=max_attempts,
-        )
-    except Exception as e:  # noqa: BLE001
-        return None, [
-            _issue(
-                severity="FAIL",
-                message=f"Encoding plan: LLM JSON generation failed: {e}",
-                evidence={"n_columns": len(columns)},
-                fix_hint="check schema mismatch while generating the plan",
-            )
-        ]
-
-    provided = set(columns)
-    seen: set[str] = set()
-    unknown_cols: List[str] = []
-    dup_cols: List[str] = []
-
-    for d in plan.decisions:
-        if d.column not in provided:
-            unknown_cols.append(d.column)
-        if d.column in seen:
-            dup_cols.append(d.column)
-        seen.add(d.column)
-
-    issues: List[ValidationIssueModel] = []
-    if unknown_cols:
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="Encoding plan: LLM referenced columns not present in dataset_summary.",
-                evidence={"unknown_columns": sorted(set(unknown_cols))[:50]},
-                fix_hint="LLM must only pick from the provided column list.",
+                cleaned_dataset_validation_issues=clean_dataset_validation_issues,
+                user_message="Data transformation successful. The dataset has been transformed according to the protocol and is ready for the next steps.",
             )
         )
-    if dup_cols:
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="Encoding plan: duplicate decisions for the same column.",
-                evidence={"duplicate_columns": sorted(set(dup_cols))[:50]},
-                fix_hint="LLM must output at most one decision per column.",
-            )
-        )
-
-    if issues:
-        return None, issues
-
-    return plan, []
+            
 
 
-# =============================================================================
-# LLM output schema + validation for transformed protocol spec
-# =============================================================================
-def _categories_in_order_from_summary(
-    *,
-    dataset_summary: DatasetSummaryModel,
-    column: str,
-) -> Optional[List[str]]:
-    for p in dataset_summary.profiles:
-        if getattr(p, "name", None) == column and isinstance(p, CategoricalColumnProfileModel):
-            top = p.summary.top_categories
-            return [c.value for c in top]
-    return None
+def get_message_for_hard_validation_issue(llm: LLMService, issue: List[ValidationIssueModel]) -> str:
+    llm_config = LLMConfig(temperature=1.0)
+    return llm.generate(
+        system_prompt="You are an assistant for generating user-friendly error messages",
+        user_prompt=build_hard_validation_system_prompt().format(
+            validation_issues_json=json.dumps([i.model_dump(mode="json") for i in issue], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        ),
+        config=llm_config,
+        history=None,
+    ).content   
+    
 
 
-def _warn_if_idx_on_truncated_topk(
-    *,
-    dataset_summary: DatasetSummaryModel,
-    column: str,
-    encoding: str,
-) -> Optional[ValidationIssueModel]:
-    """
-    ONLY CHANGE (w.r.t #4): warn when *_idx is used but categorical profile is truncated.
-    This makes the risk explicit without changing behavior.
-    """
-    for p in dataset_summary.profiles:
-        if getattr(p, "name", None) == column and isinstance(p, CategoricalColumnProfileModel):
-            other = int(p.summary.other_count)
-            top_k = len(p.summary.top_categories)
-            if other > 0:
-                return _issue(
-                    severity="WARN",
-                    message=f"{encoding} uses indices into top_categories only; '{column}' has truncated categorical profile (other_count>0).",
-                    evidence={"column": column, "encoding": encoding, "top_k": top_k, "other_count": other},
-                    fix_hint="Prefer label-based mapping or increase profiling max_categories/store a full categories list.",
-                )
-            return None
-    return None
 
 
-def _merge_feature_maps(base: FeatureMapModel, add: FeatureMapModel) -> FeatureMapModel:
-    produced = dict(base.produced_columns)
-    dropped = list(base.dropped)
-
-    for k, v in add.produced_columns.items():
-        produced[k] = list(v)
-
-    for c in add.dropped:
-        if c not in dropped:
-            dropped.append(c)
-
-    return FeatureMapModel(produced_columns=produced, dropped=dropped)
-
-
-def apply_encoding_plan(
-    *,
-    df: pd.DataFrame,
-    plan: "EncodingPlanModel",
-    dataset_summary: DatasetSummaryModel,
-    fail_fast: bool = False,
-) -> Tuple[pd.DataFrame, FeatureMapModel, List[ValidationIssueModel]]:
-    out = df.copy()
-    fmap = FeatureMapModel()
-    issues: List[ValidationIssueModel] = []
-
-    for d in plan.decisions:
-        col = d.column
-        spec: EncodingSpec = d.spec
-        enc = getattr(spec, "encoding", type(spec).__name__)
-
-        if col not in out.columns:
-            miss = ValidationIssueModel(
-                severity="FAIL",
-                message=f"Encoding plan refers to missing column '{col}'.",
-                evidence={"column": col, "encoding": enc},
-                fix_hint="Ensure plan columns come from dataset summary and are applied before dropping/renaming.",
-            )
-            issues.append(miss)
-            if fail_fast:
-                return out, fmap, issues
-            continue
-
-        # ONLY CHANGE (w.r.t #4): warn when *_idx indices are top-K and domain is truncated
-        if enc in ("binary_map_idx", "ordinal_map_idx"):
-            w = _warn_if_idx_on_truncated_topk(dataset_summary=dataset_summary, column=col, encoding=enc)
-            if w is not None:
-                issues.append(w)
-
-        cats: Optional[Sequence[str]] = _categories_in_order_from_summary(
-            dataset_summary=dataset_summary,
-            column=col,
-        )
-
-        out2, fmap2, iss2 = apply_encoding(
-            df=out,
-            column=col,
-            spec=spec,
-            categories_in_order=cats,
-        )
-
-        out = out2
-        fmap = _merge_feature_maps(fmap, fmap2)
-        issues.extend(iss2)
-
-        if fail_fast and any(_is_fail(x) for x in iss2):
-            return out, fmap, issues
-
-    return out, fmap, issues
-
-
-def llm_generate_transformed_protocol_spec(
+def transform_and_validate_protocol_spec(
     *,
     llm: LLMService,
     protocol: ProtocolSpec,
     df_after: pd.DataFrame,
-    feature_map: FeatureMapModel,
-    llm_config: Optional[LLMConfig] = None,
-    history: Optional[Sequence[ChatMessage]] = None,
-    max_attempts: int = 2,
-) -> Tuple[Optional[TransformedProtocolSpec], List[ValidationIssueModel]]:
-    df_cols = [str(c) for c in list(df_after.columns)]
-    if not df_cols:
-        return None, [
-            _issue(
-                severity="FAIL",
-                message="TransformedProtocolSpec: df_after has no columns.",
-                fix_hint="Apply encoding plan first and ensure df_after is non-empty.",
+    dataset_summary: DatasetSummaryModel,
+    max_attempts: int,
+) -> Tuple[Optional[TransformedProtocolSpec], List[ValidationIssueModel], Optional[TransformedProtocolSpec], pd.DataFrame]:
+    message_to_pass_in_case_of_error: List[ChatMessage] = []
+    validation_issues: List[ValidationIssueModel] = []
+    
+    for _ in range(1, max_attempts + 1):
+        try:
+            plan = get_transform_encoding_plan(
+                llm=llm,
+                protocol=protocol,
+                dataset_summary=dataset_summary,
+                history=message_to_pass_in_case_of_error,
             )
-        ]
-
-    system_prompt = build_transformed_protocol_system_prompt()
-    tmpl = build_transformed_protocol_user_prompt_template()
-
-    protocol_json = json.dumps(protocol.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    df_cols_json = json.dumps(df_cols, ensure_ascii=False)
-    fmap_json = json.dumps(
-        feature_map.model_dump(mode="json"),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-    user_prompt = tmpl.format(
-        protocol_json=protocol_json,
-        df_after_columns_json=df_cols_json,
-        feature_map_json=fmap_json,
-    )
-
-    cfg = llm_config or LLMConfig(temperature=0.2)
-
-    try:
-        spec = llm.generate_json(
-            schema=TransformedProtocolSpec,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            config=cfg,
-            history=history,
-            max_attempts=max_attempts,
-        )
-    except Exception as e:  # noqa: BLE001
-        return None, [
-            _issue(
-                severity="FAIL",
-                message=f"TransformedProtocolSpec: LLM JSON generation failed: {e}",
-                evidence={"n_df_after_cols": len(df_cols)},
-                fix_hint="Check schema mismatch; reduce prompt size; ensure JSON-only instruction.",
+            
+            issues = validate_plan_against_df_columns(
+                plan=plan,
+                df_columns=df_after.columns.tolist(),
+                require_full_coverage=True,
             )
-        ]
-
-    return spec, []
+            
+            if len(issues) > 0:
+                validation_issues.extend(issues)
+                message_to_pass_in_case_of_error.extend(_repair_messages_from_issues(attempt=_, stage="PLAN_VALIDATION", issues=issues))
+                continue
+            
+            df_transformed, issues = apply_plan(
+                df=df_after,
+                plans=plan,
+            )
+            
+            if df_transformed is None:
+                validation_issues.extend(issues)
+                continue
+            
+            validation_issues.extend(issues)
+            
+            transformed_specs = protocol_spec_to_transformed_spec(
+                llm=llm,
+                protocol=protocol,
+                transformed_df=df_transformed,
+                history=message_to_pass_in_case_of_error,
+            )
+            
+            validation_issues = run_transform_validations(
+                df_after=df_transformed,
+                spec=transformed_specs,
+            )
+            
+            if any(_is_fail(x) for x in validation_issues):
+                message_to_pass_in_case_of_error.extend(_repair_messages_from_issues(attempt=_, stage="VALIDATION", issues=validation_issues))
+                continue
+            
+            return transformed_specs, validation_issues, transformed_specs, df_transformed
+        except Exception as e:  # noqa: BLE001
+            message_to_pass_in_case_of_error.append(
+                ChatMessage(
+                    role="system",
+                    content=f"Error during transformed protocol spec generation: {e}. Please fix the JSON output to match the TransformedProtocolSpec schema and ensure it is consistent with the transformations applied. Output JSON only.",
+                )
+            )
+    
+    return None, validation_issues, None, df_after
 
 
 
@@ -708,6 +292,28 @@ class TransformValidationPolicy:
 
 def _is_fail(issue: ValidationIssueModel) -> bool:
     return issue.severity == "FAIL"
+
+def protocol_spec_to_transformed_spec(
+    llm: LLMService,
+    protocol: ProtocolSpec,
+    transformed_df: pd.DataFrame,
+    history: Optional[Sequence[ChatMessage]],
+) -> TransformedProtocolSpec:
+    user_prompt = build_transformed_protocol_user_prompt_template().format(
+        protocol_json=json.dumps(protocol.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        df_after_columns_json=json.dumps(transformed_df.columns.tolist(), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    )   
+    llm_config = LLMConfig(temperature=0.2)
+    return llm.generate_json(
+        schema=TransformedProtocolSpec,
+        system_prompt=get_transform_protocol_node_info(),
+        user_prompt=user_prompt,
+        config=llm_config,
+        history=history,
+        max_attempts=2,
+    )
+    
+    
 
 
 def run_transform_validations(
@@ -826,3 +432,68 @@ def run_transform_validations(
         pass
 
     return issues
+
+def apply_plan(
+    *,
+    df: pd.DataFrame,
+    plans: TransformPlanModel,
+) -> Tuple[Optional[pd.DataFrame], List[ValidationIssueModel]]:
+    """
+    Applies the encoding plan to the dataframe.
+    Returns the transformed dataframe and any issues encountered during application.
+    """
+    all_issues: List[ValidationIssueModel] = []
+    
+    for plan_decision in plans.columns:
+        df, issues =apply_encoding_plan(
+            df=df,
+            plan=plan_decision,
+        )
+        if issues is not None:
+            all_issues.append(issues)
+
+    return df, all_issues
+
+
+
+def get_transform_encoding_plan(
+    llm: LLMService,
+    protocol: ProtocolSpec,
+    history: Optional[Sequence[ChatMessage]],
+    dataset_summary: DatasetSummaryModel) -> TransformPlanModel:
+    
+    system_prompt = build_transform_plan_system_prompt()
+    user_prompt = build_transform_plan_user_prompt_template().format(
+        protocol_json=json.dumps(protocol.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        summary_json=json.dumps(dataset_summary.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    )
+    return  llm.generate_json(
+        schema=TransformPlanModel,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        config=LLMConfig(temperature=0.4),
+        history=history,
+        max_attempts=2,   
+    )
+    
+def _repair_messages_from_issues(
+    *,
+    attempt: int,
+    stage: str,
+    issues: List[ValidationIssueModel],
+) -> List[ChatMessage]:
+    """
+    Minimal “propagate error” into next attempt.
+    Kept small: only FAIL issues + up to N.
+    """
+    fails = [x for x in issues if x.severity == "FAIL"]
+    sample = (fails or issues)[:10]
+    payload = { # pyright: ignore[reportUnknownVariableType]
+        "attempt": attempt,
+        "stage": stage,
+        "n_issues": len(issues),
+        "issues_sample": [x.model_dump(mode="json") for x in sample],
+        "instruction": "On the next attempt, fix the JSON output to satisfy schema and constraints. Output JSON only.",
+    }
+    return [ChatMessage(role="system", content=f"REPAIR_CONTEXT={payload}")]    
+    

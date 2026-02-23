@@ -4,6 +4,8 @@ from typing import Annotated, Dict, List, Literal, Optional, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from python.implementation.workflows.utils.validation import ValidationIssueModel
+
 
 # =============================================================================
 # 0) Typed constraints (Pydantic v2-friendly, no conint() calls)
@@ -494,20 +496,30 @@ def validate_plan_against_df_columns(
     plan: TransformPlanModel,
     df_columns: Sequence[str],
     require_full_coverage: bool = False,
-) -> List[str]:
-    errors: List[str] = []
+) -> List[ValidationIssueModel]:
+    issues : List[ValidationIssueModel] = []
     df_set = set(df_columns)
 
     for cp in plan.columns:
         if cp.column not in df_set:
-            errors.append(f"Plan references unknown column: {cp.column!r}")
+            issues.append(
+                ValidationIssueModel(
+                    severity="FAIL",
+                    message=f"Plan column {cp.column!r} does not exist in dataset columns.",
+                    evidence={"column": cp.column, "available_columns": sorted(df_set)},
+                )
+            )
 
     if require_full_coverage:
         plan_set = {c.column for c in plan.columns}
         missing = sorted([c for c in df_columns if c not in plan_set])
         if missing:
-            errors.append(
-                f"Plan does not cover all df columns; missing={missing[:50]} (n_missing={len(missing)})"
+            issues.append(
+                ValidationIssueModel(
+                    severity="FAIL",
+                    message=f"Plan does not cover all dataset columns; missing columns: {missing}",
+                    evidence={"missing_columns": missing, "plan_columns": sorted(plan_set)},
+                )
             )
 
-    return errors
+    return issues

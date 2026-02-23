@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-def get_transform_protcol_info() -> str:
+def get_transform_protocol_node_info() -> str:
     return (
         "Transform protocol takes the compiled protocol and the cleaned dataset, and produces: \n"
         "1) a TransformPlan that specifies how to transform each column (e.g., encoding + missingness handling), and \n"
@@ -53,20 +53,13 @@ def build_transform_plan_user_prompt_template() -> str:
         "  ONLY if the order is explicitly supported by the summary.\n"
         "- If a column has missingness, choose an explicit missingness strategy appropriate for that encoding.\n"
         "\n"
-        "Encodings catalog (allowed encoding specs + fields):\n"
-        "{encoding_catalog_text}\n"
+        "Encodings catalog:\n"
+        "Protocol Specs:\n"
+        "{protocol_json}\n"
         "\n"
-        "Missingness catalog (allowed missingness specs + fields):\n"
-        "{missingness_catalog_text}\n"
-        "\n"
-        "Columns (the ONLY allowed column names):\n"
-        "{columns_json}\n"
-        "\n"
-        "Dataset summary (the ONLY data you may use to decide):\n"
+        "Dataset summary:\n"
         "{summary_json}\n"
         "\n"
-        "Output schema (must match exactly; return ONLY JSON):\n"
-        "{schema_json}\n"
     )
 
 
@@ -83,30 +76,29 @@ def build_transformed_protocol_system_prompt() -> str:
     )
 
 
+
 def build_transformed_protocol_user_prompt_template() -> str:
     """
-    Caller formats:
-      {protocol_json}, {df_after_columns_json}, {feature_map_json}, {schema_json}
+    Caller formats with:
+      {protocol_json}, {df_after_columns_json}
     """
     return (
-        "Generate a TransformedProtocolSpec aligned with the transformed dataframe for causal modeling.\n"
-        "Use ONLY the provided inputs.\n"
+        "Align the original protocol specification to the transformed dataframe using ONLY the information below.\n"
+        "For each protocol variable (treatment, outcome, adjustment), map it to the corresponding column(s) in the transformed dataframe.\n"
         "\n"
-        "Original protocol (semantic intent):\n"
+        "Protocol Specs:\n"
         "{protocol_json}\n"
         "\n"
-        "df_after_columns (the ONLY valid output feature names):\n"
+        "Transformed dataframe columns:\n"
         "{df_after_columns_json}\n"
         "\n"
-        "feature_map (how original columns expanded/changed):\n"
-        "{feature_map_json}\n"
-        "\n"
-        "Requirements:\n"
-        "- Map protocol variables to the correct transformed columns.\n"
-        "- If a single original column expanded into many features (e.g., one-hot), reference the correct set.\n"
-        "- Do NOT reference any column not in df_after_columns.\n"
-        "- Return ONLY JSON matching the schema.\n"
-        "\n"
-        "Output schema (must match exactly):\n"
-        "{schema_json}\n"
     )
+    
+def  build_hard_validation_system_prompt() -> str:
+    return (
+        "Describe the validaton issues to the clinicians in a clear and concise manner. For each issue, explain which column is affected, what the issue is, and why it matters for causal inference. Use non-technical language that clinicians can understand, and provide actionable recommendations for how to address each issue. If there are multiple issues, present them in a bulleted list format for easy reading."
+        "Ask to discuss the protocol again and to resolve the issues. Or select different causal queiton."
+        "Focus on fail part but include shed subtle light on warn part if there is any warn issue as well."
+        "if Not validation issues then simply say tried to tranfrom data but cannot"
+        "{validation_issues_json}"
+    )   

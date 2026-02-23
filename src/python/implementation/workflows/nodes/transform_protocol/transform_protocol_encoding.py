@@ -13,6 +13,7 @@ from python.implementation.workflows.nodes.transform_protocol.transform_protcol_
     BinaryMapImputeConstant,
     BinaryMapImputeToken,
     BinaryMapParams,
+    ColumnPlanModel,
     DateTimeToEpochParams,
     IdxAsUnknown,
     IdxErrorIfNA,
@@ -72,6 +73,50 @@ def _strip_only(x: Any) -> Any:
         return x.strip()
     return x
 
+
+def apply_encoding_plan(
+    df: pd.DataFrame,
+    plan: ColumnPlanModel,
+) -> tuple[pd.DataFrame, Optional[ValidationIssueModel]]:
+    """Applies the specified encoding plan to the given column of the DataFrame, returning a new DataFrame with the transformation applied.
+    Returns a tuple of (transformed_df, issue), where issue is a ValidationIssueModel if a data issue was encountered (e.g., too many categories for one-hot), or None if no issues."""
+    encoding_plan = plan.encoding
+    column = plan.column
+    if isinstance(encoding_plan, OneHotParams):
+        issue = apply_one_hot_column(df, column=column, params=encoding_plan)
+        return df, issue
+    elif isinstance(encoding_plan, BinaryMapParams):
+        issue = apply_binary_map_column(df, column=column, params=encoding_plan)
+        return df, issue
+    elif isinstance(encoding_plan, BinaryMapIdxParams):
+        issue = apply_binary_map_idx_column(df, column=column, params=encoding_plan)
+        return df, issue
+    elif isinstance(encoding_plan, OrdinalMapParams):
+        issue = apply_ordinal_map_column(df, column=column, params=encoding_plan)
+        return df, issue
+    elif isinstance(encoding_plan, OrdinalMapIdxParams):
+        issue = apply_ordinal_map_idx_column(df, column=column, params=encoding_plan)
+        return df, issue
+    elif isinstance(encoding_plan, DateTimeToEpochParams):
+        issue = apply_datetime_to_epoch_column(df, column=column, params=encoding_plan)
+        return df, issue
+    elif isinstance(encoding_plan, Log1pParams):
+        issue = apply_log1p_column(df, column=column, params=encoding_plan)
+        return df, issue
+    elif isinstance(encoding_plan, MinMaxParams):
+        issue = apply_minmax_column(df, column=column, params=encoding_plan)
+        return df, issue
+    elif isinstance(encoding_plan, StandardizeParams):
+        issue = apply_standardize_column(df, column=column, params=encoding_plan)
+        return df, issue
+    elif isinstance(encoding_plan, ToNumericParams):
+        issue = apply_to_numeric_column(df, column=column, params=encoding_plan)
+        return df, issue
+    else:
+        raise TransformPlanApplicationError(
+            "Unsupported encoding type in plan (plan validation failure).",
+            evidence={"column": column, "encoding_plan_type": encoding_plan.__class__.__name__},
+        )
 
 def apply_one_hot_column(
     df_to_change: pd.DataFrame,

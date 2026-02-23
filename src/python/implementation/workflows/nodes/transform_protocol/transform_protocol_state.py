@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, ClassVar, Dict, List, Optional, Sequence
 from uuid import UUID
 
@@ -19,8 +20,6 @@ from python.implementation.workflows.nodes.transform_protocol.transform_protocol
 
 class TransformProtocolPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    error: Optional[NonEmptyStr] = None
     
     transform_protocol_plan: Optional[TransformedProtocolSpec] = None
 
@@ -47,12 +46,13 @@ class TransformProtocolState(State):
 
     @property
     def status(self) -> Status:
-        if self.payload.error:
+        if self.payload.transformation_issues and any(i.severity == "FAIL" for i in self.payload.transformation_issues):
             return "ABORTED"
         if (
             self.payload.transformed_dataset_id
             and self.payload.cleaned_dataset_id
             and self.payload.cleaned_dataset_summary
+            and self.payload.transform_protocol_plan
             and self.payload.transformed_spec is not None
         ):
             return "DONE"
@@ -66,7 +66,7 @@ class TransformProtocolState(State):
 
     @property
     def error(self) -> Optional[str]:
-        return self.payload.error
+        return json.dumps([i.model_dump(mode="json") for i in self.payload.transformation_issues], ensure_ascii=False, sort_keys=True, separators=(",", ":")) if self.payload.transformation_issues else None
 
     @property
     def needs_action(self) -> ACTION:

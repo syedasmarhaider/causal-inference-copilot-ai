@@ -4,7 +4,6 @@ from typing import List, Literal, Optional, Set
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from python.implementation.workflows.nodes.transform_protocol.transform_protocol_encoding import EncodingType
 from python.implementation.workflows.utils.validation import NonEmptyStr
 
 
@@ -36,10 +35,6 @@ class ColumnRefModel(BaseModel):
 
     # IMPORTANT: enables group-wise validation (e.g., one-hot row sums per raw feature)
     source_raw: Optional[NonEmptyStr] = None
-
-    # Optional trace of which encoding produced this column (useful for post-conditions)
-    encoding: Optional[EncodingType] = None
-
 
 class RoleColumnsModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
