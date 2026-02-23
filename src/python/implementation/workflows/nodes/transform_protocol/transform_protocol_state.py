@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any, ClassVar, Dict, List, Optional, Sequence
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Sequence
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.workflows.state import ACTION, State, Status
+from python.implementation.workflows.nodes.transform_protocol.transform_protcol_plan import TransformPlanModel
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_deps import TransformProtocolDeps
 from python.implementation.workflows.tools.data.data_profiling_tool import DatasetSummaryModel
 from python.implementation.workflows.utils.validation import (
@@ -17,11 +18,15 @@ from python.implementation.workflows.nodes.transform_protocol.transform_protocol
     TransformedProtocolSpec,
 )
 
+TransformStage = Literal["PLAN", "APPLY", "VALIDATE", "DONE"]
 
 class TransformProtocolPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     
-    transform_protocol_plan: Optional[TransformedProtocolSpec] = None
+    stage: Optional[TransformStage] = None 
+    attempt: Optional[int] = None 
+    repair_context_json : Optional[str] = None
+    transform_protocol_plan: Optional[TransformPlanModel] = None
 
     transformed_dataset_id: Optional[UUID] = None
     transformed_spec: Optional[TransformedProtocolSpec] = None
@@ -47,7 +52,7 @@ class TransformProtocolState(State):
     @property
     def status(self) -> Status:
         if self.payload.transformation_issues and any(i.severity == "FAIL" for i in self.payload.transformation_issues):
-            return "ABORTED"
+            return "PENDING"
         if (
             self.payload.transformed_dataset_id
             and self.payload.cleaned_dataset_id
@@ -70,7 +75,7 @@ class TransformProtocolState(State):
 
     @property
     def needs_action(self) -> ACTION:
-        return "NONE"
+        return "NEEDS_INPUT" if self.status == "PENDING" else "NONE"
 
     def pre_required_states_names(self) -> Sequence[str]:
         return TransformProtocolDeps.pre_required_states_names()
