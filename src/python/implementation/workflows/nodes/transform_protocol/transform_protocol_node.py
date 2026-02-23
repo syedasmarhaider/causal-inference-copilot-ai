@@ -25,13 +25,14 @@ from python.implementation.workflows.nodes.transform_protocol.transform_protocol
     build_transform_plan_system_prompt,
     build_transform_plan_user_prompt_template,
     build_transformed_protocol_user_prompt_template,
+    build_user_friendly_message_for_transform_protocol_system_prompt,
     get_transform_protocol_node_info,
 )
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_specs import TransformedProtocolSpec
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_state import (
+    MaxAttempt,
     TransformProtocolPayloadModel,
     TransformProtocolState,
-    TransformStage,
 )
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_validation import (
     validate_binary_and_one_hot_invariants,
@@ -101,10 +102,9 @@ def _llm_stage_message(
 ) -> str:
     system = (
         "You are a progress reporter for a data transformation pipeline.\n"
-        "Write a short, clear status update for the user.\n"
+        "Write clear and comprehensive status update for the user.\n"
         "Rules:\n"
         "- Start with a one-line headline.\n"
-        "- Then 3-6 bullet points.\n"
         "- Be concrete (counts, column names) when present.\n"
         "- If failure, say what failed and what will happen next.\n"
         "- Do NOT mention internal class names.\n"
@@ -330,10 +330,12 @@ def _reset_to_plan(
     attempt_next: int,
     repair_context_json: str,
     user_message: str,
+    user_needs_input: bool = True,
 ) -> TransformProtocolState:
     # Set plan/apply/spec null + stage PLAN
     return TransformProtocolState(
         TransformProtocolPayloadModel(
+            needs_user_input=user_needs_input,
             stage="PLAN",
             attempt=attempt_next,
             repair_context_json=repair_context_json,
@@ -359,7 +361,6 @@ class TransformProtocolNode(Node):
     llm: LLMService
     data_repo: DataRepo
     model_name: str
-    max_attempts: int = 5
 
     profiling_max_categories: int = 50
     profiling_sample_distinct: int = 50
@@ -451,14 +452,44 @@ class TransformProtocolNode(Node):
         prev_payload: Optional[TransformProtocolPayloadModel] = None
         if isinstance(state, TransformProtocolState):
             prev_payload = state.payload
-
-        stage: TransformStage = cast(TransformStage, getattr(prev_payload, "stage", "PLAN"))
-        attempt: int = int(getattr(prev_payload, "attempt", 1))
-        repair_context_json: Optional[str] = getattr(prev_payload, "repair_context_json", None)
-
+        
+        stage = prev_payload.stage if prev_payload and prev_payload.stage else "PLAN"
+        attempt = prev_payload.attempt if prev_payload and prev_payload.attempt else 1
+        repair_context_json = prev_payload.repair_context_json if prev_payload and prev_payload.repair_context_json else None
+        
+        last_12_messages = messages_history[-12:] if messages_history else None
+        if stage == "PLAN" and prev_payload and prev_payload.needs_user_input:
+            discussion = self.llm.generate(
+                system_prompt="You are a helpful assistant",
+                user_prompt=build_user_friendly_message_for_transform_protocol_system_prompt().format(
+                    causal_transformation_summary= "CAUSAL_TRANSFORMATION_SUMMARY",),
+                config=LLMConfig(temperature=1.0),
+                history=last_12_messages,
+            )
+            
+            if not discussion.content.startswith("CAUSAL_TRANSFORMATION_SUMMARY"):
+                return TransformProtocolState(
+                    TransformProtocolPayloadModel(
+                        stage="PLAN",
+                        attempt=attempt,
+                        repair_context_json=repair_context_json,
+                        transformation_issues=prev_payload.transformation_issues,
+                        user_message=discussion.content,
+                        needs_user_input=True,
+                    )
+                )
+            else:
+                repair_context_json = _make_repair_context_json(
+                    attempt=attempt,
+                    stage="PLAN_USER_FEEDBACK",
+                    issues=prev_payload.transformation_issues,
+                    extra={"user_feedback": discussion.content},
+                )
+                repair_context_json= repair_context_json.replace("REPAIR_CONTEXT=", "")
+                
         # hard stop on attempts
-        if attempt > self.max_attempts:
-            issues = [_fail("Maximum transformation attempts exceeded.", {"max_attempts": self.max_attempts})]
+        if attempt > MaxAttempt:
+            issues = [_fail("Maximum transformation attempts exceeded.", {"max_attempts": MaxAttempt})]
             msg = get_message_for_hard_validation_issue(self.llm, issues)
             return TransformProtocolState(
                 TransformProtocolPayloadModel(
@@ -560,6 +591,29 @@ class TransformProtocolNode(Node):
 
             try:
                 df_transformed, apply_issues = apply_plan_or_raise(df=df_clean, plan=plan)
+                only_fail_issues = [x for x in apply_issues if _is_fail(x)]
+                if len(only_fail_issues) > 0:
+                    repair_json = _make_repair_context_json(attempt=attempt, stage="APPLY_VALIDATION", issues=only_fail_issues)
+                    msg = _llm_stage_message(
+                        llm=self.llm,
+                        stage="APPLY",
+                        ok=False,
+                        payload={"attempt": attempt, "n_issues": len(only_fail_issues), "issues": [x.model_dump(mode="json") for x in only_fail_issues]},
+                    )
+                    return _reset_to_plan(
+                        user_needs_input=True,
+                        prev=prev_payload or TransformProtocolPayloadModel(),
+                        cleaned_dataset_id=clean_dataset_id,
+                        
+                        cleaned_dataset_summary=clean_dataset_summary,
+                        cleaned_dataset_validation_issues=clean_dataset_validation_issues,
+                        issues=only_fail_issues,
+                        attempt_next=attempt + 1,
+                        repair_context_json=repair_json,
+                        user_message=msg,
+                    )
+                    
+                
             except Exception as e:  # noqa: BLE001
                 issues = [_fail("Failed to apply encoding plan (exception). Restarting from planning.", {"error": str(e), "type": type(e).__name__})]
                 repair_json = _make_repair_context_json(
@@ -673,6 +727,7 @@ class TransformProtocolNode(Node):
                     payload={"attempt": attempt, "n_issues": len(suite_issues), "issues": [x.model_dump(mode="json") for x in suite_issues[:15]]},
                 )
                 return _reset_to_plan(
+                    user_needs_input=True,
                     prev=prev_payload or TransformProtocolPayloadModel(),
                     cleaned_dataset_id=clean_dataset_id,
                     cleaned_dataset_summary=clean_dataset_summary,

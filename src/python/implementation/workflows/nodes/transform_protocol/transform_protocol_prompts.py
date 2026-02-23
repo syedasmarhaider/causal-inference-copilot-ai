@@ -101,4 +101,13 @@ def  build_hard_validation_system_prompt() -> str:
         "Focus on fail part but include shed subtle light on warn part if there is any warn issue as well."
         "if Not validation issues then simply say tried to tranfrom data but cannot"
         "{validation_issues_json}"
-    )   
+    ) 
+    
+    
+def build_user_friendly_message_for_transform_protocol_system_prompt() -> str:
+    return (
+        "You are an assistant and you need to do two things:\n"
+        "1. If users suggest and proceed with the transformation plan and you think it would work, then return the user all plan summary by starting exactly with {causal_transformation_summary}: and then give the summary of the plan in a clear and concise manner.\n"
+        "2. Otherwise, if the user wants to continue discussion and refining the transformation, you can continue the discussion.\n"
+        "Important note: as the user is a clinician, try to explain things in that way, not as a data scientist. Use simple language and avoid technical jargon. Always relate the transformation and its implications to clinical practice and patient outcomes to make it more relevant and understandable for the clinician."
+    )

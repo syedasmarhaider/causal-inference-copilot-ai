@@ -18,11 +18,13 @@ from python.implementation.workflows.nodes.transform_protocol.transform_protocol
     TransformedProtocolSpec,
 )
 
+MaxAttempt = 4
 TransformStage = Literal["PLAN", "APPLY", "VALIDATE", "DONE"]
 
 class TransformProtocolPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     
+    needs_user_input: bool = False
     stage: Optional[TransformStage] = None 
     attempt: Optional[int] = None 
     repair_context_json : Optional[str] = None
@@ -51,8 +53,8 @@ class TransformProtocolState(State):
 
     @property
     def status(self) -> Status:
-        if self.payload.transformation_issues and any(i.severity == "FAIL" for i in self.payload.transformation_issues):
-            return "PENDING"
+        if self.payload.transformation_issues and any(i.severity == "FAIL" for i in self.payload.transformation_issues) and self.payload.attempt and self.payload.attempt >= MaxAttempt:
+            return "ABORTED"
         if (
             self.payload.transformed_dataset_id
             and self.payload.cleaned_dataset_id
@@ -75,7 +77,7 @@ class TransformProtocolState(State):
 
     @property
     def needs_action(self) -> ACTION:
-        return "NEEDS_INPUT" if self.status == "PENDING" else "NONE"
+        return "NEEDS_INPUT" if self.payload.needs_user_input else "NONE"
 
     def pre_required_states_names(self) -> Sequence[str]:
         return TransformProtocolDeps.pre_required_states_names()

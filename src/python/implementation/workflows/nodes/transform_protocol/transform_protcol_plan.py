@@ -445,6 +445,10 @@ class DateTimeToEpochParams(_BaseParams):
 class DateTimeToEpochSpec(_BaseSpec):
     encoding: Literal["datetime_to_epoch_seconds"]
     params: DateTimeToEpochParams
+    
+class NoEncodingIdentitySpec(_BaseSpec):
+    encoding: Literal["no_encoding_identity"]
+    params: None    
 
 
 EncodingSpec = Annotated[
@@ -459,6 +463,7 @@ EncodingSpec = Annotated[
         StandardizeSpec,
         MinMaxSpec,
         DateTimeToEpochSpec,
+        NoEncodingIdentitySpec
     ],
     Field(discriminator="encoding"),
 ]
