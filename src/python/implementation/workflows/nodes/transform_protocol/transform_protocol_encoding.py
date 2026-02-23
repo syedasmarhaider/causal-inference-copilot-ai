@@ -10,17 +10,23 @@ from python.implementation.workflows.nodes.transform_protocol.transform_protcol_
     BinaryMapAsUnknown,
     BinaryMapErrorIfNA,
     BinaryMapIdxParams,
+    BinaryMapIdxSpec,
     BinaryMapImputeConstant,
     BinaryMapImputeToken,
     BinaryMapParams,
+    BinaryMapSpec,
     ColumnPlanModel,
     DateTimeToEpochParams,
+    DateTimeToEpochSpec,
     IdxAsUnknown,
     IdxErrorIfNA,
     IdxImputeIndex,
     IdxImputeMode,
     Log1pParams,
+    Log1pSpec,
     MinMaxParams,
+    MinMaxSpec,
+    NoEncodingIdentitySpec,
     NumericAddMissingIndicator,
     NumericErrorIfNA,
     NumericImputeMean,
@@ -30,14 +36,19 @@ from python.implementation.workflows.nodes.transform_protocol.transform_protcol_
     OneHotImputeMode,
     OneHotImputeToken,
     OneHotParams,
+    OneHotSpec,
     OrdinalAsUnknown,
     OrdinalErrorIfNA,
     OrdinalImputeMode,
     OrdinalImputeToken,
     OrdinalMapIdxParams,
+    OrdinalMapIdxSpec,
     OrdinalMapParams,
+    OrdinalMapSpec,
     StandardizeParams,
+    StandardizeSpec,
     ToNumericParams,
+    ToNumericSpec,
 )
 from python.implementation.workflows.utils.validation import (
     ValidationIssueModel,
@@ -82,36 +93,39 @@ def apply_encoding_plan(
     Returns a tuple of (transformed_df, issue), where issue is a ValidationIssueModel if a data issue was encountered (e.g., too many categories for one-hot), or None if no issues."""
     encoding_plan = plan.encoding
     column = plan.column
-    if isinstance(encoding_plan, OneHotParams):
-        issue = apply_one_hot_column(df, column=column, params=encoding_plan)
+    if isinstance(encoding_plan, OneHotSpec):
+        issue = apply_one_hot_column(df, column=column, params=encoding_plan.params)
         return df, issue
-    elif isinstance(encoding_plan, BinaryMapParams):
-        issue = apply_binary_map_column(df, column=column, params=encoding_plan)
+    elif isinstance(encoding_plan, BinaryMapSpec):
+        issue = apply_binary_map_column(df, column=column, params=encoding_plan.params)
         return df, issue
-    elif isinstance(encoding_plan, BinaryMapIdxParams):
-        issue = apply_binary_map_idx_column(df, column=column, params=encoding_plan)
+    elif isinstance(encoding_plan, BinaryMapIdxSpec):
+        issue = apply_binary_map_idx_column(df, column=column, params=encoding_plan.params)
         return df, issue
-    elif isinstance(encoding_plan, OrdinalMapParams):
-        issue = apply_ordinal_map_column(df, column=column, params=encoding_plan)
+    elif isinstance(encoding_plan, OrdinalMapSpec):
+        issue = apply_ordinal_map_column(df, column=column, params=encoding_plan.params)
         return df, issue
-    elif isinstance(encoding_plan, OrdinalMapIdxParams):
-        issue = apply_ordinal_map_idx_column(df, column=column, params=encoding_plan)
+    elif isinstance(encoding_plan, OrdinalMapIdxSpec):
+        issue = apply_ordinal_map_idx_column(df, column=column, params=encoding_plan.params)
         return df, issue
-    elif isinstance(encoding_plan, DateTimeToEpochParams):
-        issue = apply_datetime_to_epoch_column(df, column=column, params=encoding_plan)
+    elif isinstance(encoding_plan, DateTimeToEpochSpec):
+        issue = apply_datetime_to_epoch_column(df, column=column, params=encoding_plan.params)
         return df, issue
-    elif isinstance(encoding_plan, Log1pParams):
-        issue = apply_log1p_column(df, column=column, params=encoding_plan)
+    elif isinstance(encoding_plan, Log1pSpec):
+        issue = apply_log1p_column(df, column=column, params=encoding_plan.params)
         return df, issue
-    elif isinstance(encoding_plan, MinMaxParams):
-        issue = apply_minmax_column(df, column=column, params=encoding_plan)
+    elif isinstance(encoding_plan, MinMaxSpec):
+        issue = apply_minmax_column(df, column=column, params=encoding_plan.params)
         return df, issue
-    elif isinstance(encoding_plan, StandardizeParams):
-        issue = apply_standardize_column(df, column=column, params=encoding_plan)
+    elif isinstance(encoding_plan, StandardizeSpec):
+        issue = apply_standardize_column(df, column=column, params=encoding_plan.params)
         return df, issue
-    elif isinstance(encoding_plan, ToNumericParams):
-        issue = apply_to_numeric_column(df, column=column, params=encoding_plan)
+    elif isinstance(encoding_plan, ToNumericSpec):
+        issue = apply_to_numeric_column(df, column=column, params=encoding_plan.params)
         return df, issue
+    elif isinstance(encoding_plan,NoEncodingIdentitySpec ): # pyright: ignore[reportUnnecessaryIsInstance]
+        # No change to df, no issues
+        return df, None
     else:
         raise TransformPlanApplicationError(
             "Unsupported encoding type in plan (plan validation failure).",
