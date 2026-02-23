@@ -56,7 +56,7 @@ class TransformProtocolState(State):
             and self.payload.transformed_spec is not None
         ):
             return "DONE"
-        raise ValueError("TransformProtocolState status is indeterminate due to missing fields or FAIL validation status")
+        return "PENDING"
 
     @property
     def message(self) -> str:

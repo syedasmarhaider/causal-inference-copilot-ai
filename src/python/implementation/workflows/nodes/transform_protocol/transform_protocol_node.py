@@ -135,6 +135,8 @@ class TransformProtocolNode(Node):
         )
         
         if transformed_spec is None or final_transformed_spec is None or (transformation_issues and any(i.severity == "FAIL" for i in transformation_issues)):
+            if len(transformation_issues) == 0:
+                raise ValueError("transform_and_validate_protocol_spec must return transformation_issues (possibly empty list), but got None")
             message = get_message_for_hard_validation_issue(
                 llm=self.llm,
                 issue=transformation_issues
