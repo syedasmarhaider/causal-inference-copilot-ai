@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from python.implementation.workflows.utils.validation import NonEmptyStr
 
 
-OutcomeKind = Literal["binary", "continuous", "duration", "categorical"]
+OutcomeKind = Literal["binary", "continuous"]
 TreatmentKind = Literal["binary", "continuous", "categorical"]
 
 FeatureKind = Literal[
@@ -103,14 +103,9 @@ class TransformedProtocolSpec(BaseModel):
 
     @model_validator(mode="after")
     def _basic_role_constraints(self) -> "TransformedProtocolSpec":
-        # Structural constraints that match common estimator adapters.
-        if self.y_kind != "duration" and len(self.y.columns) != 1:
-            raise ValueError("For non-duration outcomes, y must contain exactly 1 column.")
-
         if self.t_kind in ("binary", "continuous") and len(self.t.columns) != 1:
             raise ValueError("For binary/continuous treatment, t must contain exactly 1 column.")
 
-        # Disallow overlap with Y/T (leakage / misuse). Allow W∩X.
         y_set = set(self.y_cols)
         t_set = set(self.t_cols)
         w_set = set(self.w_cols)

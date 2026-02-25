@@ -11,7 +11,6 @@ from typing import cast
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
     BinaryOutcomeSpecModel,
     BinaryTreatmentSpecModel,
-    CategoricalOutcomeSpecModel,
     CategoricalTreatmentSpecModel,
     ContinuousOutcomeSpecModel,
 )
@@ -608,8 +607,6 @@ def _outcome_allowed_literals(protocol: ProtocolSpec) -> List[str] | None:
     ys = protocol.outcome_spec
     if isinstance(ys, BinaryOutcomeSpecModel):
         return [ys.event, ys.non_event]
-    if isinstance(ys, CategoricalOutcomeSpecModel):
-        return list(ys.levels)
     if isinstance(ys, ContinuousOutcomeSpecModel):  # pyright: ignore[reportUnnecessaryIsInstance]
         return None
     raise ValueError(f"Unknown outcome_spec type: {type(ys)}")
@@ -899,20 +896,6 @@ def validate_outcome(
             )
         )
         return issues, metrics
-
-    # Require enough observed levels to estimate anything
-    if isinstance(ys, BinaryOutcomeSpecModel):
-        # binary: require both classes observed among NON-MISSING
-        if len(obs_set) < 2:
-            issues.append(
-                _issue(
-                    severity="FAIL",
-                    message="Binary outcome has <2 observed values among non-missing entries; cannot estimate effect.",
-                    evidence=metrics,
-                    fix_hint="Relax filters, increase cohort, or redefine outcome so both event/non-event appear.",
-                )
-            )
-            return issues, metrics
     else:
         # categorical: require at least 2 observed levels among NON-MISSING
         if len(obs_set) < 2:

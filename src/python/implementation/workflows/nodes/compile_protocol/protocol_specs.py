@@ -63,15 +63,8 @@ class ContinuousOutcomeSpecModel(BaseModel):
     clip_max: Optional[float] = None
 
 
-class CategoricalOutcomeSpecModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    kind: Literal["categorical"]
-    column: NonEmptyStr
-    levels: List[NonEmptyStr] = Field(..., min_length=2)
-
-
 OutcomeSpecModel = Annotated[
-    Union[BinaryOutcomeSpecModel, ContinuousOutcomeSpecModel, CategoricalOutcomeSpecModel],
+    Union[BinaryOutcomeSpecModel, ContinuousOutcomeSpecModel],
     Field(discriminator="kind"),
 ]
 

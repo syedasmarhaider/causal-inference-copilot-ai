@@ -20,7 +20,6 @@ from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state i
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
     BinaryOutcomeSpecModel,
     BinaryTreatmentSpecModel,
-    CategoricalOutcomeSpecModel,
     CategoricalTreatmentSpecModel,
     ContinuousOutcomeSpecModel,
     ProtocolSpec,
@@ -233,11 +232,6 @@ def _feasibility_error(df: pd.DataFrame, protocol: ProtocolSpec) -> Optional[str
         nunq = int(df[ycol].nunique(dropna=True))
         if nunq < 2:
             return f"Binary outcome column '{ycol}' has <2 unique values after filtering."
-    elif isinstance(ys, CategoricalOutcomeSpecModel):
-        ycol = ys.column
-        nunq = int(df[ycol].nunique(dropna=True))
-        if nunq < 2:
-            return f"Categorical outcome column '{ycol}' has <2 levels present after filtering."
     elif isinstance(ys, ContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         ycol = ys.column
         nunq = int(df[ycol].nunique(dropna=True))
@@ -713,8 +707,6 @@ def apply_treatment_outcome_domain_keep(
         allowed_y2: Optional[List[str]] = None
         if isinstance(ys, BinaryOutcomeSpecModel):
                 allowed_y2 = [ys.event, ys.non_event]
-        elif isinstance(ys, CategoricalOutcomeSpecModel):
-                allowed_y2 = list(ys.levels)
         elif isinstance(ys, ContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
                 allowed_y2 = None  # no whitelist for continuous
         else:
