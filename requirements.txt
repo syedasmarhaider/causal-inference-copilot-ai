@@ -6,9 +6,11 @@ langgraph
 python-dotenv
 fastapi>=0.110
 uvicorn[standard]>=0.27
-pydantic>=2.6
+pydantic
 structlog>=24.1
 joblib
 scikit-learn
 econml
-google-genai
+langchain-core 
+langchain-google-genai
+langchain-openai

@@ -1,0 +1,394 @@
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence
+from uuid import UUID
+
+from pydantic import ValidationError
+
+from python.domain.repo.data_repo import DataRepo
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
+from python.domain.workflows.node import Node
+from python.domain.workflows.state import State
+from python.domain.workflows.tool_factory import ToolFactory
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_prompts import (
+    system_prompt_validate_cleaned_protocol,
+    validate_cleaned_protocol_get_info,
+)
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_deps import (
+    ValidateCleanProtocolDeps,
+)
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import (
+    ValidateCleanProtocolPayloadModel,
+    ValidateCleanProtocolState,
+)
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_utils import (
+    ValidationIssue,
+    # ---- structural / protocol invariants ----
+    validate_min_rows,
+    validate_outcome,
+    validate_protocol_role_columns_invariants,
+    validate_time_zero_semantics_protocol,
+
+    # ---- covariates + effect modifiers ----
+    validate_covariate_and_effect_modifier_presence,
+    validate_covariate_and_effect_modifier_missingness,
+    validate_covariate_and_effect_modifier_missingness_by_treatment,
+    validate_covariate_and_effect_modifier_constantness,
+    validate_covariate_and_effect_modifier_high_cardinality_and_id_like,
+    validate_covariate_and_effect_modifier_type_risks,
+    # ---- overlap / positivity ----
+    validate_overlap_and_positivity,
+    validate_treatment,
+)
+from python.implementation.workflows.utils.validation import ValidationIssueModel
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ValidateCleanProtocolNode(Node):
+    data_repo: DataRepo
+    llm: LLMService
+    model_name: str
+
+    NAME: ClassVar[str] = ValidateCleanProtocolState.NAME
+
+    @property
+    def name(self) -> str:
+        return self.NAME
+
+    @classmethod
+    def get_info(cls) -> str:
+        return validate_cleaned_protocol_get_info()
+
+    def run(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        state: State,
+        tool_factory: ToolFactory,
+        previous_state_dependencies: Mapping[str, State],
+        messages_history: Optional[Sequence[ChatMessage]],
+    ) -> State:
+        try:
+            deps = ValidateCleanProtocolDeps.from_loaded(previous_state_dependencies)
+
+            # ----------------------------
+            # Guardrails: upstream sanity
+            # ----------------------------
+            proto = deps.compile_protocol.payload.protocol
+            assert proto is not None, "CompileProtocolState must provide a compiled protocol for validation."
+
+            clean_id = deps.clean_protocol.payload.clean_dataset_id
+            assert clean_id is not None, "CleanProtocolState must provide a clean_dataset_id for validation."
+
+            # ----------------------------
+            # Load cleaned dataframe
+            # ----------------------------
+            df = self.data_repo.get_csv_data(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                dataset_id=clean_id,
+                limit=None,
+            )
+            
+            all_issues: List[ValidationIssue] = []
+            metrics: Dict[str, Any] = {
+                "n_rows_df": int(df.shape[0]),
+                "n_cols_df": int(df.shape[1]),
+                "df_columns_unique": bool(df.columns.is_unique),
+                "df_columns_sample": list(map(str, df.columns[:200])),
+            }
+
+            # =========================================================================
+            # 0) Protocol-only invariants (no df required)
+            # =========================================================================
+            issues = validate_protocol_role_columns_invariants(proto)
+            all_issues.extend(issues)
+            metrics["protocol_role_invariants"] = {
+                "n_issues": int(len(issues)),
+                "n_fail": int(sum(1 for x in issues if x["severity"] == "FAIL")),
+                "n_warn": int(sum(1 for x in issues if x["severity"] == "WARN")),
+            }
+
+            # =========================================================================
+            # 1) Structural df-backed invariants
+            # =========================================================================
+            issues, m = validate_min_rows(df, min_rows_fail=20)
+            all_issues.extend(issues)
+            metrics["min_rows"] = m
+
+            issues, m = validate_time_zero_semantics_protocol(df, proto)
+            all_issues.extend(issues)
+            metrics["time_zero"] = m
+
+            # =========================================================================
+            # 2) Treatment validations (ProtocolSpec-native)
+            # =========================================================================
+            issues, m = validate_treatment(df=df, protocol=proto)
+            all_issues.extend(issues)
+            metrics["treatment"] = m
+
+            # =========================================================================
+            # 3) Outcome validations (ProtocolSpec-native)
+            # =========================================================================
+            issues, m = validate_outcome(df=df, protocol=proto)
+            all_issues.extend(issues)
+            metrics["outcome"] = m
+
+
+            # =========================================================================
+            # 4) Covariates / Effect modifiers (ProtocolSpec-native)
+            #    IMPORTANT: keep require_covariates=False to match your prior behavior
+            #    (warn when empty; don't hard-fail).
+            # =========================================================================
+            issues, m = validate_covariate_and_effect_modifier_presence(
+                df=df,
+                protocol=proto,
+                require_covariates=False,
+            )
+            all_issues.extend(issues)
+            metrics["covariate_effect_modifier_presence"] = m
+
+            issues, m = validate_covariate_and_effect_modifier_missingness(df=df, protocol=proto)
+            all_issues.extend(issues)
+            metrics["covariate_effect_modifier_missingness"] = m
+
+            issues, m = validate_covariate_and_effect_modifier_missingness_by_treatment(df=df, protocol=proto)
+            all_issues.extend(issues)
+            metrics["covariate_effect_modifier_missingness_by_treatment"] = m
+
+            issues, m = validate_covariate_and_effect_modifier_constantness(df=df, protocol=proto)
+            all_issues.extend(issues)
+            metrics["covariate_effect_modifier_constantness"] = m
+
+            issues, m = validate_covariate_and_effect_modifier_high_cardinality_and_id_like(df=df, protocol=proto)
+            all_issues.extend(issues)
+            metrics["covariate_effect_modifier_cardinality_idlike"] = m
+
+            issues, m = validate_covariate_and_effect_modifier_type_risks(df=df, protocol=proto)
+            all_issues.extend(issues)
+            metrics["covariate_effect_modifier_type_risks"] = m
+
+            # =========================================================================
+            # 5) Overlap / positivity (advanced)
+            #    - This uses your ProtocolSpec + cleaned df only.
+            #    - If covariates are empty, we DO NOT fail here (require_covariates=False),
+            #      but overlap diagnostics may be less meaningful.
+            # =========================================================================
+            try:
+                issues, m = validate_overlap_and_positivity(
+                    df=df,
+                    protocol=proto,
+                    require_covariates=False,
+                    use_effect_modifiers_univariate=True,
+                    enable_propensity_proxy=True,
+                )
+                all_issues.extend(issues)
+                metrics["overlap_positivity"] = m
+            except Exception as e:
+                all_issues.append(
+                    {
+                        "severity": "FAIL",
+                        "message": "Overlap/positivity diagnostics failed to run.",
+                        "evidence": {"error": repr(e)},
+                        "fix_hint": "Inspect treatment typing and feature columns; overlap diagnostics require valid arm masks and non-pathological inputs.",
+                    }
+                )
+
+            # ----------------------------
+            # Normalize issues -> pydantic models
+            # ----------------------------
+            issue_models: List[ValidationIssueModel] = [
+                ValidationIssueModel.model_validate(it) for it in all_issues
+            ]
+            has_fail = any(i.severity == "FAIL" for i in issue_models)
+
+            msg = self._make_user_message(
+                messages_history=messages_history,
+                protocol_summary=self._protocol_summary(proto),
+                metrics=metrics,
+                issues=[i.model_dump(mode="json") for i in issue_models],
+                has_fail=has_fail,
+            )
+
+            payload = ValidateCleanProtocolPayloadModel(
+                issues=issue_models,
+                validation_error="validation error occurs and protocol discussion is required as the protocol has some issues." if has_fail else None,
+                user_message=msg,
+            )
+            return ValidateCleanProtocolState(payload=payload)
+
+        except ValidationError as e:
+            return self._abort(
+                messages_history=messages_history,
+                validation_error=f"Pydantic validation error: {e.errors()}",
+                issues=[
+                    {
+                        "severity": "FAIL",
+                        "message": "Validation node produced an invalid payload (internal error).",
+                        "evidence": {"errors": e.errors()},
+                        "fix_hint": "Fix the validation node / issue schema mismatch.",
+                    }
+                ],
+            )
+        except Exception as e:
+            log.exception("Unexpected error in ValidateCleanProtocolNode: %s", repr(e))
+            return self._abort(
+                messages_history=messages_history,
+                validation_error=repr(e),
+                issues=[
+                    {
+                        "severity": "FAIL",
+                        "message": "Validation aborted due to an internal error.",
+                        "evidence": {"error": repr(e)},
+                        "fix_hint": "Inspect server logs and the validation node implementation.",
+                    }
+                ],
+            )
+
+    # =============================================================================
+    # Internals
+    # =============================================================================
+    def _abort(
+        self,
+        *,
+        messages_history: Optional[Sequence[ChatMessage]],
+        validation_error: str,
+        issues: List[Dict[str, Any]],
+    ) -> ValidateCleanProtocolState:
+        safe_issues = issues or [
+            {
+                "severity": "FAIL",
+                "message": "Validation aborted due to an internal error.",
+                "evidence": {"validation_error": validation_error},
+                "fix_hint": "Inspect server logs.",
+            }
+        ]
+
+        msg = self._make_user_message(
+            messages_history=messages_history,
+            protocol_summary=None,
+            metrics={"validation_error": validation_error},
+            issues=safe_issues,
+            has_fail=True,
+        )
+
+        issue_models = [ValidationIssueModel.model_validate(x) for x in safe_issues]
+        payload = ValidateCleanProtocolPayloadModel(
+            issues=issue_models,
+            validation_error=validation_error,
+            user_message=msg,
+        )
+        return ValidateCleanProtocolState(payload=payload)
+
+    def _protocol_summary(self, proto: Any) -> Dict[str, Any]:
+        # outcome cols summary
+        ospec = getattr(proto, "outcome_spec", None)
+        out_cols: List[str] = []
+        if ospec is not None:
+            if getattr(ospec, "kind", None) == "duration":
+                out_cols = [
+                    str(getattr(ospec, "duration_column", "")),
+                    str(getattr(ospec, "event_column", "")),
+                ]
+                out_cols = [c for c in out_cols if c and c.strip()]
+            else:
+                y = getattr(ospec, "column", None)
+                if isinstance(y, str) and y.strip():
+                    out_cols = [y]
+
+        return {
+            "treatment_col": getattr(getattr(proto, "treatment_spec", None), "column", None),
+            "treatment_kind": getattr(getattr(proto, "treatment_spec", None), "kind", None),
+            "outcome_kind": getattr(ospec, "kind", None) if ospec is not None else None,
+            "outcome_cols": out_cols,
+            "time_zero_type": getattr(proto, "time_zero_type", None),
+            "time_zero": getattr(proto, "time_zero", None),
+            "n_covariates": int(len(list(getattr(proto, "covariates", []) or []))),
+            "n_effect_modifiers": int(len(list(getattr(proto, "effect_modifiers", []) or []))),
+        }
+
+    def _make_user_message(
+        self,
+        *,
+        messages_history: Optional[Sequence[ChatMessage]],
+        protocol_summary: Optional[Dict[str, Any]],
+        metrics: Dict[str, Any],
+        issues: List[Dict[str, Any]],
+        has_fail: bool,
+    ) -> str:
+        try:
+            txt = self._try_llm_summary(
+                messages_history=messages_history,
+                protocol_summary=protocol_summary,
+                metrics=metrics,
+                issues=issues,
+                has_fail=has_fail,
+            )
+            if isinstance(txt, str) and txt.strip():
+                return txt.strip()
+        except Exception:
+            pass
+        return self._fallback_summary(issues=issues, has_fail=has_fail)
+
+    def _try_llm_summary(
+        self,
+        *,
+        messages_history: Optional[Sequence[ChatMessage]],
+        protocol_summary: Optional[Dict[str, Any]],
+        metrics: Dict[str, Any],
+        issues: List[Dict[str, Any]],
+        has_fail: bool,
+    ) -> Optional[str]:
+        system = system_prompt_validate_cleaned_protocol()
+        history_only_last_6 = messages_history[-6:] if messages_history else None
+        payload: Dict[str, Any] = {
+            "has_fail": bool(has_fail),
+            "protocol_summary": protocol_summary,
+            "metrics": metrics,
+            "issues": issues,
+        }
+        user = (
+            "Generate the user-facing message for these validation results.\n"
+            "Return plain text (no JSON).\n\n"
+            f"INPUT:\n{json.dumps(payload, ensure_ascii=False)[:60000]}"
+        )
+        config = LLMConfig(model=self.model_name, temperature=0.7)
+        resp = self.llm.generate(
+            system_prompt=system,
+            user_prompt=user,
+            config=config,
+            history=history_only_last_6,
+        )
+        return resp.content
+
+    def _fallback_summary(self, *, issues: List[Dict[str, Any]], has_fail: bool) -> str:
+        fails = [x for x in issues if str(x.get("severity")) == "FAIL"]
+        warns = [x for x in issues if str(x.get("severity")) == "WARN"]
+
+        lines: List[str] = []
+        if has_fail:
+            lines.append("Validation failed. Fix the following blockers before continuing:")
+            top = fails[:10]
+        else:
+            lines.append("Validation passed.")
+            if warns:
+                lines.append("Warnings detected (you can continue, but results may be unstable):")
+            top = warns[:10]
+
+        for i, it in enumerate(top, start=1):
+            msg = str(it.get("message", "")).strip()
+            hint = it.get("fix_hint")
+            if isinstance(hint, str) and hint.strip():
+                lines.append(f"{i}. {msg}  →  {hint.strip()}")
+            else:
+                lines.append(f"{i}. {msg}")
+
+        if not has_fail:
+            lines.append("Next: run TRANSFORM (encoding/typing) and then post-transform validation.")
+        return "\n".join(lines)
