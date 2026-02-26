@@ -1,11 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
-from typing_extensions import Literal
-
-
-SupportedModelsLiteral = Literal[
+SupportedModelsLiteral = [
     # DML-family
     "econml.dml.DML",
     "econml.dml.LinearDML",
@@ -26,10 +21,4 @@ SupportedModelsLiteral = Literal[
     "econml.metalearners.TLearner",
     "econml.metalearners.XLearner",
     "econml.metalearners.DomainAdaptationLearner",
-]
-
-
-class SupportedEconMLModels(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-   
+] 
