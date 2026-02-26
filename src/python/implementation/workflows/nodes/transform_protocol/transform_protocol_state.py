@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.workflows.state import ACTION, State, Status
+from python.implementation.workflows.nodes.compile_protocol.protocol_specs import ProtocolSpec
 from python.implementation.workflows.nodes.transform_protocol.transform_protcol_plan import TransformPlanModel
 from python.implementation.workflows.nodes.transform_protocol.transform_protocol_deps import TransformProtocolDeps
 from python.implementation.workflows.tools.data.data_profiling_tool import DatasetSummaryModel
@@ -14,12 +15,9 @@ from python.implementation.workflows.utils.validation import (
     NonEmptyStr,
     ValidationIssueModel,
 )
-from python.implementation.workflows.nodes.transform_protocol.transform_protocol_specs import (
-    TransformedProtocolSpec,
-)
 
 MaxAttempt = 4
-TransformStage = Literal["PLAN", "APPLY", "VALIDATE", "DONE"]
+TransformStage = Literal["PLAN", "APPLY", "VALIDATE", "DONE","NEGOTIATE"]
 
 class TransformProtocolPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -30,8 +28,9 @@ class TransformProtocolPayloadModel(BaseModel):
     repair_context_json : Optional[str] = None
     transform_protocol_plan: Optional[TransformPlanModel] = None
 
+    protoctol_spec: Optional[ProtocolSpec] = None
     transformed_dataset_id: Optional[UUID] = None
-    transformed_spec: Optional[TransformedProtocolSpec] = None
+    transformed_spec: Optional[ProtocolSpec] = None
 
     transformation_issues: List[ValidationIssueModel] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
    

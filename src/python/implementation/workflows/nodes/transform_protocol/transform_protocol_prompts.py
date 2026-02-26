@@ -4,8 +4,8 @@ def get_transform_protocol_node_info() -> str:
     return (
         "Transform protocol takes the compiled protocol and the cleaned dataset, and produces: \n"
         "1) a TransformPlan that specifies how to transform each column (e.g., encoding + missingness handling), and \n"
-        "2) a TransformedProtocolSpec that maps the original protocol variables to the transformed features. \n"
-        "3) Run the validaiton on transform protocol and produce user friendly message and issues if there is any problem with the transformed dataset or the spec."
+        "2) a ProtocolSpec that maps the original protocol variables to the transformed features. \n"
+        "3) Run the validation on transform protocol and produce user friendly message and issues if there is any problem with the transformed dataset or the spec."
     )
 
 
@@ -18,15 +18,15 @@ def build_transform_plan_system_prompt() -> str:
         "- Return ONLY valid JSON that conforms EXACTLY to the provided TransformPlanModel schema.\n"
         "- No prose, no markdown, no explanations, no keys not in the schema.\n"
         "- Use ONLY the column names provided in columns_json.\n"
+        "- Only create plans for covariates and effect modifiers.\n"
         "- Do NOT drop rows (row-dropping is disallowed).\n"
         "- Do NOT invent categories, mappings, or index sets that are not supported by the provided catalogs.\n"
         "- Do NOT apply any 'cleaning' beyond whitespace stripping (assume the executor only strips whitespace).\n"
         "- Every column in the plan must be explicitly specified; do not rely on defaults.\n"
         "\n"
         "Causal-safety guidance (apply using ONLY the dataset summary):\n"
-        "- Prefer transformations that preserve information and avoid altering the study population.\n"
-        "- Avoid high-cardinality one-hot explosions; use max_categories defensively based on the summary.\n"
-        "- Preserve missingness information when it is non-trivial (e.g., dummy_na or add_missing_indicator),\n"
+        "- Prefer transformations that preserve information and avoid altering the study population.\n" 
+        "- Preserve missingness information when it is non-trivial\n"
         "  unless the summary strongly suggests missingness is negligible.\n"
         "- If a column is already numeric and well-behaved, prefer minimal transforms.\n"
         "\n"
