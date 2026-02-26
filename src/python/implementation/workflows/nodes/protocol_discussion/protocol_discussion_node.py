@@ -6,17 +6,26 @@ import logging
 from typing import Any, ClassVar, Optional, Sequence, cast
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict, Field
+from typing_extensions import Literal
+
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import ProtocolDiscussionDeps
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import get_protocol_discussion_confirmation_prompt, get_protocol_discussion_get_node_info, get_protocol_discussion_readiness_prompt, get_protocol_discussion_system_prompt, get_questions
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
+    get_protocol_discussion_confirmation_prompt,
+    get_protocol_discussion_get_node_info,
+    get_protocol_discussion_system_prompt,
+    get_questions,
+)
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
 from python.implementation.workflows.tools.data.data_profiling_tool import DatasetProfilingStateTool
 from python.implementation.workflows.utils.utils import safe_err
 
 log = logging.getLogger(__name__)
+
 
 def _llm_call_text(
     *,
@@ -24,7 +33,7 @@ def _llm_call_text(
     model_name: str,
     temperature: float,
     system_prompt: str,
-    user_payload: dict[str, State],
+    user_payload: dict[str, Any],
     empty_err: str,
     history: Optional[Sequence[ChatMessage]] = None,
 ) -> str:
@@ -36,6 +45,13 @@ def _llm_call_text(
         history=history,
     )
     return resp.content.strip() if resp.content else str(empty_err)
+
+
+class _MessageAndGateModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    readiness: Literal["READY", "PENDING", "ABORT"] = Field(...)
+    user_message: str = Field(..., min_length=1)
+
 
 class ProtocolDiscussionNode(Node):
     NAME: ClassVar[str] = "PROTOCOL_DISCUSSION"
@@ -51,7 +67,6 @@ class ProtocolDiscussionNode(Node):
     @classmethod
     def get_info(cls) -> str:
         return get_protocol_discussion_get_node_info()
-    
 
     def run(
         self,
@@ -77,13 +92,15 @@ class ProtocolDiscussionNode(Node):
         payload: dict[str, Any] = {
             "prev_questions_answers_discussion_state": get_questions(),
             "dataset_columns_summary": summary_string,
+            # include the current discussion doc so LLM#1 can update it
+            "protocol_discussion": state.payload.discussion,
         }
 
         # -------------------------
-        # LLM #1: Update discussion
+        # LLM #1: Update discussion (keep separate)
         # -------------------------
         try:
-           updated_discussion = _llm_call_text(
+            updated_discussion = _llm_call_text(
                 llm=self._llm,
                 model_name=self._model_name,
                 temperature=0.7,
@@ -93,78 +110,66 @@ class ProtocolDiscussionNode(Node):
                 history=latest_12_messages,
             )
         except Exception as e:
-           new_payload = state.payload.model_copy(
+            new_payload = state.payload.model_copy(
                 update={
-                "error_message": f"Protocol discussion update failed: {safe_err(e)}",
-                "node_message": "Protocol discussion update failed. Retrying...",
-                "action": "NONE",
-                "node_status": "PENDING",
-              }
-             )
-           return ProtocolDiscussionState(new_payload)
+                    "error_message": f"Protocol discussion update failed: {safe_err(e)}",
+                    "node_message": "Protocol discussion update failed. Retrying...",
+                    "action": "NONE",
+                    "node_status": "PENDING",
+                }
+            )
+            return ProtocolDiscussionState(new_payload)
 
         state.payload.discussion = updated_discussion
 
         # -------------------------
-        # LLM #2: User-facing message
+        # LLM #2+3
         # -------------------------
         try:
-            node_msg = _llm_call_text(
-                llm=self._llm,
-                model_name=self._model_name,
-                temperature=0.7,
-                system_prompt=get_protocol_discussion_confirmation_prompt(),
-                user_payload=payload,
+            system_prompt = (
+                get_protocol_discussion_confirmation_prompt()
+            )
+
+            user_payload = { # pyright: ignore[reportUnknownVariableType]
+                # pass updated discussion doc + same context
+                "protocol_discussion": updated_discussion,
+                "prev_questions_answers_discussion_state": get_questions(),
+                "dataset_columns_summary": summary_string,
+            }
+
+            out = self._llm.generate_json(
+                schema=_MessageAndGateModel,
+                system_prompt=system_prompt,
+                user_prompt=json.dumps(user_payload, ensure_ascii=False),
+                config=LLMConfig(model=self._model_name, temperature=0.2),
                 history=latest_12_messages,
-                empty_err="LLM#2 returned empty message",
+                max_attempts=2,
             )
         except Exception as e:
-            log.exception("PROTOCOL_DISCUSSION: LLM#2 failed, using fallback")
-            state.payload.node_message = "faild to generate user-facing message, but discussion updated. Retying..."
-            state.payload.error_message = f"Protocol discussion user facing message failed: {safe_err(e)}"
+            log.exception("PROTOCOL_DISCUSSION: consolidated message+gate failed")
+            state.payload.node_message = "Failed to generate user message/readiness. Retrying..."
+            state.payload.error_message = f"Protocol discussion message+gate failed: {safe_err(e)}"
             state.payload.action = "NONE"
             state.payload.node_status = "PENDING"
             return state
 
+        token = out.readiness
 
-        # -------------------------
-        # LLM #3: Readiness token
-        # -------------------------
-        try:
-            token = _llm_call_text(
-                llm=self._llm,
-                model_name=self._model_name,
-                temperature=0.0,
-                system_prompt=get_protocol_discussion_readiness_prompt(),
-                user_payload=payload,
-                history=latest_12_messages,
-                empty_err="LLM#3 returned empty token",
-            )
-            token = (token or "").strip().splitlines()[0].strip().split()[0].strip().upper()
-        except Exception as e:
-            state.payload.node_message = " (failed to confirm readiness, but discussion updated. Retrying...)"
-            state.payload.error_message = f"Protocol discussion readiness check failed: {safe_err(e)}"
-            state.payload.action = "NONE"
-            state.payload.node_status = "PENDING"
-            return state
-         
-        logging.warning(f"PROTOCOL_DISCUSSION: Readiness token from LLM: '{token}'") 
-         
         if token == "READY":
-            state.payload.node_message = "Protocol Confirmed, ready to proceed to next step"
+            state.payload.node_message = out.user_message
             state.payload.error_message = None
             state.payload.action = "NONE"
             state.payload.node_status = "DONE"
             return state
-            
+
         if token == "ABORT":
-            state.payload.node_message = f"Protocol discussion aborted: {token}"
-            state.payload.error_message = token
+            state.payload.node_message = out.user_message
+            state.payload.error_message = out.user_message
             state.payload.action = "NONE"
             state.payload.node_status = "ABORTED"
             return state
-        
-        state.payload.node_message = node_msg
+
+        state.payload.node_message = out.user_message
         state.payload.error_message = None
         state.payload.action = "NEEDS_INPUT"
         state.payload.node_status = "PENDING"

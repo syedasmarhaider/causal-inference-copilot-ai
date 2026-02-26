@@ -148,7 +148,18 @@ def _decision_on_aborted_state(
     if chosen not in allowed_prev:
         raise ValueError(f"LLM selected state '{chosen}' which is not a previous state of '{current_state.name}' for recovery. Allowed previous states are: {sorted(allowed_prev)}.\n\nLLM message:\n{decision.router_message_for_node or ''}"
         )
+    
+    #TODO: temp sol delete later
+    next_states: list[str] = []
+    cursor = chosen
+    while True:
+        nxt = get_next_state_names_map.get(cursor)
+        if nxt is None:
+            break
+        next_states.append(nxt)
+        cursor = nxt
         
+    decision.delete_next_states_names = next_states if next_states else None  
     return decision
         
 

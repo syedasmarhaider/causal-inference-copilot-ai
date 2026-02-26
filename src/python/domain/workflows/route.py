@@ -13,6 +13,8 @@ class NextDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     state_name: str
     router_message_for_node: Optional[str] = None
+    # TODO: temp sol change later when we do snapshot mode.
+    delete_next_states_names: Optional[Sequence[str]] = None
 
 
 class Router(ABC):

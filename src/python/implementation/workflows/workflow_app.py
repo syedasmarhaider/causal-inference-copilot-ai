@@ -94,7 +94,7 @@ class WorkflowApp:
                 current_state=current_state,
                 messages_history=history,
            )
-        
+    
         last_router_message = decision.router_message_for_node
         
         if last_router_message:
@@ -105,6 +105,16 @@ class WorkflowApp:
                 message=ChatMessage(role="system", content=last_router_message),
             )
         
+        #TODO: Temp sol delete later
+        # this will not work sometimes on errors and exceptions
+        if decision.delete_next_states_names:
+            for state_name in decision.delete_next_states_names:
+                self._repo.delete_state(
+                    user_id=req.user_id,
+                    conversation_id=req.conversation_id,
+                    state_name=state_name,
+                )
+                    
 
         state_name_to_run = decision.state_name 
         state_to_run = self._repo.load_state(
