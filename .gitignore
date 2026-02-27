@@ -208,3 +208,7 @@ __marimo__/
 
 /data*
 *.local_data_repo
+
+
+# local typings
+typings/**/*.pyi
