@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Set, Tuple
+from typing import List, Mapping, Set, Tuple
 
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
@@ -15,7 +15,7 @@ def validate_dataframes_match_protocols(
     protocol_before: ProtocolSpec,
     df_after: pd.DataFrame,
     protocol_after: ProtocolSpec,
-) -> List[str]:
+) -> List[ValidationIssueModel]:
     """
     Validation logic (strict):
 
@@ -33,9 +33,9 @@ def validate_dataframes_match_protocols(
       - treatment column name must remain unchanged (protocol_before == protocol_after)
       - outcome column name must remain unchanged (protocol_before == protocol_after)
 
-    Returns: list[str] issues (empty => valid).
+    Returns: list[ValidationIssueModel] issues (empty => valid).
     """
-    issues: List[str] = []
+    issues: List[ValidationIssueModel] = []
 
     # -----------------------------
     # helpers
@@ -58,23 +58,51 @@ def validate_dataframes_match_protocols(
 
         dups = _duplicates(cols)
         if dups:
-            issues.append(f"Protocol has duplicate column names across roles: {dups}")
+            issues.append(
+                ValidationIssueModel(
+                    severity="FAIL",
+                    message="Protocol has duplicate column names across roles.",
+                    evidence={"duplicate_columns": dups},
+                    fix_hint="Ensure each column name is unique across treatment, outcome, covariates, and effect modifiers.",
+                )
+            )
 
         return set(cols)
 
     def _check_no_duplicate_dataframe_columns(df: pd.DataFrame, label: str) -> None:
         if df.columns.has_duplicates:
             dup_cols = sorted(set(df.columns[df.columns.duplicated()].tolist()))
-            issues.append(f"{label} has duplicate column labels (pandas allows this): {dup_cols}")
+            issues.append(
+                ValidationIssueModel(
+                    severity="FAIL",
+                    message=f"{label} has duplicate column labels (pandas allows this).",
+                    evidence={"duplicate_columns": dup_cols},
+                    fix_hint="Ensure each column name is unique in the dataframe.",
+                )
+            )
 
     def _check_exact_column_set(df: pd.DataFrame, required: Set[str], label: str) -> None:
         have = set(df.columns.tolist())
         missing = sorted(required - have)
         extra = sorted(have - required)
         if missing:
-            issues.append(f"{label} is missing required columns: {missing}")
+            issues.append(
+                ValidationIssueModel(
+                    severity="FAIL",
+                    message=f"{label} is missing required columns.",
+                    evidence={"missing_columns": missing},
+                    fix_hint="Ensure all required columns are present in the dataframe.",
+                )
+            )
         if extra:
-            issues.append(f"{label} has extra columns not allowed by protocol: {extra}")
+            issues.append(
+                ValidationIssueModel(
+                    severity="FAIL",
+                    message=f"{label} has extra columns not allowed by protocol.",
+                    evidence={"extra_columns": extra},
+                    fix_hint="Remove any columns not specified in the protocol.",
+                )
+            )
 
     # -----------------------------
     # dataframe structural sanity
@@ -90,11 +118,21 @@ def validate_dataframes_match_protocols(
 
     if treatment_before != treatment_after:
         issues.append(
-            f"Treatment column changed between protocols: before='{treatment_before}' after='{treatment_after}'"
+            ValidationIssueModel(
+                severity="FAIL",
+                message="Treatment column changed between protocols.",
+                evidence={"before": treatment_before, "after": treatment_after},
+                fix_hint="Ensure the treatment column remains consistent between protocols.",
+            )
         )
     if outcome_before != outcome_after:
         issues.append(
-            f"Outcome column changed between protocols: before='{outcome_before}' after='{outcome_after}'"
+            ValidationIssueModel(
+                severity="FAIL",
+                message="Outcome column changed between protocols.",
+                evidence={"before": outcome_before, "after": outcome_after},
+                fix_hint="Ensure the outcome column remains consistent between protocols.",
+            )
         )
 
     # -----------------------------
@@ -152,3 +190,30 @@ def validate_covariates_and_effect_modifiers_numeric_only(
         )
 
     return issues
+
+
+def validate_transformation_cols_to_dataset(
+    *,
+    transformation_mapping: Mapping[str, List[str]],
+    df_after: pd.DataFrame,
+) -> List[ValidationIssueModel]:
+    issues: List[ValidationIssueModel] = []
+
+    all_transformation_cols: Set[str] = set()
+    for _, transformed_cols in transformation_mapping.items():
+        all_transformation_cols.update(transformed_cols)
+
+    missing: List[str] = sorted([c for c in all_transformation_cols if c not in df_after.columns])
+    if missing:
+        issues.append(
+            ValidationIssueModel(
+                severity="FAIL",
+                message="Transformation mapping references columns not present in transformed dataset.",
+                evidence={
+                    "missing_columns": missing,
+                    "transformation_mapping": transformation_mapping,
+                },
+                fix_hint="Ensure the transform plan produces all columns referenced in the transformation mapping.",
+            )
+        )   
+    return issues   

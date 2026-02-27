@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
 import pandas as pd
@@ -88,14 +88,14 @@ def _strip_only(x: Any) -> Any:
 def apply_encoding_plan(
     df: pd.DataFrame,
     plan: ColumnPlanModel,
-) -> tuple[pd.DataFrame, Optional[ValidationIssueModel]]:
+) -> tuple[pd.DataFrame, Mapping[str, List[str]], Optional[ValidationIssueModel]]:
     """Applies the specified encoding plan to the given column of the DataFrame, returning a new DataFrame with the transformation applied.
     Returns a tuple of (transformed_df, issue), where issue is a ValidationIssueModel if a data issue was encountered (e.g., too many categories for one-hot), or None if no issues."""
     encoding_plan = plan.encoding
     column = plan.column
     if isinstance(encoding_plan, OneHotSpec):
-        issue = apply_one_hot_column(df, column=column, params=encoding_plan.params)
-        return df, issue
+        return apply_one_hot_column(df, column=column, params=encoding_plan.params)
+    
     elif isinstance(encoding_plan, BinaryMapSpec):
         issue = apply_binary_map_column(df, column=column, params=encoding_plan.params)
         return df, issue
@@ -138,7 +138,7 @@ def apply_one_hot_column(
     column: str,
     params: OneHotParams,
     prefix_sep: str = "__",
-) -> ValidationIssueModel | None:
+) -> tuple[pd.DataFrame, Mapping[str, List[str]], ValidationIssueModel | None]:
     """
     Applies one-hot encoding IN-PLACE to a single column, per OneHotParams.
 
@@ -199,11 +199,15 @@ def apply_one_hot_column(
     elif isinstance(miss, OneHotImputeMode):
         non_na = s.dropna()
         if non_na.empty:
-            return _issue(
-                f"one_hot: impute_mode cannot run because {column!r} has no non-missing values.",
-                severity="FAIL",
-                evidence={"column": column, "n_rows": int(len(s0)), "n_missing": n_missing},
-                fix_hint="Use dummy_na or impute_token.",
+            return (
+                df_to_change,
+                {},
+                _issue(
+                    f"one_hot: impute_mode cannot run because {column!r} has no non-missing values.",
+                    severity="FAIL",
+                    evidence={"column": column, "n_rows": int(len(s0)), "n_missing": n_missing},
+                    fix_hint="Use dummy_na or impute_token.",
+                ),
             )
         vc = non_na.value_counts(dropna=True)
         max_count = int(vc.max())
@@ -218,11 +222,15 @@ def apply_one_hot_column(
     if params.max_categories is not None:
         n_unique = int(s.dropna().nunique())
         if n_unique > int(params.max_categories):
-            return _issue(
-                f"one_hot: too many categories in {column!r} (n_unique={n_unique}, max={int(params.max_categories)}).",
-                severity="FAIL",
-                evidence={"column": column, "n_unique_non_na": n_unique, "max_categories": int(params.max_categories)},
-                fix_hint="Increase max_categories or choose ordinal_map/binary_map.",
+            return (
+                df_to_change,
+                {},
+                _issue(
+                    f"one_hot: too many categories in {column!r} (n_unique={n_unique}, max={int(params.max_categories)}).",
+                    severity="FAIL",
+                    evidence={"column": column, "n_unique_non_na": n_unique, "max_categories": int(params.max_categories)},
+                    fix_hint="Increase max_categories or choose ordinal_map/binary_map.",
+                ),
             )
 
     # Encode (still no mutation)
@@ -237,14 +245,26 @@ def apply_one_hot_column(
     )
 
     if dummies.shape[1] == 0:
-        return _issue(
-            f"one_hot: no dummy columns produced for {column!r}.",
-            severity="FAIL",
-            evidence={"column": column, "n_unique_non_na": int(s.dropna().nunique()), "n_missing": n_missing},
-            fix_hint="Column may be all-missing or constant; adjust missingness/encoding.",
+        return (
+            df_to_change,
+            {},
+            _issue(
+                f"one_hot: no dummy columns produced for {column!r}.",
+                severity="FAIL",
+                evidence={"column": column, "n_unique_non_na": int(s.dropna().nunique()), "n_missing": n_missing},
+                fix_hint="Column may be all-missing or constant; adjust missingness/encoding.",
+            ),
         )
 
     dummies = dummies.astype("int8")
+
+    # Build transformation mapping: original category -> dummy columns
+    transformation_mapping: Dict[str, List[str]] = {}
+    for orig_cat in s.dropna().unique():
+        transformation_mapping[str(orig_cat)] = [
+            col for col in dummies.columns 
+            if col.endswith(f"{prefix_sep}{orig_cat}")
+        ]
 
     # drop_first warning
     if params.drop_first and dummies.shape[1] <= 1:
@@ -271,6 +291,10 @@ def apply_one_hot_column(
             to_drop = non_na[0] if non_na else cols_sorted[0]
 
         dummies = dummies.drop(columns=[to_drop])
+        
+        # Update transformation_mapping to remove dropped column
+        for key in transformation_mapping:
+            transformation_mapping[key] = [col for col in transformation_mapping[key] if col != to_drop]
 
     # -------------------------
     # COMMIT (mutate only now)
@@ -281,7 +305,7 @@ def apply_one_hot_column(
     for i, new_col in enumerate(dummies.columns):
         df_to_change.insert(loc + i, new_col, dummies[new_col]) # pyright: ignore[reportUnknownMemberType]
 
-    return return_issue
+    return df_to_change, transformation_mapping, return_issue
 
 
 def _ensure_column_exists_unique(df: pd.DataFrame, *, column: str, encoder: str) -> int:

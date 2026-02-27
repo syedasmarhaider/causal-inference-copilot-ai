@@ -7,7 +7,6 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional, Sequence, Tuple
 from uuid import UUID, uuid4
 
 import pandas as pd
-from pandas.api.types import is_numeric_dtype
 from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.repo.data_repo import DataRepo
@@ -35,6 +34,7 @@ from python.implementation.workflows.nodes.transform_protocol.transform_protocol
     TransformProtocolPayloadModel,
     TransformProtocolState,
 )
+from python.implementation.workflows.nodes.transform_protocol.transform_protocol_validation import validate_covariates_and_effect_modifiers_numeric_only, validate_dataframes_match_protocols, validate_transformation_cols_to_dataset
 from python.implementation.workflows.tools.data.data_profiling_tool import (
     DatasetProfilingStateTool,
     DatasetSummaryModel,
@@ -103,46 +103,6 @@ def get_message_for_hard_validation_issue(llm: LLMService, issues: List[Validati
         config=LLMConfig(temperature=1.0),
         history=None,
     ).content
-
-
-# =============================================================================
-# Minimal post-transform validation (covariates + effect modifiers only)
-# =============================================================================
-def validate_covariates_and_effect_modifiers_numeric_only(
-    *,
-    df_after: pd.DataFrame,
-    protocol_after: ProtocolSpec,
-) -> List[ValidationIssueModel]:
-    issues: List[ValidationIssueModel] = []
-
-    cols = list(protocol_after.covariates) + list(protocol_after.effect_modifiers)
-
-    missing = sorted([c for c in cols if c not in df_after.columns])
-    if missing:
-        issues.append(
-            _fail(
-                "Missing covariate/effect-modifier columns in transformed dataframe.",
-                evidence={
-                    "missing_columns": missing,
-                    "expected_covariates": list(protocol_after.covariates),
-                    "expected_effect_modifiers": list(protocol_after.effect_modifiers),
-                },
-                fix_hint="Update the transform plan so it produces these columns.",
-            )
-        )
-        return issues
-
-    non_numeric = [{"column": c, "dtype": str(df_after[c].dtype)} for c in cols if not is_numeric_dtype(df_after[c])]
-    if non_numeric:
-        issues.append(
-            _fail(
-                "Some covariates/effect modifiers are not numeric after transformation.",
-                evidence={"non_numeric_columns": non_numeric},
-                fix_hint="Encode these covariates/effect modifiers to numeric (e.g., one-hot / ordinal / to_numeric).",
-            )
-        )
-
-    return issues
 
 
 # =============================================================================
@@ -217,17 +177,19 @@ def apply_plan_with_lineage_or_raise(
     *,
     df: pd.DataFrame,
     plan: TransformPlanModel,
-) -> Tuple[pd.DataFrame, List[ValidationIssueModel], Dict[str, List[str]]]:
+) -> Tuple[pd.DataFrame, List[ValidationIssueModel], Dict[str, List[str]], Mapping[str, List[str]]]:
     cur: Optional[pd.DataFrame] = df
     all_issues: List[ValidationIssueModel] = []
     raw_to_outputs: Dict[str, List[str]] = {}
+    transformation_mapping: Dict[str, List[str]] = {}
 
     for cp in plan.columns:
         assert cur is not None
         before_cols = set(cur.columns.tolist())
 
-        cur, step_issues = apply_encoding_plan(df=cur, plan=cp)
-
+        cur, transformation_mapping_step, step_issues = apply_encoding_plan(df=cur, plan=cp)
+        transformation_mapping.update(transformation_mapping_step)
+        
         # step_issues is List[ValidationIssueModel]
         if step_issues:
             all_issues.extend([step_issues])
@@ -243,7 +205,7 @@ def apply_plan_with_lineage_or_raise(
             raw_to_outputs[cp.column] = []
 
     assert cur is not None
-    return cur, all_issues, raw_to_outputs
+    return cur, all_issues, raw_to_outputs, transformation_mapping
 
 
 def build_protocol_after_from_lineage(
@@ -843,7 +805,7 @@ class TransformProtocolNode(Node):
                 )
 
             try:
-                df_transformed, apply_issues, raw_to_outputs = apply_plan_with_lineage_or_raise(df=df_clean, plan=plan)
+                df_transformed, apply_issues, raw_to_outputs, transformation_mapping = apply_plan_with_lineage_or_raise(df=df_clean, plan=plan)
             except Exception as e:  # noqa: BLE001
                 fail_issue = _fail(
                     "Failed to apply encoding plan.",
@@ -925,6 +887,7 @@ class TransformProtocolNode(Node):
                     repair_context_json=None,
                     transform_protocol_plan=plan,
                     protoctol_spec=protocol,
+                    transformation_mapping=transformation_mapping,
                     transformed_dataset_id=new_transformed_dataset_id,
                     transformed_spec=protocol_after,  # ProtocolSpec (updated covariates/effect_modifiers)
                     cleaned_dataset_id=clean_dataset_id,
@@ -942,8 +905,10 @@ class TransformProtocolNode(Node):
             plan = getattr(prev_payload, "transform_protocol_plan", None) if prev_payload else None
             transformed_dataset_id = getattr(prev_payload, "transformed_dataset_id", None) if prev_payload else None
             protocol_after = getattr(prev_payload, "transformed_spec", None) if prev_payload else None
+            transformation_mapping = getattr(prev_payload, "transformation_mapping", None) if prev_payload else None
+            
 
-            if plan is None or transformed_dataset_id is None or protocol_after is None:
+            if plan is None or transformed_dataset_id is None or protocol_after is None or transformation_mapping is None:
                 issues = [_fail("Missing inputs in VALIDATE stage; restarting planning.")]
                 repair_json = _make_repair_context_json(attempt=attempt, stage="VALIDATE_MISSING_INPUTS", issues=issues)
                 msg = _llm_stage_message(llm=self.llm, stage="VALIDATE", ok=False, payload={"attempt": attempt, "auto_action": "replan"})
@@ -963,11 +928,20 @@ class TransformProtocolNode(Node):
                 conversation_id=conversation_id,
                 dataset_id=transformed_dataset_id,
             )
+            
+            suite_issues = validate_dataframes_match_protocols(df_before=df_clean, protocol_before=protocol, df_after=df_transformed, protocol_after=protocol_after)
 
-            suite_issues = validate_covariates_and_effect_modifiers_numeric_only(
+            suite_issues.extend(validate_covariates_and_effect_modifiers_numeric_only(
                 df_after=df_transformed,
                 protocol_after=protocol_after,
-            )
+            ))
+            
+            suite_issues.extend(validate_covariates_and_effect_modifiers_numeric_only(df_after=df_transformed, protocol_after=protocol_after))
+            suite_issues.extend(validate_transformation_cols_to_dataset(
+                df_after=df_transformed,
+                transformation_mapping=transformation_mapping,
+            ))
+            
 
             if any(_is_fail(x) for x in suite_issues):
                 # deterministic -> auto replan (no negotiation)
@@ -1004,6 +978,7 @@ class TransformProtocolNode(Node):
                     transform_protocol_plan=plan,
                     transformed_dataset_id=transformed_dataset_id,
                     transformed_spec=protocol_after,
+                    transformation_mapping=transformation_mapping,
                     protoctol_spec=protocol,
                     cleaned_dataset_id=clean_dataset_id,
                     cleaned_dataset_summary=clean_dataset_summary,
