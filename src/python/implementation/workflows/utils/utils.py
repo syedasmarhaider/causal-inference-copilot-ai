@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, TypeAlias
+from typing import Any, Dict, Optional, TypeAlias, Union
 from uuid import UUID
 
 DEFAULT_MODEL_GEMNI: str = "gemini-2.5-flash"
@@ -33,3 +33,5 @@ def safe_err(e: Exception, limit: int = 500) -> str:
 
 BOOL_TRUE = {"true", "1", "yes"}
 BOOL_FALSE = {"false", "0", "no"}
+# ---------- core ----------
+ScalarValue = Union[str, int, float, bool]  # or Strict* variants if you want strictness

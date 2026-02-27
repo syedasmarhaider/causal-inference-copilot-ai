@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Mapping, Optional, Set, Tuple, Type
 import numpy as np
 import pandas as pd
 
-from python.implementation.workflows.tools.causal.causal_command import ATEInputsModel
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 
 
@@ -234,31 +233,65 @@ def serialize_inference_obj(obj: Any) -> Dict[str, Any]:
             pass
     return {"type": "repr", "data": repr(obj)}
 
-                
-def resolve_contrast(inputs: ATEInputsModel, *, default_binary: bool = True) -> Tuple[Any, Any, Dict[str, Any]]:
+def categorical_t0_t1_pairs(spec: CausalSpec) -> Tuple[Any, List[Any]]:
     """
-    Minimal resolution:
-      - mode=default => (control->treated) assuming binary encoding control=0 treated=1
-      - mode=contrast => resolve t0/t1
-    """
-    if inputs.mode == "default":
-        if not default_binary:
-            raise ModelSpecError("ATE default mode is only valid for binary treatments.")
-        t0, t1 = 0, 1
-        return t0, t1, {"t0": {"kind": "symbolic", "value": "control"}, "t1": {"kind": "symbolic", "value": "treated"}}
+    For categorical treatments:
+      - t0 = baseline if provided else levels[0]
+      - t1s = all other levels in order
 
-    if inputs.mode == "contrast":
-        if inputs.contrast is None:
-            raise ModelSpecError("inputs.mode='contrast' requires inputs.contrast.")
-        def _arm(a: Any) -> int:
-            if getattr(a, "kind") == "symbolic":
-                return 0 if a.value == "control" else 1
-            return a.value
-        t0 = _arm(inputs.contrast.t0)
-        t1 = _arm(inputs.contrast.t1)
-        return t0, t1, {
-            "t0": inputs.contrast.t0.model_dump(mode="json"),
-            "t1": inputs.contrast.t1.model_dump(mode="json"),
-        }
-        
-    raise ModelSpecError(f"Unsupported ATE mode: {inputs.mode!r}")
+    Returns:
+      (t0, t1_list)
+
+    Raises:
+      ValueError if spec.T is not categorical or levels invalid.
+    """
+    t = spec.T
+    if getattr(t, "kind", None) != "categorical":
+        raise ValueError("categorical_t0_t1_pairs requires spec.T.kind == 'categorical'.")
+
+    levels: List[Any] = list(getattr(t, "levels", None) or [])
+    if len(levels) < 2:
+        raise ValueError("Categorical treatment requires at least 2 levels.")
+
+    t0 = getattr(t, "baseline", None) if getattr(t, "baseline", None) is not None else levels[0]
+    if t0 not in levels:
+        raise ValueError(f"baseline {t0!r} must be one of levels={levels!r}.")
+
+    t1s = [lv for lv in levels if lv != t0]
+    if not t1s:
+        raise ValueError("No target levels found after removing baseline from levels.")
+
+    return t0, t1s
+
+
+def expand_categorical_contrasts(spec: CausalSpec) -> List[Dict[str, Any]]:
+    """
+    Returns a list of contrasts suitable for computing ATE per target:
+      [{"t0": t0, "t1": t1}, ...]
+    """
+    t0, t1s = categorical_t0_t1_pairs(spec)
+    return [{"t0": t0, "t1": t1} for t1 in t1s]
+
+def materialize_x_query(
+    *,
+    x_rows: List[Dict[str, Any]],
+    x_cols: List[str],
+) -> np.ndarray:
+    if not x_cols:
+        raise ModelSpecError("CATE requires effect modifiers X; x_cols is empty.")
+
+    X_list = []
+    x_set = set(x_cols)
+
+    for i, row in enumerate(x_rows):
+        row_keys = set(row.keys())
+        missing = [c for c in x_cols if c not in row]
+        extra = [k for k in row_keys if k not in x_set]
+        if missing or extra:
+            raise ModelSpecError(
+                f"x_rows[{i}] feature mismatch. missing={missing}, extra={extra}. "
+                f"Expected exactly: {x_cols}"
+            )
+        X_list.append([row[c] for c in x_cols]) # pyright: ignore[reportUnknownMemberType]
+
+    return np.asarray(X_list, dtype=float)

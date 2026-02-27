@@ -3,11 +3,8 @@ from __future__ import annotations
 from typing import Annotated, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from python.implementation.workflows.utils.utils import ScalarValue
 from python.implementation.workflows.utils.validation import NonEmptyStr
-
-# ---------- core ----------
-ScalarValue = Union[str, int, float, bool]  # or Strict* variants if you want strictness
-
 
 class BinaryTreatmentSpecModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)

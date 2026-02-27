@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping
 from uuid import UUID
 
 from econml.dml.dml import LinearDML
@@ -13,7 +13,11 @@ from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
 from python.implementation.workflows.tools.causal.causal_command import (
     ATECommand,
+    ATEModelResult,
     ATESuccess,
+    CATECommand,
+    CATEModelResult,
+    CATESuccess,
     CommandFailure,
     ErrorInfo,
     FitCommand,
@@ -22,7 +26,7 @@ from python.implementation.workflows.tools.causal.causal_command import (
 from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.econml.dml.dml_info import  linear_dml_causal_model_info
-from python.implementation.workflows.tools.causal.econml.utils import ModelSpecError, build_init_fit_options_param_maps, get_input_params_from_spec, has_missing, now_utc, required_init_keys, resolve_contrast, serialize_inference_obj, split_flat_options, validate_semantic_consistency
+from python.implementation.workflows.tools.causal.econml.utils import ModelSpecError, build_init_fit_options_param_maps, categorical_t0_t1_pairs, get_input_params_from_spec, has_missing, materialize_x_query, now_utc, required_init_keys, serialize_inference_obj, split_flat_options, validate_semantic_consistency
 
 @dataclass(frozen=True, slots=True)
 class LinearDMLCausalModel(CausalModel):
@@ -218,47 +222,87 @@ class LinearDMLCausalModel(CausalModel):
         command: ATECommand,
         started_at: datetime,
     ) -> CausalResult:
-        warnings: List[str] = []
+        try:
+            warnings: List[str] = []
             # 1) load fitted model + metadata
-            # You need a corresponding ModelsRepo API; adapt to your interface.
-        spec: CausalSpec = command.transformed_protocol_specs    
-        model_record: ModelRecord | None = self.models_repo.load_model(
+            spec: CausalSpec = command.transformed_protocol_specs
+            model_record: ModelRecord | None = self.models_repo.load_model(
                 user_id=user_id,
                 conversation_id=conversation_id,
                 model_id=command.fitted_model_id,
-        )
-        if model_record is None:
+            )
+            if model_record is None:
                 raise ModelSpecError(f"Fitted model with id {command.fitted_model_id} not found.")
-            
-        df = self.data_repo.get_csv_data(
+
+            df = self.data_repo.get_csv_data(
                 user_id,
                 conversation_id,
                 command.dataset_id,
                 limit=None,
-        )
-        est = model_record.model
-     
-        # 3) build X from stored column meta
-        _, _, X, _, _ = get_input_params_from_spec(df, spec)
-
-        # 4) resolve contrast
-        try:
-            # For now: default assumes binary encoding control=0, treated=1.
-            # later we will store the mapping in fit_meta and resolve from there.
-            t0, t1, contrast_norm = resolve_contrast(command.inputs, default_binary=True)
-        except ModelSpecError as e:
-            return CommandFailure(
-                run_id=command.run_id,
-                started_at=started_at,
-                finished_at=now_utc(),
-                error=ErrorInfo(code="OPTIONS_INVALID", message=str(e), details={}),
-                warnings=[],
-                meta={},
             )
 
-        # 5) compute ATE (+ optional interval/inference)
-        try:
-            ate = est.ate(X=X, T0=t0, T1=t1)
+            est: LinearDML = model_record.model
+            t0, t1s = categorical_t0_t1_pairs(spec)
+            effects: List[Dict[ATEModelResult, Any]] = []
+            X_for_ate = None  # no X for ATE; pass None to use all X as in fit
+            for t1_val in t1s:
+                if t1_val == t0:
+                    raise ModelSpecError(f"Invalid contrast: t1 value {t1_val} is the same as t0 baseline {t0}.")
+                item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1_val}}
+                # point estimate
+                item["ate"] = est.ate(X=X_for_ate, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownMemberType]
+                try:
+                    lo, hi = est.ate_interval(X=X_for_ate, T0=t0, T1=t1_val, alpha=command.input.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+                    if lo is not None and hi is not None:
+                        item["ate_interval"] = (list(lo), list(hi)) # pyright: ignore[reportUnknownArgumentType]
+                    else:
+                        item["ate_interval"] = None
+                        warnings.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")    
+                except Exception as e:
+                    warnings.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+                    item["ate_interval"] = None
+
+    
+                try:
+                    inference = est.ate_inference(X=X_for_ate, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+                    if inference is not None:
+                        item["ate_inference"] = serialize_inference_obj(inference)
+                    else:
+                        item["ate_inference"] = None
+                        warnings.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
+                except Exception as e:
+                        warnings.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+                        item["ate_inference"] = None
+
+                effects.append(item)
+
+            if not effects:
+                return CommandFailure(
+                    run_id=command.run_id,
+                    started_at=started_at,
+                    finished_at=now_utc(),
+                    error=ErrorInfo(code="OPTIONS_INVALID", message="No valid categorical contrasts found (baseline vs all).", details={}),
+                    warnings=[],
+                    meta={},
+                )
+
+            finished = now_utc()
+            return ATESuccess(
+                run_id=command.run_id,
+                started_at=started_at,
+                finished_at=finished,
+                warnings=warnings,
+                meta={
+                    "backend": "econml.dml.LinearDML",
+                    "n": int(df.shape[0]),
+                    "x_cols": spec.X if spec.X else None,
+                    "contrast_kind": "baseline_vs_all",
+                    "t0": t0,
+                },
+                fitted_model_id=command.fitted_model_id,
+                contrast={"t0": t0, "t1": "vs_all"},
+                ate=effects,
+            )
         except Exception as e:
             return CommandFailure(
                 run_id=command.run_id,
@@ -268,36 +312,168 @@ class LinearDMLCausalModel(CausalModel):
                 warnings=[],
                 meta={},
             )
+    
+    def _cate(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        command: CATECommand,
+        started_at: datetime,
+    ) -> CausalResult:
+        warnings: List[str] = []
+        try:
+            model_record: ModelRecord | None = self.models_repo.load_model(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                model_id=command.fitted_model_id,
+            )
+            if model_record is None:
+                return CommandFailure(
+                    run_id=command.run_id,
+                    started_at=started_at,
+                    finished_at=now_utc(),
+                    error=ErrorInfo(code="MODEL_NOT_FOUND", message="Fitted model not found.", details={"fitted_model_id": str(command.fitted_model_id)}),
+                    warnings=[],
+                    meta={},
+                )
 
-        ate_interval: Optional[Tuple[Any, Any]] = None
-        if command.inputs.return_interval:
-            try:
-                ate_interval = est.ate_interval(X=X, T0=t0, T1=t1, alpha=command.inputs.alpha)
-            except Exception:
-                warnings.append("INFERENCE_NOT_AVAILABLE")
+            est: LinearDML = model_record.model
+            spec: CausalSpec = command.transformed_protocol_specs
+            # HARD GATE: need effect modifiers
+            if not spec.X:
+                return CommandFailure(
+                    run_id=command.run_id,
+                    started_at=started_at,
+                    finished_at=now_utc(),
+                    error=ErrorInfo(
+                        code="UNSUPPORTED_QUERY",
+                        message="CATE requires effect modifiers (spec.X). None were provided",
+                        details={"x": list(spec.X)},
+                    ),
+                    warnings=[],
+                    meta={},
+                )
 
-        ate_inference: Optional[Dict[str, Any]] = None
-        if command.inputs.return_inference:
-            try:
-                inf = est.ate_inference(X=X, T0=t0, T1=t1)
-                ate_inference = serialize_inference_obj(inf)
-            except Exception:
-                warnings.append("INFERENCE_NOT_AVAILABLE")
+            x_cols = list(spec.X)
+            X_query = materialize_x_query(x_rows=command.inputs.x_rows, x_cols=x_cols)
 
-        finished = now_utc()
-        return ATESuccess(
-            run_id=command.run_id,
-            started_at=started_at,
-            finished_at=finished,
-            warnings=warnings,
-            meta={"backend": "econml.dml.LinearDML", "n": int(df.shape[0]), "x_cols": spec.X if spec.X else None},
-            fitted_model_id=command.fitted_model_id,
-            contrast=contrast_norm,
-            ate=ate,
-            ate_interval=ate_interval,
-            ate_inference=ate_inference,
-            artifacts={},
-        )
+            effects: List[Dict[CATEModelResult, Any]] = []
+
+            # build contrasts baseline vs all
+            if spec.T.kind == "binary":
+                t0 = spec.T.control_values[0]
+                t1 = spec.T.treated_values[0]
+
+                item: Dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
+                item["cate"] = est.effect(X_query, T0=t0, T1=t1) # pyright: ignore[reportUnknownMemberType]
+
+
+                try:
+                    lo, hi = est.effect_interval(X_query, T0=t0, T1=t1, alpha=command.inputs.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+                    if lo is not None and hi is not None:
+                        item["cate_interval"] = (list(lo), list(hi)) # pyright: ignore[reportUnknownArgumentType]
+                    else:
+                        item["cate_interval"] = None
+                        warnings.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
+                except Exception as e:
+                    warnings.append("INFERENCE_NOT_AVAILABLE" + repr(e))
+                    item["cate_interval"] = None
+
+                try:
+                    inference = est.effect_inference(X_query, T0=t0, T1=t1) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+                    item["cate_inference"] = serialize_inference_obj(inference)
+                except Exception as e:
+                    warnings.append("INFERENCE_NOT_AVAILABLE" + repr(e))
+                    item["cate_inference"] = None
+                    
+                effects.append(item)
+
+            elif spec.T.kind == "categorical":
+                t0, t1s = categorical_t0_t1_pairs(spec)  # baseline first (or spec.T.baseline)
+                for t1_val in t1s:
+                    if t1_val == t0:
+                        continue
+
+                    item: Dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1_val}}
+                    item["cate"] = est.effect(X_query, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownMemberType]
+
+ 
+                    try:
+                        lo, hi = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+                        if lo is not None and hi is not None:
+                           item["cate_interval"] = (list(lo), list(hi)) # pyright: ignore[reportUnknownArgumentType]
+                        else:
+                            item["cate_interval"] = None
+                            warnings.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")   
+                    except Exception as e:
+                            warnings.append("INFERENCE_NOT_AVAILABLE" + repr(e))
+                            item["cate_interval"] = None
+
+
+                    try:
+                        inference = est.effect_inference(X_query, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+                        if inference is not None:
+                            item["cate_inference"] = serialize_inference_obj(inference)
+                        else:
+                            item["cate_inference"] = None
+                            warnings.append("INFERENCE_NOT_AVAILABLE: effect_inference returned None")
+                    except Exception as e:
+                        warnings.append("INFERENCE_NOT_AVAILABLE" + repr(e))
+                        item["cate_inference"] = None
+
+                    effects.append(item)
+
+            else:
+                return CommandFailure(
+                    run_id=command.run_id,
+                    started_at=started_at,
+                    finished_at=now_utc(),
+                    error=ErrorInfo(code="UNSUPPORTED_QUERY", message=f"Unsupported treatment kind {spec.T.kind!r} for CATE.", details={}),
+                    warnings=[],
+                    meta={},
+                )
+
+            if not effects:
+                return CommandFailure(
+                    run_id=command.run_id,
+                    started_at=started_at,
+                    finished_at=now_utc(),
+                    error=ErrorInfo(code="OPTIONS_INVALID", message="No valid contrasts produced for CATE.", details={}),
+                    warnings=[],
+                    meta={},
+                )
+
+            finished = now_utc()
+            return CATESuccess(
+                run_id=command.run_id,
+                started_at=started_at,
+                finished_at=finished,
+                warnings=warnings,
+                meta={"backend": "econml.dml.LinearDML", "row_count": int(X_query.shape[0])},
+                fitted_model_id=command.fitted_model_id,
+                x_cols=x_cols,
+                effects=effects,
+            )
+
+        except ModelSpecError as e:
+            return CommandFailure(
+                run_id=command.run_id,
+                started_at=started_at,
+                finished_at=now_utc(),
+                error=ErrorInfo(code="OPTIONS_INVALID", message=str(e), details={}),
+                warnings=[],
+                meta={},
+            )
+        except Exception as e:
+            return CommandFailure(
+                run_id=command.run_id,
+                started_at=started_at,
+                finished_at=now_utc(),
+                error=ErrorInfo(code="ESTIMATOR_ERROR", message="CATE computation failed.", details={"exception": repr(e)}),
+                warnings=[],
+                meta={},
+            )
             
     def _get_default_init_options(self, specs: CausalSpec) -> Dict[str, Any]:
         """
