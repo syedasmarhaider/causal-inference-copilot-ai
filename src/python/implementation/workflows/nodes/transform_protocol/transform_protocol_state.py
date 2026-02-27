@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Sequence
+from typing import Any, ClassVar, Dict, List, Literal, Mapping, Optional, Sequence
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,6 +27,7 @@ class TransformProtocolPayloadModel(BaseModel):
     attempt: Optional[int] = None 
     repair_context_json : Optional[str] = None
     transform_protocol_plan: Optional[TransformPlanModel] = None
+    transformation_mapping : Optional[Mapping[str, List[str]]] = None
 
     protoctol_spec: Optional[ProtocolSpec] = None
     transformed_dataset_id: Optional[UUID] = None
@@ -59,6 +60,7 @@ class TransformProtocolState(State):
             and self.payload.cleaned_dataset_id
             and self.payload.cleaned_dataset_summary
             and self.payload.transform_protocol_plan
+            and self.payload.transformation_mapping
             and self.payload.transformed_spec is not None
         ):
             return "DONE"
