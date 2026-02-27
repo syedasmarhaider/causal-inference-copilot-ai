@@ -1,9 +1,17 @@
 
 from __future__ import annotations
 from datetime import datetime, timezone
-
 import inspect
-from typing import Any, Dict, Mapping, Optional, Set, Type
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple, Type
+import numpy as np
+import pandas as pd
+
+from python.implementation.workflows.tools.causal.causal_command import ATEInputsModel
+from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
+
+
+class ModelSpecError(ValueError):
+    pass
 
 
 # a hack
@@ -50,10 +58,9 @@ def _param_meta(p: inspect.Parameter) -> Dict[str, Any]:
     }
 
 
-def build_init_fit_param_maps(
+def build_init_fit_options_param_maps(
     cls: Type[Any],
     *,
-    fit_exclude_names: Optional[Set[str]] = None,
     fit_include_names: Optional[Set[str]] = None,
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """
@@ -68,8 +75,7 @@ def build_init_fit_param_maps(
       - fit excludes data args by default ("self","Y","T","X","W","Z")
       - You can whitelist fit params via fit_include_names if you want (e.g. {"cache_values","inference"}).
     """
-    if fit_exclude_names is None:
-        fit_exclude_names = {"self", "Y", "T", "X", "W", "Z"}
+    fit_exclude_names = {"self", "Y", "T", "X", "W", "Z"}
 
     # ---- __init__ map ----
     init_sig = inspect.signature(cls.__init__)
@@ -129,5 +135,130 @@ def split_flat_options(
             init_kwargs[k] = v
         else:
             fit_kwargs[k] = v
-
+            
     return init_kwargs, fit_kwargs
+
+
+def required_init_keys(cls: Type[Any], init_map: Mapping[str, Any]) -> Set[str]:
+        sig = inspect.signature(cls.__init__)
+        required = {p.name for p in sig.parameters.values() if p.default is p.empty and p.name in init_map}
+        return required  
+
+
+# =============================================================================
+# CausalSpec -> columns / arrays (strict to your Pydantic schema)
+# =============================================================================
+
+def validate_columns_exist(df: pd.DataFrame, cols: List[str]) -> None:
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ModelSpecError(f"Dataset missing required columns: {missing}")
+
+
+def has_missing(arr: Any) -> bool:
+    if arr is None:
+        return False
+    a = np.asarray(arr)
+    try:
+        return bool(np.isnan(a).any())
+    except Exception:
+        return bool(pd.isna(a).any())
+
+
+def get_input_params_from_spec(
+    df: pd.DataFrame,
+    spec: CausalSpec
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, Any]]:
+    y_col = spec.Y.column
+    t_col = spec.T.column
+    x_cols = list(spec.X or [])
+    w_cols = list(spec.W or [])
+
+    validate_columns_exist(df, [y_col, t_col] + x_cols + w_cols)
+
+    y: np.ndarray = df[[y_col]].to_numpy()
+    t: np.ndarray = df[[t_col]].to_numpy()
+    x: Optional[np.ndarray] = df[x_cols].to_numpy() if x_cols else None
+    w: Optional[np.ndarray] = df[w_cols].to_numpy() if w_cols else None
+
+    # squeeze singleton dims
+    if y.ndim == 2 and y.shape[1] == 1:
+        y = y[:, 0]
+    if t.ndim == 2 and t.shape[1] == 1:
+        t = t[:, 0]
+
+    meta: Dict[str, Any] = {"y": y_col, "t": t_col, "x": x_cols, "w": w_cols}
+    return y, t, x, w, meta
+
+
+
+def validate_semantic_consistency(spec: CausalSpec, init_kwargs: Mapping[str, Any]) -> None:
+    """
+    If the user provided options contradict the declared CausalSpec, fail fast.
+    Keep it minimal.
+    """
+    t_kind = getattr(spec.T, "kind", None)
+    y_kind = getattr(spec.Y, "kind", None)
+
+    if y_kind == "binary" and "discrete_outcome" in init_kwargs and not bool(init_kwargs["discrete_outcome"]):
+        raise ModelSpecError("Spec declares binary outcome but options.discrete_outcome is False.")
+
+    if t_kind in ("binary", "categorical") and "discrete_treatment" in init_kwargs and not bool(init_kwargs["discrete_treatment"]):
+        raise ModelSpecError("Spec declares discrete treatment but options.discrete_treatment is False.")
+
+    if t_kind == "categorical":
+        baseline = getattr(spec.T, "baseline", None)
+        if baseline is not None and "categories" in init_kwargs:
+            cats = init_kwargs["categories"]
+            if isinstance(cats, list) and cats:
+                if cats[0] != baseline:
+                    raise ModelSpecError(
+                        f"Spec baseline={baseline!r} must be the FIRST category (control). Got categories[0]={cats[0]!r}."
+                    )
+
+
+
+def serialize_inference_obj(obj: Any) -> Dict[str, Any]:
+    # Try common econml inference surfaces; fall back to repr
+    if hasattr(obj, "summary_frame"):
+        try:
+            sf = obj.summary_frame()
+            return {"type": "summary_frame", "data": sf.to_dict(orient="list")}
+        except Exception:
+            pass
+    if hasattr(obj, "summary"):
+        try:
+            s = obj.summary()
+            return {"type": "summary", "data": str(s)}
+        except Exception:
+            pass
+    return {"type": "repr", "data": repr(obj)}
+
+                
+def resolve_contrast(inputs: ATEInputsModel, *, default_binary: bool = True) -> Tuple[Any, Any, Dict[str, Any]]:
+    """
+    Minimal resolution:
+      - mode=default => (control->treated) assuming binary encoding control=0 treated=1
+      - mode=contrast => resolve t0/t1
+    """
+    if inputs.mode == "default":
+        if not default_binary:
+            raise ModelSpecError("ATE default mode is only valid for binary treatments.")
+        t0, t1 = 0, 1
+        return t0, t1, {"t0": {"kind": "symbolic", "value": "control"}, "t1": {"kind": "symbolic", "value": "treated"}}
+
+    if inputs.mode == "contrast":
+        if inputs.contrast is None:
+            raise ModelSpecError("inputs.mode='contrast' requires inputs.contrast.")
+        def _arm(a: Any) -> int:
+            if getattr(a, "kind") == "symbolic":
+                return 0 if a.value == "control" else 1
+            return a.value
+        t0 = _arm(inputs.contrast.t0)
+        t1 = _arm(inputs.contrast.t1)
+        return t0, t1, {
+            "t0": inputs.contrast.t0.model_dump(mode="json"),
+            "t1": inputs.contrast.t1.model_dump(mode="json"),
+        }
+        
+    raise ModelSpecError(f"Unsupported ATE mode: {inputs.mode!r}")
