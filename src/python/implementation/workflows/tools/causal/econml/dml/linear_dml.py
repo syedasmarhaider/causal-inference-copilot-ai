@@ -174,11 +174,7 @@ class LinearDMLCausalModel(CausalModel):
                     f"Provide them in options. (This adapter does not inject defaults.)"
                 )
 
-            # 7) If X/W missing, require allow_missing=True
-            allow_missing = bool(defaults.get("allow_missing", False))
-            if (miss["X"] or miss["W"]) and not allow_missing:
-                raise ModelSpecError(f"X/W contain missing values but allow_missing is not True in options. missing={miss}")
-
+            defaults["allow_missing"] = True      
             # 8) Fit
             est = LinearDML(**defaults)
             
