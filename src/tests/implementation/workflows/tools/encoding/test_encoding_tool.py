@@ -19,6 +19,7 @@ from python.implementation.workflows.tools.encoding.encoding_tool import (  # no
 )
 
 from python.implementation.workflows.tools.encoding.encoding_plan import TransformPlan
+import python.implementation.workflows.tools.encoding.encoding_tool as m
 
 
 def _mk_plan(*cols: dict) -> TransformPlan:
@@ -185,7 +186,7 @@ def test_compile_unsupported_preset_raises():
 
 def test_make_one_hot_encoder_backward_compat_monkeypatch(monkeypatch: pytest.MonkeyPatch):
     # Hit the except TypeError path (older sklearn API) by replacing OneHotEncoder with a stub.
-    import python.implementation.workflows.tools.data.encoding.encoding_tool as m
+
 
     class StubOHE:
         def __init__(self, **kwargs):
