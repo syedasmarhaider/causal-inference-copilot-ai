@@ -269,9 +269,19 @@ class LinearDMLCausalModel(CausalModel):
                 raise ModelSpecError(f"Fitted model with id {command.fitted_model_id} not found.")
 
             est: LinearDML = model_record.model
-            t0, t1s = categorical_t0_t1_pairs(spec)
+            if spec.T.kind == "binary":
+                if len(spec.T.control_values) != 1 or len(spec.T.treated_values) != 1:
+                    raise ModelSpecError("Binary ATE requires exactly one control_value and one treated_value (or pre-normalize T).")
+                t0 = spec.T.control_values[0]
+                t1s = [spec.T.treated_values[0]]
+            elif spec.T.kind == "categorical":
+                t0, t1s = categorical_t0_t1_pairs(spec)
+            else:
+                raise ModelSpecError(f"Unsupported treatment kind {spec.T.kind!r} for ATE.")
             effects: List[Dict[ATEModelResult, Any]] = []
-            X_for_ate = None  # no X for ATE; pass None to use all X as in fit
+            X_for_ate = None
+            if spec.X:
+                X_for_ate = df[spec.X]
             for t1_val in t1s:
                 if t1_val == t0:
                     raise ModelSpecError(f"Invalid contrast: t1 value {t1_val} is the same as t0 baseline {t0}.")
@@ -279,7 +289,7 @@ class LinearDMLCausalModel(CausalModel):
                 # point estimate
                 item["ate"] = est.ate(X=X_for_ate, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownMemberType]
                 try:
-                    lo, hi = est.ate_interval(X=X_for_ate, T0=t0, T1=t1_val, alpha=command.input.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+                    lo, hi = est.ate_interval(X=X_for_ate, T0=t0, T1=t1_val, alpha=command.inputs.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
                     if lo is not None and hi is not None:
                         item["ate_interval"] = (list(lo), list(hi)) # pyright: ignore[reportUnknownArgumentType]
                     else:

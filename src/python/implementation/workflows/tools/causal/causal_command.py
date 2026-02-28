@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Literal,  Optional,  Union
 from uuid import UUID
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field
 from sklearn.compose import ColumnTransformer
 
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
@@ -92,15 +91,15 @@ FitResult = Union[FitSuccess, CommandFailure]
 # =============================================================================
 # Effect Command and Result
 # =============================================================================
-
-class ATEInputsModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    alpha: float = Field(0.05, gt=0.0, lt=1.0)
+@dataclass(frozen=True, slots=True)
+class ATEInputsModel:
+    alpha: float = 0.05
+    
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ATECommand(BaseCommand):
     fitted_model_id: UUID
-    input: ATEInputsModel
+    inputs: ATEInputsModel
     command: Literal["ATE"] = field(init=False, default="ATE")
 
 # =============================================================================
@@ -117,7 +116,7 @@ class ATESuccess(BaseResult):
     """
     fitted_model_id: UUID
     contrast: Dict[str, Any]
-    ate: List[dict[ATEModelResult,Any]]                      
+    ate: List[Dict[ATEModelResult, Any]]                      
     artifacts: Dict[str, Any] = field(default_factory=lambda: {})
     status: Literal["SUCCEEDED"] = field(init=False, default="SUCCEEDED")
 
