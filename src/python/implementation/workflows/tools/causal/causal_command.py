@@ -5,10 +5,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal,  Optional,  Union
 from uuid import UUID
 
+import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
+from sklearn.compose import ColumnTransformer
 
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-from python.implementation.workflows.utils.utils import ScalarValue
 
 CommandType = Literal["FIT", "EFFECT", "INTERVAL"]
 
@@ -23,7 +24,7 @@ class BaseCommand:
     dataset_id: UUID
     run_id: UUID
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    transformed_protocol_specs: CausalSpec
+    protocol_specs: CausalSpec
     options: Dict[str, Any] = field(default_factory=lambda: {})
 
 
@@ -34,6 +35,8 @@ class BaseCommand:
 @dataclass(frozen=True, slots=True)
 class FitInputs:
     model_spec: Optional[Dict[str, Any]] = None
+    pre_X:  Optional[ColumnTransformer] = None
+    pre_XW: Optional[ColumnTransformer] = None
     
 
 
@@ -126,23 +129,21 @@ ATEResult = Union[ATESuccess, CommandFailure]
 # CATE Command Inputs (Pydantic)
 # =============================================================================
 
-class CATEInputsModel(BaseModel):
-    """
-    Caller must provide X_query explicitly as rows of feature->value mappings.
+FilterOp = Literal["==", "!=","in", "not_in", ">=", "<=", ">", "<"]
 
-    IMPORTANT:
-      - Each row must contain ALL feature names used during training (x_cols)
-      - No extra keys allowed
-      - Values must be numeric/bool (already-transformed feature space)
-    """
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    x_rows: List[Dict[str, ScalarValue]] = Field(..., min_length=1)
-    alpha: float = Field(0.05, gt=0.0, lt=1.0)
+# ----------------------------
+# Models
+# ----------------------------
+@dataclass(frozen=True, slots=True)
+class CATEInputs:
+    x_rows: pd.DataFrame   # already-transformed X in exact training columns/order
+    alpha: float = 0.05
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CATECommand(BaseCommand):
     fitted_model_id: UUID
-    inputs: CATEInputsModel
+    run_id: UUID
+    inputs: CATEInputs
     command: Literal["CATE"] = field(init=False, default="CATE")
 
 

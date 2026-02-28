@@ -5,7 +5,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from python.implementation.workflows.utils.validation import NonEmptyStr
+from python.domain.models.models import NonEmptyStr
 
 # ----------------------------
 # Core types

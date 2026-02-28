@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Annotated, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from python.domain.models.models import NonEmptyStr
 from python.implementation.workflows.utils.utils import ScalarValue
-from python.implementation.workflows.utils.validation import NonEmptyStr
 
 class BinaryTreatmentSpecModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)

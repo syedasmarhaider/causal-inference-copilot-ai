@@ -2,12 +2,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID
 
 from econml.dml.dml import LinearDML
 import numpy as np
 import pandas as pd
+from sklearn.compose import ColumnTransformer
+
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegressionCV, RidgeCV
+from sklearn.ensemble import (
+    ExtraTreesClassifier,
+    ExtraTreesRegressor,
+    RandomForestClassifier,
+    RandomForestRegressor,
+    HistGradientBoostingClassifier,
+    HistGradientBoostingRegressor,
+)
+
+from econml.sklearn_extensions.linear_model import WeightedLassoCVWrapper
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
@@ -26,7 +42,7 @@ from python.implementation.workflows.tools.causal.causal_command import (
 from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.econml.dml.dml_info import  linear_dml_causal_model_info
-from python.implementation.workflows.tools.causal.econml.utils import ModelSpecError, build_init_fit_options_param_maps, categorical_t0_t1_pairs, get_input_params_from_spec, has_missing, materialize_x_query, now_utc, required_init_keys, serialize_inference_obj, split_flat_options, validate_semantic_consistency
+from python.implementation.workflows.tools.causal.econml.utils import ModelSpecError, build_init_fit_options_param_maps, categorical_t0_t1_pairs, get_input_params_from_spec, has_missing, now_utc, raise_if_x_rows_not_exactly_match_fit_x_cols, required_init_keys, serialize_inference_obj
 
 @dataclass(frozen=True, slots=True)
 class LinearDMLCausalModel(CausalModel):
@@ -81,8 +97,17 @@ class LinearDMLCausalModel(CausalModel):
                 user_id=user_id,
                 conversation_id=conversation_id,
                 command=command,
+                df=df,
                 started_at=started,
             )
+        
+        if isinstance(command, CATECommand): # pyright: ignore[reportUnnecessaryIsInstance]
+            return self._cate(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                command=command,
+                started_at=started,
+            )    
         raise ValueError(f"Unsupported command type: {type(command)}")
     
     # -------------------------------------------------------------------------
@@ -99,10 +124,18 @@ class LinearDMLCausalModel(CausalModel):
         started_at: datetime,
     ) -> CausalResult:
         try:
-            spec: CausalSpec = command.transformed_protocol_specs
-            options: Mapping[str, Any] =command.options or {}
-            Y, T, X, W, col_meta = get_input_params_from_spec(df, spec)
-
+            specs: CausalSpec = command.protocol_specs
+            pre_x: ColumnTransformer | None = command.inputs.pre_X
+            pre_xw: ColumnTransformer | None = command.inputs.pre_XW
+            
+            if pre_x is None and len(specs.X or []) > 0:
+                raise ModelSpecError("Spec declares effect modifiers (spec.X) but no pre_X transformer provided in inputs. Provide a ColumnTransformer that at least passes through spec.X columns.")
+            if pre_xw is None and (len(specs.W or []) + len(specs.X or [])) > 0:
+                raise ModelSpecError("Spec declares controls (spec.W) and/or effect modifiers (spec.X) but no pre_XW transformer provided in inputs. Provide a ColumnTransformer that at least passes through spec.W and spec.X columns.")
+            
+            
+            Y, T, X, W, col_meta = get_input_params_from_spec(df, specs)
+            
             # 2) Missingness: keep strict for Y/T
             miss = {"Y": has_missing(Y), "T": has_missing(T), "X": has_missing(X), "W": has_missing(W)}
             if miss["Y"] or miss["T"]:
@@ -114,24 +147,25 @@ class LinearDMLCausalModel(CausalModel):
             )
 
             init_map = maps["init"]
-            fit_map = maps["fit"]
-
-
-            init_kwargs_default = self._get_default_init_options(spec)
-            init_kwargs_from_user, fit_kwargs = split_flat_options(
-                options=options,
-                init_map=init_map,
-                fit_map=fit_map,
-            )
             
-            init_kwargs_default.update(init_kwargs_from_user)
-            validate_semantic_consistency(spec, init_kwargs_default)
-
+            defaults: Dict[str, Any] = {}
+            disc_t = specs.T.kind in ("binary", "categorical")
+            disc_y = specs.Y.kind == "binary"
+            if disc_t:
+                defaults["discrete_treatment"] = True
+            if disc_y:
+                defaults["discrete_outcome"] = True    
+            
+            if pre_xw is not None:
+                 default_models_for_t_and_y = _get_default_models_for_t_and_y(specs, pre_XW=pre_xw)
+                 defaults.update(default_models_for_t_and_y)
+            
+            if pre_x is not None:
+                defaults["featurizer"] = pre_x     
+            
             # 6) Enforce required init args (no defaults injected by us)
             required_keys = required_init_keys(LinearDML, init_map=init_map)
-            required_keys.add("discrete_treatment") if spec.T.kind in ("binary", "categorical") else None
-            required_keys.add("discrete_outcome") if spec.Y.kind == "binary" else None
-            missing_required = [k for k in required_keys if k not in init_kwargs_default]
+            missing_required = [k for k in required_keys if k not in defaults]
             if missing_required:
                 raise ModelSpecError(
                     f"Missing required DML __init__ parameters: {missing_required}. "
@@ -139,13 +173,13 @@ class LinearDMLCausalModel(CausalModel):
                 )
 
             # 7) If X/W missing, require allow_missing=True
-            allow_missing = bool(init_kwargs_default.get("allow_missing", False))
+            allow_missing = bool(defaults.get("allow_missing", False))
             if (miss["X"] or miss["W"]) and not allow_missing:
                 raise ModelSpecError(f"X/W contain missing values but allow_missing is not True in options. missing={miss}")
 
             # 8) Fit
-            est = LinearDML(**init_kwargs_default)
-            est.fit(Y, T, X=X, W=W, **fit_kwargs) # pyright: ignore[reportUnknownMemberType]
+            est = LinearDML(**defaults)
+            est.fit(Y, T, X=X, W=W) # pyright: ignore[reportUnknownMemberType]
 
             # 9) Meta
             n = int(df.shape[0])
@@ -155,9 +189,7 @@ class LinearDMLCausalModel(CausalModel):
                     "backend": "econml.dml.DML",
                     "n": n,
                     "columns": col_meta,
-                    "used_init_kwargs": sorted(list(init_kwargs_default.keys())),
-                    "used_fit_kwargs": sorted(list(fit_kwargs.keys())),
-                    "provided_options": dict(options),
+                    "used_init_kwargs": defaults,
                     "spec_semantics_applied": sorted(list(required_keys)),
                 },
                 "artifacts": {
@@ -220,12 +252,13 @@ class LinearDMLCausalModel(CausalModel):
         user_id: UUID,
         conversation_id: UUID,
         command: ATECommand,
+        df: pd.DataFrame,
         started_at: datetime,
     ) -> CausalResult:
         try:
             warnings: List[str] = []
             # 1) load fitted model + metadata
-            spec: CausalSpec = command.transformed_protocol_specs
+            spec: CausalSpec = command.protocol_specs
             model_record: ModelRecord | None = self.models_repo.load_model(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -233,13 +266,6 @@ class LinearDMLCausalModel(CausalModel):
             )
             if model_record is None:
                 raise ModelSpecError(f"Fitted model with id {command.fitted_model_id} not found.")
-
-            df = self.data_repo.get_csv_data(
-                user_id,
-                conversation_id,
-                command.dataset_id,
-                limit=None,
-            )
 
             est: LinearDML = model_record.model
             t0, t1s = categorical_t0_t1_pairs(spec)
@@ -262,7 +288,6 @@ class LinearDMLCausalModel(CausalModel):
                     warnings.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                     item["ate_interval"] = None
 
-    
                 try:
                     inference = est.ate_inference(X=X_for_ate, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
                     if inference is not None:
@@ -314,184 +339,395 @@ class LinearDMLCausalModel(CausalModel):
             )
     
     def _cate(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-        command: CATECommand,
-        started_at: datetime,
-    ) -> CausalResult:
-        warnings: List[str] = []
-        try:
-            model_record: ModelRecord | None = self.models_repo.load_model(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                model_id=command.fitted_model_id,
-            )
-            if model_record is None:
-                return CommandFailure(
-                    run_id=command.run_id,
-                    started_at=started_at,
-                    finished_at=now_utc(),
-                    error=ErrorInfo(code="MODEL_NOT_FOUND", message="Fitted model not found.", details={"fitted_model_id": str(command.fitted_model_id)}),
-                    warnings=[],
-                    meta={},
+            self,
+            *,
+            user_id: UUID,
+            conversation_id: UUID,
+            command: CATECommand,
+            started_at: datetime,
+        ) -> CausalResult:
+            warnings: List[str] = []
+            try:
+                # 1) load fitted model
+                model_record: ModelRecord | None = self.models_repo.load_model(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    model_id=command.fitted_model_id,
                 )
+                if model_record is None:
+                    return CommandFailure(
+                        run_id=command.run_id,
+                        started_at=started_at,
+                        finished_at=now_utc(),
+                        error=ErrorInfo(
+                            code="MODEL_NOT_FOUND",
+                            message="Fitted model not found.",
+                            details={"fitted_model_id": str(command.fitted_model_id)},
+                        ),
+                        warnings=[],
+                        meta={},
+                    )
 
-            est: LinearDML = model_record.model
-            spec: CausalSpec = command.transformed_protocol_specs
-            # HARD GATE: need effect modifiers
-            if not spec.X:
-                return CommandFailure(
-                    run_id=command.run_id,
-                    started_at=started_at,
-                    finished_at=now_utc(),
-                    error=ErrorInfo(
-                        code="UNSUPPORTED_QUERY",
-                        message="CATE requires effect modifiers (spec.X). None were provided",
-                        details={"x": list(spec.X)},
-                    ),
-                    warnings=[],
-                    meta={},
-                )
+                est: LinearDML = model_record.model
+                spec: CausalSpec = command.protocol_specs
+                X_query = command.inputs.x_rows
+                x_cols = spec.X
+     
+                raise_if_x_rows_not_exactly_match_fit_x_cols(x_rows=df, x_cols=x_cols)           
+                # 4) Build contrasts (baseline vs each target)
+                effects: List[Dict[CATEModelResult, Any]] = []
 
-            x_cols = list(spec.X)
-            X_query = materialize_x_query(x_rows=command.inputs.x_rows, x_cols=x_cols)
+                if spec.T.kind == "binary":
+                    # IMPORTANT: EconML expects single labels, not sets.
+                    # If you allow multiple treated/control values, you MUST pre-map T upstream.
+                    if len(spec.T.control_values) != 1 or len(spec.T.treated_values) != 1:
+                        return CommandFailure(
+                            run_id=command.run_id,
+                            started_at=started_at,
+                            finished_at=now_utc(),
+                            error=ErrorInfo(
+                                code="OPTIONS_INVALID",
+                                message=(
+                                    "Binary treatment for CATE requires exactly one control_value and one treated_value "
+                                    "(or pre-normalize T upstream to a single encoding like 0/1)."
+                                ),
+                                details={
+                                    "control_values": list(spec.T.control_values),
+                                    "treated_values": list(spec.T.treated_values),
+                                },
+                            ),
+                            warnings=[],
+                            meta={},
+                        )
 
-            effects: List[Dict[CATEModelResult, Any]] = []
+                    t0 = spec.T.control_values[0]
+                    t1s = [spec.T.treated_values[0]]
 
-            # build contrasts baseline vs all
-            if spec.T.kind == "binary":
-                t0 = spec.T.control_values[0]
-                t1 = spec.T.treated_values[0]
+                elif spec.T.kind == "categorical":
+                    t0, t1s = categorical_t0_t1_pairs(spec)  # baseline first / spec.T.baseline if present
 
-                item: Dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
-                item["cate"] = est.effect(X_query, T0=t0, T1=t1) # pyright: ignore[reportUnknownMemberType]
+                else:
+                    return CommandFailure(
+                        run_id=command.run_id,
+                        started_at=started_at,
+                        finished_at=now_utc(),
+                        error=ErrorInfo(
+                            code="UNSUPPORTED_QUERY",
+                            message=f"Unsupported treatment kind {spec.T.kind!r} for CATE.",
+                            details={},
+                        ),
+                        warnings=[],
+                        meta={},
+                    )
 
-
-                try:
-                    lo, hi = est.effect_interval(X_query, T0=t0, T1=t1, alpha=command.inputs.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-                    if lo is not None and hi is not None:
-                        item["cate_interval"] = (list(lo), list(hi)) # pyright: ignore[reportUnknownArgumentType]
-                    else:
-                        item["cate_interval"] = None
-                        warnings.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
-                except Exception as e:
-                    warnings.append("INFERENCE_NOT_AVAILABLE" + repr(e))
-                    item["cate_interval"] = None
-
-                try:
-                    inference = est.effect_inference(X_query, T0=t0, T1=t1) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-                    item["cate_inference"] = serialize_inference_obj(inference)
-                except Exception as e:
-                    warnings.append("INFERENCE_NOT_AVAILABLE" + repr(e))
-                    item["cate_inference"] = None
-                    
-                effects.append(item)
-
-            elif spec.T.kind == "categorical":
-                t0, t1s = categorical_t0_t1_pairs(spec)  # baseline first (or spec.T.baseline)
+                # 5) Compute per-target CATE (+ optional interval/inference)
                 for t1_val in t1s:
                     if t1_val == t0:
                         continue
 
                     item: Dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1_val}}
-                    item["cate"] = est.effect(X_query, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownMemberType]
 
- 
+                    # point estimate
                     try:
-                        lo, hi = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-                        if lo is not None and hi is not None:
-                           item["cate_interval"] = (list(lo), list(hi)) # pyright: ignore[reportUnknownArgumentType]
-                        else:
-                            item["cate_interval"] = None
-                            warnings.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")   
+                        item["cate"] = est.effect(X_query, T0=t0, T1=t1_val)  # vector length m
                     except Exception as e:
-                            warnings.append("INFERENCE_NOT_AVAILABLE" + repr(e))
-                            item["cate_interval"] = None
+                        return CommandFailure(
+                            run_id=command.run_id,
+                            started_at=started_at,
+                            finished_at=now_utc(),
+                            error=ErrorInfo(
+                                code="ESTIMATOR_ERROR",
+                                message="CATE computation failed (effect).",
+                                details={"exception": repr(e)},
+                            ),
+                            warnings=[],
+                            meta={},
+                        )
 
-
+    
                     try:
-                        inference = est.effect_inference(X_query, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-                        if inference is not None:
-                            item["cate_inference"] = serialize_inference_obj(inference)
+                        lo, hi = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha)
+                        if lo is None or hi is None:
+                            warnings.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
                         else:
-                            item["cate_inference"] = None
+                            item["cate_interval"] = (list(lo), list(hi)) if lo is not None and hi is not None else None    
+                    except Exception as e:
+                        warnings.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+                        item["cate_interval"] = None
+
+          
+                    try:
+                        inf = est.effect_inference(X_query, T0=t0, T1=t1_val)
+                        item["cate_inference"] = serialize_inference_obj(inf)
+                        if inf is None:
                             warnings.append("INFERENCE_NOT_AVAILABLE: effect_inference returned None")
+                        else:
+                            item["cate_inference"] = serialize_inference_obj(inf)    
                     except Exception as e:
-                        warnings.append("INFERENCE_NOT_AVAILABLE" + repr(e))
+                        warnings.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                         item["cate_inference"] = None
 
                     effects.append(item)
 
-            else:
+                if not effects:
+                    return CommandFailure(
+                        run_id=command.run_id,
+                        started_at=started_at,
+                        finished_at=now_utc(),
+                        error=ErrorInfo(code="OPTIONS_INVALID", message="No valid contrasts produced for CATE.", details={}),
+                        warnings=[],
+                        meta={},
+                    )
+
+                finished = now_utc()
+                return CATESuccess(
+                    run_id=command.run_id,
+                    started_at=started_at,
+                    finished_at=finished,
+                    warnings=warnings,
+                    meta={
+                        "backend": "econml.dml.LinearDML",
+                        "row_count": int(getattr(X_query, "shape", [len(command.inputs.x_rows)])[0]),
+                    },
+                    fitted_model_id=command.fitted_model_id,
+                    x_cols=x_cols,
+                    effects=effects,
+                )
+
+            except ModelSpecError as e:
                 return CommandFailure(
                     run_id=command.run_id,
                     started_at=started_at,
                     finished_at=now_utc(),
-                    error=ErrorInfo(code="UNSUPPORTED_QUERY", message=f"Unsupported treatment kind {spec.T.kind!r} for CATE.", details={}),
+                    error=ErrorInfo(code="OPTIONS_INVALID", message=str(e), details={}),
                     warnings=[],
                     meta={},
                 )
-
-            if not effects:
+            except Exception as e:
                 return CommandFailure(
                     run_id=command.run_id,
                     started_at=started_at,
                     finished_at=now_utc(),
-                    error=ErrorInfo(code="OPTIONS_INVALID", message="No valid contrasts produced for CATE.", details={}),
+                    error=ErrorInfo(code="ESTIMATOR_ERROR", message="CATE computation failed.", details={"exception": repr(e)}),
                     warnings=[],
                     meta={},
                 )
 
-            finished = now_utc()
-            return CATESuccess(
-                run_id=command.run_id,
-                started_at=started_at,
-                finished_at=finished,
-                warnings=warnings,
-                meta={"backend": "econml.dml.LinearDML", "row_count": int(X_query.shape[0])},
-                fitted_model_id=command.fitted_model_id,
-                x_cols=x_cols,
-                effects=effects,
-            )
-
-        except ModelSpecError as e:
-            return CommandFailure(
-                run_id=command.run_id,
-                started_at=started_at,
-                finished_at=now_utc(),
-                error=ErrorInfo(code="OPTIONS_INVALID", message=str(e), details={}),
-                warnings=[],
-                meta={},
-            )
-        except Exception as e:
-            return CommandFailure(
-                run_id=command.run_id,
-                started_at=started_at,
-                finished_at=now_utc(),
-                error=ErrorInfo(code="ESTIMATOR_ERROR", message="CATE computation failed.", details={"exception": repr(e)}),
-                warnings=[],
-                meta={},
-            )
-            
-    def _get_default_init_options(self, specs: CausalSpec) -> Dict[str, Any]:
-        """
-        Merge BaseCommand.options with FitInputs.model_spec if present.
-        model_spec overrides.
-        """
-        opts: Dict[str, Any] = {}
-        if specs.T.kind in ("binary", "categorical"):
-            opts["discrete_treatment"] = True
-        if specs.Y.kind == "binary":
-            opts["discrete_outcome"] = True
-        
-        opts["model_y"] = "auto" 
-        opts["model_t"] = "auto"
-        
-        return opts  
-
 
     
 
+
+
+# =============================================================================
+# Model spec and options
+# =============================================================================
+
+class _ToDense(BaseEstimator, TransformerMixin):
+    """Convert sparse -> dense for models that don't accept sparse."""
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X: Any) -> np.ndarray:
+            if issparse(X):
+                return X.toarray()  # type: ignore[no-any-return]
+            return X
+
+
+def _wrap_with_pre(
+    *,
+    pre_XW: ColumnTransformer,
+    model: BaseEstimator,
+    require_dense: bool,
+) -> BaseEstimator:
+    steps: List[tuple[str, BaseEstimator]] = [("pre", pre_XW)]
+    if require_dense:
+        steps.append(("dense", _ToDense()))
+    steps.append(("model", model))
+    return Pipeline(steps)
+
+
+def _normalize_model_spec_to_wrapped_list(
+    *,
+    spec_value: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]],
+    pre_XW: ColumnTransformer,
+    is_discrete: bool,
+    random_state: Optional[int],
+    cv: int,
+    n_jobs: Optional[int],
+) -> Sequence[BaseEstimator]:
+    """
+    Accepts: string keyword (e.g. 'auto', 'automl', 'linear'), a model, or a list of these.
+    Returns: list of fully wrapped sklearn estimators (Pipeline(pre -> [dense] -> model)).
+    We intentionally DO NOT return string keywords because you want to inject pre_XW.
+    """
+
+    def candidates_for_keyword(key: str) -> Sequence[BaseEstimator]:
+        k = key.lower()
+        # EconML source semantics:
+        # - 'auto' == best among linear+forest (LinearDML docs) :contentReference[oaicite:3]{index=3}
+        # - 'automl' expands to poly/forest/gbf/nnet in econml.get_selector :contentReference[oaicite:4]{index=4}
+        # Here we implement a stronger, transformer-aware version:
+        if k in ("auto", "auto_plus"):
+            return build_default_candidates()
+        if k in ("automl", "automl_plus"):
+            # “automl” in econml includes poly/gbf/nnet; but with one-hot, poly explodes.
+            # We provide a practical automl-like set for tabular: linear + (extra trees, RF, HGB).
+            return build_default_candidates()
+        if k == "linear":
+            return build_linear_candidates()
+        if k in ("forest", "trees"):
+            return build_tree_candidates()
+        if k in ("gbf", "hgb", "boosting"):
+            return build_boosting_candidates()
+        raise ValueError(f"Unknown model keyword: {key!r}")
+
+    def build_linear_candidates() -> Sequence[BaseEstimator]:
+        if is_discrete:
+            # must support predict_proba for discrete nuisances :contentReference[oaicite:5]{index=5}
+            lr = LogisticRegressionCV(
+                cv=cv,
+                max_iter=2000,
+                solver="lbfgs",
+                n_jobs=n_jobs,
+                random_state=random_state,
+            )
+            return [_wrap_with_pre(pre_XW=pre_XW, model=lr, require_dense=False)]
+        # regression
+        lasso = WeightedLassoCVWrapper(cv=cv, random_state=random_state)
+        ridge = RidgeCV(alphas=np.logspace(-4, 4, 25))
+        return [
+            _wrap_with_pre(pre_XW=pre_XW, model=lasso, require_dense=False),  # type: ignore[arg-type]
+            _wrap_with_pre(pre_XW=pre_XW, model=ridge, require_dense=False),
+        ]
+
+    def build_tree_candidates() -> Sequence[BaseEstimator]:
+        # Tree models generally expect dense; we densify after pre_XW.
+        if is_discrete:
+            et = ExtraTreesClassifier(
+                n_estimators=400,
+                min_samples_leaf=5,
+                random_state=random_state,
+                n_jobs=n_jobs,
+            )
+            rf = RandomForestClassifier(
+                n_estimators=400,
+                min_samples_leaf=5,
+                random_state=random_state,
+                n_jobs=n_jobs,
+            )
+            return [
+                _wrap_with_pre(pre_XW=pre_XW, model=et, require_dense=True),
+                _wrap_with_pre(pre_XW=pre_XW, model=rf, require_dense=True),
+            ]
+        et = ExtraTreesRegressor(
+            n_estimators=400,
+            min_samples_leaf=5,
+            random_state=random_state,
+            n_jobs=n_jobs,
+        )
+        rf = RandomForestRegressor(
+            n_estimators=400,
+            min_samples_leaf=5,
+            random_state=random_state,
+            n_jobs=n_jobs,
+        )
+        return [
+            _wrap_with_pre(pre_XW=pre_XW, model=et, require_dense=True),
+            _wrap_with_pre(pre_XW=pre_XW, model=rf, require_dense=True),
+        ]
+
+    def build_boosting_candidates() -> Sequence[BaseEstimator]:
+        # HistGradientBoosting is often strong on tabular; dense required.
+        if is_discrete:
+            hgb = HistGradientBoostingClassifier(
+                random_state=random_state,
+                max_depth=None,
+                learning_rate=0.05,
+                max_iter=400,
+                early_stopping=True,
+            )
+            return [_wrap_with_pre(pre_XW=pre_XW, model=hgb, require_dense=True)]
+        hgb = HistGradientBoostingRegressor(
+            random_state=random_state,
+            max_depth=None,
+            learning_rate=0.05,
+            max_iter=400,
+            early_stopping=True,
+        )
+        return [_wrap_with_pre(pre_XW=pre_XW, model=hgb, require_dense=True)]
+
+    def build_default_candidates() -> Sequence[BaseEstimator]:
+        # “Best practical” set for generic mixed tabular:
+        # linear baseline + strong non-linear options
+        return [
+            *build_linear_candidates(),
+            *build_tree_candidates(),
+            *build_boosting_candidates(),
+        ]
+
+    # Normalize input to list
+    if isinstance(spec_value, (list, tuple)):
+        items = list(spec_value)
+    else:
+        items = [spec_value]
+
+    out: list[BaseEstimator] = []
+    for item in items:
+        if isinstance(item, str):
+            out.extend(candidates_for_keyword(item))
+        else:
+            # user gave a concrete estimator/pipeline: wrap it so pre_XW is always applied fold-safely
+            out.append(_wrap_with_pre(pre_XW=pre_XW, model=item, require_dense=True))
+    if not out:
+        raise ValueError("Empty nuisance model candidate list.")
+    return out
+
+
+def _get_default_models_for_t_and_y(
+    specs : CausalSpec,
+    pre_XW: ColumnTransformer,
+    random_state: Optional[int] = None,
+    cv: int = 3,
+    n_jobs: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Build LinearDML nuisance defaults WITH transformer injected.
+
+    Precedence:
+      defaults < base_options < model_spec
+
+    Notes:
+      - LinearDML supports 'auto'/'automl'/lists for model_y/model_t. :contentReference[oaicite:6]{index=6}
+      - But strings cannot include your preprocessor; so we expand keywords into wrapped pipelines.
+    """
+    disc_t = specs.T.kind in ("binary", "categorical")
+    disc_y = specs.Y.kind == "binary"
+
+    defaults: Dict[str, Any] = {}
+
+    # Default *keywords* (we'll expand into wrapped candidate lists)
+    default_model_y: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
+    default_model_t: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
+
+    defaults["model_y"] = list(
+        _normalize_model_spec_to_wrapped_list(
+            spec_value=default_model_y,
+            pre_XW=pre_XW,
+            is_discrete=disc_y,
+            random_state=random_state,
+            cv=cv,
+            n_jobs=n_jobs,
+        )
+    )
+    defaults["model_t"] = list(
+        _normalize_model_spec_to_wrapped_list(
+            spec_value=default_model_t,
+            pre_XW=pre_XW,
+            is_discrete=disc_t,
+            random_state=random_state,
+            cv=cv,
+            n_jobs=n_jobs,
+        )
+    )
     
+    return defaults

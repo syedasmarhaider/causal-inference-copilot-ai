@@ -295,3 +295,36 @@ def materialize_x_query(
         X_list.append([row[c] for c in x_cols]) # pyright: ignore[reportUnknownMemberType]
 
     return np.asarray(X_list, dtype=float)
+
+def raise_if_x_rows_not_exactly_match_fit_x_cols(
+    *,
+    x_rows: pd.DataFrame,
+    x_cols: List[str],
+    require_order: bool = True,
+) -> None:
+    """
+    Enforce x_rows contains ONLY X columns (no extras), and optionally same order.
+    """
+    # duplicates
+    cols = list(x_rows.columns)
+    if len(cols) != len(set(cols)):
+        dupes = [c for c in set(cols) if cols.count(c) > 1]
+        raise ModelSpecError(f"inputs.x_rows has duplicate columns: {dupes}")
+
+    expected = list(x_cols)
+    got = cols
+
+    missing = [c for c in expected if c not in set(got)]
+    extra = [c for c in got if c not in set(expected)]
+
+    if missing or extra:
+        raise ModelSpecError(
+            "inputs.x_rows must contain EXACTLY the effect modifier columns spec.X. "
+            f"missing={missing}, extra={extra}, expected={expected}, got={got}"
+        )
+
+    if require_order and got != expected:
+        raise ModelSpecError(
+            "inputs.x_rows columns must match spec.X order exactly. "
+            f"expected={expected}, got={got}"
+        )

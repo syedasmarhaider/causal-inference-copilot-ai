@@ -1,9 +1,10 @@
 from typing import Any, Dict, Literal, Optional
-from typing_extensions import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field
 
-NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+from python.domain.models.models import NonEmptyStr
+
+
 
 ValidationSeverity = Literal["WARN", "FAIL"]
 ValidationStatus = Literal["PASS", "WARN", "FAIL"]
