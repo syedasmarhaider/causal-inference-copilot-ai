@@ -34,6 +34,7 @@ class BaseCommand:
 @dataclass(frozen=True, slots=True)
 class FitInputs:
     model_spec: Optional[Dict[str, Any]] = None
+    missingness_mode: MissingnessMode = "none"
     pre_X:  Optional[ColumnTransformer] = None
     pre_XW: Optional[ColumnTransformer] = None
     
@@ -91,6 +92,7 @@ FitResult = Union[FitSuccess, CommandFailure]
 # =============================================================================
 # Effect Command and Result
 # =============================================================================
+MissingnessMode = Literal["none", "present"]
 @dataclass(frozen=True, slots=True)
 class ATEInputsModel:
     alpha: float = 0.05

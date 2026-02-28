@@ -40,6 +40,7 @@ from python.implementation.workflows.tools.causal.causal_command import (
     ErrorInfo,
     FitCommand,
     FitSuccess,
+    MissingnessMode,
 )
 from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
@@ -536,13 +537,13 @@ class LinearDMLCausalModel(CausalModel):
 
 class _ToDense(BaseEstimator, TransformerMixin):
     """Convert sparse -> dense for models that don't accept sparse."""
-    def fit(self, X, y=None): # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def fit(self, X, y=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return self
 
     def transform(self, X: Any) -> np.ndarray:
-            if issparse(X):
-                return X.toarray()  # type: ignore[no-any-return]
-            return X
+        if issparse(X):
+            return X.toarray()  # type: ignore[no-any-return]
+        return X
 
 
 def _wrap_with_pre(
@@ -563,91 +564,23 @@ def _normalize_model_spec_to_wrapped_list(
     spec_value: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]],
     pre_XW: ColumnTransformer,
     is_discrete: bool,
+    missingness: MissingnessMode,           
     random_state: Optional[int],
     n_jobs: Optional[int],
 ) -> Sequence[BaseEstimator]:
     """
-    Accepts: string keyword (e.g. 'auto', 'automl', 'linear'), a model, or a list of these.
+    Accepts: keyword ('auto', 'automl', 'linear'...), estimator, or list of these.
     Returns: list of fully wrapped sklearn estimators (Pipeline(pre -> [dense] -> model)).
-    We intentionally DO NOT return string keywords because you want to inject pre_XW.
+
+    missingness:
+      - "none": your usual candidate menu.
+      - "present": restrict to NaN-tolerant candidates (HGB), avoiding models that error on NaNs.
     """
 
-    def candidates_for_keyword(key: str) -> Sequence[BaseEstimator]:
-        k = key.lower()
-        # EconML source semantics:
-        # - 'auto' == best among linear+forest (LinearDML docs) :contentReference[oaicite:3]{index=3}
-        # - 'automl' expands to poly/forest/gbf/nnet in econml.get_selector :contentReference[oaicite:4]{index=4}
-        # Here we implement a stronger, transformer-aware version:
-        if k in ("auto", "auto_plus"):
-            return build_default_candidates()
-        if k in ("automl", "automl_plus"):
-            # “automl” in econml includes poly/gbf/nnet; but with one-hot, poly explodes.
-            # We provide a practical automl-like set for tabular: linear + (extra trees, RF, HGB).
-            return build_default_candidates()
-        if k == "linear":
-            return build_linear_candidates()
-        if k in ("forest", "trees"):
-            return build_tree_candidates()
-        if k in ("gbf", "hgb", "boosting"):
-            return build_boosting_candidates()
-        raise ValueError(f"Unknown model keyword: {key!r}")
+    missing_present = (missingness == "present")
 
-    def build_linear_candidates() -> Sequence[BaseEstimator]:
-        if is_discrete:
-            # must support predict_proba for discrete nuisances :contentReference[oaicite:5]{index=5}
-            lr = LogisticRegressionCV(
-                max_iter=2000,
-                solver="lbfgs",
-                n_jobs=n_jobs,
-                random_state=random_state,
-            )
-            return [_wrap_with_pre(pre_XW=pre_XW, model=lr, require_dense=False)]
-        # regression
-        lasso = WeightedLassoCVWrapper(random_state=random_state)
-        ridge = RidgeCV(alphas=np.logspace(-4, 4, 25))
-        return [
-            _wrap_with_pre(pre_XW=pre_XW, model=lasso, require_dense=False),  # type: ignore[arg-type]
-            _wrap_with_pre(pre_XW=pre_XW, model=ridge, require_dense=False),
-        ]
-
-    def build_tree_candidates() -> Sequence[BaseEstimator]:
-        # Tree models generally expect dense; we densify after pre_XW.
-        if is_discrete:
-            et = ExtraTreesClassifier(
-                n_estimators=400,
-                min_samples_leaf=5,
-                random_state=random_state,
-                n_jobs=n_jobs,
-            )
-            rf = RandomForestClassifier(
-                n_estimators=400,
-                min_samples_leaf=5,
-                random_state=random_state,
-                n_jobs=n_jobs,
-            )
-            return [
-                _wrap_with_pre(pre_XW=pre_XW, model=et, require_dense=True),
-                _wrap_with_pre(pre_XW=pre_XW, model=rf, require_dense=True),
-            ]
-        et = ExtraTreesRegressor(
-            n_estimators=400,
-            min_samples_leaf=5,
-            random_state=random_state,
-            n_jobs=n_jobs,
-        )
-        rf = RandomForestRegressor(
-            n_estimators=400,
-            min_samples_leaf=5,
-            random_state=random_state,
-            n_jobs=n_jobs,
-        )
-        return [
-            _wrap_with_pre(pre_XW=pre_XW, model=et, require_dense=True),
-            _wrap_with_pre(pre_XW=pre_XW, model=rf, require_dense=True),
-        ]
-
-    def build_boosting_candidates() -> Sequence[BaseEstimator]:
-        # HistGradientBoosting is often strong on tabular; dense required.
+    def build_boosting_candidates_nan_safe() -> Sequence[BaseEstimator]:
+        # HistGradientBoosting supports NaNs natively; requires dense arrays.
         if is_discrete:
             hgb = HistGradientBoostingClassifier(
                 random_state=random_state,
@@ -666,76 +599,156 @@ def _normalize_model_spec_to_wrapped_list(
         )
         return [_wrap_with_pre(pre_XW=pre_XW, model=hgb, require_dense=True)]
 
+    def build_linear_candidates() -> Sequence[BaseEstimator]:
+        # Linear/logistic models do NOT accept NaNs -> when missingness is present, fall back to NaN-safe boosting.
+        if missing_present:
+            return build_boosting_candidates_nan_safe()
+
+        if is_discrete:
+            lr = LogisticRegressionCV(
+                max_iter=2000,
+                solver="lbfgs",
+                n_jobs=n_jobs,
+                random_state=random_state,
+            )
+            return [_wrap_with_pre(pre_XW=pre_XW, model=lr, require_dense=False)]
+
+        lasso = WeightedLassoCVWrapper(random_state=random_state)
+        ridge = RidgeCV(alphas=np.logspace(-4, 4, 25))
+        return [
+            _wrap_with_pre(pre_XW=pre_XW, model=lasso, require_dense=False),  # type: ignore[arg-type]
+            _wrap_with_pre(pre_XW=pre_XW, model=ridge, require_dense=False),
+        ]
+
+    def build_tree_candidates() -> Sequence[BaseEstimator]:
+        # sklearn RF/ET do NOT accept NaNs -> when missingness is present, fall back to NaN-safe boosting.
+        if missing_present:
+            return build_boosting_candidates_nan_safe()
+
+        if is_discrete:
+            et = ExtraTreesClassifier(
+                n_estimators=400,
+                min_samples_leaf=5,
+                random_state=random_state,
+                n_jobs=n_jobs,
+            )
+            rf = RandomForestClassifier(
+                n_estimators=400,
+                min_samples_leaf=5,
+                random_state=random_state,
+                n_jobs=n_jobs,
+            )
+            return [
+                _wrap_with_pre(pre_XW=pre_XW, model=et, require_dense=True),
+                _wrap_with_pre(pre_XW=pre_XW, model=rf, require_dense=True),
+            ]
+
+        et = ExtraTreesRegressor(
+            n_estimators=400,
+            min_samples_leaf=5,
+            random_state=random_state,
+            n_jobs=n_jobs,
+        )
+        rf = RandomForestRegressor(
+            n_estimators=400,
+            min_samples_leaf=5,
+            random_state=random_state,
+            n_jobs=n_jobs,
+        )
+        return [
+            _wrap_with_pre(pre_XW=pre_XW, model=et, require_dense=True),
+            _wrap_with_pre(pre_XW=pre_XW, model=rf, require_dense=True),
+        ]
+
+    def build_boosting_candidates() -> Sequence[BaseEstimator]:
+        # Boosting is always available; also happens to be the NaN-safe fallback.
+        return build_boosting_candidates_nan_safe()
+
     def build_default_candidates() -> Sequence[BaseEstimator]:
-        # “Best practical” set for generic mixed tabular:
-        # linear baseline + strong non-linear options
+        # If missingness present: restrict to NaN-safe set (avoids false candidates + wasted selector time).
+        if missing_present:
+            return build_boosting_candidates_nan_safe()
         return [
             *build_linear_candidates(),
             *build_tree_candidates(),
             *build_boosting_candidates(),
         ]
 
+    def candidates_for_keyword(key: str) -> Sequence[BaseEstimator]:
+        k = key.lower()
+        if k in ("auto", "auto_plus"):
+            return build_default_candidates()
+        if k in ("automl", "automl_plus"):
+            return build_default_candidates()
+        if k == "linear":
+            return build_linear_candidates()
+        if k in ("forest", "trees"):
+            return build_tree_candidates()
+        if k in ("gbf", "hgb", "boosting"):
+            return build_boosting_candidates()
+        raise ValueError(f"Unknown model keyword: {key!r}")
+
     # Normalize input to list
-    if isinstance(spec_value, (list, tuple)):
-        items = list(spec_value)
-    else:
+    items: List[Union[str, BaseEstimator]]
+    if isinstance(spec_value, (str, BaseEstimator)):
         items = [spec_value]
+    else:
+        items = list(spec_value)
 
     out: list[BaseEstimator] = []
     for item in items:
         if isinstance(item, str):
             out.extend(candidates_for_keyword(item))
         else:
-            # user gave a concrete estimator/pipeline: wrap it so pre_XW is always applied fold-safely
-            # TODO: fix later
-            out.append(_wrap_with_pre(pre_XW=pre_XW, model=item, require_dense=True)) # pyright: ignore[reportArgumentType]
+            # User provided a concrete estimator/pipeline.
+            # NOTE: we cannot guarantee NaN support for arbitrary estimators; caller should validate or warn upstream.
+            out.append(_wrap_with_pre(pre_XW=pre_XW, model=item, require_dense=True))  # pyright: ignore[reportArgumentType]
+
     if not out:
         raise ValueError("Empty nuisance model candidate list.")
     return out
 
 
 def _get_default_models_for_t_and_y(
-    specs : CausalSpec,
+    specs: Any,  # CausalSpec
     pre_XW: ColumnTransformer,
+    *,
+    missingness: MissingnessMode = "none",     # <--- NEW
     random_state: Optional[int] = None,
     n_jobs: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Build LinearDML nuisance defaults WITH transformer injected.
 
-    Precedence:
-      defaults < base_options < model_spec
-
-    Notes:
-      - LinearDML supports 'auto'/'automl'/lists for model_y/model_t. :contentReference[oaicite:6]{index=6}
-      - But strings cannot include your preprocessor; so we expand keywords into wrapped pipelines.
+    missingness:
+      - "none": normal candidate menu
+      - "present": NaN-safe nuisance menu (HGB only)
     """
     disc_t = specs.T.kind in ("binary", "categorical")
     disc_y = specs.Y.kind == "binary"
 
-    defaults: Dict[str, Any] = {}
-
-    # Default *keywords* (we'll expand into wrapped candidate lists)
     default_model_y: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
     default_model_t: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
 
-    defaults["model_y"] = list(
+    model_y = list(
         _normalize_model_spec_to_wrapped_list(
             spec_value=default_model_y,
             pre_XW=pre_XW,
             is_discrete=disc_y,
+            missingness=missingness,
             random_state=random_state,
             n_jobs=n_jobs,
         )
     )
-    defaults["model_t"] = list(
+    model_t = list(
         _normalize_model_spec_to_wrapped_list(
             spec_value=default_model_t,
             pre_XW=pre_XW,
             is_discrete=disc_t,
+            missingness=missingness,
             random_state=random_state,
             n_jobs=n_jobs,
         )
     )
-    
-    return defaults
+
+    return {"model_y": model_y, "model_t": model_t}
