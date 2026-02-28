@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID
+import warnings
 from scipy.sparse import issparse
 
 from econml.dml.dml import LinearDML
@@ -180,12 +181,16 @@ class LinearDMLCausalModel(CausalModel):
 
             # 8) Fit
             est = LinearDML(**defaults)
-            est.fit(Y, T, X=X, W=W) # pyright: ignore[reportUnknownMemberType]
+            
+            fit_warnings: list[str] = []
+            with warnings.catch_warnings(record=True) as ws:
+               warnings.simplefilter("always")
+               est.fit(Y, T, X=X, W=W)   # pyright: ignore[reportUnknownMemberType]
+            fit_warnings = [f"{w.category.__name__}: {str(w.message)}" for w in ws]
 
-            # 9) Meta
             n = int(df.shape[0])
             fit_meta: Dict[str, Any] = {
-                "warnings": [],
+                "warnings": fit_warnings,
                 "meta": {
                     "backend": "econml.dml.DML",
                     "n": n,
