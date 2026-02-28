@@ -49,10 +49,10 @@ lint: install
 # format-fix: install
 # 	@$(PYBIN)/black .
 
-test: install
-	@$(PYBIN)/pytest -c pytest.ini --cov=python --cov-report=term-missing --maxfail=1 -q
+# test: install
+# 	@$(PYBIN)/pytest -c pytest.ini --cov=python --cov-report=term-missing --maxfail=1 -q
 
-test-quick: install
+test: install
 	@$(PYBIN)/pytest -c pytest.ini -q
 
 run-cli: venv

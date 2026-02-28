@@ -125,11 +125,21 @@ def test_compile_duplicate_column_plans_raises():
 
 def test_compile_role_mismatch_raises():
     plan = _mk_plan(
+        # ❌ intentionally wrong: age is in X_order but role is W
         {"column": "age", "role": "W", "encoding": {"preset": "num_standard"}},
+        # ✅ satisfy TransformPlan invariant: at least one X exists
+        {"column": "x_ok", "role": "X", "encoding": {"preset": "num_standard"}},
+        # ✅ W exists
         {"column": "gender", "role": "W", "encoding": {"preset": "cat_onehot"}},
     )
+
     with pytest.raises(ValueError, match="is in X_order but plan role"):
-        compile_plan_to_transformers(plan, X_order=["age"], W_order=["gender"], dense_output=True)
+        compile_plan_to_transformers(
+            plan,
+            X_order=["age", "x_ok"],
+            W_order=["gender"],
+            dense_output=True,
+        )
 
 
 def test_compile_requires_X_and_W_present_in_plan():
@@ -374,3 +384,225 @@ def test_datetime_to_epoch_seconds_branches_and_names():
     assert t.get_feature_names_out(["dt"]).tolist() == ["dt", "dt_missing"]
     t2 = DateTimeToEpochSecondsTransformer(errors="coerce", unit="s", add_missing_indicator=False)
     assert t2.get_feature_names_out(["dt"]).tolist() == ["dt"]
+    
+    
+    # -----------------------------------------------------------------------------
+# Compile-level behavioral edge cases
+# -----------------------------------------------------------------------------
+def test_compile_require_full_coverage_false_allows_partial_plan():
+    # Contract: when coverage is not required, compiler should accept plan that
+    # doesn't mention every X/W column (and should compile what exists).
+    plan = _mk_plan(
+        {"column": "x1", "role": "X", "encoding": {"preset": "num_standard"}},
+        {"column": "w1", "role": "W", "encoding": {"preset": "cat_onehot"}},
+    )
+
+    compiled = compile_plan_to_transformers(
+        plan,
+        X_order=["x1", "x2"],      # x2 not in plan
+        W_order=["w1", "w2"],      # w2 not in plan
+        dense_output=True,
+        require_full_coverage=False,
+    )
+
+    # Should still compile, and should be usable on arrays that contain the full X|W layout.
+    XW = pd.DataFrame(
+        {
+            "x1": [1.0, 2.0],
+            "x2": [10.0, 20.0],      # no plan
+            "w1": ["a", "b"],
+            "w2": ["u", "v"],        # no plan
+        }
+    )
+    out = compiled.pre_XW.fit_transform(XW)
+    assert out.shape[0] == 2
+
+
+def test_compiled_transformers_work_with_numpy_arrays_not_only_dataframes():
+    plan = _mk_plan(
+        {"column": "x", "role": "X", "encoding": {"preset": "num_standard"}},
+        {"column": "w", "role": "W", "encoding": {"preset": "cat_onehot", "missing": "impute_token"}},
+    )
+    compiled = compile_plan_to_transformers(plan, X_order=["x"], W_order=["w"], dense_output=True)
+
+    X_np = np.array([[1.0], [np.nan], [3.0]], dtype=object)
+    XW_np = np.array([[1.0, "a"], [np.nan, None], [3.0, "b"]], dtype=object)
+
+    out_x = compiled.pre_X.fit_transform(X_np)
+    out_xw = compiled.pre_XW.fit_transform(XW_np)
+
+    assert isinstance(out_x, np.ndarray)
+    assert isinstance(out_xw, np.ndarray)
+    assert out_x.shape[0] == 3
+    assert out_xw.shape[0] == 3
+
+
+# -----------------------------------------------------------------------------
+# cat_onehot behavioral edges (unknown categories + missing policies)
+# -----------------------------------------------------------------------------
+def test_cat_onehot_handle_unknown_error_raises_on_unseen_category():
+    plan = _mk_plan(
+        {"column": "x", "role": "X", "encoding": {"preset": "passthrough"}},
+        {
+            "column": "w",
+            "role": "W",
+            "encoding": {
+                "preset": "cat_onehot",
+                "handle_unknown": "error",
+                "missing": "impute_token",
+                "missing_token": "__MISSING__",
+            },
+        },
+    )
+
+    compiled = compile_plan_to_transformers(plan, X_order=["x"], W_order=["w"], dense_output=True)
+
+    train = pd.DataFrame({"x": [0, 1], "w": ["A", "A"]})
+    test = pd.DataFrame({"x": [0], "w": ["B"]})  # unseen
+
+    compiled.pre_XW.fit(train)
+    with pytest.raises(Exception):  # sklearn message differs by version
+        compiled.pre_XW.transform(test)
+
+
+def test_cat_onehot_handle_unknown_ignore_does_not_raise_on_unseen_category():
+    plan = _mk_plan(
+        {"column": "x", "role": "X", "encoding": {"preset": "passthrough"}},
+        {
+            "column": "w",
+            "role": "W",
+            "encoding": {
+                "preset": "cat_onehot",
+                "handle_unknown": "ignore",
+                "missing": "impute_token",
+                "missing_token": "__MISSING__",
+            },
+        },
+    )
+
+    compiled = compile_plan_to_transformers(plan, X_order=["x"], W_order=["w"], dense_output=True)
+
+    train = pd.DataFrame({"x": [0, 1], "w": ["A", "A"]})
+    test = pd.DataFrame({"x": [0], "w": ["B"]})  # unseen
+
+    compiled.pre_XW.fit(train)
+    out = compiled.pre_XW.transform(test)
+    assert out.shape[0] == 1
+
+
+def test_cat_onehot_missing_error_raises_on_missing_values():
+    plan = _mk_plan(
+        {"column": "x", "role": "X", "encoding": {"preset": "passthrough"}},
+        {"column": "w", "role": "W", "encoding": {"preset": "cat_onehot", "missing": "error"}},
+    )
+    compiled = compile_plan_to_transformers(plan, X_order=["x"], W_order=["w"], dense_output=True)
+
+    df = pd.DataFrame({"x": [0, 1], "w": ["A", None]})
+    with pytest.raises(ValueError, match="Missing values found"):
+        compiled.pre_XW.fit_transform(df)
+
+
+def test_cat_onehot_dummy_na_treats_missing_as_category():
+    plan = _mk_plan(
+        {"column": "x", "role": "X", "encoding": {"preset": "passthrough"}},
+        {"column": "w", "role": "W", "encoding": {"preset": "cat_onehot", "missing": "dummy_na"}},
+    )
+    compiled = compile_plan_to_transformers(plan, X_order=["x"], W_order=["w"], dense_output=True)
+
+    df = pd.DataFrame({"x": [0, 1, 2], "w": ["A", None, "A"]})
+    out = compiled.pre_XW.fit_transform(df)
+    assert out.shape[0] == 3
+
+
+# -----------------------------------------------------------------------------
+# datetime_epoch_seconds: invalid unit + unit scaling
+# -----------------------------------------------------------------------------
+def test_datetime_epoch_seconds_invalid_unit_raises_in_fit():
+    t = DateTimeToEpochSecondsTransformer(errors="coerce", unit="minutes", add_missing_indicator=False)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="invalid unit"):
+        t.fit(np.array([["2020-01-01"]], dtype=object))
+
+
+def test_datetime_epoch_seconds_unit_scaling_s_vs_ms():
+    dt = np.array([["1970-01-01T00:00:01Z"]], dtype=object)
+
+    t_s = DateTimeToEpochSecondsTransformer(errors="coerce", unit="s", add_missing_indicator=False)
+    t_ms = DateTimeToEpochSecondsTransformer(errors="coerce", unit="ms", add_missing_indicator=False)
+
+    out_s = t_s.transform(dt)[0, 0]
+    out_ms = t_ms.transform(dt)[0, 0]
+
+    # 1 second == 1000 milliseconds
+    assert out_ms == pytest.approx(out_s * 1000.0)
+
+
+# -----------------------------------------------------------------------------
+# map_binary: fit-time guards + transform unknowns
+# -----------------------------------------------------------------------------
+def test_map_binary_fit_rejects_empty_mapping():
+    t = BinaryMapTransformer(
+        mapping={},
+        allow_unknown=True,
+        unknown_value=-1.0,
+        missing="as_unknown",
+        missing_token=None,
+    )
+    with pytest.raises(ValueError, match="mapping must be non-empty"):
+        t.fit(np.array([["x"]], dtype=object))
+
+
+def test_map_binary_fit_rejects_missing_token_not_in_mapping():
+    t = BinaryMapTransformer(
+        mapping={"yes": 1.0, "no": 0.0},
+        allow_unknown=True,
+        unknown_value=-1.0,
+        missing="impute_token",
+        missing_token="__NA__",  # not in mapping
+    )
+    with pytest.raises(ValueError, match="missing_token must exist in mapping"):
+        t.fit(np.array([["yes"]], dtype=object))
+
+
+def test_map_binary_fit_rejects_unknown_value_when_allow_unknown_false():
+    t = BinaryMapTransformer(
+        mapping={"yes": 1.0, "no": 0.0},
+        allow_unknown=False,
+        unknown_value=-9.0,  # forbidden in strict mode
+        missing="error",
+        missing_token=None,
+    )
+    with pytest.raises(ValueError, match="unknown_value must be null"):
+        t.fit(np.array([["yes"]], dtype=object))
+
+
+# -----------------------------------------------------------------------------
+# map_ordinal: fit-time duplicate protection + strict unknowns
+# -----------------------------------------------------------------------------
+def test_map_ordinal_fit_rejects_duplicate_order():
+    t = OrdinalMapTransformer(
+        order=["a", "a"],
+        start=0,
+        allow_unknown=True,
+        unknown_value=-1,
+        missing="error",
+        missing_token=None,
+        token_position=None,
+    )
+    with pytest.raises(ValueError, match="must not contain duplicates"):
+        t.fit(np.array([["a"]], dtype=object))
+
+
+def test_map_ordinal_strict_unknown_raises_on_unseen_category():
+    t = OrdinalMapTransformer(
+        order=["low", "high"],
+        start=0,
+        allow_unknown=False,
+        unknown_value=None,
+        missing="impute_token",
+        missing_token="low",
+        token_position="prepend",
+    )
+    t.fit(np.array([["low"]], dtype=object))
+
+    with pytest.raises(ValueError, match="unknown categories"):
+        t.transform(np.array([["mid"]], dtype=object))
