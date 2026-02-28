@@ -19,7 +19,6 @@ CausalResult = Union[
 
 class CausalModel(Protocol):
     def get_info(self) -> Dict[str, Any]: ...    
-    def get_input_options_spec(self) -> Dict[str, Any]: ...
     def execute(
         self,
         *,

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID
+from scipy.sparse import issparse
 
 from econml.dml.dml import LinearDML
 import numpy as np
@@ -552,7 +553,6 @@ def _normalize_model_spec_to_wrapped_list(
     pre_XW: ColumnTransformer,
     is_discrete: bool,
     random_state: Optional[int],
-    cv: int,
     n_jobs: Optional[int],
 ) -> Sequence[BaseEstimator]:
     """
@@ -585,7 +585,6 @@ def _normalize_model_spec_to_wrapped_list(
         if is_discrete:
             # must support predict_proba for discrete nuisances :contentReference[oaicite:5]{index=5}
             lr = LogisticRegressionCV(
-                cv=cv,
                 max_iter=2000,
                 solver="lbfgs",
                 n_jobs=n_jobs,
@@ -593,7 +592,7 @@ def _normalize_model_spec_to_wrapped_list(
             )
             return [_wrap_with_pre(pre_XW=pre_XW, model=lr, require_dense=False)]
         # regression
-        lasso = WeightedLassoCVWrapper(cv=cv, random_state=random_state)
+        lasso = WeightedLassoCVWrapper(random_state=random_state)
         ridge = RidgeCV(alphas=np.logspace(-4, 4, 25))
         return [
             _wrap_with_pre(pre_XW=pre_XW, model=lasso, require_dense=False),  # type: ignore[arg-type]
@@ -687,7 +686,6 @@ def _get_default_models_for_t_and_y(
     specs : CausalSpec,
     pre_XW: ColumnTransformer,
     random_state: Optional[int] = None,
-    cv: int = 3,
     n_jobs: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
@@ -715,7 +713,6 @@ def _get_default_models_for_t_and_y(
             pre_XW=pre_XW,
             is_discrete=disc_y,
             random_state=random_state,
-            cv=cv,
             n_jobs=n_jobs,
         )
     )
@@ -725,7 +722,6 @@ def _get_default_models_for_t_and_y(
             pre_XW=pre_XW,
             is_discrete=disc_t,
             random_state=random_state,
-            cv=cv,
             n_jobs=n_jobs,
         )
     )
