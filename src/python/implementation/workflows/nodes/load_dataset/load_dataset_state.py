@@ -6,7 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from python.domain.workflows.state import ACTION, State, Status
-from python.implementation.workflows.tools.data.data_profiling_tool import DatasetSummaryModel
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
 from python.implementation.workflows.utils.utils import  uuid_from_any
 
 class LoadDatasetPayloadModel(BaseModel):

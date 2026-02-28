@@ -2,7 +2,7 @@
 from __future__ import annotations
 from typing import Any
 from python.domain.workflows.tool_factory import ToolFactory
-from python.implementation.workflows.tools.data.data_profiling_tool import DatasetProfilingStateTool
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingStateTool
 
 
 class DefaultToolFactory(ToolFactory):

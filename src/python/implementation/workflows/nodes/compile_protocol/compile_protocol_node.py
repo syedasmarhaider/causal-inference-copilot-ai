@@ -18,7 +18,7 @@ from python.implementation.workflows.nodes.compile_protocol import compile_proto
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_deps import CompileProtocolDeps
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolPayloadModel, CompileProtocolState
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CategoricalTreatmentSpecModel, ContinuousOutcomeSpecModel,ProtocolSpec
-from python.implementation.workflows.tools.data.data_profiling_tool import DatasetProfilingStateTool, DatasetSummaryModel
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingStateTool, DatasetSummaryModel
 
 log = logging.getLogger(__name__)
 

@@ -21,7 +21,7 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     get_questions,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
-from python.implementation.workflows.tools.data.data_profiling_tool import DatasetProfilingStateTool
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingStateTool
 from python.implementation.workflows.utils.utils import safe_err
 
 log = logging.getLogger(__name__)
