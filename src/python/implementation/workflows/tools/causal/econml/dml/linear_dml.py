@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID
 import warnings
-from scipy.sparse import issparse
+from scipy.sparse import issparse # type: ignore[import]
 
 from econml.dml.dml import LinearDML
 import numpy as np
@@ -389,7 +389,7 @@ class LinearDMLCausalModel(CausalModel):
                 X_query = command.inputs.x_rows
                 x_cols = spec.X
      
-                raise_if_x_rows_not_exactly_match_fit_x_cols(x_rows=df, x_cols=x_cols)           
+                raise_if_x_rows_not_exactly_match_fit_x_cols(x_rows=X_query, x_cols=x_cols)           
                 # 4) Build contrasts (baseline vs each target)
                 effects: List[Dict[CATEModelResult, Any]] = []
 
@@ -445,7 +445,7 @@ class LinearDMLCausalModel(CausalModel):
 
                     # point estimate
                     try:
-                        item["cate"] = est.effect(X_query, T0=t0, T1=t1_val)  # vector length m
+                        item["cate"] = est.effect(X_query, T0=t0, T1=t1_val)  # pyright: ignore[reportUnknownMemberType] # vector length m
                     except Exception as e:
                         return CommandFailure(
                             run_id=command.run_id,
@@ -462,18 +462,18 @@ class LinearDMLCausalModel(CausalModel):
 
     
                     try:
-                        lo, hi = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha)
+                        lo, hi = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
                         if lo is None or hi is None:
                             warnings.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
                         else:
-                            item["cate_interval"] = (list(lo), list(hi)) if lo is not None and hi is not None else None    
+                            item["cate_interval"] = (list(lo), list(hi)) if lo is not None and hi is not None else None     # pyright: ignore[reportUnknownArgumentType]
                     except Exception as e:
                         warnings.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                         item["cate_interval"] = None
 
           
                     try:
-                        inf = est.effect_inference(X_query, T0=t0, T1=t1_val)
+                        inf = est.effect_inference(X_query, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
                         item["cate_inference"] = serialize_inference_obj(inf)
                         if inf is None:
                             warnings.append("INFERENCE_NOT_AVAILABLE: effect_inference returned None")
@@ -540,7 +540,7 @@ class LinearDMLCausalModel(CausalModel):
 
 class _ToDense(BaseEstimator, TransformerMixin):
     """Convert sparse -> dense for models that don't accept sparse."""
-    def fit(self, X, y=None):
+    def fit(self, X, y=None): # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return self
 
     def transform(self, X: Any) -> np.ndarray:
@@ -691,7 +691,8 @@ def _normalize_model_spec_to_wrapped_list(
             out.extend(candidates_for_keyword(item))
         else:
             # user gave a concrete estimator/pipeline: wrap it so pre_XW is always applied fold-safely
-            out.append(_wrap_with_pre(pre_XW=pre_XW, model=item, require_dense=True))
+            # TODO: fix later
+            out.append(_wrap_with_pre(pre_XW=pre_XW, model=item, require_dense=True)) # pyright: ignore[reportArgumentType]
     if not out:
         raise ValueError("Empty nuisance model candidate list.")
     return out
