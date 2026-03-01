@@ -6,6 +6,7 @@ from typing import Any, ClassVar, Optional, Sequence
 from pydantic import BaseModel, ConfigDict
 
 from python.domain.workflows.state import ACTION, State, Status
+from python.implementation.workflows.nodes.model_selection.model_selection_deps import ModelSelectionDeps
 
 
 class ConfirmedModelSelectionPayload(BaseModel):
@@ -63,7 +64,7 @@ class ModelSelectionState(State):
         return "NEEDS_INPUT"
 
     def pre_required_states_names(self) -> Sequence[str]:
-        return ()
+        return ModelSelectionDeps.pre_required_states_names()
 
     def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json", exclude_none=True)

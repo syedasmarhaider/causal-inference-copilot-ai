@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 import logging
-from typing import Any, ClassVar, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Set, Tuple, cast
 from uuid import UUID, uuid4
 
 import pandas as pd
@@ -24,6 +24,7 @@ from python.implementation.workflows.nodes.compile_protocol.protocol_specs impor
     ContinuousOutcomeSpecModel,
     ProtocolSpec,
 )
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingStateTool
 from python.implementation.workflows.utils.utils import BOOL_FALSE, BOOL_TRUE
 
 
@@ -70,6 +71,7 @@ class CleanProtocolNode(Node):
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         try:
+            data_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))  
             deps = CleanProtocolDeps.from_loaded(previous_state_dependencies)
             dataset_id = deps.load_dataset.payload.id
             if dataset_id is None:
@@ -162,6 +164,15 @@ class CleanProtocolNode(Node):
                 overwrite=True,
                 include_index=False,
             )
+            
+            summary = data_profiling_tool.extract_dataset_summary(
+                df3,
+                max_categories=1000,
+                sample_distinct=1000,
+                compute_quantiles=True,
+                strict=False,
+            )
+            
 
             # 6) Success state
             msg_ok = _render_success_message(
@@ -173,10 +184,13 @@ class CleanProtocolNode(Node):
                 excl_summary=excl_summary,
                 domain_summary=domain_summary,
             )
+            
+    
             return CleanProtocolState(
                 payload=CleanProtocolPayloadModel(
                     clean_dataset_id=clean_id,
                     cleaning_error=None,
+                    summary=summary,
                     user_message=msg_ok,
                 )
             )

@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from python.domain.workflows.state import ACTION, State, Status
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_deps import CleanProtocolDeps
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
 from python.implementation.workflows.utils.utils import uuid_from_any
 
 
@@ -19,6 +20,7 @@ class CleanProtocolPayloadModel(BaseModel):
     clean_dataset_id: Optional[UUID] = None
     cleaning_error: Optional[str] = None
     user_message: Optional[str] = None
+    summary: Optional[DatasetSummaryModel] = None
 
     @field_validator("cleaning_error", "user_message", mode="before")
     @classmethod
@@ -54,7 +56,7 @@ class CleanProtocolState(State):
     def status(self) -> Status:
         if self.payload.cleaning_error is not None:
             return "ABORTED"
-        if self.payload.clean_dataset_id is not None:
+        if self.payload.clean_dataset_id is not None and self.payload.summary is not None:
             return "DONE"
         return "PENDING"
 

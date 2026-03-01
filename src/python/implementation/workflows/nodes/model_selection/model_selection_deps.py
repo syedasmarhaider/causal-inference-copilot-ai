@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Mapping
-from typing import Sequence
+from typing import Sequence, TypeVar
 
 from python.domain.workflows.state import State
 
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
-from python.implementation.workflows.nodes.validate_clean_protocol.validate_clean_protocol_state import (
-    ValidateCleanProtocolState,
-)
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import ValidateCleanProtocolState
+
+
+
+T = TypeVar("T", bound=State)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +34,7 @@ class ModelSelectionDeps:
 
     @classmethod
     def from_loaded(cls, loaded: Mapping[str, State]) -> "ModelSelectionDeps":
-        def _get(name: str, expected_type: type[State]) -> State:
+        def _get(name: str, expected_type: type[T]) -> T:
             st = loaded.get(name)
             if st is None:
                 raise ValueError(f"ModelSelectionDeps: missing {name}")
