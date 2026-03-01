@@ -44,7 +44,7 @@ from python.implementation.workflows.tools.causal.causal_command import (
 )
 from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-from python.implementation.workflows.tools.causal.econml.dml.dml_info import  linear_dml_causal_model_info
+from python.implementation.workflows.tools.causal.econml.models_info import  get_linear_dml_causal_model_info
 from python.implementation.workflows.tools.causal.econml.utils import ModelSpecError, build_init_fit_options_param_maps, categorical_t0_t1_pairs, get_input_params_from_spec, has_missing, now_utc, raise_if_x_rows_not_exactly_match_fit_x_cols, required_init_keys, serialize_inference_obj
 
 @dataclass(frozen=True, slots=True)
@@ -53,8 +53,8 @@ class LinearDMLCausalModel(CausalModel):
     models_repo: ModelsRepo
     
 
-    def get_info(self) -> Dict[str, Any]:
-        return linear_dml_causal_model_info()
+    def get_info(self) -> str:
+        return get_linear_dml_causal_model_info()
 
     def execute(
         self,

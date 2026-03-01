@@ -1,0 +1,61 @@
+econml.dml.CausalForestDML
+What it is: DML-style orthogonalization + forest final stage for nonparametric heterogeneity; in EconML it is a linear-in-treatment CATE estimator (moment equation uses ⟨θ(x),T⟩\langle \theta(x), T\rangle⟨θ(x),T⟩).
+CATE predictor:
+Nonparametric θ(x)\theta(x)θ(x) via an honest forest; effect computed as τ(x,T0,T1)\tau(x,T_0,T_1)τ(x,T0​,T1​) and marginal effects available.
+
+
+Identification assumptions: unconfoundedness + overlap; forest theory for heterogeneity and inference (causal forest literature).
+Compatibility scores
+Binary T: good — discrete_treatment=True.
+
+
+Categorical T: good — via discrete treatment encoding (categories baseline).
+
+
+Continuous T: good — supported; still linear in treatment representation at the moment-equation level.
+
+
+Continuous Y: good — model_y regressor/auto.
+
+
+Binary Y: ok — discrete_outcome=True.
+
+
+Count/other Y: ok (practical) — same caveat.
+
+
+Strong heterogeneity need: good — explicitly supports complex, nonlinear θ(x)\theta(x)θ(x) via forests.
+
+
+High-dimensional W: ok — W in nuisances; must validate nuisance stability.
+
+
+High-dimensional X: good — forests can handle many X, but you still need enough n.
+
+
+Sparse linear signal expected: ok — can recover but not as directly interpretable as linear/sparse linear.
+
+
+Nonlinear signal expected: good — core strength.
+
+
+Weak overlap robustness: poor — overlap problems remain critical; the class exposes diagnostics but doesn’t “solve” positivity. (This is also reflected in repeated user failure reports in the issue tracker for discrete/binary settings.)
+
+
+Interpretability: ok — post-hoc tools (e.g., SHAP in EconML examples) rather than coefficients.
+
+
+Compute cost: poor — forest training + inference is heavy; inference has strict constraints.
+
+
+Inference constraint (hard rule):
+If inference=True, max_samples must be <= 0.5 (or integer < n/2).
+
+
+Sample-size regime (heuristic)
+Causal forests generally need larger n than linear models for stable CATE surfaces and valid inference claims; the causal forest theory provides asymptotic normality under assumptions.
+
+
+Links
+Docs: https://www.pywhy.org/EconML/_autosummary/econml.dml.CausalForestDML.html
+Causal forest paper: https://www.tandfonline.com/doi/full/10.1080/01621459.2017.1319839

@@ -7,7 +7,7 @@ from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
 from python.domain.workflows.tool import Tool
 from python.implementation.workflows.tools.causal.causal_model import CausalModel
-from python.implementation.workflows.tools.causal.econml.dml.causal_dml import CausalForestDMLCausalModel
+from python.implementation.workflows.tools.causal.econml.dml.causal_forest_dml import CausalForestDMLCausalModel
 from python.implementation.workflows.tools.causal.econml.dml.kernal_dml import KernelDMLCausalModel
 from python.implementation.workflows.tools.causal.econml.dml.linear_dml import LinearDMLCausalModel
 from python.implementation.workflows.tools.causal.econml.dml.sparse_linear_dml import SparseLinearDMLCausalModel

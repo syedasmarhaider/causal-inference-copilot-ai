@@ -1,0 +1,58 @@
+econml.dr.ForestDRLearner
+What it is: DRLearner with a RegressionForest final stage (nonparametric CATE), enabling nonparametric inference; default has n_estimators=1000 and forest-specific parameters (honest, subforest_size, max_samples, etc.).
+CATE predictor:
+τ(x)\tau(x)τ(x) learned by forest final model on DR pseudo-outcomes.
+
+
+Identification assumptions: unconfoundedness + overlap; propensity clipping via min_propensity exists but overlap still critical.
+Compatibility scores
+Binary T: good — discrete treatment DR setting.
+
+
+Categorical T: good — baseline semantics via categories and one-hot minus baseline.
+
+
+Continuous T: poor — this DR learner is for discrete treatments.
+
+
+Continuous Y: good — regression nuisance.
+
+
+Binary Y: ok — discrete_outcome=True.
+
+
+Count/other Y: ok (practical) — same caveat.
+
+
+Strong heterogeneity need: good — flexible nonlinear heterogeneity via forest final stage.
+
+
+High-dimensional W: ok — nuisance models must carry it.
+
+
+High-dimensional X: good — forest final stage can handle many features (subject to n).
+
+
+Sparse linear signal expected: ok — can fit it but not as interpretable/efficient as sparse linear models.
+
+
+Nonlinear signal expected: good — intended regime.
+
+
+Weak overlap robustness: poor — DR pseudo-outcome sensitivity; only safeguard is min_propensity clipping.
+
+
+Interpretability: ok — post-hoc rather than coefficients.
+
+
+Compute cost: poor — defaults show why: n_estimators=1000, honest forest machinery, bootstrap-of-little-bags style components (subforest_size).
+
+
+Sample-size regime (heuristic)
+Needs larger n than linear/sparse linear to get stable nonlinear CATE + usable uncertainty.
+
+
+Links
+Docs: https://www.pywhy.org/EconML/_autosummary/econml.dr.ForestDRLearner.html
+DR learner source: https://www.pywhy.org/EconML/_modules/econml/dr/_drlearner.html
+Causal forest theory ref: https://www.tandfonline.com/doi/full/10.1080/01621459.2017.1319839

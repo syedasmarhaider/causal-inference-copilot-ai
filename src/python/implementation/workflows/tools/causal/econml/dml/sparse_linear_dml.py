@@ -46,7 +46,7 @@ from python.implementation.workflows.tools.causal.causal_model import CausalComm
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 
 # you probably want a parallel info provider like sparse_linear_dml_causal_model_info()
-from python.implementation.workflows.tools.causal.econml.dml.dml_info import linear_dml_causal_model_info
+from python.implementation.workflows.tools.causal.econml.models_info import get_sparse_linear_dml_causal_model_info
 
 from python.implementation.workflows.tools.causal.econml.utils import (
     ModelSpecError,
@@ -278,11 +278,8 @@ class SparseLinearDMLCausalModel(CausalModel):
     data_repo: DataRepo
     models_repo: ModelsRepo
 
-    def get_info(self) -> Dict[str, Any]:
-        info = linear_dml_causal_model_info()
-        info["name"] = "econml.dml.SparseLinearDML"
-        info["backend"] = "econml.dml.SparseLinearDML"
-        return info
+    def get_info(self) -> str:
+        return get_sparse_linear_dml_causal_model_info()
 
     def execute(
         self,

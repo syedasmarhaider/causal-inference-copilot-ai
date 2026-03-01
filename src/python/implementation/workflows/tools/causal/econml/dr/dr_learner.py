@@ -49,9 +49,7 @@ from python.implementation.workflows.tools.causal.causal_model import (
     CausalResult,
 )
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-from python.implementation.workflows.tools.causal.econml.dml.dml_info import (
-    linear_dml_causal_model_info,  # you can replace with dr_dml_info later
-)
+from python.implementation.workflows.tools.causal.econml.models_info import get_forest_dr_learner_causal_model_info, get_linear_dr_learner_causal_model_info, get_sparse_linear_dr_learner_causal_model_info
 from python.implementation.workflows.tools.causal.econml.utils import (
     ModelSpecError,
     build_init_fit_options_param_maps,
@@ -370,12 +368,10 @@ class _BaseDRLearnerAdapter(CausalModel):
 
     ESTIMATOR_CLS: Any = DRLearner
     BACKEND_NAME: str = "econml.dr.DRLearner"
+    INFO: str = "No info provided."
 
-    def get_info(self) -> Dict[str, Any]:
-        info = linear_dml_causal_model_info()
-        info["name"] = self.BACKEND_NAME
-        info["backend"] = self.BACKEND_NAME
-        return info
+    def get_info(self) -> str:
+        return self.INFO
 
     def execute(
         self,
@@ -833,15 +829,17 @@ class _BaseDRLearnerAdapter(CausalModel):
 class LinearDRLearnerCausalModel(_BaseDRLearnerAdapter):
     ESTIMATOR_CLS: Any = LinearDRLearner
     BACKEND_NAME: str = "econml.dr.LinearDRLearner"
+    INFO :str = get_linear_dr_learner_causal_model_info()
 
 
 @dataclass(frozen=True, slots=True)
 class ForestDRLearnerCausalModel(_BaseDRLearnerAdapter):
     ESTIMATOR_CLS: Any = ForestDRLearner
     BACKEND_NAME: str = "econml.dr.ForestDRLearner"
-
+    INFO :str = get_forest_dr_learner_causal_model_info()
 
 @dataclass(frozen=True, slots=True)
 class SparseLinearDRLearnerCausalModel(_BaseDRLearnerAdapter):
     ESTIMATOR_CLS: Any = SparseLinearDRLearner
     BACKEND_NAME: str = "econml.dr.SparseLinearDRLearner"
+    INFO :str = get_sparse_linear_dr_learner_causal_model_info()

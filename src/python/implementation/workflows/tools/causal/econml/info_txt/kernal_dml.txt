@@ -1,0 +1,57 @@
+econml.dml.KernelDML
+What it is: DML where the final stage uses random Fourier features (RFF) to approximate a kernelized CATE (smooth nonlinear function class).
+CATE predictor:
+τ(x)≈⟨θ,ΦRFF(x)⟩\tau(x)\approx \langle \theta, \Phi_{\text{RFF}}(x)\rangleτ(x)≈⟨θ,ΦRFF​(x)⟩ with dim random features and bandwidth bw.
+
+
+Identification assumptions: DML-style unconfoundedness + overlap.
+Compatibility scores
+Binary T: good — supports discrete_treatment.
+
+
+Categorical T: good — categorical via discrete_treatment + categories baseline.
+
+
+Continuous T: ok — supported (still “linear in treatment representation” unless you featurize T).
+
+
+Continuous Y: good — arbitrary regressor in nuisances.
+
+
+Binary Y: ok — discrete_outcome=True.
+
+
+Count/other Y: ok (practical) — same caveat.
+
+
+Strong heterogeneity need: good — targets smooth nonlinear CATE surfaces (kernel class approximation).
+
+
+High-dimensional W: ok — W in nuisances; kernel is acting on X via RFF.
+
+
+High-dimensional X: ok — controlled via fixed dim, but tuning (dim, bw) is nontrivial.
+
+
+Sparse linear signal expected: ok — can work but may be unnecessary complexity.
+
+
+Nonlinear signal expected: good — that’s the point of RFF.
+
+
+Weak overlap robustness: ok — still requires overlap; DML doesn’t solve positivity.
+
+
+Interpretability: poor — RFF basis not human-interpretable.
+
+
+Compute cost: ok — depends heavily on dim and cross-fitting; can be expensive.
+
+
+Sample-size regime (heuristic)
+Needs more data than linear to stabilize a flexible nonlinear CATE surface; otherwise high variance/tuning instability.
+
+
+Links
+Docs: https://www.pywhy.org/EconML/_autosummary/econml.dml.KernelDML.html
+DML paper: https://doi.org/10.1111/ectj.12097

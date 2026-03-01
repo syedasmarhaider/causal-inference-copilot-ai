@@ -45,7 +45,7 @@ from python.implementation.workflows.tools.causal.causal_command import (
 )
 from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-from python.implementation.workflows.tools.causal.econml.dml.dml_info import linear_dml_causal_model_info
+from python.implementation.workflows.tools.causal.econml.models_info import get_kernel_dml_causal_model_info
 from python.implementation.workflows.tools.causal.econml.utils import (
     ModelSpecError,
     build_init_fit_options_param_maps,
@@ -286,8 +286,7 @@ class KernelDMLCausalModel(CausalModel):
     models_repo: ModelsRepo
 
     def get_info(self) -> str:
-        return "some info"
-        # CHANGED (KernelDML): metadata name/backend
+        return get_kernel_dml_causal_model_info()
         
 
     def execute(
@@ -323,7 +322,7 @@ class KernelDMLCausalModel(CausalModel):
             return self._fit(user_id=user_id, conversation_id=conversation_id, command=command, df=df, started_at=started)
         if isinstance(command, ATECommand):
             return self._ate(user_id=user_id, conversation_id=conversation_id, command=command, df=df, started_at=started)
-        if isinstance(command, CATECommand):
+        if isinstance(command, CATECommand): # pyright: ignore[reportUnnecessaryIsInstance]
             return self._cate(user_id=user_id, conversation_id=conversation_id, command=command, started_at=started)
 
         raise ValueError(f"Unsupported command type: {type(command)}")

@@ -46,7 +46,7 @@ from python.implementation.workflows.tools.causal.causal_model import CausalComm
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 
 # NOTE: you should ideally add causal_forest_dml_causal_model_info()
-from python.implementation.workflows.tools.causal.econml.dml.dml_info import linear_dml_causal_model_info
+from python.implementation.workflows.tools.causal.econml.models_info import get_causal_forest_dml_causal_model_info
 
 from python.implementation.workflows.tools.causal.econml.utils import (
     ModelSpecError,
@@ -282,9 +282,8 @@ class CausalForestDMLCausalModel(CausalModel):
     models_repo: ModelsRepo
 
     def get_info(self) -> str:
-        # CHANGED (Forest): backend metadata
-        info = linear_dml_causal_model_info()
-        return info
+        return get_causal_forest_dml_causal_model_info()
+        
 
     def execute(
         self,
