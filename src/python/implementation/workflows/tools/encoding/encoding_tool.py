@@ -44,9 +44,6 @@ class CompiledTransformers:
     """
     pre_X: ColumnTransformer
     pre_XW: ColumnTransformer
-    X_order: Tuple[str, ...]
-    W_order: Tuple[str, ...]
-
 
 CTTransformer = Union[BaseEstimator, Literal["passthrough"], Literal["drop"]]
 
@@ -563,6 +560,4 @@ def compile_plan_to_transformers(
     return CompiledTransformers(
         pre_X=pre_X,
         pre_XW=pre_XW,
-        X_order=tuple(X_order_l),
-        W_order=tuple(W_order_l),
     )  
