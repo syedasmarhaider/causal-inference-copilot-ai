@@ -76,6 +76,7 @@ def create_conversation(req: CreateConversationRequest):
     user_id = req.user_id or uuid4()
     conversation_id = uuid4()
     logging.warning(f"Creating conversation: user_id={user_id}, conversation_id={conversation_id}")
+    _workflow.create_init_files(user_id=user_id, conversation_id=conversation_id)
     return CreateConversationResponse(user_id=user_id, conversation_id=conversation_id)
 
 
@@ -103,5 +104,6 @@ async def invoke_once(conversation_id: UUID, req: InvokeRequest):
         node_message=resp.node_message,
         needs_input=resp.needs_input,
         current_stage=str(resp.current_stage),
+        artifact_ids =resp.artifact_ids,
         current_stage_status=str(resp.current_stage_status),
     )

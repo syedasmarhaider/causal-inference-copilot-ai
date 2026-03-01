@@ -28,6 +28,7 @@ class WorkflowResponse:
     needs_input: bool
     current_stage: Stage
     current_stage_status: Status
+    artifact_ids: Optional[list[str]] = None
 
 
 class WorkflowApp:
@@ -61,6 +62,21 @@ class WorkflowApp:
             conversation_id=conversation_id,
             artifact_id=artifact_id,
         ) 
+    
+    # TODO: this will be removed just now for init data
+    def create_init_files(self, user_id: UUID, conversation_id: UUID) -> None: 
+        df= self._data_repo.get_csv_data(
+            user_id=UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
+            conversation_id=UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
+            dataset_id=UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
+        )
+        
+        self._data_repo.save_csv_data(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            dataset_id=UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
+            df=df,
+        )
         
     def handle(self, req: WorkflowRequest) -> WorkflowResponse:
         if req.user_message is not None and req.user_message.strip():
@@ -181,6 +197,7 @@ class WorkflowApp:
             needs_input=(new_state.needs_action == "NEEDS_INPUT"),
             current_stage=new_state.name,
             current_stage_status=new_state.status,
+            artifact_ids= list("486f4975-6cd9-4261-a122-e6b0fc46462d")
         )
 
     # ------------------------
