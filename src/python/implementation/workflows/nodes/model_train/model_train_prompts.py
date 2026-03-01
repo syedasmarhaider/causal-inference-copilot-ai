@@ -58,9 +58,6 @@ Your job:
 - user message to clinician if needed to clarify tradeoffs or ask for missing info
 Supported presets (JSON):
 
-TransformPlan schema reminders:
-- columns: list of {column, role, encoding}
-- encoding must contain "preset" plus valid parameters for that preset.
 
 Chosen causal estimator (JSON):
 {selected_model_json}

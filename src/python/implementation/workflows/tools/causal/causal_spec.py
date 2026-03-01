@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Annotated, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -77,7 +78,7 @@ class CausalSpec(BaseModel):
         if t in w or t in x or t in z:
             raise ValueError("Treatment column must not appear in W/X/Z.")
         if w & x:
-            raise ValueError("W (adjustment_set) and X (effect_modifiers) must be disjoint.")
+            logging.warning("Columns %s appear in both W and X. This is not recommended but we will keep them in W.", w & x)
         if (w | x | z) and (len(w | x | z) != len(list(w | x | z))):
             # defensive; sets already unique. keep if you later change representation.
             pass

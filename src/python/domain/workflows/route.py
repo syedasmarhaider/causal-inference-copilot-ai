@@ -10,7 +10,7 @@ from python.domain.workflows.state import State
 
 
 class NextDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid")
     state_name: str
     router_message_for_node: Optional[str] = None
     # TODO: temp sol change later when we do snapshot mode.

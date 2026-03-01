@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+import logging
 from typing import Any, Optional, Sequence, cast
 from uuid import UUID, uuid4
 
@@ -343,6 +344,7 @@ class ModelTrainNode(Node):
         )
 
         res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)
+        logging.warning(f"Model training command executed with result: {res}")
         
         if not isinstance(res, FitResult):
             raise ValueError(f"Expected FitResult from model execution, got {type(res).__name__}")
@@ -361,7 +363,7 @@ class ModelTrainNode(Node):
                 }
             )
             
-        if isinstance(res, CommandFailure) and res.status == "FAILED":
+        if isinstance(res, CommandFailure):
             err_obj = res.error
             err_msg = getattr(err_obj, "message", None) or str(err_obj) or "Training failed for an unknown reason."
             payload = state.payload.model_copy(

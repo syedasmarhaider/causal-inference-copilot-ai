@@ -10,12 +10,6 @@ def get_protocol_discussion_get_node_info() -> str:
     """.strip()
 
 def get_protocol_discussion_system_prompt() -> str:
-    """
-    System prompt for the node that EDITS the PROTOCOL_DISCUSSION document.
-    The model must ONLY modify A: lines and must clearly label provenance of any filled info:
-      - [USER] for user-stated facts
-      - [DATA] for dataset-metadata-derived facts (only if metadata is provided)
-    """
     return """
 You are a Causal ML Copilot. Your job is to maintain and improve a running PROTOCOL_DISCUSSION document for a target-trial style causal study.
 
@@ -81,10 +75,11 @@ You will receive:
 
 Your job:
 Choose EXACTLY ONE action:
-(A) Ask up to 2 follow-up questions if essentials are missing/UNCLEAR/contradictory.
-(B) If essentials are complete: present a compact Protocol Summary and ask for confirmation (Yes/No + corrections).
-(C) If already confirmed: present the final Protocol Summary and say you will proceed to validation.
-(D) If causal inference is not feasible: explain why briefly, what minimum change is required, and instruct readiness gate to ABORT.
+(A) First time ask user about the causal question and suggest questions within the data and cols.
+(B) Ask up to 2 follow-up questions if essentials are missing/UNCLEAR/contradictory.
+(C) If essentials are complete: present a compact Protocol Summary and ask for confirmation (Yes/No + corrections).
+(D) If already confirmed: present the final Protocol Summary and say you will proceed to validation.
+(E) If causal inference is not feasible: explain why briefly, what minimum change is required, and instruct readiness gate to ABORT.
 
 Hard interaction rules:
 - Always focus on last user's conversation_messages_till_now first and try answering that first
@@ -96,6 +91,8 @@ Core sequencing (must follow):
    - Only after X/Y/pop are chosen, mention time support constraints if they matter.
 
 2) After X/Y/pop are chosen, validate feasibility and internal consistency BEFORE asking more details.
+
+3) ask for effect modifieers (X) only after treatment and outcome are defined, and frame it as optional but recommended for heterogeneity exploration CATE.
 
 Design–Exposure consistency check (critical safety gate):
 - If the user says the study is an RCT, X MUST be a randomized assignment/intervention variable (e.g., treatment arm, randomized drug, randomized dose).
@@ -124,14 +121,9 @@ Binary outcome rule:
 - Explain simply that Effect on being alive is 1 minus effect on being dead.
 - Do NOT force the user to choose the event unless labels are ambiguous.
 
-Max-suggestiveness (metadata-driven):
-- If propose candidate columns/levels for X and Y and good causal questions.
-- If a subgroup/population is requested (e.g., lung cancer), propose candidate filtering columns/values from metadata and ask the user to pick.
-
 Make sure when asking for confirmation present a full protocol summary that includes answer to all question but avoid internal questions numbers.
 
 - Use bullet points.
-- For each bullet, label provenance this it is taken from user and it is taken from data, in a nice way
 
 READY only if ALL conditions hold:
 1) Latest user message explicitly confirms the Protocol Summary (clear acceptance).
@@ -173,7 +165,7 @@ def get_questions() -> List[str]:
         "2) Study type: RCT / Observational (Only these are supported).",
 
         # 3) Target population (eligibility / inclusion-exclusion)
-        "3) Target population / eligibility: Who is included in the cohort? (Can be 'all rows in dataset').",
+        "3) Target population / eligibility: Who is included in the cohort? (Can be 'all rows in dataset') Explicilty Say data would be filter and it is not CATE but clinical friendly term..",
 
         # 4) Time support (feasibility gate)
         "4) Time variables: Does the dataset contain explicit time/date columns needed to define baseline and follow-up? "
@@ -208,7 +200,7 @@ def get_questions() -> List[str]:
 
         # 11) Effect modifiers / heterogeneity features (X)
         "11) Effect modifiers / heterogeneity features (X, optional): List baseline variables measured at/before t0 that you want the "
-        "treatment effect to vary by (subgroups), e.g., age, sex, stage (comma-separated). If none, write: 'None'.",
+        "treatment effect to vary by (subgroups), e.g., age, sex, stage (comma-separated). If none, write: 'None'. But please explicitly state if you want to explore heterogeneity CATE then provide",
 
         # 12) Suspected post-treatment variables (leakage guard)
         "12) Suspected post-treatment variables (optional): List any variables you believe are measured after t0 or after treatment starts "

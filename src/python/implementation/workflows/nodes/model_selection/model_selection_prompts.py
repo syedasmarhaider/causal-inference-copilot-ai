@@ -35,20 +35,6 @@ Style
 MODEL_SELECTION_RECOMMENDER_USER_PROMPT_TEMPLATE = """
 You will receive a context bundle and a catalog of supported estimators.
 
-Return JSON for this schema (do not include extra keys):
-{
-  "recommendations": [
-    {
-      "estimator_fqcn": "string",
-      "title": "string",
-      "best_when": "string",
-      "why": "string",
-      "tradeoffs": "string | null"
-    }
-  ],
-  "clinician_message": "string"
-}
-
 Rules
 - recommendations MUST have exactly 3 items.
 - estimator_fqcn MUST be one of supported_estimators.
