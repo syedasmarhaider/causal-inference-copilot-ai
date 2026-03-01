@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence, Type
 from uuid import UUID
 
+from python.domain.repo.data_repo import ArtifactRef, DataRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import ChatMessage
 from python.domain.workflows.node import Node
@@ -34,6 +35,7 @@ class WorkflowApp:
         self,
         *,
         repo: WorkflowStateRepo,
+        data_repo: DataRepo,
         router: Router,
         nodes_by_state_name: Mapping[str, Node],
         state_classes_by_name: Mapping[str, Type[State]],
@@ -45,13 +47,21 @@ class WorkflowApp:
             raise ValueError("max_steps_per_call must be >= 1")
 
         self._repo = repo
+        self._data_repo = data_repo
         self._router = router
         self._nodes = dict(nodes_by_state_name)
         self._state_classes = dict(state_classes_by_name)
         self._tool_factory = tool_factory
         self._history_limit = history_limit
         self._max_steps_per_call = max_steps_per_call
-
+    
+    def get_artifact(self, user_id: UUID, conversation_id: UUID, artifact_id: UUID) -> ArtifactRef:
+        return self._data_repo.get_artifact_ref(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            artifact_id=artifact_id,
+        ) 
+        
     def handle(self, req: WorkflowRequest) -> WorkflowResponse:
         if req.user_message is not None and req.user_message.strip():
             self._repo.append_message(

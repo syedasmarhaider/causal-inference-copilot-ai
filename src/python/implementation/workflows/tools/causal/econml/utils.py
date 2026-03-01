@@ -166,7 +166,7 @@ def has_missing(arr: Any) -> bool:
 
 def get_input_params_from_spec(
     df: pd.DataFrame,
-    spec: CausalSpec
+    spec: CausalSpec,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, Any]]:
     y_col = spec.Y.column
     t_col = spec.T.column

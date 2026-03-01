@@ -79,6 +79,7 @@ def make_workflow_app(settings: WorkflowSettings) -> WorkflowApp:
     # 6) Workflow app
     return WorkflowApp(
         repo=workflow_repo,
+        data_repo=data_repo,
         router=router,
         nodes_by_state_name=nodes_by_state_name,
         state_classes_by_name=state_classes_by_name,

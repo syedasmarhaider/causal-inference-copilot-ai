@@ -4,8 +4,9 @@ import asyncio
 import logging
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from python.adapters.api.schemas import (
     CreateConversationRequest,
@@ -41,6 +42,35 @@ def healthz():
     return {"ok": True}
 
 
+@app.get(path="/v1/conversations/{conversation_id}/artifacts/{artifact_id}")
+def get_artifact(
+    conversation_id: UUID,
+    artifact_id: UUID,
+    user_id: UUID | None = Query(default=None),
+    x_user_id: UUID | None = Header(default=None, alias="X-User-Id"),
+):
+    uid = user_id or x_user_id
+    if uid is None:
+        raise HTTPException(status_code=400, detail="user_id required (query ?user_id=... or header X-User-Id)")
+
+    try:
+        ref = _workflow.get_artifact(
+            user_id=uid,
+            conversation_id=conversation_id,
+            artifact_id=artifact_id,
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="artifact not found")
+
+    return FileResponse(
+        path=ref.path,
+        media_type=ref.mime,
+        headers={
+            "Content-Disposition": "inline",
+            "Cache-Control": "private, max-age=60",
+        },
+    )
+    
 @app.post("/v1/conversations", response_model=CreateConversationResponse)
 def create_conversation(req: CreateConversationRequest):
     user_id = req.user_id or uuid4()

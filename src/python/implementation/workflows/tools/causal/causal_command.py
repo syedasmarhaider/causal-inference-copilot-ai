@@ -34,7 +34,9 @@ class BaseCommand:
 @dataclass(frozen=True, slots=True)
 class FitInputs:
     model_spec: Optional[Dict[str, Any]] = None
-    missingness_mode: MissingnessMode = "none"
+    missingness_mode: MissingnessMode = "present"
+    X_order: Optional[List[str]] = None
+    Y_order: Optional[List[str]] = None
     pre_X:  Optional[ColumnTransformer] = None
     pre_XW: Optional[ColumnTransformer] = None
     
