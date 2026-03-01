@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import issparse  # type: ignore[import]
 
-from econml.dml.dml import SparseLinearDML
+from econml.dml import CausalForestDML
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
@@ -45,7 +45,7 @@ from python.implementation.workflows.tools.causal.causal_command import (
 from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 
-# you probably want a parallel info provider like sparse_linear_dml_causal_model_info()
+# NOTE: you should ideally add causal_forest_dml_causal_model_info()
 from python.implementation.workflows.tools.causal.econml.dml.dml_info import linear_dml_causal_model_info
 
 from python.implementation.workflows.tools.causal.econml.utils import (
@@ -103,12 +103,13 @@ def _normalize_model_spec_to_wrapped_list(
     Returns: list of fully wrapped sklearn estimators (Pipeline(pre -> [dense] -> model)).
 
     missingness:
-      - "none": your usual candidate menu.
+      - "none": usual candidate menu.
       - "present": restrict to NaN-tolerant candidates (HGB), avoiding models that error on NaNs.
     """
     missing_present = (missingness == "present")
 
     def build_boosting_candidates_nan_safe() -> Sequence[BaseEstimator]:
+        # NaN-safe fallback (dense); good when you truly cannot impute upstream.
         if is_discrete:
             hgb = HistGradientBoostingClassifier(
                 random_state=random_state,
@@ -151,6 +152,7 @@ def _normalize_model_spec_to_wrapped_list(
         if missing_present:
             return build_boosting_candidates_nan_safe()
 
+        # WARNING: these densify; can explode RAM if pre_XW creates huge sparse one-hot matrices.
         if is_discrete:
             et = ExtraTreesClassifier(
                 n_estimators=400,
@@ -224,6 +226,7 @@ def _normalize_model_spec_to_wrapped_list(
         if isinstance(item, str):
             out.extend(candidates_for_keyword(item))
         else:
+            # User provided a concrete estimator/pipeline; we still wrap to enforce pre_XW.
             out.append(_wrap_with_pre(pre_XW=pre_XW, model=item, require_dense=True))  # pyright: ignore[reportArgumentType]
 
     if not out:
@@ -270,18 +273,17 @@ def _get_default_models_for_t_and_y(
 
 
 # =============================================================================
-# SparseLinearDML adapter
+# CausalForestDML adapter
 # =============================================================================
 
 @dataclass(frozen=True, slots=True)
-class SparseLinearDMLCausalModel(CausalModel):
+class CausalForestDMLCausalModel(CausalModel):
     data_repo: DataRepo
     models_repo: ModelsRepo
 
-    def get_info(self) -> Dict[str, Any]:
+    def get_info(self) -> str:
+        # CHANGED (Forest): backend metadata
         info = linear_dml_causal_model_info()
-        info["name"] = "econml.dml.SparseLinearDML"
-        info["backend"] = "econml.dml.SparseLinearDML"
         return info
 
     def execute(
@@ -329,7 +331,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 df=df,
                 started_at=started,
             )
-        if isinstance(command, CATECommand): # pyright: ignore[reportUnnecessaryIsInstance]
+        if isinstance(command, CATECommand):  # pyright: ignore[reportUnnecessaryIsInstance]
             return self._cate(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -372,10 +374,17 @@ class SparseLinearDMLCausalModel(CausalModel):
             if miss["Y"] or miss["T"]:
                 raise ModelSpecError(f"Y/T contain missing values; must be fixed upstream. missing={miss}")
 
-            # (kept) parameter-map machinery for required-init enforcement
+            # CHANGED (Forest): CausalForestDML does NOT allow missing X via allow_missing;
+            # allow_missing only applies to W. If X contains NaNs, force upstream imputation/cleaning.
+            if miss["X"]:
+                raise ModelSpecError(
+                    "CausalForestDML does not support missing values in X via allow_missing "
+                    "(only W is allowed). Impute/clean X upstream before fit."
+                )
+
             maps = build_init_fit_options_param_maps(
-                SparseLinearDML,
-                fit_include_names={"cache_values", "inference", "sample_weight", "freq_weight", "sample_var", "groups"},
+                CausalForestDML,  # CHANGED (Forest): estimator class
+                fit_include_names={"cache_values", "inference", "sample_weight", "groups"},
             )
             init_map = maps["init"]
 
@@ -388,7 +397,9 @@ class SparseLinearDMLCausalModel(CausalModel):
             if disc_y:
                 defaults["discrete_outcome"] = True
 
-            
+            # CHANGED (Forest): allow_missing only controls W-missing acceptance
+            # (safe to set True always; it just relaxes W checks).
+            defaults["allow_missing"] = True
 
             if pre_xw is not None:
                 defaults.update(
@@ -400,32 +411,50 @@ class SparseLinearDMLCausalModel(CausalModel):
                 )
 
             if pre_x is not None:
+                # CHANGED (Forest): featurizer affects the forest splitting/features (not linear regression)
                 defaults["featurizer"] = pre_x
 
-            required_keys = required_init_keys(SparseLinearDML, init_map=init_map)
+            # Required init enforcement (likely empty for CausalForestDML since it has defaults everywhere,
+            # but we keep your pattern)
+            required_keys = required_init_keys(CausalForestDML, init_map=init_map)  # CHANGED (Forest)
             missing_required = [k for k in required_keys if k not in defaults]
             if missing_required:
                 raise ModelSpecError(
-                    f"Missing required SparseLinearDML __init__ parameters: {missing_required}. "
+                    f"Missing required CausalForestDML __init__ parameters: {missing_required}. "
                     f"(Adapter is not exposing command.options yet.)"
                 )
 
-            # allow_missing must be True if X/W can contain NaNs (EconML pre-check bypass)
-            defaults["allow_missing"] = True
-
-            est = SparseLinearDML(**defaults)
+            # CHANGED (Forest): estimator instance
+            est = CausalForestDML(**defaults)
 
             fit_warnings: list[str] = []
             with warnings.catch_warnings(record=True) as ws:
                 warnings.simplefilter("always")
+                # NOTE: we are not passing fit-time options; command.options disabled
                 est.fit(Y, T, X=X, W=W)  # pyright: ignore[reportUnknownMemberType]
             fit_warnings = [f"{w.category.__name__}: {str(w.message)}" for w in ws]
+
+            # Optional forest artifacts
+            forest_artifacts: Dict[str, Any] = {}
+            try:
+                if hasattr(est, "feature_importances_"):
+                    forest_artifacts["feature_importances_"] = list(getattr(est, "feature_importances_"))
+            except Exception:
+                pass
+            # ate_ exists only in discrete_treatment + drate scenarios
+            try:
+                if hasattr(est, "ate_"):
+                    forest_artifacts["ate_"] = np.asarray(getattr(est, "ate_")).tolist()
+                if hasattr(est, "ate_stderr_"):
+                    forest_artifacts["ate_stderr_"] = np.asarray(getattr(est, "ate_stderr_")).tolist()
+            except Exception:
+                pass
 
             n = int(df.shape[0])
             fit_meta: Dict[str, Any] = {
                 "warnings": fit_warnings,
                 "meta": {
-                    "backend": "econml.dml.SparseLinearDML",
+                    "backend": "econml.dml.CausalForestDML",  # CHANGED (Forest)
                     "n": n,
                     "columns": col_meta,
                     "used_init_kwargs": defaults,
@@ -437,6 +466,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                     "t_shape": list(np.asarray(T).shape),
                     "x_shape": (list(np.asarray(X).shape) if X is not None else None),
                     "w_shape": (list(np.asarray(W).shape) if W is not None else None),
+                    **forest_artifacts,
                 },
             }
 
@@ -474,7 +504,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 run_id=command.run_id,
                 started_at=started_at,
                 finished_at=now_utc(),
-                error=ErrorInfo(code="ESTIMATOR_ERROR", message="EconML SparseLinearDML.fit failed.", details={"exception": repr(e)}),
+                error=ErrorInfo(code="ESTIMATOR_ERROR", message="EconML CausalForestDML.fit failed.", details={"exception": repr(e)}),
                 warnings=[],
                 meta={},
             )
@@ -504,7 +534,8 @@ class SparseLinearDMLCausalModel(CausalModel):
             if model_record is None:
                 raise ModelSpecError(f"Fitted model with id {command.fitted_model_id} not found.")
 
-            est: SparseLinearDML = model_record.model
+            # CHANGED (Forest): estimator type
+            est: CausalForestDML = model_record.model
 
             if spec.T.kind == "binary":
                 if len(spec.T.control_values) != 1 or len(spec.T.treated_values) != 1:
@@ -524,7 +555,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                     raise ModelSpecError(f"Invalid contrast: t1 value {t1_val} is the same as t0 baseline {t0}.")
 
                 item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1_val}}
-                item["ate"] = est.ate(X=X_for_ate, T0=t0, T1=t1_val)  # pyright: ignore[reportUnknownMemberType]
+                item["ate"] = est.ate(X=X_for_ate, T0=t0, T1=t1_val)
 
                 try:
                     lo, hi = est.ate_interval(X=X_for_ate, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
@@ -565,7 +596,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 finished_at=finished,
                 warnings=warnings_list,
                 meta={
-                    "backend": "econml.dml.SparseLinearDML",
+                    "backend": "econml.dml.CausalForestDML",  # CHANGED (Forest)
                     "n": int(df.shape[0]),
                     "x_cols": spec.X if spec.X else None,
                     "contrast_kind": "baseline_vs_all",
@@ -619,7 +650,8 @@ class SparseLinearDMLCausalModel(CausalModel):
                     meta={},
                 )
 
-            est: SparseLinearDML = model_record.model
+            # CHANGED (Forest): estimator type
+            est: CausalForestDML = model_record.model
             spec: CausalSpec = command.protocol_specs
 
             X_query = command.inputs.x_rows
@@ -720,7 +752,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 finished_at=finished,
                 warnings=warnings_list,
                 meta={
-                    "backend": "econml.dml.SparseLinearDML",
+                    "backend": "econml.dml.CausalForestDML",
                     "row_count": int(getattr(X_query, "shape", [len(command.inputs.x_rows)])[0]),
                 },
                 fitted_model_id=command.fitted_model_id,

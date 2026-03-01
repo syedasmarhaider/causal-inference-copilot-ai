@@ -9,28 +9,7 @@ from typing import Tuple
 # Canonical estimator identifiers (EXACT EconML fully-qualified class names)
 # --------------------------------------------------------------------------------------
 
-ECONML_ALLOWED_ESTIMATORS: Tuple[str, ...] = (
-    # DML-family
-    "econml.dml.DML",
-    "econml.dml.LinearDML",
-    "econml.dml.SparseLinearDML",
-    "econml.dml.KernelDML",
-    "econml.dml.NonParamDML",
-    "econml.dml.CausalForestDML",
-    # DR-family
-    "econml.dr.DRLearner",
-    "econml.dr.LinearDRLearner",
-    "econml.dr.SparseLinearDRLearner",
-    "econml.dr.ForestDRLearner",
-    # ORF-family
-    "econml.orf.DMLOrthoForest",
-    "econml.orf.DROrthoForest",
-    # Meta-learners
-    "econml.metalearners.SLearner",
-    "econml.metalearners.TLearner",
-    "econml.metalearners.XLearner",
-    "econml.metalearners.DomainAdaptationLearner",
-)
+
 
 
 def get_econml_allowed_estimators() -> Tuple[str, ...]:

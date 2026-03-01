@@ -9,8 +9,10 @@ import warnings
 import numpy as np
 import pandas as pd
 from scipy.sparse import issparse  # type: ignore[import]
+from pandas.api.types import is_numeric_dtype
 
-from econml.dml.dml import SparseLinearDML
+# CHANGED (KernelDML): estimator import
+from econml.dml import KernelDML
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
@@ -24,7 +26,6 @@ from sklearn.ensemble import (
     HistGradientBoostingClassifier,
     HistGradientBoostingRegressor,
 )
-
 from econml.sklearn_extensions.linear_model import WeightedLassoCVWrapper
 
 from python.domain.repo.data_repo import DataRepo
@@ -44,10 +45,7 @@ from python.implementation.workflows.tools.causal.causal_command import (
 )
 from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-
-# you probably want a parallel info provider like sparse_linear_dml_causal_model_info()
 from python.implementation.workflows.tools.causal.econml.dml.dml_info import linear_dml_causal_model_info
-
 from python.implementation.workflows.tools.causal.econml.utils import (
     ModelSpecError,
     build_init_fit_options_param_maps,
@@ -60,14 +58,13 @@ from python.implementation.workflows.tools.causal.econml.utils import (
     serialize_inference_obj,
 )
 
-
 # =============================================================================
-# Model spec and options (unchanged)
+# Helpers: same as your nuisance wrapper approach
 # =============================================================================
 
 class _ToDense(BaseEstimator, TransformerMixin):
     """Convert sparse -> dense for models that don't accept sparse."""
-    def fit(self, X, y=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def fit(self, X, y=None): # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return self
 
     def transform(self, X: Any) -> np.ndarray:
@@ -99,12 +96,9 @@ def _normalize_model_spec_to_wrapped_list(
     n_jobs: Optional[int],
 ) -> Sequence[BaseEstimator]:
     """
-    Accepts: keyword ('auto', 'automl', 'linear'...), estimator, or list of these.
-    Returns: list of fully wrapped sklearn estimators (Pipeline(pre -> [dense] -> model)).
-
-    missingness:
-      - "none": your usual candidate menu.
-      - "present": restrict to NaN-tolerant candidates (HGB), avoiding models that error on NaNs.
+    Same logic as your current implementation:
+      - "present" => restrict to NaN-safe HGB
+      - else => linear + trees + boosting candidates
     """
     missing_present = (missingness == "present")
 
@@ -186,33 +180,23 @@ def _normalize_model_spec_to_wrapped_list(
             _wrap_with_pre(pre_XW=pre_XW, model=rf, require_dense=True),
         ]
 
-    def build_boosting_candidates() -> Sequence[BaseEstimator]:
-        return build_boosting_candidates_nan_safe()
-
     def build_default_candidates() -> Sequence[BaseEstimator]:
         if missing_present:
             return build_boosting_candidates_nan_safe()
-        return [
-            *build_linear_candidates(),
-            *build_tree_candidates(),
-            *build_boosting_candidates(),
-        ]
+        return [*build_linear_candidates(), *build_tree_candidates(), *build_boosting_candidates_nan_safe()]
 
     def candidates_for_keyword(key: str) -> Sequence[BaseEstimator]:
         k = key.lower()
-        if k in ("auto", "auto_plus"):
-            return build_default_candidates()
-        if k in ("automl", "automl_plus"):
+        if k in ("auto", "auto_plus", "automl", "automl_plus"):
             return build_default_candidates()
         if k == "linear":
             return build_linear_candidates()
         if k in ("forest", "trees"):
             return build_tree_candidates()
         if k in ("gbf", "hgb", "boosting"):
-            return build_boosting_candidates()
+            return build_boosting_candidates_nan_safe()
         raise ValueError(f"Unknown model keyword: {key!r}")
 
-    # Normalize input to list
     items: List[Union[str, BaseEstimator]]
     if isinstance(spec_value, (str, BaseEstimator)):
         items = [spec_value]
@@ -265,24 +249,46 @@ def _get_default_models_for_t_and_y(
             n_jobs=n_jobs,
         )
     )
-
     return {"model_y": model_y, "model_t": model_t}
 
 
+def _raise_if_x_not_numeric(X: Any) -> None:
+    """CHANGED (KernelDML): KernelDML's random Fourier features require numeric X."""
+    if X is None:
+        return
+    if isinstance(X, pd.DataFrame):
+        bad = [c for c in X.columns if not is_numeric_dtype(X[c])]
+        if bad:
+            raise ModelSpecError(
+                "KernelDML requires numeric X (no strings/datetimes). "
+                f"Non-numeric X columns: {bad}. Encode/transform X upstream."
+            )
+        return
+    arr = np.asarray(X)
+    # object dtype is ambiguous; force upstream encoding
+    if arr.dtype == object:
+        raise ModelSpecError(
+            "KernelDML requires numeric X; got object dtype. Encode/transform X upstream."
+        )
+    if not np.issubdtype(arr.dtype, np.number):
+        raise ModelSpecError(
+            f"KernelDML requires numeric X; got dtype={arr.dtype}."
+        )
+
+
 # =============================================================================
-# SparseLinearDML adapter
+# KernelDML adapter
 # =============================================================================
 
 @dataclass(frozen=True, slots=True)
-class SparseLinearDMLCausalModel(CausalModel):
+class KernelDMLCausalModel(CausalModel):
     data_repo: DataRepo
     models_repo: ModelsRepo
 
-    def get_info(self) -> Dict[str, Any]:
-        info = linear_dml_causal_model_info()
-        info["name"] = "econml.dml.SparseLinearDML"
-        info["backend"] = "econml.dml.SparseLinearDML"
-        return info
+    def get_info(self) -> str:
+        return "some info"
+        # CHANGED (KernelDML): metadata name/backend
+        
 
     def execute(
         self,
@@ -314,28 +320,11 @@ class SparseLinearDMLCausalModel(CausalModel):
             )
 
         if isinstance(command, FitCommand):
-            return self._fit(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                command=command,
-                df=df,
-                started_at=started,
-            )
+            return self._fit(user_id=user_id, conversation_id=conversation_id, command=command, df=df, started_at=started)
         if isinstance(command, ATECommand):
-            return self._ate(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                command=command,
-                df=df,
-                started_at=started,
-            )
-        if isinstance(command, CATECommand): # pyright: ignore[reportUnnecessaryIsInstance]
-            return self._cate(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                command=command,
-                started_at=started,
-            )
+            return self._ate(user_id=user_id, conversation_id=conversation_id, command=command, df=df, started_at=started)
+        if isinstance(command, CATECommand):
+            return self._cate(user_id=user_id, conversation_id=conversation_id, command=command, started_at=started)
 
         raise ValueError(f"Unsupported command type: {type(command)}")
 
@@ -357,13 +346,19 @@ class SparseLinearDMLCausalModel(CausalModel):
             pre_x: ColumnTransformer | None = command.inputs.pre_X
             pre_xw: ColumnTransformer | None = command.inputs.pre_XW
 
+            # Same presence checks as before
             if pre_x is None and len(specs.X or []) > 0:
+                # CHANGED (KernelDML): we *don't* use pre_X as featurizer, but we still require
+                # that X is already numeric. If user has non-numeric X, they must encode upstream.
+                # We keep the check to preserve your contract that spec.X implies a transformer exists.
                 raise ModelSpecError(
-                    "Spec declares effect modifiers (spec.X) but no pre_X transformer provided in inputs."
+                    "Spec declares effect modifiers (spec.X) but no pre_X transformer provided in inputs. "
+                    "For KernelDML, X must already be numeric (encode upstream) or provide a transformer that "
+                    "produces numeric X without changing the raw XW layout expected by pre_XW."
                 )
             if pre_xw is None and (len(specs.W or []) + len(specs.X or [])) > 0:
                 raise ModelSpecError(
-                    "Spec declares controls (spec.W) and/or effect modifiers (spec.X) but no pre_XW transformer provided in inputs."
+                    "Spec declares controls (spec.W) and/or effect modifiers (spec.X) but no pre_XW transformer provided."
                 )
 
             Y, T, X, W, col_meta = get_input_params_from_spec(df, specs)
@@ -372,10 +367,19 @@ class SparseLinearDMLCausalModel(CausalModel):
             if miss["Y"] or miss["T"]:
                 raise ModelSpecError(f"Y/T contain missing values; must be fixed upstream. missing={miss}")
 
-            # (kept) parameter-map machinery for required-init enforcement
+            # CHANGED (KernelDML): allow_missing is W-only; X missing should be rejected (or imputed upstream)
+            if miss["X"]:
+                raise ModelSpecError(
+                    "KernelDML does not support missing values in X via allow_missing (only W is allowed). "
+                    "Impute/clean X upstream before fit."
+                )
+
+            # CHANGED (KernelDML): KernelDML requires numeric X because it applies random Fourier features.
+            _raise_if_x_not_numeric(X)
+
             maps = build_init_fit_options_param_maps(
-                SparseLinearDML,
-                fit_include_names={"cache_values", "inference", "sample_weight", "freq_weight", "sample_var", "groups"},
+                KernelDML,  # CHANGED (KernelDML): estimator
+                fit_include_names={"cache_values", "inference", "sample_weight", "groups"},
             )
             init_map = maps["init"]
 
@@ -388,7 +392,8 @@ class SparseLinearDMLCausalModel(CausalModel):
             if disc_y:
                 defaults["discrete_outcome"] = True
 
-            
+            # CHANGED (KernelDML): allow_missing pertains to W only; enable only if caller says missingness present
+            defaults["allow_missing"] = (command.inputs.missingness_mode == "present")
 
             if pre_xw is not None:
                 defaults.update(
@@ -399,21 +404,19 @@ class SparseLinearDMLCausalModel(CausalModel):
                     )
                 )
 
-            if pre_x is not None:
-                defaults["featurizer"] = pre_x
+            # CHANGED (KernelDML): DO NOT set defaults["featurizer"] = pre_x
+            # KernelDML internally uses Random Fourier Features; pre_X is not a supported init param.
 
-            required_keys = required_init_keys(SparseLinearDML, init_map=init_map)
+            required_keys = required_init_keys(KernelDML, init_map=init_map)  # CHANGED (KernelDML)
             missing_required = [k for k in required_keys if k not in defaults]
             if missing_required:
                 raise ModelSpecError(
-                    f"Missing required SparseLinearDML __init__ parameters: {missing_required}. "
+                    f"Missing required KernelDML __init__ parameters: {missing_required}. "
                     f"(Adapter is not exposing command.options yet.)"
                 )
 
-            # allow_missing must be True if X/W can contain NaNs (EconML pre-check bypass)
-            defaults["allow_missing"] = True
-
-            est = SparseLinearDML(**defaults)
+            # Fit
+            est = KernelDML(**defaults)
 
             fit_warnings: list[str] = []
             with warnings.catch_warnings(record=True) as ws:
@@ -425,11 +428,13 @@ class SparseLinearDMLCausalModel(CausalModel):
             fit_meta: Dict[str, Any] = {
                 "warnings": fit_warnings,
                 "meta": {
-                    "backend": "econml.dml.SparseLinearDML",
+                    "backend": "econml.dml.KernelDML",  # CHANGED (KernelDML)
                     "n": n,
                     "columns": col_meta,
                     "used_init_kwargs": defaults,
                     "spec_semantics_applied": sorted(list(required_keys)),
+                    # CHANGED (KernelDML): document featurizer semantics
+                    "kernel_final_stage": {"uses_random_fourier_features": True, "dim_default": 20, "bw_default": 1.0},
                 },
                 "artifacts": {
                     "n": n,
@@ -474,7 +479,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 run_id=command.run_id,
                 started_at=started_at,
                 finished_at=now_utc(),
-                error=ErrorInfo(code="ESTIMATOR_ERROR", message="EconML SparseLinearDML.fit failed.", details={"exception": repr(e)}),
+                error=ErrorInfo(code="ESTIMATOR_ERROR", message="EconML KernelDML.fit failed.", details={"exception": repr(e)}),
                 warnings=[],
                 meta={},
             )
@@ -504,7 +509,7 @@ class SparseLinearDMLCausalModel(CausalModel):
             if model_record is None:
                 raise ModelSpecError(f"Fitted model with id {command.fitted_model_id} not found.")
 
-            est: SparseLinearDML = model_record.model
+            est: KernelDML = model_record.model  # CHANGED (KernelDML)
 
             if spec.T.kind == "binary":
                 if len(spec.T.control_values) != 1 or len(spec.T.treated_values) != 1:
@@ -519,6 +524,9 @@ class SparseLinearDMLCausalModel(CausalModel):
             effects: List[Dict[ATEModelResult, Any]] = []
             X_for_ate = df[spec.X] if spec.X else None
 
+            # CHANGED (KernelDML): X must be numeric at query time too
+            _raise_if_x_not_numeric(X_for_ate)
+
             for t1_val in t1s:
                 if t1_val == t0:
                     raise ModelSpecError(f"Invalid contrast: t1 value {t1_val} is the same as t0 baseline {t0}.")
@@ -528,10 +536,8 @@ class SparseLinearDMLCausalModel(CausalModel):
 
                 try:
                     lo, hi = est.ate_interval(X=X_for_ate, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
-                    if lo is not None and hi is not None:
-                        item["ate_interval"] = (list(lo), list(hi))  # pyright: ignore
-                    else:
-                        item["ate_interval"] = None
+                    item["ate_interval"] = (list(lo), list(hi)) if lo is not None and hi is not None else None
+                    if lo is None or hi is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")
                 except Exception as e:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
@@ -565,7 +571,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 finished_at=finished,
                 warnings=warnings_list,
                 meta={
-                    "backend": "econml.dml.SparseLinearDML",
+                    "backend": "econml.dml.KernelDML",  # CHANGED (KernelDML)
                     "n": int(df.shape[0]),
                     "x_cols": spec.X if spec.X else None,
                     "contrast_kind": "baseline_vs_all",
@@ -610,21 +616,20 @@ class SparseLinearDMLCausalModel(CausalModel):
                     run_id=command.run_id,
                     started_at=started_at,
                     finished_at=now_utc(),
-                    error=ErrorInfo(
-                        code="MODEL_NOT_FOUND",
-                        message="Fitted model not found.",
-                        details={"fitted_model_id": str(command.fitted_model_id)},
-                    ),
+                    error=ErrorInfo(code="MODEL_NOT_FOUND", message="Fitted model not found.", details={"fitted_model_id": str(command.fitted_model_id)}),
                     warnings=[],
                     meta={},
                 )
 
-            est: SparseLinearDML = model_record.model
+            est: KernelDML = model_record.model  # CHANGED (KernelDML)
             spec: CausalSpec = command.protocol_specs
 
             X_query = command.inputs.x_rows
             x_cols = spec.X
             raise_if_x_rows_not_exactly_match_fit_x_cols(x_rows=X_query, x_cols=x_cols)
+
+            # CHANGED (KernelDML): X must be numeric at query time too
+            _raise_if_x_not_numeric(X_query)
 
             effects: List[Dict[CATEModelResult, Any]] = []
 
@@ -637,20 +642,15 @@ class SparseLinearDMLCausalModel(CausalModel):
                         error=ErrorInfo(
                             code="OPTIONS_INVALID",
                             message="Binary treatment for CATE requires exactly one control_value and one treated_value (or pre-normalize T upstream).",
-                            details={
-                                "control_values": list(spec.T.control_values),
-                                "treated_values": list(spec.T.treated_values),
-                            },
+                            details={"control_values": list(spec.T.control_values), "treated_values": list(spec.T.treated_values)},
                         ),
                         warnings=[],
                         meta={},
                     )
                 t0 = spec.T.control_values[0]
                 t1s = [spec.T.treated_values[0]]
-
             elif spec.T.kind == "categorical":
                 t0, t1s = categorical_t0_t1_pairs(spec)
-
             else:
                 return CommandFailure(
                     run_id=command.run_id,
@@ -681,22 +681,18 @@ class SparseLinearDMLCausalModel(CausalModel):
 
                 try:
                     lo, hi = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
+                    item["cate_interval"] = (list(lo), list(hi)) if lo is not None and hi is not None else None
                     if lo is None or hi is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
-                        item["cate_interval"] = None
-                    else:
-                        item["cate_interval"] = (list(lo), list(hi))  # pyright: ignore
                 except Exception as e:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                     item["cate_interval"] = None
 
                 try:
                     inf = est.effect_inference(X_query, T0=t0, T1=t1_val)  # pyright: ignore
+                    item["cate_inference"] = serialize_inference_obj(inf) if inf is not None else None
                     if inf is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_inference returned None")
-                        item["cate_inference"] = None
-                    else:
-                        item["cate_inference"] = serialize_inference_obj(inf)
                 except Exception as e:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                     item["cate_inference"] = None
@@ -720,7 +716,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 finished_at=finished,
                 warnings=warnings_list,
                 meta={
-                    "backend": "econml.dml.SparseLinearDML",
+                    "backend": "econml.dml.KernelDML",  # CHANGED (KernelDML)
                     "row_count": int(getattr(X_query, "shape", [len(command.inputs.x_rows)])[0]),
                 },
                 fitted_model_id=command.fitted_model_id,

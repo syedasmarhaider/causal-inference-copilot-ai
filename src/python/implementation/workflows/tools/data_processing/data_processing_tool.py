@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import Literal
 
 from python.domain.models.models import NonEmptyStr
+from python.domain.workflows.tool import Tool
 
 InclusionOperator = Literal["==", "in", "not_in", ">=", "<=", ">", "<"]
 
@@ -21,7 +22,7 @@ class InclusionRuleModel(BaseModel):
 
 
 @dataclass(frozen=True)
-class DataProcessingTool:
+class DataProcessingTool(Tool):
     """
     Strict semantics:
       - No value coercion/parsing. Values are applied as provided.
@@ -29,6 +30,12 @@ class DataProcessingTool:
       - Rows with NA in the target column are excluded for all ops.
       - Rules are ANDed together.
     """
+    
+    def get_tool_name(self) -> str:
+        return "DATA_PROCESSING_TOOL"
+    
+    def get_tool_info(self) -> str:
+            return "Tool for processing datasets, including applying inclusion rules to filter rows based on column values."
 
     def apply_inclusion_rules(
         self,

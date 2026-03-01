@@ -8,9 +8,12 @@ import warnings
 
 import numpy as np
 import pandas as pd
+
+import scipy.sparse as sp
 from scipy.sparse import issparse  # type: ignore[import]
 
-from econml.dml.dml import SparseLinearDML
+from econml.dr import DRLearner, ForestDRLearner, LinearDRLearner, SparseLinearDRLearner
+from econml.sklearn_extensions.linear_model import WeightedLassoCVWrapper
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
@@ -24,8 +27,6 @@ from sklearn.ensemble import (
     HistGradientBoostingClassifier,
     HistGradientBoostingRegressor,
 )
-
-from econml.sklearn_extensions.linear_model import WeightedLassoCVWrapper
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
@@ -42,12 +43,15 @@ from python.implementation.workflows.tools.causal.causal_command import (
     FitSuccess,
     MissingnessMode,
 )
-from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
+from python.implementation.workflows.tools.causal.causal_model import (
+    CausalCommand,
+    CausalModel,
+    CausalResult,
+)
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-
-# you probably want a parallel info provider like sparse_linear_dml_causal_model_info()
-from python.implementation.workflows.tools.causal.econml.dml.dml_info import linear_dml_causal_model_info
-
+from python.implementation.workflows.tools.causal.econml.dml.dml_info import (
+    linear_dml_causal_model_info,  # you can replace with dr_dml_info later
+)
 from python.implementation.workflows.tools.causal.econml.utils import (
     ModelSpecError,
     build_init_fit_options_param_maps,
@@ -60,9 +64,8 @@ from python.implementation.workflows.tools.causal.econml.utils import (
     serialize_inference_obj,
 )
 
-
 # =============================================================================
-# Model spec and options (unchanged)
+# Helpers: sparse/dense + "transform XW only, passthrough tail"
 # =============================================================================
 
 class _ToDense(BaseEstimator, TransformerMixin):
@@ -73,15 +76,79 @@ class _ToDense(BaseEstimator, TransformerMixin):
     def transform(self, X: Any) -> np.ndarray:
         if issparse(X):
             return X.toarray()  # type: ignore[no-any-return]
-        return X
+        return np.asarray(X)
 
 
-def _wrap_with_pre(
+# FIX(3): normalize input to a sliceable 2D matrix (dense ndarray or CSR)
+def _as_2d_matrix(X: Any):
+    if issparse(X):
+        X2 = X.tocsr()
+    else:
+        X2 = np.asarray(X)
+    if getattr(X2, "ndim", 0) != 2:
+        raise ValueError(f"Expected 2D matrix input, got ndim={getattr(X2, 'ndim', None)}")
+    return X2
+
+
+class _TransformFirstBlockPassthroughTail(BaseEstimator, TransformerMixin):
+    """
+    Applies `pre_XW` to the first `n_xw` columns of input, and passes through
+    any remaining columns unchanged.
+
+    WHY (DRLearner):
+      - propensity is trained on concat([X, W]) -> exactly n_xw cols
+      - regression is trained on concat([X, W, onehot(T_excl_baseline)]) -> tail cols exist
+    """
+    def __init__(self, *, pre_XW: ColumnTransformer, n_xw: int):
+        self.pre_XW = pre_XW
+        self.n_xw = int(n_xw)
+
+    # FIX(3): normalize X before slicing
+    def fit(self, X, y=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+        X_arr = _as_2d_matrix(X)
+        X_head = X_arr[:, : self.n_xw]
+        self.pre_XW.fit(X_head, y)
+        return self
+
+    # FIX(3): normalize X before slicing + robust hstack
+    def transform(self, X: Any):
+        X_arr = _as_2d_matrix(X)
+        X_head = X_arr[:, : self.n_xw]
+        X_tail = X_arr[:, self.n_xw :] if X_arr.shape[1] > self.n_xw else None
+
+        head_tx = self.pre_XW.transform(X_head)
+
+        if X_tail is None or X_tail.shape[1] == 0:
+            return head_tx
+
+        # hstack head + tail while preserving sparsity when possible
+        if issparse(head_tx):
+            if issparse(X_tail):
+                tail_sparse = X_tail.tocsr()
+            else:
+                # tail should be numeric one-hot; force numeric conversion early
+                try:
+                    tail_dense = np.asarray(X_tail, dtype=float)
+                except Exception as e:
+                    raise ValueError(f"DRLearner tail block is not numeric; cannot csr_matrix it. {e!r}") from e
+                tail_sparse = sp.csr_matrix(tail_dense)
+            return sp.hstack([head_tx, tail_sparse], format="csr")
+
+        # head is dense
+        if issparse(X_tail):
+            tail_dense2 = X_tail.toarray()
+        else:
+            tail_dense2 = np.asarray(X_tail)
+        return np.hstack([np.asarray(head_tx), tail_dense2])
+
+
+def _wrap_xw_model(
     *,
     pre_XW: ColumnTransformer,
     model: BaseEstimator,
     require_dense: bool,
 ) -> BaseEstimator:
+    """For models trained on concat([X, W])."""
     steps: List[tuple[str, BaseEstimator]] = [("pre", pre_XW)]
     if require_dense:
         steps.append(("dense", _ToDense()))
@@ -89,27 +156,100 @@ def _wrap_with_pre(
     return Pipeline(steps)
 
 
-def _normalize_model_spec_to_wrapped_list(
+def _wrap_xw_plus_t_model(
     *,
-    spec_value: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]],
     pre_XW: ColumnTransformer,
-    is_discrete: bool,
+    n_xw: int,
+    model: BaseEstimator,
+    require_dense: bool,
+) -> BaseEstimator:
+    """For models trained on concat([X, W, onehot(T_excl_baseline)])."""
+    steps: List[tuple[str, BaseEstimator]] = [
+        ("pre_xw_only", _TransformFirstBlockPassthroughTail(pre_XW=pre_XW, n_xw=n_xw))
+    ]
+    if require_dense:
+        steps.append(("dense", _ToDense()))
+    steps.append(("model", model))
+    return Pipeline(steps)
+
+
+# =============================================================================
+# Default nuisance candidate builders (propensity + regression)
+# =============================================================================
+
+def _build_propensity_candidates(
+    *,
+    pre_XW: ColumnTransformer,
     missingness: MissingnessMode,
     random_state: Optional[int],
     n_jobs: Optional[int],
 ) -> Sequence[BaseEstimator]:
     """
-    Accepts: keyword ('auto', 'automl', 'linear'...), estimator, or list of these.
-    Returns: list of fully wrapped sklearn estimators (Pipeline(pre -> [dense] -> model)).
-
-    missingness:
-      - "none": your usual candidate menu.
-      - "present": restrict to NaN-tolerant candidates (HGB), avoiding models that error on NaNs.
+    Propensity model: classifier for Pr[T=t | X,W].
+    If missingness is present, restrict to NaN-tolerant models (HGB).
     """
     missing_present = (missingness == "present")
 
-    def build_boosting_candidates_nan_safe() -> Sequence[BaseEstimator]:
-        if is_discrete:
+    if missing_present:
+        hgb = HistGradientBoostingClassifier(
+            random_state=random_state,
+            max_depth=None,
+            learning_rate=0.05,
+            max_iter=400,
+            early_stopping=True,
+        )
+        return [_wrap_xw_model(pre_XW=pre_XW, model=hgb, require_dense=True)]
+
+    lr = LogisticRegressionCV(
+        max_iter=2000,
+        solver="lbfgs",
+        n_jobs=n_jobs,
+        random_state=random_state,
+    )
+    et = ExtraTreesClassifier(
+        n_estimators=400,
+        min_samples_leaf=5,
+        random_state=random_state,
+        n_jobs=n_jobs,
+    )
+    rf = RandomForestClassifier(
+        n_estimators=400,
+        min_samples_leaf=5,
+        random_state=random_state,
+        n_jobs=n_jobs,
+    )
+    hgb = HistGradientBoostingClassifier(
+        random_state=random_state,
+        max_depth=None,
+        learning_rate=0.05,
+        max_iter=400,
+        early_stopping=True,
+    )
+    return [
+        _wrap_xw_model(pre_XW=pre_XW, model=lr, require_dense=False),
+        _wrap_xw_model(pre_XW=pre_XW, model=et, require_dense=True),
+        _wrap_xw_model(pre_XW=pre_XW, model=rf, require_dense=True),
+        _wrap_xw_model(pre_XW=pre_XW, model=hgb, require_dense=True),
+    ]
+
+
+def _build_regression_candidates(
+    *,
+    pre_XW: ColumnTransformer,
+    n_xw: int,
+    discrete_outcome: bool,
+    missingness: MissingnessMode,
+    random_state: Optional[int],
+    n_jobs: Optional[int],
+) -> Sequence[BaseEstimator]:
+    """
+    Regression nuisance for E[Y | X,W,T] trained on concat([X,W, onehot(T_excl_baseline)]).
+    If missingness is present, restrict to NaN-tolerant HGB.
+    """
+    missing_present = (missingness == "present")
+
+    if missing_present:
+        if discrete_outcome:
             hgb = HistGradientBoostingClassifier(
                 random_state=random_state,
                 max_depth=None,
@@ -117,7 +257,7 @@ def _normalize_model_spec_to_wrapped_list(
                 max_iter=400,
                 early_stopping=True,
             )
-            return [_wrap_with_pre(pre_XW=pre_XW, model=hgb, require_dense=True)]
+            return [_wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=hgb, require_dense=True)]
         hgb = HistGradientBoostingRegressor(
             random_state=random_state,
             max_depth=None,
@@ -125,163 +265,116 @@ def _normalize_model_spec_to_wrapped_list(
             max_iter=400,
             early_stopping=True,
         )
-        return [_wrap_with_pre(pre_XW=pre_XW, model=hgb, require_dense=True)]
+        return [_wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=hgb, require_dense=True)]
 
-    def build_linear_candidates() -> Sequence[BaseEstimator]:
-        if missing_present:
-            return build_boosting_candidates_nan_safe()
-
-        if is_discrete:
-            lr = LogisticRegressionCV(
-                max_iter=2000,
-                solver="lbfgs",
-                n_jobs=n_jobs,
-                random_state=random_state,
-            )
-            return [_wrap_with_pre(pre_XW=pre_XW, model=lr, require_dense=False)]
-
-        lasso = WeightedLassoCVWrapper(random_state=random_state)
-        ridge = RidgeCV(alphas=np.logspace(-4, 4, 25))
-        return [
-            _wrap_with_pre(pre_XW=pre_XW, model=lasso, require_dense=False),  # type: ignore[arg-type]
-            _wrap_with_pre(pre_XW=pre_XW, model=ridge, require_dense=False),
-        ]
-
-    def build_tree_candidates() -> Sequence[BaseEstimator]:
-        if missing_present:
-            return build_boosting_candidates_nan_safe()
-
-        if is_discrete:
-            et = ExtraTreesClassifier(
-                n_estimators=400,
-                min_samples_leaf=5,
-                random_state=random_state,
-                n_jobs=n_jobs,
-            )
-            rf = RandomForestClassifier(
-                n_estimators=400,
-                min_samples_leaf=5,
-                random_state=random_state,
-                n_jobs=n_jobs,
-            )
-            return [
-                _wrap_with_pre(pre_XW=pre_XW, model=et, require_dense=True),
-                _wrap_with_pre(pre_XW=pre_XW, model=rf, require_dense=True),
-            ]
-
-        et = ExtraTreesRegressor(
+    if discrete_outcome:
+        lr = LogisticRegressionCV(
+            max_iter=2000,
+            solver="lbfgs",
+            n_jobs=n_jobs,
+            random_state=random_state,
+        )
+        et = ExtraTreesClassifier(
             n_estimators=400,
             min_samples_leaf=5,
             random_state=random_state,
             n_jobs=n_jobs,
         )
-        rf = RandomForestRegressor(
+        rf = RandomForestClassifier(
             n_estimators=400,
             min_samples_leaf=5,
             random_state=random_state,
             n_jobs=n_jobs,
         )
+        hgb = HistGradientBoostingClassifier(
+            random_state=random_state,
+            max_depth=None,
+            learning_rate=0.05,
+            max_iter=400,
+            early_stopping=True,
+        )
         return [
-            _wrap_with_pre(pre_XW=pre_XW, model=et, require_dense=True),
-            _wrap_with_pre(pre_XW=pre_XW, model=rf, require_dense=True),
+            _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=lr, require_dense=False),
+            _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=et, require_dense=True),
+            _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=rf, require_dense=True),
+            _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=hgb, require_dense=True),
         ]
 
-    def build_boosting_candidates() -> Sequence[BaseEstimator]:
-        return build_boosting_candidates_nan_safe()
-
-    def build_default_candidates() -> Sequence[BaseEstimator]:
-        if missing_present:
-            return build_boosting_candidates_nan_safe()
-        return [
-            *build_linear_candidates(),
-            *build_tree_candidates(),
-            *build_boosting_candidates(),
-        ]
-
-    def candidates_for_keyword(key: str) -> Sequence[BaseEstimator]:
-        k = key.lower()
-        if k in ("auto", "auto_plus"):
-            return build_default_candidates()
-        if k in ("automl", "automl_plus"):
-            return build_default_candidates()
-        if k == "linear":
-            return build_linear_candidates()
-        if k in ("forest", "trees"):
-            return build_tree_candidates()
-        if k in ("gbf", "hgb", "boosting"):
-            return build_boosting_candidates()
-        raise ValueError(f"Unknown model keyword: {key!r}")
-
-    # Normalize input to list
-    items: List[Union[str, BaseEstimator]]
-    if isinstance(spec_value, (str, BaseEstimator)):
-        items = [spec_value]
-    else:
-        items = list(spec_value)
-
-    out: list[BaseEstimator] = []
-    for item in items:
-        if isinstance(item, str):
-            out.extend(candidates_for_keyword(item))
-        else:
-            out.append(_wrap_with_pre(pre_XW=pre_XW, model=item, require_dense=True))  # pyright: ignore[reportArgumentType]
-
-    if not out:
-        raise ValueError("Empty nuisance model candidate list.")
-    return out
-
-
-def _get_default_models_for_t_and_y(
-    specs: Any,  # CausalSpec
-    pre_XW: ColumnTransformer,
-    *,
-    missingness: MissingnessMode = "none",
-    random_state: Optional[int] = None,
-    n_jobs: Optional[int] = None,
-) -> Dict[str, Any]:
-    disc_t = specs.T.kind in ("binary", "categorical")
-    disc_y = specs.Y.kind == "binary"
-
-    default_model_y: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
-    default_model_t: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
-
-    model_y = list(
-        _normalize_model_spec_to_wrapped_list(
-            spec_value=default_model_y,
-            pre_XW=pre_XW,
-            is_discrete=disc_y,
-            missingness=missingness,
-            random_state=random_state,
-            n_jobs=n_jobs,
-        )
+    lasso = WeightedLassoCVWrapper(random_state=random_state)
+    ridge = RidgeCV(alphas=np.logspace(-4, 4, 25))
+    et = ExtraTreesRegressor(
+        n_estimators=400,
+        min_samples_leaf=5,
+        random_state=random_state,
+        n_jobs=n_jobs,
     )
-    model_t = list(
-        _normalize_model_spec_to_wrapped_list(
-            spec_value=default_model_t,
-            pre_XW=pre_XW,
-            is_discrete=disc_t,
-            missingness=missingness,
-            random_state=random_state,
-            n_jobs=n_jobs,
-        )
+    rf = RandomForestRegressor(
+        n_estimators=400,
+        min_samples_leaf=5,
+        random_state=random_state,
+        n_jobs=n_jobs,
     )
+    hgb = HistGradientBoostingRegressor(
+        random_state=random_state,
+        max_depth=None,
+        learning_rate=0.05,
+        max_iter=400,
+        early_stopping=True,
+    )
+    return [
+        _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=lasso, require_dense=False),  # type: ignore[arg-type]
+        _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=ridge, require_dense=False),
+        _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=et, require_dense=True),
+        _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=rf, require_dense=True),
+        _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=hgb, require_dense=True),
+    ]
 
-    return {"model_y": model_y, "model_t": model_t}
+
+def _safe_required_init_keys(estimator_cls: Any, *, init_map: Dict[str, Any]) -> List[str]:
+    """
+    Your `required_init_keys()` currently returns ['args','kwargs'] for some estimators in tests.
+    Filter those out here so adapters don't fail spuriously.
+    """
+    keys = list(required_init_keys(estimator_cls, init_map=init_map))
+    return [k for k in keys if k not in ("args", "kwargs")]
+
+
+def _categories_from_spec(specs: CausalSpec) -> Union[str, List[Any]]:
+    """
+    Ensure baseline ordering matches your spec when treatment is discrete.
+    EconML uses the first category as control/baseline.
+    """
+    if specs.T.kind == "binary":
+        if len(specs.T.control_values) == 1 and len(specs.T.treated_values) == 1:
+            return [specs.T.control_values[0], specs.T.treated_values[0]]
+        return "auto"
+
+    if specs.T.kind == "categorical":
+        baseline = getattr(specs.T, "baseline", None)
+        levels = list(getattr(specs.T, "levels", []) or [])
+        if baseline is not None and baseline in levels:
+            return [baseline] + [v for v in levels if v != baseline]
+        return "auto"
+
+    return "auto"
 
 
 # =============================================================================
-# SparseLinearDML adapter
+# Base adapter shared logic (DRLearner family)
 # =============================================================================
 
 @dataclass(frozen=True, slots=True)
-class SparseLinearDMLCausalModel(CausalModel):
+class _BaseDRLearnerAdapter(CausalModel):
     data_repo: DataRepo
     models_repo: ModelsRepo
 
+    ESTIMATOR_CLS: Any = DRLearner
+    BACKEND_NAME: str = "econml.dr.DRLearner"
+
     def get_info(self) -> Dict[str, Any]:
         info = linear_dml_causal_model_info()
-        info["name"] = "econml.dml.SparseLinearDML"
-        info["backend"] = "econml.dml.SparseLinearDML"
+        info["name"] = self.BACKEND_NAME
+        info["backend"] = self.BACKEND_NAME
         return info
 
     def execute(
@@ -306,7 +399,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 finished_at=now_utc(),
                 error=ErrorInfo(
                     code="DATASET_NOT_FOUND",
-                    message="Failed to load dataset for FIT.",
+                    message="Failed to load dataset.",
                     details={"dataset_id": str(command.dataset_id), "exception": repr(e)},
                 ),
                 warnings=[],
@@ -314,28 +407,11 @@ class SparseLinearDMLCausalModel(CausalModel):
             )
 
         if isinstance(command, FitCommand):
-            return self._fit(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                command=command,
-                df=df,
-                started_at=started,
-            )
+            return self._fit(user_id=user_id, conversation_id=conversation_id, command=command, df=df, started_at=started)
         if isinstance(command, ATECommand):
-            return self._ate(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                command=command,
-                df=df,
-                started_at=started,
-            )
-        if isinstance(command, CATECommand): # pyright: ignore[reportUnnecessaryIsInstance]
-            return self._cate(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                command=command,
-                started_at=started,
-            )
+            return self._ate(user_id=user_id, conversation_id=conversation_id, command=command, df=df, started_at=started)
+        if isinstance(command, CATECommand):  # pyright: ignore[reportUnnecessaryIsInstance]
+            return self._cate(user_id=user_id, conversation_id=conversation_id, command=command, started_at=started)
 
         raise ValueError(f"Unsupported command type: {type(command)}")
 
@@ -357,14 +433,14 @@ class SparseLinearDMLCausalModel(CausalModel):
             pre_x: ColumnTransformer | None = command.inputs.pre_X
             pre_xw: ColumnTransformer | None = command.inputs.pre_XW
 
+            # DRLearner assumes discrete treatments
+            if specs.T.kind not in ("binary", "categorical"):
+                raise ModelSpecError(f"{self.BACKEND_NAME} supports only binary/categorical treatments.")
+
             if pre_x is None and len(specs.X or []) > 0:
-                raise ModelSpecError(
-                    "Spec declares effect modifiers (spec.X) but no pre_X transformer provided in inputs."
-                )
+                raise ModelSpecError("Spec declares effect modifiers (spec.X) but no pre_X transformer provided.")
             if pre_xw is None and (len(specs.W or []) + len(specs.X or [])) > 0:
-                raise ModelSpecError(
-                    "Spec declares controls (spec.W) and/or effect modifiers (spec.X) but no pre_XW transformer provided in inputs."
-                )
+                raise ModelSpecError("Spec declares controls (spec.W) and/or effect modifiers (spec.X) but no pre_XW transformer provided.")
 
             Y, T, X, W, col_meta = get_input_params_from_spec(df, specs)
 
@@ -372,48 +448,77 @@ class SparseLinearDMLCausalModel(CausalModel):
             if miss["Y"] or miss["T"]:
                 raise ModelSpecError(f"Y/T contain missing values; must be fixed upstream. missing={miss}")
 
-            # (kept) parameter-map machinery for required-init enforcement
+            # FIX(2): do NOT silently allow missing X; allow_missing in EconML is about W.
+            if miss["X"]:
+                raise ModelSpecError(
+                    f"{self.BACKEND_NAME} does not support missing values in X. "
+                    f"Impute/clean X upstream. missing={miss}"
+                )
+
+            # nuisance defaults (command.options disabled)
+            missingness_mode: MissingnessMode = getattr(command.inputs, "missingness_mode", "none")
+
+            # FIX(2): only set allow_missing when W actually has NaNs; and ensure nuisances are NaN-tolerant
+            if miss["W"] and missingness_mode != "present":
+                raise ModelSpecError(
+                    f"W contains missing values but missingness_mode={missingness_mode!r}. "
+                    f"Set missingness_mode='present' (NaN-tolerant nuisances) or impute W upstream. missing={miss}"
+                )
+
+            # Figure out raw n_xw for the regression nuisance wrapper
+            n_x = int(np.asarray(X).shape[1]) if X is not None else 0
+            n_w = int(np.asarray(W).shape[1]) if W is not None else 0
+            n_xw = n_x + n_w
+
             maps = build_init_fit_options_param_maps(
-                SparseLinearDML,
+                self.ESTIMATOR_CLS,
                 fit_include_names={"cache_values", "inference", "sample_weight", "freq_weight", "sample_var", "groups"},
             )
             init_map = maps["init"]
 
             defaults: Dict[str, Any] = {}
 
-            disc_t = specs.T.kind in ("binary", "categorical")
             disc_y = specs.Y.kind == "binary"
-            if disc_t:
-                defaults["discrete_treatment"] = True
             if disc_y:
                 defaults["discrete_outcome"] = True
 
-            
+            defaults["categories"] = _categories_from_spec(specs)
 
             if pre_xw is not None:
-                defaults.update(
-                    _get_default_models_for_t_and_y(
-                        specs,
+                defaults["model_propensity"] = list(
+                    _build_propensity_candidates(
                         pre_XW=pre_xw,
-                        missingness=command.inputs.missingness_mode,
+                        missingness=missingness_mode,
+                        random_state=None,
+                        n_jobs=None,
+                    )
+                )
+                defaults["model_regression"] = list(
+                    _build_regression_candidates(
+                        pre_XW=pre_xw,
+                        n_xw=n_xw,
+                        discrete_outcome=disc_y,
+                        missingness=missingness_mode,
+                        random_state=None,
+                        n_jobs=None,
                     )
                 )
 
             if pre_x is not None:
                 defaults["featurizer"] = pre_x
 
-            required_keys = required_init_keys(SparseLinearDML, init_map=init_map)
+            # FIX(2): allow_missing should reflect *W* missingness only
+            defaults["allow_missing"] = bool(miss["W"])
+
+            required_keys = _safe_required_init_keys(self.ESTIMATOR_CLS, init_map=init_map)
             missing_required = [k for k in required_keys if k not in defaults]
             if missing_required:
                 raise ModelSpecError(
-                    f"Missing required SparseLinearDML __init__ parameters: {missing_required}. "
+                    f"Missing required {self.BACKEND_NAME} __init__ parameters: {missing_required}. "
                     f"(Adapter is not exposing command.options yet.)"
                 )
 
-            # allow_missing must be True if X/W can contain NaNs (EconML pre-check bypass)
-            defaults["allow_missing"] = True
-
-            est = SparseLinearDML(**defaults)
+            est = self.ESTIMATOR_CLS(**defaults)
 
             fit_warnings: list[str] = []
             with warnings.catch_warnings(record=True) as ws:
@@ -422,22 +527,32 @@ class SparseLinearDMLCausalModel(CausalModel):
             fit_warnings = [f"{w.category.__name__}: {str(w.message)}" for w in ws]
 
             n = int(df.shape[0])
+
+            artifacts: Dict[str, Any] = {
+                "n": n,
+                "y_shape": list(np.asarray(Y).shape),
+                "t_shape": list(np.asarray(T).shape),
+                "x_shape": (list(np.asarray(X).shape) if X is not None else None),
+                "w_shape": (list(np.asarray(W).shape) if W is not None else None),
+            }
+            for attr in ("score_", "nuisance_scores_propensity", "nuisance_scores_regression"):
+                try:
+                    if hasattr(est, attr):
+                        val = getattr(est, attr)
+                        artifacts[attr] = np.asarray(val).tolist() if isinstance(val, (np.ndarray,)) else val
+                except Exception:
+                    pass
+
             fit_meta: Dict[str, Any] = {
                 "warnings": fit_warnings,
                 "meta": {
-                    "backend": "econml.dml.SparseLinearDML",
+                    "backend": self.BACKEND_NAME,
                     "n": n,
                     "columns": col_meta,
                     "used_init_kwargs": defaults,
                     "spec_semantics_applied": sorted(list(required_keys)),
                 },
-                "artifacts": {
-                    "n": n,
-                    "y_shape": list(np.asarray(Y).shape),
-                    "t_shape": list(np.asarray(T).shape),
-                    "x_shape": (list(np.asarray(X).shape) if X is not None else None),
-                    "w_shape": (list(np.asarray(W).shape) if W is not None else None),
-                },
+                "artifacts": artifacts,
             }
 
             model_id = command.run_id
@@ -474,7 +589,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 run_id=command.run_id,
                 started_at=started_at,
                 finished_at=now_utc(),
-                error=ErrorInfo(code="ESTIMATOR_ERROR", message="EconML SparseLinearDML.fit failed.", details={"exception": repr(e)}),
+                error=ErrorInfo(code="ESTIMATOR_ERROR", message=f"{self.BACKEND_NAME}.fit failed.", details={"exception": repr(e)}),
                 warnings=[],
                 meta={},
             )
@@ -504,7 +619,7 @@ class SparseLinearDMLCausalModel(CausalModel):
             if model_record is None:
                 raise ModelSpecError(f"Fitted model with id {command.fitted_model_id} not found.")
 
-            est: SparseLinearDML = model_record.model
+            est = model_record.model
 
             if spec.T.kind == "binary":
                 if len(spec.T.control_values) != 1 or len(spec.T.treated_values) != 1:
@@ -524,39 +639,27 @@ class SparseLinearDMLCausalModel(CausalModel):
                     raise ModelSpecError(f"Invalid contrast: t1 value {t1_val} is the same as t0 baseline {t0}.")
 
                 item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1_val}}
-                item["ate"] = est.ate(X=X_for_ate, T0=t0, T1=t1_val)  # pyright: ignore[reportUnknownMemberType]
+                item["ate"] = est.ate(X=X_for_ate, T0=t0, T1=t1_val)
 
                 try:
                     lo, hi = est.ate_interval(X=X_for_ate, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
-                    if lo is not None and hi is not None:
-                        item["ate_interval"] = (list(lo), list(hi))  # pyright: ignore
-                    else:
-                        item["ate_interval"] = None
+                    item["ate_interval"] = (list(lo), list(hi)) if lo is not None and hi is not None else None  # pyright: ignore
+                    if item["ate_interval"] is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")
                 except Exception as e:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                     item["ate_interval"] = None
 
                 try:
-                    inference = est.ate_inference(X=X_for_ate, T0=t0, T1=t1_val)  # pyright: ignore
-                    item["ate_inference"] = serialize_inference_obj(inference) if inference is not None else None
-                    if inference is None:
+                    inf = est.ate_inference(X=X_for_ate, T0=t0, T1=t1_val)  # pyright: ignore
+                    item["ate_inference"] = serialize_inference_obj(inf) if inf is not None else None
+                    if inf is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
                 except Exception as e:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                     item["ate_inference"] = None
 
                 effects.append(item)
-
-            if not effects:
-                return CommandFailure(
-                    run_id=command.run_id,
-                    started_at=started_at,
-                    finished_at=now_utc(),
-                    error=ErrorInfo(code="OPTIONS_INVALID", message="No valid categorical contrasts found (baseline vs all).", details={}),
-                    warnings=[],
-                    meta={},
-                )
 
             finished = now_utc()
             return ATESuccess(
@@ -565,7 +668,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 finished_at=finished,
                 warnings=warnings_list,
                 meta={
-                    "backend": "econml.dml.SparseLinearDML",
+                    "backend": self.BACKEND_NAME,
                     "n": int(df.shape[0]),
                     "x_cols": spec.X if spec.X else None,
                     "contrast_kind": "baseline_vs_all",
@@ -610,16 +713,12 @@ class SparseLinearDMLCausalModel(CausalModel):
                     run_id=command.run_id,
                     started_at=started_at,
                     finished_at=now_utc(),
-                    error=ErrorInfo(
-                        code="MODEL_NOT_FOUND",
-                        message="Fitted model not found.",
-                        details={"fitted_model_id": str(command.fitted_model_id)},
-                    ),
+                    error=ErrorInfo(code="MODEL_NOT_FOUND", message="Fitted model not found.", details={"fitted_model_id": str(command.fitted_model_id)}),
                     warnings=[],
                     meta={},
                 )
 
-            est: SparseLinearDML = model_record.model
+            est = model_record.model
             spec: CausalSpec = command.protocol_specs
 
             X_query = command.inputs.x_rows
@@ -637,20 +736,15 @@ class SparseLinearDMLCausalModel(CausalModel):
                         error=ErrorInfo(
                             code="OPTIONS_INVALID",
                             message="Binary treatment for CATE requires exactly one control_value and one treated_value (or pre-normalize T upstream).",
-                            details={
-                                "control_values": list(spec.T.control_values),
-                                "treated_values": list(spec.T.treated_values),
-                            },
+                            details={"control_values": list(spec.T.control_values), "treated_values": list(spec.T.treated_values)},
                         ),
                         warnings=[],
                         meta={},
                     )
                 t0 = spec.T.control_values[0]
                 t1s = [spec.T.treated_values[0]]
-
             elif spec.T.kind == "categorical":
                 t0, t1s = categorical_t0_t1_pairs(spec)
-
             else:
                 return CommandFailure(
                     run_id=command.run_id,
@@ -681,37 +775,23 @@ class SparseLinearDMLCausalModel(CausalModel):
 
                 try:
                     lo, hi = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
-                    if lo is None or hi is None:
+                    item["cate_interval"] = (list(lo), list(hi)) if lo is not None and hi is not None else None  # pyright: ignore
+                    if item["cate_interval"] is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
-                        item["cate_interval"] = None
-                    else:
-                        item["cate_interval"] = (list(lo), list(hi))  # pyright: ignore
                 except Exception as e:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                     item["cate_interval"] = None
 
                 try:
                     inf = est.effect_inference(X_query, T0=t0, T1=t1_val)  # pyright: ignore
+                    item["cate_inference"] = serialize_inference_obj(inf) if inf is not None else None
                     if inf is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_inference returned None")
-                        item["cate_inference"] = None
-                    else:
-                        item["cate_inference"] = serialize_inference_obj(inf)
                 except Exception as e:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                     item["cate_inference"] = None
 
                 effects.append(item)
-
-            if not effects:
-                return CommandFailure(
-                    run_id=command.run_id,
-                    started_at=started_at,
-                    finished_at=now_utc(),
-                    error=ErrorInfo(code="OPTIONS_INVALID", message="No valid contrasts produced for CATE.", details={}),
-                    warnings=[],
-                    meta={},
-                )
 
             finished = now_utc()
             return CATESuccess(
@@ -719,10 +799,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 started_at=started_at,
                 finished_at=finished,
                 warnings=warnings_list,
-                meta={
-                    "backend": "econml.dml.SparseLinearDML",
-                    "row_count": int(getattr(X_query, "shape", [len(command.inputs.x_rows)])[0]),
-                },
+                meta={"backend": self.BACKEND_NAME, "row_count": int(getattr(X_query, "shape", [len(X_query)])[0])},
                 fitted_model_id=command.fitted_model_id,
                 x_cols=x_cols,
                 effects=effects,
@@ -746,3 +823,25 @@ class SparseLinearDMLCausalModel(CausalModel):
                 warnings=[],
                 meta={},
             )
+
+
+# =============================================================================
+# Concrete adapters
+# =============================================================================
+
+@dataclass(frozen=True, slots=True)
+class LinearDRLearnerCausalModel(_BaseDRLearnerAdapter):
+    ESTIMATOR_CLS: Any = LinearDRLearner
+    BACKEND_NAME: str = "econml.dr.LinearDRLearner"
+
+
+@dataclass(frozen=True, slots=True)
+class ForestDRLearnerCausalModel(_BaseDRLearnerAdapter):
+    ESTIMATOR_CLS: Any = ForestDRLearner
+    BACKEND_NAME: str = "econml.dr.ForestDRLearner"
+
+
+@dataclass(frozen=True, slots=True)
+class SparseLinearDRLearnerCausalModel(_BaseDRLearnerAdapter):
+    ESTIMATOR_CLS: Any = SparseLinearDRLearner
+    BACKEND_NAME: str = "econml.dr.SparseLinearDRLearner"

@@ -7,6 +7,8 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
+from python.domain.workflows.tool import Tool
+
 # =============================================================================
 # Errors (structured + parseable)
 # =============================================================================
@@ -145,7 +147,7 @@ class DatasetSummaryModel(BaseModel):
 # Public API (STATE-style profiling tool; no constructor; pure funcs)
 # =============================================================================
 
-class DatasetProfilingStateTool:
+class DatasetProfilingStateTool(Tool):
     """
     "State tool" API:
       - extract_dataset_summary(df, ...) -> DatasetSummaryModel
@@ -156,6 +158,9 @@ class DatasetProfilingStateTool:
 
     def get_tool_name(self) -> str:
         return "DATA_PROFILING_TOOL"
+    
+    def get_tool_info(self) -> str:
+        return "Tool for profiling datasets for summary statistics and data quality insights."
     
 
 
