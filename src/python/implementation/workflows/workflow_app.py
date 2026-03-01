@@ -28,7 +28,7 @@ class WorkflowResponse:
     needs_input: bool
     current_stage: Stage
     current_stage_status: Status
-    artifact_ids: Optional[list[str]] = None
+    artifact_ids: Optional[Sequence[str]] = None
 
 
 class WorkflowApp:
@@ -197,7 +197,7 @@ class WorkflowApp:
             needs_input=(new_state.needs_action == "NEEDS_INPUT"),
             current_stage=new_state.name,
             current_stage_status=new_state.status,
-            artifact_ids= list("486f4975-6cd9-4261-a122-e6b0fc46462d")
+            artifact_ids=[str("486f4975-6cd9-4261-a122-e6b0fc46462d")]
         )
 
     # ------------------------

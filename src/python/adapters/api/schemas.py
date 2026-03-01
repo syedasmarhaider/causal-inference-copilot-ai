@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -25,6 +25,6 @@ class InvokeResponse(BaseModel):
     user_id: UUID
     node_message: Optional[str]
     needs_input: bool
-    artifact_ids: Optional[list[str]] = None
+    artifact_ids: Optional[Sequence[str]] = None
     current_stage: str
     current_stage_status: str

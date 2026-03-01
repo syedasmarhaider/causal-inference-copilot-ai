@@ -4,7 +4,7 @@ import asyncio
 import logging
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -42,17 +42,14 @@ def healthz():
     return {"ok": True}
 
 
-@app.get(path="/v1/conversations/{conversation_id}/artifacts/{artifact_id}")
+@app.get(path="/v1/{user_id}/conversations/{conversation_id}/artifacts/{artifact_id}")
 def get_artifact(
+    user_id: UUID,
     conversation_id: UUID,
     artifact_id: UUID,
-    user_id: UUID | None = Query(default=None),
-    x_user_id: UUID | None = Header(default=None, alias="X-User-Id"),
 ):
-    uid = user_id or x_user_id
-    if uid is None:
-        raise HTTPException(status_code=400, detail="user_id required (query ?user_id=... or header X-User-Id)")
-
+    # TODO: for now no authentication and authorization, but in the future we should check if the user has access to the conversation and artifact
+    uid = user_id
     try:
         ref = _workflow.get_artifact(
             user_id=uid,
