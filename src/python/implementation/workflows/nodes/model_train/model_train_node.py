@@ -12,6 +12,13 @@ from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 
+from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
+    ProtocolSpec,
+    BinaryTreatmentSpecModel as ProtocolBinaryTreatmentSpecModel,
+    CategoricalTreatmentSpecModel as ProtocolCategoricalTreatmentSpecModel,
+    BinaryOutcomeSpecModel as ProtocolBinaryOutcomeSpecModel,
+    ContinuousOutcomeSpecModel as ProtocolContinuousOutcomeSpecModel,
+)
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.nodes.model_train.model_train_prompts import (
     ENCODING_PLAN_SYSTEM_PROMPT,
@@ -20,9 +27,16 @@ from python.implementation.workflows.nodes.model_train.model_train_prompts impor
 )
 from python.implementation.workflows.nodes.model_train.model_train_state import ModelTrainPayload, ModelTrainState
 
-from python.implementation.workflows.tools.causal.causal_command import FitCommand, FitInputs
+from python.implementation.workflows.tools.causal.causal_command import CommandFailure, FitCommand, FitInputs, FitResult, FitSuccess
 from python.implementation.workflows.tools.causal.causal_model_factory_tool import CausalModelFactoryTool
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.causal_spec import (
+    CausalSpec,
+    BinaryTreatmentSpecModel as CausalBinaryTreatmentSpecModel,
+    CategoricalTreatmentSpecModel as CausalCategoricalTreatmentSpecModel,
+    BinaryOutcomeSpecModel as CausalBinaryOutcomeSpecModel,
+    ContinuousOutcomeSpecModel as CausalContinuousOutcomeSpecModel,
+)
+
 from python.implementation.workflows.tools.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.encoding.encoding_tool import EncodingTool
 
@@ -58,6 +72,57 @@ def _safe_model_dump(x: Any) -> Any:
     if hasattr(x, "model_dump"):
         return x.model_dump(mode="json")
     return x
+
+def _protocol_to_causal_spec(protocol: ProtocolSpec) -> CausalSpec:
+    # -------- Treatment (T) --------
+    t = protocol.treatment_spec
+    if isinstance(t, ProtocolBinaryTreatmentSpecModel):
+        t_specs = CausalBinaryTreatmentSpecModel(
+            kind="binary",
+            column=t.column,
+            treated_values=[t.treated],
+            control_values=[t.control],
+        )
+    elif isinstance(t, ProtocolCategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
+        t_specs = CausalCategoricalTreatmentSpecModel(
+            kind="categorical",
+            column=t.column,
+            levels=list(t.levels),
+            baseline=None,
+        )
+    else:
+        raise TypeError(f"Unsupported treatment_spec type: {type(t).__name__}")
+
+    # -------- Outcome (Y) --------
+    y = protocol.outcome_spec
+    if isinstance(y, ProtocolBinaryOutcomeSpecModel):
+        y_specs = CausalBinaryOutcomeSpecModel(
+            kind="binary",
+            column=y.column,
+            event_values=[y.event],
+            non_event_values=[y.non_event],
+        )
+    elif isinstance(y, ProtocolContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
+        y_specs = CausalContinuousOutcomeSpecModel(
+            kind="continuous",
+            column=y.column,
+            unit=y.unit,
+            clip_min=y.clip_min,
+            clip_max=y.clip_max,
+        )
+    else:
+        raise TypeError(f"Unsupported outcome_spec type: {type(y).__name__}")
+
+    # -------- Roles --------
+    # NOTE: Your CausalSpec validator says W and X must be disjoint and T/Y must not be in W/X/Z.
+    # This will raise if ProtocolSpec contains overlaps.
+    return CausalSpec(
+        Y=y_specs,
+        T=t_specs,
+        W=list(protocol.covariates),
+        X=list(protocol.effect_modifiers),
+        Z=[],
+    )    
 
 
 
@@ -179,7 +244,7 @@ class ModelTrainNode(Node):
     ) -> State:
         if not isinstance(state, ModelTrainState):
             raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")
-
+        
         deps = ModelTrainDeps.from_loaded(previous_state_dependencies)
         
         protocol = deps.compile_protocol.payload.protocol
@@ -199,7 +264,6 @@ class ModelTrainNode(Node):
                         column_transformation_plan=None,
                         col_tranformation_not_needed=True,
                         training_warnings=None,
-                        warnings=None,
                         user_message="No covariates or effect modifiers detected, so no column transformation needed. Proceeding to the training",
                         needs_user_input=False,
                         error=None,
@@ -239,86 +303,36 @@ class ModelTrainNode(Node):
                     }
                 )
             )
-        
-
+         
+        pre_X = None
+        pre_XW = None 
         if not state.payload.col_tranformation_not_needed:
-           assert state.payload.column_transformation_plan is not None, "Column transformation plan must be available if transformation is needed."
+            assert state.payload.column_transformation_plan is not None, "Column transformation plan must be available if transformation is needed."
             encoding_tool = cast(EncodingTool, tool_factory.get_tool(EncodingTool.NAME)) 
-            encoding_tool.compile(
+            transformers = encoding_tool.compile(
             plan=state.payload.column_transformation_plan,
             X_order=[c.column for c in state.payload.column_transformation_plan.columns if c.role == "X"],
             W_order=[c.column for c in state.payload.column_transformation_plan.columns if c.role == "W"],
             dense_output=True,
-        ) 
-               
-
-
+           )
+            pre_X = transformers.pre_X
+            pre_XW = transformers.pre_XW
+           
         
-        
-            
-      
-
-        
-
-            # If plan not stored yet and not marked as not needed, generate plan
-            plan = state.payload.column_transformation_plan
-            plan_message = "Using existing encoding plan."
-
-            if plan is None and not col_transformation_not_needed:
-                out = _generate_encoding_plan(
-                    llm=self.llm,
-                    llm_config=self.llm_config,
-                    deps=deps,
-                    history=messages_history,
-                )
-                if out.needs_user_input:
-                    payload = state.payload.model_copy(
-                        update={
-                            "needs_user_input": True,
-                            "error": None,
-                            "user_message": out.message,
-                            "column_transformation_plan": None,
-                            "col_tranformation_not_needed": None,
-                        }
-                    )
-                    return ModelTrainState(payload=payload)
-
-                plan = out.plan
-                plan_message = out.message
-
-        # Compile transformers if we have a plan
-        pre_X = None
-        pre_XW = None
-        if plan is not None:
-            # Derive X/W orders from the plan itself (so compile input order matches plan roles)
-            X_order = [c.column for c in plan.columns if c.role == "X"]
-            W_order = [c.column for c in plan.columns if c.role == "W"]
-
-            enc_tool_raw = tool_factory.get_tool(EncodingTool.NAME)
-            enc_tool = cast(EncodingTool, enc_tool_raw)
-            compiled = enc_tool.compile(plan=plan, X_order=X_order, W_order=W_order, dense_output=True)
-            pre_X = compiled.pre_X
-            pre_XW = compiled.pre_XW
 
         # Resolve selected causal model
         mf_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
         model_factory = cast(CausalModelFactoryTool, mf_raw)
 
-        estimator_fqcn = selected.selected_model.strip()
+        estimator_fqcn = selected.selected_model
+        assert estimator_fqcn is not None, "Selected model must include the fully qualified class name."
         model = model_factory.resolve(estimator_fqcn)
         if model is None:
-            payload = state.payload.model_copy(
-                update={
-                    "needs_user_input": True,
-                    "error": None,
-                    "user_message": "The selected model is not available. Please choose another model.",
-                }
-            )
-            return ModelTrainState(payload=payload)
+            raise ValueError(f"Selected model '{estimator_fqcn}' is not supported by the CausalModelFactoryTool.")
 
         # Build command + execute
         run_id = uuid4()
-        causal_spec = _build_causal_spec(protocol)
+        causal_spec = _protocol_to_causal_spec(protocol)
 
         cmd = FitCommand(
             model_name=estimator_fqcn,
@@ -329,40 +343,37 @@ class ModelTrainNode(Node):
         )
 
         res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)
-
-        # Success/failure handling (duck-typed to your FitResult union)
-        if getattr(res, "status", None) == "SUCCEEDED":
-            fitted_model_id = getattr(res, "fitted_model_id", None)
-            warnings_list = getattr(res, "warnings", []) or []
+        
+        if not isinstance(res, FitResult):
+            raise ValueError(f"Expected FitResult from model execution, got {type(res).__name__}")
+        
+        if  isinstance(res, FitSuccess):
+            fitted_model_id = res.fitted_model_id
+            warnings_list = res.warnings or []
             warnings_str = "\n".join([str(w) for w in warnings_list]) if warnings_list else None
-
             payload = state.payload.model_copy(
                 update={
                     "trained_model_id": fitted_model_id,
-                    "column_transformation_plan": plan,
-                    "col_tranformation_not_needed": bool(col_transformation_not_needed or plan is None),
                     "training_warnings": warnings_str,
-                    "warnings": None,
                     "needs_user_input": False,
                     "error": None,
-                    "user_message": plan_message + "\n\nTraining completed successfully.",
+                    "user_message": "Training completed successfully.",
                 }
             )
-            return ModelTrainState(payload=payload)
+            
+        if isinstance(res, CommandFailure) and res.status == "FAILED":
+            err_obj = res.error
+            err_msg = getattr(err_obj, "message", None) or str(err_obj) or "Training failed for an unknown reason."
+            payload = state.payload.model_copy(
+                update={
+                    "trained_model_id": None,
+                    "needs_user_input": False,
+                    "error": err_msg,
+                    "user_message": f"Retrying. Training failed: {err_msg}",
+                }
+            )
+            
+        raise ValueError(f"Unexpected FitResult status: {getattr(res, 'status', None)}")   
 
-        # FAILED
-        err_obj = getattr(res, "error", None)
-        err_msg = None
-        if err_obj is not None:
-            err_msg = getattr(err_obj, "message", None) or str(err_obj)
-        err_msg = err_msg or "Training failed for an unknown reason."
 
-        payload = state.payload.model_copy(
-            update={
-                "trained_model_id": None,
-                "needs_user_input": True,
-                "error": err_msg,
-                "user_message": f"Training failed: {err_msg}",
-            }
-        )
-        return ModelTrainState(payload=payload)
+

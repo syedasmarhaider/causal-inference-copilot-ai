@@ -19,7 +19,6 @@ class ModelTrainPayload(BaseModel):
     column_transformation_plan: Optional[TransformPlan] = None
     col_tranformation_not_needed: Optional[bool] = None  # in case LLM determines no transformation needed, to distinguish from not run yet
     training_warnings: Optional[str] = None
-    warnings: Optional[str] = None
     
 
     # UI / node-local
