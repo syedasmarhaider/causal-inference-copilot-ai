@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Literal, Optional, Sequence, Tuple, Union, cast
+from typing import Any, ClassVar, List, Literal, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 import pandas as pd
@@ -17,8 +17,9 @@ from python.domain.workflows.tool import Tool
 
 
 class EncodingTool(Tool):
+    NAME: ClassVar[str] = "ENCODING"
     def get_tool_name(self) -> str:
-        return "ENCODING_TOOL"
+        return self.NAME
     def get_tool_info(self) -> str:
         return "Tool for compiling encoding plans into sklearn ColumnTransformers for preprocessing features before causal inference modeling."
     def compile(self,plan: TransformPlan, *, X_order: Sequence[str], W_order: Sequence[str], dense_output: bool = True) -> CompiledTransformers:

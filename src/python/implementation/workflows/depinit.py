@@ -82,6 +82,6 @@ def make_workflow_app(settings: WorkflowSettings) -> WorkflowApp:
         router=router,
         nodes_by_state_name=nodes_by_state_name,
         state_classes_by_name=state_classes_by_name,
-        tool_factory=DefaultToolFactory(),
+        tool_factory=DefaultToolFactory(data_repo=data_repo, models_repo=models_repo),
         history_limit=settings.history_limit,
     )

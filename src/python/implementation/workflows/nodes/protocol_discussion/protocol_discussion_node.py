@@ -21,7 +21,7 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     get_questions,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingStateTool
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool
 from python.implementation.workflows.utils.utils import safe_err
 
 log = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ class ProtocolDiscussionNode(Node):
         messages_history: Optional[Sequence[ChatMessage]],
         state: State,
     ) -> State:
-        data_set_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))
+        data_set_profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))
         if not isinstance(state, ProtocolDiscussionState):
             raise TypeError(f"{self.name}: expected ProtocolDiscussionState, got {type(state).__name__}")
 

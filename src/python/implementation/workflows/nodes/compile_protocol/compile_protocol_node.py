@@ -18,7 +18,7 @@ from python.implementation.workflows.nodes.compile_protocol import compile_proto
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_deps import CompileProtocolDeps
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolPayloadModel, CompileProtocolState
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CategoricalTreatmentSpecModel, ContinuousOutcomeSpecModel,ProtocolSpec
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingStateTool, DatasetSummaryModel
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool, DatasetSummaryModel
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class CompileProtocolNode(Node):
         previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
-        dataset_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))
+        dataset_profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))
         deps = CompileProtocolDeps.from_loaded(previous_state_dependencies)
         ld = deps.load_dataset
         ds_summary: DatasetSummaryModel | None = ld.payload.summary

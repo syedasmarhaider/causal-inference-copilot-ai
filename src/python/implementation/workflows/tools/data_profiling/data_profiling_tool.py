@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
@@ -147,7 +147,8 @@ class DatasetSummaryModel(BaseModel):
 # Public API (STATE-style profiling tool; no constructor; pure funcs)
 # =============================================================================
 
-class DatasetProfilingStateTool(Tool):
+class DatasetProfilingTool(Tool):
+    NAME: ClassVar[str] = "DATA_PROFILING"
     """
     "State tool" API:
       - extract_dataset_summary(df, ...) -> DatasetSummaryModel
@@ -157,7 +158,7 @@ class DatasetProfilingStateTool(Tool):
     
 
     def get_tool_name(self) -> str:
-        return "DATA_PROFILING_TOOL"
+        return self.NAME
     
     def get_tool_info(self) -> str:
         return "Tool for profiling datasets for summary statistics and data quality insights."
@@ -615,4 +616,4 @@ def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummaryModel:
                 hint="Verify the column is iterable or provides .unique().",
                 evidence={"error": repr(e)},
             )
-        )
+        )        

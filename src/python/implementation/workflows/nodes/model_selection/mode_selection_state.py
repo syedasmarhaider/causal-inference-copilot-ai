@@ -19,7 +19,7 @@ class ModelSelectionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     confirmed_model_selection: Optional[ConfirmedModelSelectionPayload] = None
-    user_message: Optional[str] = None
+    message: Optional[str] = None
     error: Optional[str] = None
     system_choice_message: Optional[str] = None
 
@@ -50,12 +50,12 @@ class ModelSelectionState(State):
 
     @property
     def message(self) -> str:
-        if self.payload.user_message is None:
+        if self.payload.message is None:
             raise ValueError(
                 "ModelSelectionState.message is required but missing. "
-                "Don't access .message outside a node context where user_message is guaranteed."
+                "Don't access .message outside a node context where message is guaranteed."
             )
-        return self.payload.user_message
+        return self.payload.message
 
     @property
     def needs_action(self) -> ACTION:

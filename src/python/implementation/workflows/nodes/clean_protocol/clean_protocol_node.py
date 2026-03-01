@@ -24,7 +24,7 @@ from python.implementation.workflows.nodes.compile_protocol.protocol_specs impor
     ContinuousOutcomeSpecModel,
     ProtocolSpec,
 )
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingStateTool
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool
 from python.implementation.workflows.utils.utils import BOOL_FALSE, BOOL_TRUE
 
 
@@ -71,7 +71,7 @@ class CleanProtocolNode(Node):
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
         try:
-            data_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))  
+            data_profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))  
             deps = CleanProtocolDeps.from_loaded(previous_state_dependencies)
             dataset_id = deps.load_dataset.payload.id
             if dataset_id is None:

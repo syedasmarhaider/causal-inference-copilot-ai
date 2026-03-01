@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import ClassVar, List, Optional
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
@@ -16,11 +16,13 @@ from python.implementation.workflows.tools.causal.econml.models_meta import Supp
 
 
 @dataclass
-class CausalInferenceFactory(Tool):
+class CausalModelFactoryTool(Tool):
+    NAME: ClassVar[str] = "CAUSAL_MODEL_FACTORY"
     _by_fqcn: dict[SupportedModelsLiteralType, CausalModel]
+
     
     @classmethod
-    def create_default(cls, *, data_repo: DataRepo, models_repo: ModelsRepo) -> "CausalInferenceFactory":
+    def create_default(cls, *, data_repo: DataRepo, models_repo: ModelsRepo) -> "CausalModelFactoryTool":
         return cls(
             _by_fqcn={
                 "econml.dml.LinearDML": LinearDMLCausalModel(data_repo=data_repo, models_repo=models_repo),
@@ -34,7 +36,7 @@ class CausalInferenceFactory(Tool):
         )
      
     def get_tool_name(self) -> str:
-        return "CAUSAL_INFERENCE_TOOL"
+        return self.NAME
     
     def get_tool_info(self) -> str:
         return "Tool for managing and resolving causal inference models."

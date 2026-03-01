@@ -5,9 +5,9 @@ from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
 from python.domain.workflows.tool import Tool
 from python.domain.workflows.tool_factory import ToolFactory
-from python.implementation.workflows.tools.causal.causal_model_factory import CausalInferenceFactory
+from python.implementation.workflows.tools.causal.causal_model_factory_tool import CausalModelFactoryTool
 from python.implementation.workflows.tools.data_processing.data_processing_tool import DataProcessingTool
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingStateTool
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool
 from python.implementation.workflows.tools.encoding.encoding_tool import EncodingTool
 
 
@@ -15,10 +15,10 @@ class DefaultToolFactory(ToolFactory):
     _tools: dict[str, Tool]
     def __init__(self, data_repo: DataRepo, models_repo: ModelsRepo) -> None:
         self._tools = {
-            "DATA_PROFILING_TOOL": DatasetProfilingStateTool(),
-            "ENCODING_TOOL": EncodingTool(),
-            "DATA_PROCESSING_TOOL": DataProcessingTool(),
-            "CAUSAL_INFERENCE_TOOL": CausalInferenceFactory.create_default(data_repo=data_repo, models_repo=models_repo),
+            DatasetProfilingTool.NAME: DatasetProfilingTool(),
+            EncodingTool.NAME: EncodingTool(),
+            DataProcessingTool.NAME: DataProcessingTool(),
+            CausalModelFactoryTool.NAME: CausalModelFactoryTool.create_default(data_repo=data_repo, models_repo=models_repo),
         }
 
     def get_tool_names(self) -> list[str]:

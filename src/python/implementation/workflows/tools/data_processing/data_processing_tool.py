@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import ClassVar, List, Sequence
 
 import pandas as pd
 
@@ -23,6 +23,7 @@ class InclusionRuleModel(BaseModel):
 
 @dataclass(frozen=True)
 class DataProcessingTool(Tool):
+    NAME: ClassVar[str] = "DATA_PROCESSING"
     """
     Strict semantics:
       - No value coercion/parsing. Values are applied as provided.

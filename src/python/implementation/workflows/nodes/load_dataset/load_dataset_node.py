@@ -12,7 +12,7 @@ from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.load_dataset.load_dataset_prompts import load_dataset_node_info, load_dataset_system_prompt
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetPayloadModel, LoadDatasetState
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingError, DatasetProfilingStateTool
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingError, DatasetProfilingTool
 from python.implementation.workflows.utils.utils import DEFAULT_MODEL_GEMNI, JSONDict
 
 
@@ -68,7 +68,7 @@ class LoadDatasetNode(Node):
         state: State,
     ) -> State:
         
-        data_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))        
+        data_profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))        
         if not isinstance(state, LoadDatasetState):
             raise TypeError(f"{self.name}: expected LoadDatasetState, got {type(state).__name__}")
         
