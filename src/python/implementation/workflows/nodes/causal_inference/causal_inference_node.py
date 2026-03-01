@@ -5,6 +5,7 @@ import json
 from typing import Any, Optional, Sequence, cast
 from uuid import UUID, uuid4
 
+from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
@@ -118,7 +119,8 @@ def _serialize_result_to_json_str(res: Any) -> str:
 @dataclass(frozen=True, slots=True)
 class CausalInferenceNode(Node):
     llm: LLMService
-    llm_config: LLMConfig = LLMConfig(temperature=0.2)
+    data_repo: DataRepo
+    model_name: str
 
     @property
     def name(self) -> str:
@@ -209,7 +211,7 @@ class CausalInferenceNode(Node):
                             ate_result_json=result,
                             warnings_json=_dumps(warnings),
                         ),
-                        config=self.llm_config,
+                        config=LLMConfig(temperature=0.2, model=self.model_name),
                         history=messages_history[-8:] if messages_history else None,
                     ).content.strip()
                     
@@ -244,7 +246,7 @@ class CausalInferenceNode(Node):
         message = self.llm.generate(
             system_prompt= "Talk to user",
             user_prompt= state.payload.ate_result_summary if state.payload.ate_result_summary else "The ATE result is available. How can I assist you with it?",
-            config=self.llm_config,
+            config=LLMConfig(temperature=0.2, model=self.model_name),
             history=messages_history[-8:] if messages_history else None,
         ).content.strip()
         

@@ -222,7 +222,7 @@ def _generate_encoding_plan(
 @dataclass(frozen=True, slots=True)
 class ModelTrainNode(Node):
     llm: LLMService
-    llm_config: LLMConfig = LLMConfig(temperature=0.2)
+    model_name: str
 
     @property
     def name(self) -> str:
@@ -272,7 +272,7 @@ class ModelTrainNode(Node):
             
             plan = _generate_encoding_plan(
                 llm=self.llm,
-                llm_config=self.llm_config,
+                llm_config=LLMConfig(temperature=0.2, model=self.model_name),
                 deps=deps,
                 history=messages_history,
             )

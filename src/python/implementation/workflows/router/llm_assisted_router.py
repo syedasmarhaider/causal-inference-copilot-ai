@@ -11,20 +11,22 @@ from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.route import NextDecision, Router
 from python.domain.workflows.state import State
+from python.implementation.workflows.nodes.causal_inference.causal_inference_node import CausalInferenceNode
+from python.implementation.workflows.nodes.causal_inference.causal_inference_state import CausalInferenceState
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_node import CleanProtocolNode
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_node import CompileProtocolNode
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
-from python.implementation.workflows.nodes.confirm_transformed_protocol.confirm_transformed_protocol_node import ConfirmTransformedProtocolNode
-from python.implementation.workflows.nodes.confirm_transformed_protocol.confirm_transformed_protocol_state import ConfirmTransformedProtocolState
 from python.implementation.workflows.nodes.load_dataset.load_dataset_node import LoadDatasetNode
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
+from python.implementation.workflows.nodes.model_selection.mode_selection_state import ModelSelectionState
+from python.implementation.workflows.nodes.model_selection.model_selection_node import ModelSelectionNode
+from python.implementation.workflows.nodes.model_train.model_train_node import ModelTrainNode
+from python.implementation.workflows.nodes.model_train.model_train_state import ModelTrainState
 from python.implementation.workflows.nodes.noop_done.noop_done_node import NoopDoneNode
 from python.implementation.workflows.nodes.noop_done.noop_done_state import NoopDoneState
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import ProtocolDiscussionNode
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
-from python.implementation.workflows.nodes.transform_protocol.transform_protocol_node import TransformProtocolNode
-from python.implementation.workflows.nodes.transform_protocol.transform_protocol_state import TransformProtocolState
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_node import ValidateCleanProtocolNode
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import ValidateCleanProtocolState
 from python.implementation.workflows.utils.utils import DEFAULT_MODEL_GEMNI
@@ -200,8 +202,9 @@ def build_state_classes_by_name() -> Mapping[str, Type[State]]:
         CompileProtocolState.NAME: CompileProtocolState,
         CleanProtocolState.NAME: CleanProtocolState,
         ValidateCleanProtocolState.NAME: ValidateCleanProtocolState,
-        TransformProtocolState.NAME: TransformProtocolState,
-        ConfirmTransformedProtocolState.NAME: ConfirmTransformedProtocolState,
+        ModelSelectionState.NAME: ModelSelectionState,
+        ModelTrainState.NAME: ModelTrainState,
+        CausalInferenceState.NAME: CausalInferenceState,
         NoopDoneState.NAME: NoopDoneState,
     }
         
@@ -212,21 +215,23 @@ def init_next_state_names() -> Mapping[str, Optional[str]]:
         ProtocolDiscussionState.NAME: CompileProtocolState.NAME,
         CompileProtocolState.NAME: CleanProtocolState.NAME,
         CleanProtocolState.NAME: ValidateCleanProtocolState.NAME,
-        ValidateCleanProtocolState.NAME: TransformProtocolState.NAME,
-        TransformProtocolState.NAME: ConfirmTransformedProtocolState.NAME,
-        ConfirmTransformedProtocolState.NAME: NoopDoneState.NAME,
+        ValidateCleanProtocolState.NAME: ModelSelectionState.NAME,
+        ModelSelectionState.NAME: ModelTrainState.NAME,
+        ModelTrainState.NAME: CausalInferenceState.NAME,
+        CausalInferenceState.NAME: NoopDoneState.NAME,
         NoopDoneState.NAME: None,
     }
 
 def get_node_name_with_description() -> Mapping[str, str]:
-    return {
-        LoadDatasetState.NAME: LoadDatasetNode.get_info(),
-        ProtocolDiscussionState.NAME: ProtocolDiscussionNode.get_info(),
-        CompileProtocolState.NAME: CompileProtocolNode.get_info(),
-        CleanProtocolState.NAME: CleanProtocolNode.get_info(),
-        ValidateCleanProtocolState.NAME: ValidateCleanProtocolNode.get_info(),
-        TransformProtocolState.NAME: TransformProtocolNode.get_info(),
-        ConfirmTransformedProtocolState.NAME: ConfirmTransformedProtocolNode.get_info(),
+    return{
+        LoadDatasetNode.NAME: LoadDatasetNode.get_info(),
+        ProtocolDiscussionNode.NAME: ProtocolDiscussionNode.get_info(),
+        CompileProtocolNode.NAME: CompileProtocolNode.get_info(),
+        CleanProtocolNode.NAME: CleanProtocolNode.get_info(),
+        ValidateCleanProtocolNode.NAME: ValidateCleanProtocolNode.get_info(),
+        ModelSelectionState.NAME: ModelSelectionNode.get_info(),
+        ModelTrainState.NAME: ModelTrainNode.get_info(),
+        CausalInferenceState.NAME: CausalInferenceNode.get_info(),
         NoopDoneState.NAME: NoopDoneNode.get_info(),
     }
 
@@ -250,15 +255,25 @@ def init_all_nodoes_with_name_as_key(llm: LLMService, data_repo: DataRepo, model
         llm=llm,
         model_name=DEFAULT_MODEL_GEMNI,
         )
-    transform_protocol_node = TransformProtocolNode(
-        data_repo=data_repo,
-        llm=llm,
-        model_name=DEFAULT_MODEL_GEMNI,
-    )
-    confirm_transformed_protocol_node = ConfirmTransformedProtocolNode(
+    
+    model_selection_node = ModelSelectionNode(
         llm=llm,
         model_name=DEFAULT_MODEL_GEMNI,
      )
+    
+    model_train_node = ModelTrainNode(
+        llm=llm,
+        model_name=DEFAULT_MODEL_GEMNI,
+     )
+    
+    inference_node = CausalInferenceNode(
+        llm=llm,
+        data_repo=data_repo,
+        model_name=DEFAULT_MODEL_GEMNI,
+     )
+    
+    
+   
     done_node = NoopDoneNode()
     
     return {
@@ -267,8 +282,9 @@ def init_all_nodoes_with_name_as_key(llm: LLMService, data_repo: DataRepo, model
         compiled_protocol_node.name: compiled_protocol_node,
         clean_protocol_node.name: clean_protocol_node,
         validate_cleaned_protocol_node.name: validate_cleaned_protocol_node,
-        transform_protocol_node.name: transform_protocol_node,
-        confirm_transformed_protocol_node.name: confirm_transformed_protocol_node,
+        model_selection_node.name: model_selection_node,
+        model_train_node.name: model_train_node,
+        inference_node.name: inference_node,
         done_node.name: done_node,
     }
     
