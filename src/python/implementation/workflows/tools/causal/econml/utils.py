@@ -2,7 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 import inspect
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple, Type
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Type
 import numpy as np
 import pandas as pd
 
@@ -148,12 +148,6 @@ def required_init_keys(cls: Type[Any], init_map: Mapping[str, Any]) -> Set[str]:
 # CausalSpec -> columns / arrays (strict to your Pydantic schema)
 # =============================================================================
 
-def validate_columns_exist(df: pd.DataFrame, cols: List[str]) -> None:
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        raise ModelSpecError(f"Dataset missing required columns: {missing}")
-
-
 def has_missing(arr: Any) -> bool:
     if arr is None:
         return False
@@ -166,19 +160,34 @@ def has_missing(arr: Any) -> bool:
 
 def get_input_params_from_spec(
     df: pd.DataFrame,
-    spec: CausalSpec,
+    specs: CausalSpec, 
+    order_X: Optional[List[str]] = None,
+    order_W: Optional[List[str]] = None,
+    *,
+    strict_order: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, Any]]:
-    y_col = spec.Y.column
-    t_col = spec.T.column
-    x_cols = list(spec.X or [])
-    w_cols = list(spec.W or [])
+    """
+    Returns (y, t, x, w, meta) where x/w are ordered to match the transformer expectations.
 
-    validate_columns_exist(df, [y_col, t_col] + x_cols + w_cols)
+    Ordering rules:
+      - If oder_X/order_W are provided, they MUST match exactly the X/W columns from specs (strict_order=True).
+      - Otherwise we use the specs-defined order.
+    """
+    y_col = str(specs.Y.column)
+    t_col = str(specs.T.column)
 
+    x_cols = specs.X or []
+    w_cols = specs.W or []
+
+
+    # Validate all required columns exist
+    validate_columns_exist(df, [y_col, t_col] + (order_X or []) + (order_W or []))
+
+    # Build arrays in the exact order that downstream transformer/model expects
     y: np.ndarray = df[[y_col]].to_numpy()
     t: np.ndarray = df[[t_col]].to_numpy()
-    x: Optional[np.ndarray] = df[x_cols].to_numpy() if x_cols else None
-    w: Optional[np.ndarray] = df[w_cols].to_numpy() if w_cols else None
+    x: Optional[np.ndarray] = df[order_X].to_numpy() if order_X else None
+    w: Optional[np.ndarray] = df[order_W].to_numpy() if order_W else None
 
     # squeeze singleton dims
     if y.ndim == 2 and y.shape[1] == 1:
@@ -186,7 +195,17 @@ def get_input_params_from_spec(
     if t.ndim == 2 and t.shape[1] == 1:
         t = t[:, 0]
 
-    meta: Dict[str, Any] = {"y": y_col, "t": t_col, "x": x_cols, "w": w_cols}
+    overlap_XW = sorted(set(order_X or []).intersection(order_W or []))
+
+    meta: Dict[str, Any] = {
+        "y": y_col,
+        "t": t_col,
+        "x_cols": x_cols,
+        "w_cols": w_cols,
+        "X_order": order_X,  # <- this is what your ColumnTransformer should use
+        "W_order": order_W,  # <- this is what your ColumnTransformer should use
+        "overlap_XW": overlap_XW,  # useful for diagnostics if user put same col in both
+    }
     return y, t, x, w, meta
 
 
@@ -328,3 +347,9 @@ def raise_if_x_rows_not_exactly_match_fit_x_cols(
             "inputs.x_rows columns must match spec.X order exactly. "
             f"expected={expected}, got={got}"
         )
+        
+
+def validate_columns_exist(df: pd.DataFrame, cols: Sequence[str]) -> None:
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in df: {missing}")

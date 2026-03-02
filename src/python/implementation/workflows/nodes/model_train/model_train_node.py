@@ -256,6 +256,19 @@ class ModelTrainNode(Node):
 
         clean_dataset_id = getattr(deps.clean_protocol.payload, "clean_dataset_id", None)
         assert clean_dataset_id is not None, "Clean dataset ID must be available for model training."
+        
+        if len(protocol.covariates or []) == 0 and len(protocol.effect_modifiers or []) == 0:
+                return ModelTrainState(
+                    payload= ModelTrainPayload(
+                        trained_model_id=None, 
+                        column_transformation_plan=None,
+                        col_tranformation_not_needed=True,
+                        training_warnings=None,
+                        user_message="No covariates or effect modifiers detected, so no column transformation needed. Proceeding to the training",
+                        needs_user_input=False,
+                        error=None,
+                    )
+                )
 
         if state.payload.column_transformation_plan is None and state.payload.col_tranformation_not_needed is None:
             if len(protocol.covariates or []) == 0 and len(protocol.effect_modifiers or []) == 0:
@@ -306,14 +319,18 @@ class ModelTrainNode(Node):
             )
          
         pre_X = None
-        pre_XW = None 
+        pre_XW = None
+        order_X = None
+        order_W = None 
         if not state.payload.col_tranformation_not_needed:
             assert state.payload.column_transformation_plan is not None, "Column transformation plan must be available if transformation is needed."
-            encoding_tool = cast(EncodingTool, tool_factory.get_tool(EncodingTool.NAME)) 
+            encoding_tool = cast(EncodingTool, tool_factory.get_tool(EncodingTool.NAME))
+            order_X = [c.column for c in state.payload.column_transformation_plan.columns if c.role == "X"]
+            order_W = [c.column for c in state.payload.column_transformation_plan.columns if c.role == "W"]
             transformers = encoding_tool.compile(
             plan=state.payload.column_transformation_plan,
-            X_order=[c.column for c in state.payload.column_transformation_plan.columns if c.role == "X"],
-            W_order=[c.column for c in state.payload.column_transformation_plan.columns if c.role == "W"],
+            X_order=order_X,
+            W_order=order_W,
             dense_output=True,
            )
             pre_X = transformers.pre_X
@@ -340,7 +357,7 @@ class ModelTrainNode(Node):
             dataset_id=clean_dataset_id,
             run_id=run_id,
             protocol_specs=causal_spec,
-            inputs=FitInputs(pre_X=pre_X, pre_XW=pre_XW),
+            inputs=FitInputs(pre_X=pre_X, pre_XW=pre_XW, order_X=order_X, order_W=order_W),
         )
 
         res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)
@@ -357,6 +374,8 @@ class ModelTrainNode(Node):
                 update={
                     "trained_model_id": fitted_model_id,
                     "training_warnings": warnings_str,
+                    "order_X": order_X,
+                    "order_W": order_W,
                     "needs_user_input": False,
                     "error": None,
                     "user_message": "Training completed successfully.",

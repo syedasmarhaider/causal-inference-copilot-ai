@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, Optional, Sequence
+from typing import Any, ClassVar, List, Optional, Sequence
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -19,7 +19,8 @@ class ModelTrainPayload(BaseModel):
     column_transformation_plan: Optional[TransformPlan] = None
     col_tranformation_not_needed: Optional[bool] = None  # in case LLM determines no transformation needed, to distinguish from not run yet
     training_warnings: Optional[str] = None
-    
+    order_X: Optional[List[str]] = None
+    order_W: Optional[List[str]] = None
 
     # UI / node-local
     user_message: Optional[str] = None

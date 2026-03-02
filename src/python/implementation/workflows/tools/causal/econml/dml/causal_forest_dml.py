@@ -357,6 +357,10 @@ class CausalForestDMLCausalModel(CausalModel):
             specs: CausalSpec = command.protocol_specs
             pre_x: ColumnTransformer | None = command.inputs.pre_X
             pre_xw: ColumnTransformer | None = command.inputs.pre_XW
+            order_X: Optional[List[str]] = command.inputs.order_X
+            order_W: Optional[List[str]] = command.inputs.order_W
+            
+            
 
             if pre_x is None and len(specs.X or []) > 0:
                 raise ModelSpecError(
@@ -367,7 +371,7 @@ class CausalForestDMLCausalModel(CausalModel):
                     "Spec declares controls (spec.W) and/or effect modifiers (spec.X) but no pre_XW transformer provided in inputs."
                 )
 
-            Y, T, X, W, col_meta = get_input_params_from_spec(df, specs)
+            Y, T, X, W, col_meta = get_input_params_from_spec(df, specs, order_X=order_X, order_W=order_W)
 
             miss = {"Y": has_missing(Y), "T": has_missing(T), "X": has_missing(X), "W": has_missing(W)}
             if miss["Y"] or miss["T"]:
