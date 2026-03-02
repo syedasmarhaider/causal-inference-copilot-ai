@@ -297,7 +297,7 @@ def _feasibility_error(df: pd.DataFrame, protocol: ProtocolSpec) -> Optional[str
 class CleaningMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     message_for_user: str
-    user_acceptance: bool
+    user_acceptance: Optional[bool] = None  # None = pending acceptance, True/False = accepted/rejected
     
 
 

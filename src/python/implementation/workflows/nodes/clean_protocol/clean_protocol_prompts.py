@@ -13,5 +13,7 @@ You are at the cleaning stage of the causal ML copilot.
 You cleaned the data and applied exlcusion rules.
 And created new dataset. Explain clinincan what has been dropped and why
 and ask for acceptance to proceed with the cleaned dataset.
+assing None whenever you are not sure about the acceptance and asking for confirmation from the user, True when you are sure that the user will accept and False when you are sure that the user have rejected.
+
 """
     
