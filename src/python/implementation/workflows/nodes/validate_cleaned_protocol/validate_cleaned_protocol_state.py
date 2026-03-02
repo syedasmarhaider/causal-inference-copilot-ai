@@ -14,6 +14,7 @@ class ValidateCleanProtocolPayloadModel(BaseModel):
 
     issues: List[ValidationIssueModel] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     validation_error: Optional[str] = None
+    user_acceptance: Optional[bool] = None
     user_message: Optional[str] = None
 
     @field_validator("validation_error", "user_message", mode="before")
@@ -40,9 +41,11 @@ class ValidateCleanProtocolState(State):
     @property
     def status(self) -> Status:
         # ABORTED if any FAIL issue; else DONE
-        if any(i.severity == "FAIL" for i in self.payload.issues):
+        if any(i.severity == "FAIL" for i in self.payload.issues) or (self.payload.user_acceptance is not None and not self.payload.user_acceptance):
             return "ABORTED"
-        return "DONE"
+        if self.payload.user_acceptance is not None and self.payload.user_acceptance:
+            return "DONE"
+        return "PENDING"
 
     @property
     def message(self) -> StateMessage:
@@ -56,7 +59,9 @@ class ValidateCleanProtocolState(State):
 
     @property
     def needs_action(self) -> ACTION:
-        return "NONE"
+        if self.status in ("ABORTED", "DONE"):
+            return "NONE"
+        return "NEEDS_INPUT"
 
     def pre_required_states_names(self) -> Sequence[str]:
         return ValidateCleanProtocolDeps.pre_required_states_names()

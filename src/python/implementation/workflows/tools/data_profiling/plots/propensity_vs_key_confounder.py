@@ -7,16 +7,18 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from python.domain.repo.data_repo import ImageMime
-from python.implementation.workflows.tools.data_profiling.plots.model  import GraphImage
-from python.implementation.workflows.tools.data_profiling.plots.utils  import (
-    fig_to_png_bytes,
+from  python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
+from python.implementation.workflows.tools.data_profiling.plots.utils import (
     coerce_numeric_ratio,
+    fig_to_png_bytes,
     protocol_WX_columns,
     build_binary_treatment_from_protocol,
     fit_treatment_likelihood_scores,
 )
 
+# ----------------------------
+# helpers
+# ----------------------------
 
 def _split_label(label: str) -> Tuple[str, str]:
     parts = [p.strip() for p in label.split(" vs ")]
@@ -55,7 +57,6 @@ def _abs_corr_with_t(x: pd.Series, t: np.ndarray) -> float:
 
 
 def _cramers_v(x: pd.Series, t: np.ndarray) -> float:
-    # Simple Cramér's V (no external deps); good enough for ranking.
     a = x.astype("object").fillna("MISSING")
     tab = pd.crosstab(a, pd.Series(t, name="t"))
     if tab.size == 0:
@@ -68,6 +69,7 @@ def _cramers_v(x: pd.Series, t: np.ndarray) -> float:
     row_sums = obs.sum(axis=1, keepdims=True)
     col_sums = obs.sum(axis=0, keepdims=True)
     exp = (row_sums @ col_sums) / n
+
     with np.errstate(divide="ignore", invalid="ignore"):
         chi2 = np.nansum((obs - exp) ** 2 / exp)
 
@@ -79,50 +81,97 @@ def _cramers_v(x: pd.Series, t: np.ndarray) -> float:
     return float(v) if math.isfinite(v) else 0.0
 
 
-def _pick_key_confounder(d: pd.DataFrame, t_bin: np.ndarray, candidates: Sequence[str]) -> str:
-    # Prefer numeric-ish confounders by absolute correlation; fallback to categorical by Cramér's V.
-    best_col = None
-    best_score = -1.0
-
-    # Pass 1: numeric-ish
+def _rank_confounders(d: pd.DataFrame, t_bin: np.ndarray, candidates: Sequence[str]) -> List[Tuple[str, float]]:
+    scored: List[Tuple[str, float]] = []
     for c in candidates:
         s = d[c]
         if _is_numericish(s):
             score = _abs_corr_with_t(s, t_bin)
-            if score > best_score:
-                best_score = score
-                best_col = c
-
-    if best_col is not None and best_score > 0:
-        return best_col
-
-    # Pass 2: categorical-ish
-    for c in candidates:
-        s = d[c]
-        score = _cramers_v(s, t_bin)
-        if score > best_score:
-            best_score = score
-            best_col = c
-
-    if best_col is None:
-        raise ValueError("Could not select a key confounder (no usable baseline columns).")
-    return best_col
+        else:
+            score = _cramers_v(s, t_bin)
+        if math.isfinite(score) and score > 0:
+            scored.append((c, float(score)))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored
 
 
-def generate_propensity_vs_key_confounder_graph(
+def _plot_propensity_vs_confounder(
+    *,
+    d: pd.DataFrame,
+    scores: np.ndarray,
+    confounder: str,
+    control_name: str,
+    treated_name: str,
+) -> plt.Figure:
+    x = d[confounder]
+    fig = plt.figure(figsize=(10.5, 5.6))
+    ax = fig.add_subplot(111)
+
+    if _is_numericish(x):
+        xv = pd.to_numeric(x, errors="coerce")
+        m = xv.notna()
+
+        # Density-friendly option: hexbin (avoids “blue cloud” overplotting)
+        # If you prefer scatter, swap this with ax.scatter(..., alpha=0.2)
+        ax.hexbin(xv[m].to_numpy(dtype=float), scores[m.to_numpy()], gridsize=45, mincnt=1)
+
+        # Decile trend line (clinically readable)
+        try:
+            q = pd.qcut(xv[m], q=10, duplicates="drop")
+            tmp = pd.DataFrame({"x": xv[m].to_numpy(dtype=float), "p": scores[m.to_numpy()], "bin": q})
+            grp = tmp.groupby("bin", observed=True).agg(x_mean=("x", "mean"), p_mean=("p", "mean")).sort_values("x_mean")
+            ax.plot(grp["x_mean"].to_numpy(), grp["p_mean"].to_numpy(), marker="o", linewidth=2)
+        except Exception:
+            pass
+
+        ax.set_xlabel(f"{confounder} (baseline)")
+        ax.set_ylabel("Likelihood of being treated (based on baseline profile)")
+        ax.set_title("Treatment assignment pressure vs baseline driver")
+
+    else:
+        s = x.astype("object").fillna("MISSING")
+        vc = s.value_counts(dropna=False)
+        top = vc.index.astype(str).tolist()[:8]
+        s2 = s.astype(str).where(s.astype(str).isin(top), other="Other")
+
+        tmp = pd.DataFrame({"cat": s2, "p": scores})
+        cats = tmp["cat"].value_counts().index.tolist()
+        data = [tmp.loc[tmp["cat"] == c, "p"].to_numpy(dtype=float) for c in cats]
+
+        ax.boxplot(data, labels=cats, showfliers=False)
+        ax.set_xlabel(f"{confounder} (baseline categories)")
+        ax.set_ylabel("Likelihood of being treated (based on baseline profile)")
+        ax.set_title("Treatment assignment pressure differs by baseline category")
+
+    fig.text(
+        0.01,
+        0.01,
+        f"Control: {control_name}. Treated: {treated_name}. "
+        f"Interpretation: near-0/near-1 propensities across ranges indicate weak positivity there.",
+        fontsize=9,
+    )
+    return fig
+
+
+# ----------------------------
+# public API
+# ----------------------------
+
+def generate_propensity_vs_top_confounders_graphs(
     df: pd.DataFrame,
     protocol: Any,
     *,
-    key_confounder: Optional[str] = None,
+    top_k: int = 4,
+    confounders: Optional[Sequence[str]] = None,
     include_effect_modifiers_in_propensity: bool = True,
-    key: str = "causal_propensity_vs_key_confounder",
-) -> GraphImage:
+    key_prefix: str = "causal_propensity_vs",
+) -> List[GraphImage]:
     """
-    Graph (5): Propensity vs key confounder.
+    Graph (5) — but for multiple baseline drivers.
+    Returns one GraphImage per confounder.
 
-    - Fits propensity-like scores: P(T=1 | baseline profile) using your shared scorer.
-    - Picks one clinically informative confounder automatically (unless provided).
-    - Adds a decile trend line for interpretability.
+    - If confounders is None: auto-picks top_k baseline covariates (W) most associated with treatment.
+    - Fits propensity scores once, reuses them for all plots.
     """
     d, t_bin, label, dropped = build_binary_treatment_from_protocol(df, protocol)
     control_name, treated_name = _split_label(label)
@@ -134,67 +183,33 @@ def generate_propensity_vs_key_confounder_graph(
 
     scores = fit_treatment_likelihood_scores(d, t_bin, feats_present)
 
-    # Choose confounder from W (confounders), not X by default
     W_present = _safe_cols_present(d, W)
-    if key_confounder is None:
-        if not W_present:
-            # fallback: if no W, pick from available features
-            W_present = feats_present
-        key_confounder = _pick_key_confounder(d, t_bin, W_present)
-
-    if key_confounder not in d.columns:
-        raise ValueError(f"key_confounder '{key_confounder}' missing from df")
-
-    x = d[key_confounder]
-
-    fig = plt.figure(figsize=(10.5, 5.6))
-    ax = fig.add_subplot(111)
-
-    if _is_numericish(x):
-        xv = pd.to_numeric(x, errors="coerce")
-        m = xv.notna()
-        ax.scatter(xv[m].to_numpy(dtype=float), scores[m.to_numpy()], s=10, alpha=0.25)
-
-        # Decile trend line (more interpretable than a raw cloud)
-        try:
-            q = pd.qcut(xv[m], q=10, duplicates="drop")
-            tmp = pd.DataFrame({"x": xv[m].to_numpy(dtype=float), "p": scores[m.to_numpy()], "bin": q})
-            grp = tmp.groupby("bin", observed=True).agg(x_mean=("x", "mean"), p_mean=("p", "mean")).sort_values("x_mean")
-            ax.plot(grp["x_mean"].to_numpy(), grp["p_mean"].to_numpy(), marker="o", linewidth=2)
-        except Exception:
-            # if qcut fails (too few unique), skip trend line
-            pass
-
-        ax.set_xlabel(f"{key_confounder} (baseline)")
-        ax.set_ylabel("Likelihood of being treated (based on baseline profile)")
-        ax.set_title("Treatment assignment pressure vs a key baseline driver")
+    if confounders is None:
+        # Auto-pick from W (confounders)
+        ranked = _rank_confounders(d, t_bin, W_present or feats_present)
+        picked = [c for c, _ in ranked[: max(1, int(top_k))]]
     else:
-        # Categorical confounder: show propensity distributions by category (top categories)
-        s = x.astype("object").fillna("MISSING")
-        vc = s.value_counts(dropna=False)
-        top = vc.index.astype(str).tolist()[:8]
-        s2 = s.astype(str).where(s.astype(str).isin(top), other="Other")
+        picked = [c for c in confounders if c in d.columns]
 
-        tmp = pd.DataFrame({"cat": s2, "p": scores})
-        cats = tmp["cat"].value_counts().index.tolist()
+    if not picked:
+        raise ValueError("No confounders available to plot (check protocol W columns).")
 
-        data = [tmp.loc[tmp["cat"] == c, "p"].to_numpy(dtype=float) for c in cats]
-        ax.boxplot(data, labels=cats, showfliers=False)
-        ax.set_xlabel(f"{key_confounder} (baseline categories)")
-        ax.set_ylabel("Likelihood of being treated (based on baseline profile)")
-        ax.set_title("Treatment assignment differs by baseline category")
+    out: List[GraphImage] = []
+    for c in picked:
+        fig = _plot_propensity_vs_confounder(
+            d=d,
+            scores=scores,
+            confounder=c,
+            control_name=control_name,
+            treated_name=treated_name,
+        )
+        out.append(
+            GraphImage(
+                key=f"{key_prefix}__{c}",
+                title=f"Treatment assignment pressure vs {c}",
+                mime="image/png",
+                content= fig_to_png_bytes(fig),
+            )
+        )
 
-    fig.text(
-        0.01,
-        0.01,
-        f"Interpretation: If scores approach 0 or 1 across wide confounder ranges, positivity is weak there.\n"
-        f"Control: {control_name}. Treated: {treated_name}. Rows kept: {len(d)}. Dropped: {dropped}.",
-        fontsize=9,
-    )
-
-    return GraphImage(
-        key=key,
-        title="Propensity vs key confounder",
-        mime="image/png",
-        content=fig_to_png_bytes(fig),
-    )
+    return out

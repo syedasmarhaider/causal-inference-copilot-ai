@@ -167,10 +167,10 @@ def validate_protocol_role_columns_invariants(protocol: ProtocolSpec) -> List[Va
     if overlap:
         issues.append(
             _issue(
-                severity="WARN",
+                severity="FAIL",
                 message="covariates and effect_modifiers overlap: some columns appear in both lists.",
                 evidence={"overlap_cols": overlap, "n_overlap": len(overlap)},
-                fix_hint="Allowed, but redundant. Downstream code should dedupe combined feature lists.",
+                fix_hint="This is allowed is some estimation frameworks, but it's clearer to separate covariates (for adjustment) from effect modifiers (for heterogeneity). Consider assigning each column to one role. So we dont allow it",
             )
         )
 
@@ -1254,7 +1254,7 @@ def validate_covariate_and_effect_modifier_missingness(
                 severity="FAIL",
                 message="Some covariate/effect-modifier features have high missingness.",
                 evidence=metrics,
-                fix_hint="Drop/impute these columns explicitly in transform, or fix upstream null-handling.",
+                fix_hint="Drop these columns or fix your data",
             )
         )
     if warn_off:

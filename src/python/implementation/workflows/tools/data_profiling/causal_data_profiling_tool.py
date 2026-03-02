@@ -12,7 +12,7 @@ from python.domain.workflows.tool import Tool
 from python.implementation.workflows.tools.data_profiling.plots.causal_missingness_by_group import generate_causal_missingness_by_group_graph
 from python.implementation.workflows.tools.data_profiling.plots.comparability_overlap import generate_comparability_overlap_histogram_graph
 from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
-from python.implementation.workflows.tools.data_profiling.plots.propensity_vs_key_confounder import generate_propensity_vs_key_confounder_graph
+from python.implementation.workflows.tools.data_profiling.plots.propensity_vs_key_confounder import  generate_propensity_vs_top_confounders_graphs
 
 
 
@@ -45,8 +45,8 @@ class CausalDataProfilingTool(Tool):
         """
         comparability_map = generate_comparability_overlap_histogram_graph(df, protocol) 
         causal_missingness = generate_causal_missingness_by_group_graph(df, protocol)
-        propensity_vs_key_confounder = generate_propensity_vs_key_confounder_graph(df, protocol)
+        propensity_vs_key_confounder = generate_propensity_vs_top_confounders_graphs(df, protocol)
     
-        return [comparability_map, causal_missingness, propensity_vs_key_confounder]
+        return [comparability_map, causal_missingness] + propensity_vs_key_confounder
 
 

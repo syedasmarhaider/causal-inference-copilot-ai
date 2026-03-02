@@ -56,10 +56,10 @@ class CleanProtocolState(State):
 
     @property
     def status(self) -> Status:
-        if self.payload.cleaning_error is not None:
+        if self.payload.cleaning_error is not None or (self.payload.user_acceptance is not None and not self.payload.user_acceptance):
             return "ABORTED"
-        if self.payload.clean_dataset_id is not None and self.payload.summary is not None:
-            return "PENDING"     # TODO chante just for testing
+        if self.payload.clean_dataset_id is not None and self.payload.summary is not None and self.payload.user_acceptance is not None and self.payload.user_acceptance:
+            return "DONE"     
         return "PENDING"
 
     @property
@@ -73,9 +73,10 @@ class CleanProtocolState(State):
     def error(self) -> Optional[str]:
         return self.payload.cleaning_error
 
-    # TODO chante just for testing
     @property
     def needs_action(self) -> ACTION:
+        if self.status in ("ABORTED", "DONE"):
+            return "NONE"
         return "NEEDS_INPUT"
 
     def pre_required_states_names(self) -> Sequence[str]:
