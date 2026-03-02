@@ -21,6 +21,7 @@ class CleanProtocolPayloadModel(BaseModel):
     cleaning_error: Optional[str] = None
     user_message: Optional[str] = None
     summary: Optional[DatasetSummaryModel] = None
+    user_acceptance: Optional[bool] = None
     graph_picture_ids: Optional[Sequence[UUID]] = None
 
     @field_validator("cleaning_error", "user_message", mode="before")
@@ -58,7 +59,7 @@ class CleanProtocolState(State):
         if self.payload.cleaning_error is not None:
             return "ABORTED"
         if self.payload.clean_dataset_id is not None and self.payload.summary is not None:
-            return "DONE"
+            return "PENDING"     # TODO chante just for testing
         return "PENDING"
 
     @property
@@ -72,9 +73,10 @@ class CleanProtocolState(State):
     def error(self) -> Optional[str]:
         return self.payload.cleaning_error
 
+    # TODO chante just for testing
     @property
     def needs_action(self) -> ACTION:
-        return "NONE"
+        return "NEEDS_INPUT"
 
     def pre_required_states_names(self) -> Sequence[str]:
         return CleanProtocolDeps.pre_required_states_names()

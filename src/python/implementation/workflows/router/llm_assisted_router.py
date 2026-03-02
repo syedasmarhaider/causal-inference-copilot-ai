@@ -248,6 +248,8 @@ def init_all_nodoes_with_name_as_key(llm: LLMService, data_repo: DataRepo, model
      )
     clean_protocol_node = CleanProtocolNode(
          data_repo=data_repo,
+        llm=llm,
+        model_name=DEFAULT_MODEL_GEMNI,
      )
      
     validate_cleaned_protocol_node = ValidateCleanProtocolNode(

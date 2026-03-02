@@ -1,21 +1,23 @@
 from __future__ import annotations
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
+import json
 import logging
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Set, Tuple, cast
 from uuid import UUID, uuid4
 
 import pandas as pd
 import pandas.api.types as ptypes
+from pydantic import BaseModel, ConfigDict
 
 from python.domain.repo.data_repo import DataRepo
-from python.domain.service.llm_service import ChatMessage
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_deps import CleanProtocolDeps
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_prompts import get_clean_protocol_node_info
+from python.implementation.workflows.nodes.clean_protocol.clean_protocol_prompts import CLEANING_MESSAGE_TEMPLATE, get_clean_protocol_node_info
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolPayloadModel, CleanProtocolState
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
     BinaryOutcomeSpecModel,
@@ -48,6 +50,8 @@ class CleanProtocolNode(Node):
     NAME: ClassVar[str] = CleanProtocolState.NAME
 
     data_repo: DataRepo
+    llm: LLMService
+    model_name: str
 
     # behavior knobs
     strict_required_cols: bool = True
@@ -193,8 +197,10 @@ class CleanProtocolNode(Node):
             
 
             # 6) Success state
-            msg_ok = _render_success_message(
-                clean_dataset_id=clean_id,
+            message = _render_success_message(
+                llm=self.llm,
+                chat_history=messages_history,
+                model_name="gpt-4-0613",
                 n_rows_0=n_rows_0,
                 n_cols_0=n_cols_0,
                 df_clean=df3,
@@ -210,7 +216,8 @@ class CleanProtocolNode(Node):
                     cleaning_error=None,
                     graph_picture_ids=artifact_ids,
                     summary=summary,
-                    user_message=msg_ok,
+                    user_acceptance=message.user_acceptance,  
+                    user_message=message.message_for_user,
                 )
             )
 
@@ -280,34 +287,60 @@ def _feasibility_error(df: pd.DataFrame, protocol: ProtocolSpec) -> Optional[str
 # Message rendering
 # =============================================================================
 
+class CleaningMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    message_for_user: str
+    user_acceptance: bool
+    
+
+
 def _render_success_message(
     *,
-    clean_dataset_id: UUID,
+    llm: LLMService,
+    chat_history: Optional[Sequence[ChatMessage]],
+    model_name: str,
     n_rows_0: int,
     n_cols_0: int,
     df_clean: pd.DataFrame,
     drop_summary: DropColsSummary,
     excl_summary: Dict[str, Any],
     domain_summary: TreatmentOutcomeDomainSummary,
-) -> str:
-    n_rows_1 = int(df_clean.shape[0])
-    n_cols_1 = int(df_clean.shape[1])
+) -> CleaningMessage:
+    """
+    Generates a natural language summary of the data cleaning process using an LLM.
+    """
+    # 1. Prepare the contextual data
+    # We include the 'after' stats so the LLM can compare them to the 'before' stats
+    prompt_payload = { # pyright: ignore[reportUnknownVariableType]
+        "initial_stats": {"rows": n_rows_0, "cols": n_cols_0},
+        "final_stats": {"rows": len(df_clean), "cols": len(df_clean.columns)},
+        "column_drops": asdict(drop_summary), 
+        "exclusions": excl_summary, # Already a dict
+        "domain_insights": asdict(domain_summary)
+    }
 
-    parts: list[str] = []
-    parts.append("Inference-ready dataset compiled successfully.")
-    parts.append(f"- clean_dataset_id: {clean_dataset_id}")
-    parts.append(f"- rows: {n_rows_0} -> {n_rows_1}")
-    parts.append(f"- cols: {n_cols_0} -> {n_cols_1}")
-    parts.append(f"- kept_cols: {len(drop_summary.kept_cols)}, dropped_cols: {len(drop_summary.dropped_cols)}")
+    # 2. Setup LLM configuration
+    config = LLMConfig(model=model_name, temperature=0.7)
+    
+    # 3. Limit history to keep the context window clean
+    recent_history = chat_history[-12:] if chat_history else None
 
-    parts.append(
-        f"- null_purge_removed: {int(excl_summary.get('n_removed_null_purge', 0))}, "
-        f"exclusions_removed_total: {sum(int(r.get('n_removed', 0)) for r in excl_summary.get('applied', []))}"
+    # 4. Generate the structured response
+    # Assuming generate_json returns an instance of the 'schema' (CleaningMessage)
+    response = llm.generate_json(
+        config=config,
+        system_prompt=CLEANING_MESSAGE_TEMPLATE,
+        user_prompt=json.dumps(prompt_payload),
+        history=recent_history,
+        schema=CleaningMessage,
+        max_attempts=2
     )
 
-    parts.append(f"- domain_removed_total: {domain_summary.total_removed}")
-
-    return "\n".join(parts)
+    # 5. Extract and return the string content
+    return response
+        
+    
+    
 
 
 def _render_failure_message(
