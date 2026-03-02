@@ -10,7 +10,7 @@ from sklearn.compose import ColumnTransformer
 
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 
-CommandType = Literal["FIT", "EFFECT", "INTERVAL"]
+CommandType = Literal["FIT", "ATE", "CATE"]
 
 # =============================================================================
 # Meta / base command

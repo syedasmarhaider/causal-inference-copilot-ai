@@ -71,7 +71,10 @@ Dataset summary (JSON):
 {dataset_summary_json}
 
 Previous training errors Optional(String):
-{prev_training_errors_json}
+{prev_training_errors_string}
+
+documentation of model Optional(String):
+{documentation_string}
 
 Return JSON only.
 """.strip()

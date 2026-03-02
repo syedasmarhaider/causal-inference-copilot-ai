@@ -39,6 +39,7 @@ from python.implementation.workflows.tools.causal.causal_command import (
     CATEModelResult,
     CATESuccess,
     CommandFailure,
+    CommandType,
     ErrorInfo,
     FitCommand,
     FitSuccess,
@@ -289,16 +290,16 @@ class KernelDMLCausalModel(CausalModel):
     def get_info(self) -> str:
         return get_kernel_dml_causal_model_info()
     
-    def get_command_info(self, command: CausalCommand) -> str | None:
+    def get_command_info(self, command: CommandType) -> str | None:
         match command:
-            case FitCommand():
+            case "FIT":
                 fit_doc = inspect.getdoc(KernelDML.fit) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
                 base_doc = inspect.getdoc(KernelDML) or ""
                 return base_doc + fit_doc
-            case ATECommand():
+            case "ATE":
                 ate_doc = inspect.getdoc(KernelDML.ate) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
                 return ate_doc
-            case CATECommand():
+            case "CATE":
                 effect_doc = inspect.getdoc(KernelDML.effect) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
                 return effect_doc    
             case _:

@@ -167,6 +167,7 @@ def _generate_encoding_plan(
     selected_model: Any,
     dataset_summary: DatasetSummaryModel,
     prev_training_error: Optional[str] = None,
+    documentation: Optional[str] = None,
     history: Optional[Sequence[ChatMessage]],
 ) -> EncodingPlanLLMOutput:    
     # Eligible columns = X+W minus treatment/outcome
@@ -174,7 +175,6 @@ def _generate_encoding_plan(
     W_cols = list(protocol.effect_modifiers or [])
     treatment_col = protocol.treatment_spec.column
     outcome_col = protocol.outcome_spec.column
-
     eligible = set(X_cols) | set(W_cols)
     eligible.discard(treatment_col)
     eligible.discard(outcome_col)
@@ -189,18 +189,19 @@ def _generate_encoding_plan(
         selected_model_json=_dumps(_safe_model_dump(selected_model)),
         protocol_json=_dumps(_safe_model_dump(protocol)),
         dataset_summary_json=_dumps(_safe_model_dump(dataset_summary)),
-        prev_training_errors_json=prev_training_error,
+        prev_training_errors_string=prev_training_error,
+        documentation_string=documentation,
 
     )
     
-    last_5_messages = list(history[-5:]) if history else None
+    last_3_messages = list(history[-3:]) if history else None
 
     out = llm.generate_json(
         schema=EncodingPlanLLMOutput,
         system_prompt=ENCODING_PLAN_SYSTEM_PROMPT,
         user_prompt=user_prompt,
         config=llm_config,
-        history=last_5_messages,
+        history=last_3_messages,
         max_attempts=3,
     )
 
@@ -256,6 +257,15 @@ class ModelTrainNode(Node):
         
         dataset_summary = deps.clean_protocol.payload.summary
         assert dataset_summary is not None, "Cleaned dataset summary must be available for encoding plan generation."
+                # Resolve selected causal model
+        mf_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
+        model_factory = cast(CausalModelFactoryTool, mf_raw)
+
+        estimator_fqcn = selected.selected_model
+        assert estimator_fqcn is not None, "Selected model must include the fully qualified class name."
+        model = model_factory.resolve(estimator_fqcn)
+        if model is None:
+            raise ValueError(f"Selected model '{estimator_fqcn}' is not supported by the CausalModelFactoryTool.")
         
         if len(protocol.covariates or []) == 0 and len(protocol.effect_modifiers or []) == 0:
                 return ModelTrainState(
@@ -291,7 +301,8 @@ class ModelTrainNode(Node):
                 selected_model=selected,
                 dataset_summary=dataset_summary,
                 history=messages_history,
-                
+                prev_training_error=state.payload.prev_training_errors,
+                documentation=model.get_command_info("FIT"),
             )
             
             if plan.needs_user_input:
@@ -339,18 +350,6 @@ class ModelTrainNode(Node):
             pre_X = transformers.pre_X
             pre_XW = transformers.pre_XW
            
-        
-
-        # Resolve selected causal model
-        mf_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
-        model_factory = cast(CausalModelFactoryTool, mf_raw)
-
-        estimator_fqcn = selected.selected_model
-        assert estimator_fqcn is not None, "Selected model must include the fully qualified class name."
-        model = model_factory.resolve(estimator_fqcn)
-        if model is None:
-            raise ValueError(f"Selected model '{estimator_fqcn}' is not supported by the CausalModelFactoryTool.")
-
         # Build command + execute
         run_id = uuid4()
         causal_spec = _protocol_to_causal_spec(protocol)
