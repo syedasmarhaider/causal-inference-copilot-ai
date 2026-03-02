@@ -402,8 +402,8 @@ class CausalForestDMLCausalModel(CausalModel):
 
             # CHANGED (Forest): CausalForestDML does NOT allow missing X via allow_missing;
             # allow_missing only applies to W. If X contains NaNs, force upstream imputation/cleaning.
-            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
-            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
+            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
+            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
             if missingness_X:
                 raise ModelSpecError(
                     "CausalForestDML does not support missing values in X via allow_missing "

@@ -166,8 +166,8 @@ class LinearDMLCausalModel(CausalModel):
             if miss["Y"] or miss["T"]:
                 raise ModelSpecError(f"Y/T contain missing values; must be fixed upstream. missing={miss}")
             
-            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
-            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
+            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
+            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
             if missingness_X:
                 raise ModelSpecError(
                     "LinearDML does not support missing values in X via allow_missing (only W is allowed). "

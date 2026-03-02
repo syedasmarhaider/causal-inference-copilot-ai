@@ -189,6 +189,8 @@ class CausalInferenceNode(Node):
                     model_name=selected_model_fqcn,
                     dataset_id=clean_dataset_id,
                     run_id=uuid4(),
+                    data_summary=data_summary,
+                    transformation_plan=deps.model_train.payload.column_transformation_plan,
                     protocol_specs=spec,
                     fitted_model_id=trained_model_id,
                     inputs=ATEInputsModel(),

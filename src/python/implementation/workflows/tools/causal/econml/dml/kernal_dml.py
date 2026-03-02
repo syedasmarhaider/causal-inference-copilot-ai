@@ -43,7 +43,6 @@ from python.implementation.workflows.tools.causal.causal_command import (
     ErrorInfo,
     FitCommand,
     FitSuccess,
-    MissingnessMode,
 )
 from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
@@ -54,7 +53,6 @@ from python.implementation.workflows.tools.causal.econml.utils import (
     categorical_t0_t1_pairs,
     get_input_params_from_spec,
     has_missing,
-    is_X_missing_handled,
     is_missing_handled,
     now_utc,
     raise_if_x_rows_not_exactly_match_fit_x_cols,
@@ -392,8 +390,8 @@ class KernelDMLCausalModel(CausalModel):
                 raise ModelSpecError(f"Y/T contain missing values; must be fixed upstream. missing={miss}")
 
             # CHANGED (KernelDML): allow_missing is W-only; X missing should be rejected (or imputed upstream)
-            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
-            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
+            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
+            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
             if missingness_X:
                 raise ModelSpecError(
                     "KernelDML does not support missing values in X via allow_missing (only W is allowed). "

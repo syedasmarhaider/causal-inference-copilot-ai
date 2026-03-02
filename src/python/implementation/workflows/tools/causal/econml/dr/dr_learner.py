@@ -43,7 +43,6 @@ from python.implementation.workflows.tools.causal.causal_command import (
     ErrorInfo,
     FitCommand,
     FitSuccess,
-    MissingnessMode,
 )
 from python.implementation.workflows.tools.causal.causal_model import (
     CausalCommand,
@@ -58,7 +57,7 @@ from python.implementation.workflows.tools.causal.econml.utils import (
     categorical_t0_t1_pairs,
     get_input_params_from_spec,
     has_missing,
-    is_X_missing_handled,
+    is_missing_handled,
     now_utc,
     raise_if_x_rows_not_exactly_match_fit_x_cols,
     required_init_keys,
@@ -184,7 +183,7 @@ def _wrap_xw_plus_t_model(
 def _build_propensity_candidates(
     *,
     pre_XW: ColumnTransformer,
-    missingness: MissingnessMode,
+    missingness_W: bool,
     random_state: Optional[int],
     n_jobs: Optional[int],
 ) -> Sequence[BaseEstimator]:
@@ -192,7 +191,7 @@ def _build_propensity_candidates(
     Propensity model: classifier for Pr[T=t | X,W].
     If missingness is present, restrict to NaN-tolerant models (HGB).
     """
-    missing_present = (missingness == "present")
+    missing_present = missingness_W
 
     if missing_present:
         hgb = HistGradientBoostingClassifier(
@@ -242,7 +241,7 @@ def _build_regression_candidates(
     pre_XW: ColumnTransformer,
     n_xw: int,
     discrete_outcome: bool,
-    missingness: MissingnessMode,
+    missingness_W: bool,
     random_state: Optional[int],
     n_jobs: Optional[int],
 ) -> Sequence[BaseEstimator]:
@@ -250,7 +249,7 @@ def _build_regression_candidates(
     Regression nuisance for E[Y | X,W,T] trained on concat([X,W, onehot(T_excl_baseline)]).
     If missingness is present, restrict to NaN-tolerant HGB.
     """
-    missing_present = (missingness == "present")
+    missing_present = missingness_W
 
     if missing_present:
         if discrete_outcome:
@@ -470,23 +469,14 @@ class _BaseDRLearnerAdapter(CausalModel):
             if miss["Y"] or miss["T"]:
                 raise ModelSpecError(f"Y/T contain missing values; must be fixed upstream. missing={miss}")
 
-            # FIX(2): do NOT silently allow missing X; allow_missing in EconML is about W.
-            if len(specs.X or []) > 0 and miss["X"] and (transformation_plan is None or not is_X_missing_handled(plan=transformation_plan,summary=data_summary)):
+            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
+            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
+            if missingness_X:
                 raise ModelSpecError(
                     f"{self.BACKEND_NAME} does not support missing values in X. "
                     f"Impute/clean X upstream. missing={miss}"
                 )
-
-            # nuisance defaults (command.options disabled)
-            missingness_mode: MissingnessMode = getattr(command.inputs, "missingness_mode", "none")
-
-            # FIX(2): only set allow_missing when W actually has NaNs; and ensure nuisances are NaN-tolerant
-            if miss["W"] and missingness_mode != "present":
-                raise ModelSpecError(
-                    f"W contains missing values but missingness_mode={missingness_mode!r}. "
-                    f"Set missingness_mode='present' (NaN-tolerant nuisances) or impute W upstream. missing={miss}"
-                )
-
+                
             # Figure out raw n_xw for the regression nuisance wrapper
             n_x = int(np.asarray(X).shape[1]) if X is not None else 0
             n_w = int(np.asarray(W).shape[1]) if W is not None else 0
@@ -510,7 +500,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 defaults["model_propensity"] = list(
                     _build_propensity_candidates(
                         pre_XW=pre_xw,
-                        missingness=missingness_mode,
+                        missingness_W=missingness_W,
                         random_state=None,
                         n_jobs=None,
                     )
@@ -520,7 +510,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                         pre_XW=pre_xw,
                         n_xw=n_xw,
                         discrete_outcome=disc_y,
-                        missingness=missingness_mode,
+                        missingness_W=missingness_W,
                         random_state=None,
                         n_jobs=None,
                     )
@@ -529,8 +519,7 @@ class _BaseDRLearnerAdapter(CausalModel):
             if pre_x is not None:
                 defaults["featurizer"] = pre_x
 
-            # FIX(2): allow_missing should reflect *W* missingness only
-            defaults["allow_missing"] = bool(miss["W"])
+            defaults["allow_missing"] = missingness_W
 
             required_keys = _safe_required_init_keys(self.ESTIMATOR_CLS, init_map=init_map)
             missing_required = [k for k in required_keys if k not in defaults]
