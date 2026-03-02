@@ -11,6 +11,7 @@ from python.implementation.workflows.nodes.model_train.model_train_deps import M
 from python.implementation.workflows.tools.encoding.encoding_plan import TransformPlan
 
 
+
 class ModelTrainPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -21,6 +22,8 @@ class ModelTrainPayload(BaseModel):
     training_warnings: Optional[str] = None
     order_X: Optional[List[str]] = None
     order_W: Optional[List[str]] = None
+    prev_training_errors: Optional[str] = None
+    no_of_times_trained: Optional[int] = None
 
     # UI / node-local
     user_message: Optional[str] = None
@@ -33,6 +36,7 @@ class ModelTrainPayload(BaseModel):
 class ModelTrainState(State):
     NAME: ClassVar[str] = "MODEL_TRAIN"
     payload: ModelTrainPayload
+    MaxNoOfInterationTrain = 2
 
     # ---- required by State ABC ----
     @property

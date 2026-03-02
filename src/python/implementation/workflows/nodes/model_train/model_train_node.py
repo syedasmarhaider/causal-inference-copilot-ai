@@ -166,6 +166,7 @@ def _generate_encoding_plan(
     protocol: ProtocolSpec,
     selected_model: Any,
     dataset_summary: DatasetSummaryModel,
+    prev_training_error: Optional[str] = None,
     history: Optional[Sequence[ChatMessage]],
 ) -> EncodingPlanLLMOutput:    
     # Eligible columns = X+W minus treatment/outcome
@@ -188,6 +189,7 @@ def _generate_encoding_plan(
         selected_model_json=_dumps(_safe_model_dump(selected_model)),
         protocol_json=_dumps(_safe_model_dump(protocol)),
         dataset_summary_json=_dumps(_safe_model_dump(dataset_summary)),
+        prev_training_errors_json=prev_training_error,
 
     )
     
@@ -389,6 +391,7 @@ class ModelTrainNode(Node):
                     "order_X": order_X,
                     "order_W": order_W,
                     "needs_user_input": False,
+                    "no_of_times_trained": (state.payload.no_of_times_trained or 0) + 1,
                     "error": None,
                     "user_message": message,
                  }
@@ -405,12 +408,30 @@ class ModelTrainNode(Node):
                     user_prompt=f"Model training failed with error: {err_msg}. Explain to the user in a clinician-friendly way and suggest next steps.",
                     history=messages_history,
                 ).content
+                if state.payload.no_of_times_trained is not None and state.payload.no_of_times_trained >= state.MaxNoOfInterationTrain:
+                    return ModelTrainState(
+                        payload=state.payload.model_copy(
+                            update={
+                                "trained_model_id": None,
+                                "training_warnings": None,
+                                "order_X": None,
+                                "order_W": None,
+                                "needs_user_input": False,
+                                "no_of_times_trained": state.payload.no_of_times_trained,
+                                "error": err_msg,
+                                "user_message": message,
+                            }
+                        )
+                    )
+                    
                 payload = state.payload.model_copy(
                     update={
                         "trained_model_id": None,
                         "needs_user_input": False,
-                        "error": err_msg,
+                        "error": None,
+                        "prev_training_errors": err_msg,
                         "user_message": message,
+                        "no_of_times_trained": (state.payload.no_of_times_trained or 0) + 1,
                     }
                 )
                 return ModelTrainState(payload=payload)

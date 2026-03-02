@@ -69,6 +69,9 @@ Protocol (JSON):
 Dataset summary (JSON):
 {dataset_summary_json}
 
+Previous training errors Optional(String):
+{prev_training_errors_json}
+
 Return JSON only.
 """.strip()
 
