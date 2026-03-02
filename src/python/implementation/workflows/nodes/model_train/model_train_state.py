@@ -36,7 +36,7 @@ class ModelTrainPayload(BaseModel):
 class ModelTrainState(State):
     NAME: ClassVar[str] = "MODEL_TRAIN"
     payload: ModelTrainPayload
-    MaxNoOfInterationTrain = 2
+    MaxNoOfInterationTrain = 10 # TODO: change this just for testing
 
     # ---- required by State ABC ----
     @property

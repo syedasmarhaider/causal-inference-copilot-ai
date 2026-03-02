@@ -280,9 +280,9 @@ class ModelTrainNode(Node):
                     )
                 )
 
-        if state.payload.column_transformation_plan is None and state.payload.col_tranformation_not_needed is None:
+        if state.payload.column_transformation_plan is None and (state.payload.col_tranformation_not_needed is None or not state.payload.col_tranformation_not_needed):
             if len(protocol.covariates or []) == 0 and len(protocol.effect_modifiers or []) == 0:
-                return ModelTrainState(
+                return ModelTrainState( 
                      payload= ModelTrainPayload(
                         trained_model_id=None, 
                         column_transformation_plan=None,
