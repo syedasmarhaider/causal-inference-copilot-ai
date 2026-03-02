@@ -193,14 +193,14 @@ def _generate_encoding_plan(
 
     )
     
-    last_6 = list(history[-6:]) if history else None
+    last_5_messages = list(history[-5:]) if history else None
 
     out = llm.generate_json(
         schema=EncodingPlanLLMOutput,
         system_prompt=ENCODING_PLAN_SYSTEM_PROMPT,
         user_prompt=user_prompt,
         config=llm_config,
-        history=last_6,
+        history=last_5_messages,
         max_attempts=3,
     )
 
@@ -415,6 +415,7 @@ class ModelTrainNode(Node):
                                 "trained_model_id": None,
                                 "training_warnings": None,
                                 "order_X": None,
+                                "column_transformation_plan": None,
                                 "order_W": None,
                                 "needs_user_input": False,
                                 "no_of_times_trained": state.payload.no_of_times_trained,
@@ -429,6 +430,7 @@ class ModelTrainNode(Node):
                         "trained_model_id": None,
                         "needs_user_input": False,
                         "error": None,
+                        "column_transformation_plan": None,
                         "prev_training_errors": err_msg,
                         "user_message": message,
                         "no_of_times_trained": (state.payload.no_of_times_trained or 0) + 1,
