@@ -9,6 +9,8 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
+from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
+from python.implementation.workflows.tools.common.model.encoding_plan import TransformPlan
 
 CommandType = Literal["FIT", "ATE", "CATE"]
 
@@ -22,6 +24,10 @@ class BaseCommand:
     model_name: str
     dataset_id: UUID
     run_id: UUID
+    order_X: Optional[List[str]] = None
+    order_W: Optional[List[str]] = None
+    data_summary: DatasetSummaryModel
+    transformation_plan: TransformPlan
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     protocol_specs: CausalSpec
     options: Dict[str, Any] = field(default_factory=lambda: {})
@@ -34,9 +40,6 @@ class BaseCommand:
 @dataclass(frozen=True, slots=True)
 class FitInputs:
     model_spec: Optional[Dict[str, Any]] = None
-    missingness_mode: MissingnessMode = "present"
-    order_X: Optional[List[str]] = None
-    order_W: Optional[List[str]] = None
     pre_X:  Optional[ColumnTransformer] = None
     pre_XW: Optional[ColumnTransformer] = None
     

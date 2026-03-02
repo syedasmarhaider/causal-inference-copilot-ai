@@ -47,7 +47,9 @@ from python.implementation.workflows.tools.causal.causal_command import (
 from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.econml.models_info import  get_linear_dml_causal_model_info
-from python.implementation.workflows.tools.causal.econml.utils import ModelSpecError, build_init_fit_options_param_maps, categorical_t0_t1_pairs, get_input_params_from_spec, has_missing, now_utc, raise_if_x_rows_not_exactly_match_fit_x_cols, required_init_keys, serialize_inference_obj
+from python.implementation.workflows.tools.causal.econml.utils import ModelSpecError, build_init_fit_options_param_maps, categorical_t0_t1_pairs, get_input_params_from_spec, has_missing, is_X_missing_handled, now_utc, raise_if_x_rows_not_exactly_match_fit_x_cols, required_init_keys, serialize_inference_obj
+from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
+from python.implementation.workflows.tools.common.model.encoding_plan import TransformPlan
 
 @dataclass(frozen=True, slots=True)
 class LinearDMLCausalModel(CausalModel):
@@ -147,8 +149,10 @@ class LinearDMLCausalModel(CausalModel):
             specs: CausalSpec = command.protocol_specs
             pre_x: ColumnTransformer | None = command.inputs.pre_X
             pre_xw: ColumnTransformer | None = command.inputs.pre_XW
-            order_X: Optional[List[str]] = command.inputs.order_X
-            order_W: Optional[List[str]] = command.inputs.order_W
+            order_X: Optional[List[str]] = command.order_X
+            order_W: Optional[List[str]] = command.order_W
+            data_summary: DatasetSummaryModel = command.data_summary
+            transformation_plan: TransformPlan = command.transformation_plan
             
             if pre_x is None and len(specs.X or []) > 0:
                 raise ModelSpecError("Spec declares effect modifiers (spec.X) but no pre_X transformer provided in inputs. Provide a ColumnTransformer that at least passes through spec.X columns.")
@@ -162,6 +166,12 @@ class LinearDMLCausalModel(CausalModel):
             miss = {"Y": has_missing(Y), "T": has_missing(T), "X": has_missing(X), "W": has_missing(W)}
             if miss["Y"] or miss["T"]:
                 raise ModelSpecError(f"Y/T contain missing values; must be fixed upstream. missing={miss}")
+            
+            if miss["X"] and not is_X_missing_handled(plan=transformation_plan,summary=data_summary):
+                raise ModelSpecError(
+                    "LinearDML does not support missing values in X via allow_missing (only W is allowed). "
+                    "Impute/clean X upstream before fit."
+                )
 
             maps = build_init_fit_options_param_maps(
                 LinearDML,

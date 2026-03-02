@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
+from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
+from python.implementation.workflows.tools.common.model.encoding_plan import CatOneHotParams, DateTimeEpochParams, DropParams, EncodingPresetSpec, MapBinaryParams, MapOrdinalParams, NumLog1pParams, NumMinMaxParams, NumStandardParams, PassthroughParams, TransformPlan
 
 
 class ModelSpecError(ValueError):
@@ -353,3 +355,110 @@ def validate_columns_exist(df: pd.DataFrame, cols: Sequence[str]) -> None:
     missing = [c for c in cols if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns in df: {missing}")
+
+
+
+#========================================================================
+# Misgineess allow or not
+#=========================================================================
+def is_X_missing_handled(*, plan: TransformPlan, summary: DatasetSummaryModel, strict: bool = True) -> bool:
+    """
+    Decide whether the downstream causal estimator should be configured with allow_missing=True.
+
+    Intuition:
+      - Think of missing values as "holes" in columns.
+      - Some encodings "patch the hole" (impute / map / dummy category).
+      - Others let the hole pass through (passthrough, some datetime conversions, etc.).
+      - If any hole can pass through -> allow_missing=True.
+
+    strict=True behavior:
+      - If the plan says missing must error (missing='error') but data has missing, raise ValueError
+        because allow_missing cannot fix a pipeline that is configured to fail.
+    """
+    missing_by_col: Dict[str, int] = {p.name: int(p.n_missing) for p in summary.profiles}
+
+    forbidden: List[str] = []
+    needs_allow_missing: List[str] = []
+
+    for col_plan in plan.columns:
+        col = col_plan.column
+        enc = col_plan.encoding
+
+        # Dropped columns don't matter for downstream missingness.
+        if enc.preset == "drop":
+            continue
+
+        n_missing = missing_by_col.get(col)
+        if n_missing is None:
+            if strict:
+                raise ValueError(f"Column '{col}' is in TransformPlan but not present in DatasetSummaryModel.")
+            continue
+
+        if n_missing <= 0:
+            continue  # no hole to worry about
+
+        status = _missingness_handling(enc)
+
+        if status == "FORBIDS":
+            forbidden.append(col)
+        elif status == "UNHANDLED":
+            needs_allow_missing.append(col)
+        else:
+            # HANDLED -> safe
+            pass
+
+    if forbidden and strict:
+        raise ValueError(
+            "Missingness is present in columns that are configured to forbid missing values: "
+            + ", ".join(sorted(forbidden))
+            + ". Fix by changing encoding missing=..., imputing upstream, or dropping the column."
+        )
+
+    # If any used column has missing that can pass through -> allow_missing=True
+    return bool(needs_allow_missing)
+
+
+def _missingness_handling(enc: EncodingPresetSpec) -> str:
+    """
+    Returns one of: "HANDLED", "UNHANDLED", "FORBIDS"
+    """
+    # Structural
+    if isinstance(enc, DropParams):
+        return "HANDLED"  # ignored upstream
+    if isinstance(enc, PassthroughParams):
+        return "UNHANDLED"  # NaNs pass straight through
+
+    # Categorical
+    if isinstance(enc, CatOneHotParams):
+        # - impute_token: explicit fill_value -> no NaNs
+        # - dummy_na: missing represented as its own category -> no NaNs (conceptually)
+        # - error: pipeline should fail if missing exists
+        if enc.missing in ("impute_token", "dummy_na"):
+            return "HANDLED"
+        return "FORBIDS"  # missing == "error"
+
+    # Numeric: all your Num* presets explicitly impute -> handled
+    if isinstance(enc, (NumStandardParams, NumMinMaxParams, NumLog1pParams)):
+        return "HANDLED"
+
+    # Datetime epoch seconds:
+    # Your params include errors/coerce and add_missing_indicator, but no explicit imputation knob.
+    # That means NaNs can still exist after conversion -> treat as UNHANDLED.
+    if isinstance(enc, DateTimeEpochParams):
+        return "UNHANDLED"
+
+    # Explicit mapping: handled unless missing='error'
+    if isinstance(enc, MapBinaryParams):
+        if enc.missing == "error":
+            return "FORBIDS"
+        return "HANDLED"
+
+    if isinstance(enc, MapOrdinalParams): # pyright: ignore[reportUnnecessaryIsInstance]
+        if enc.missing == "error":
+            return "FORBIDS"
+        return "HANDLED"
+
+    # Should be unreachable if EncodingPresetSpec is exhaustive
+    return "UNHANDLED"
+
+    

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 from pandas.api.types import (
     is_bool_dtype,
     is_datetime64_any_dtype,
@@ -16,6 +16,7 @@ from python.domain.workflows.tool import Tool
 
 import pandas as pd
 from python.domain.workflows.tool import Tool
+from python.implementation.workflows.tools.common.model.data_summary import BooleanColumnProfileModel, BooleanSummaryModel, CategoricalColumnProfileModel, CategoricalSummaryModel, CategoryCountModel, ColumnProfileCommonModel, DatasetSummaryModel, DatetimeColumnProfileModel, DatetimeSummaryModel, DiscriminatedColumnProfile, NumericColumnProfileModel, NumericSummaryModel, OtherColumnProfileModel, OtherSummaryModel
 from python.implementation.workflows.tools.data_profiling.plots.data_missingness import generate_data_completeness_graph
 from python.implementation.workflows.tools.data_profiling.plots.measure_relationships import generate_measure_relationships_graph
 from python.implementation.workflows.tools.data_profiling.plots.measure_relationships import generate_measure_relationships_graph
@@ -47,115 +48,6 @@ class DatasetProfilingError(RuntimeError):
         if details.hint:
             msg = f"{msg} Hint: {details.hint}"
         super().__init__(msg)
-
-
-# =============================================================================
-# Pydantic output schema (discriminated union)
-# =============================================================================
-
-
-
-
-class NumericSummaryModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    min: Optional[float] = None
-    max: Optional[float] = None
-    mean: Optional[float] = None
-    std: Optional[float] = None
-    quantiles: Optional[Dict[str, float]] = None  # {"0.05": 1.2, ...}
-
-
-class DatetimeSummaryModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    min: Optional[str] = None  # isoformat-ish
-    max: Optional[str] = None
-
-
-class BooleanSummaryModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    counts: Dict[str, int]  # keys are stringified values
-
-
-class CategoryCountModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    value: str
-    count: int
-
-
-class CategoricalSummaryModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    top_categories: List[CategoryCountModel]
-    other_count: int
-
-
-class OtherSummaryModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    distinct_values_sample: List[str]
-
-
-class ColumnProfileCommonModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    name: str
-    dtype: Optional[str] = None
-    n_rows: int
-    n_missing: int
-    missing_rate: float
-    distinct_count: Optional[int] = None
-    note: Optional[str] = None  # only used in non-strict mode fallbacks
-
-
-class NumericColumnProfileModel(ColumnProfileCommonModel):
-    inferred_kind: Literal["NUMERIC"]
-    summary: NumericSummaryModel
-
-
-class DatetimeColumnProfileModel(ColumnProfileCommonModel):
-    inferred_kind: Literal["DATETIME"]
-    summary: DatetimeSummaryModel
-
-
-class BooleanColumnProfileModel(ColumnProfileCommonModel):
-    inferred_kind: Literal["BOOLEAN"]
-    summary: BooleanSummaryModel
-
-
-class CategoricalColumnProfileModel(ColumnProfileCommonModel):
-    inferred_kind: Literal["CATEGORICAL"]
-    summary: CategoricalSummaryModel
-
-
-class OtherColumnProfileModel(ColumnProfileCommonModel):
-    inferred_kind: Literal["OTHER"]
-    summary: OtherSummaryModel
-
-
-ColumnProfileModel = Union[
-    NumericColumnProfileModel,
-    DatetimeColumnProfileModel,
-    BooleanColumnProfileModel,
-    CategoricalColumnProfileModel,
-    OtherColumnProfileModel,
-]
-
-# Discriminator annotation (pydantic v2)
-DiscriminatedColumnProfile = Annotated[ColumnProfileModel, Field(discriminator="inferred_kind")]
-
-
-class DatasetSummaryModel(BaseModel):
-    """
-    Deterministic order: profiles follow df.columns order.
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    n_rows: int
-    profiles: List[DiscriminatedColumnProfile] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
 
 
 # =============================================================================
