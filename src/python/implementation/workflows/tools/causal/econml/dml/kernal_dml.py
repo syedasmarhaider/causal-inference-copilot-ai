@@ -55,6 +55,7 @@ from python.implementation.workflows.tools.causal.econml.utils import (
     get_input_params_from_spec,
     has_missing,
     is_X_missing_handled,
+    is_missing_handled,
     now_utc,
     raise_if_x_rows_not_exactly_match_fit_x_cols,
     required_init_keys,
@@ -96,7 +97,7 @@ def _normalize_model_spec_to_wrapped_list(
     spec_value: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]],
     pre_XW: ColumnTransformer,
     is_discrete: bool,
-    missingness: MissingnessMode,
+    missingness_W: bool,
     random_state: Optional[int],
     n_jobs: Optional[int],
 ) -> Sequence[BaseEstimator]:
@@ -105,7 +106,7 @@ def _normalize_model_spec_to_wrapped_list(
       - "present" => restrict to NaN-safe HGB
       - else => linear + trees + boosting candidates
     """
-    missing_present = (missingness == "present")
+    missing_present = missingness_W
 
     def build_boosting_candidates_nan_safe() -> Sequence[BaseEstimator]:
         if is_discrete:
@@ -224,7 +225,7 @@ def _get_default_models_for_t_and_y(
     specs: Any,  # CausalSpec
     pre_XW: ColumnTransformer,
     *,
-    missingness: MissingnessMode = "none",
+    missingness_W: bool,
     random_state: Optional[int] = None,
     n_jobs: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -239,7 +240,7 @@ def _get_default_models_for_t_and_y(
             spec_value=default_model_y,
             pre_XW=pre_XW,
             is_discrete=disc_y,
-            missingness=missingness,
+            missingness_W=missingness_W,
             random_state=random_state,
             n_jobs=n_jobs,
         )
@@ -249,7 +250,7 @@ def _get_default_models_for_t_and_y(
             spec_value=default_model_t,
             pre_XW=pre_XW,
             is_discrete=disc_t,
-            missingness=missingness,
+            missingness_W=missingness_W,
             random_state=random_state,
             n_jobs=n_jobs,
         )
@@ -367,7 +368,7 @@ class KernelDMLCausalModel(CausalModel):
             order_X: Optional[List[str]] = command.order_X
             order_W: Optional[List[str]] = command.order_W
             data_summary: DatasetSummaryModel = command.data_summary
-            transformation_plan: TransformPlan = command.transformation_plan
+            transformation_plan: Optional[TransformPlan] = command.transformation_plan
 
             # Same presence checks as before
             if pre_x is None and len(specs.X or []) > 0:
@@ -391,7 +392,9 @@ class KernelDMLCausalModel(CausalModel):
                 raise ModelSpecError(f"Y/T contain missing values; must be fixed upstream. missing={miss}")
 
             # CHANGED (KernelDML): allow_missing is W-only; X missing should be rejected (or imputed upstream)
-            if miss["X"] and not is_X_missing_handled(plan=transformation_plan,summary=data_summary):
+            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
+            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
+            if missingness_X:
                 raise ModelSpecError(
                     "KernelDML does not support missing values in X via allow_missing (only W is allowed). "
                     "Impute/clean X upstream before fit."
@@ -416,14 +419,14 @@ class KernelDMLCausalModel(CausalModel):
                 defaults["discrete_outcome"] = True
 
             # CHANGED (KernelDML): allow_missing pertains to W only; enable only if caller says missingness present
-            defaults["allow_missing"] = (command.inputs.missingness_mode == "present")
+            defaults["allow_missing"] = missingness_W
 
             if pre_xw is not None:
                 defaults.update(
                     _get_default_models_for_t_and_y(
                         specs,
                         pre_XW=pre_xw,
-                        missingness=command.inputs.missingness_mode,
+                        missingness_W=missingness_W,
                     )
                 )
 

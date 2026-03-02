@@ -42,7 +42,6 @@ from python.implementation.workflows.tools.causal.causal_command import (
     ErrorInfo,
     FitCommand,
     FitSuccess,
-    MissingnessMode,
 )
 from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
@@ -56,7 +55,7 @@ from python.implementation.workflows.tools.causal.econml.utils import (
     categorical_t0_t1_pairs,
     get_input_params_from_spec,
     has_missing,
-    is_X_missing_handled,
+    is_missing_handled,
     now_utc,
     raise_if_x_rows_not_exactly_match_fit_x_cols,
     required_init_keys,
@@ -99,7 +98,7 @@ def _normalize_model_spec_to_wrapped_list(
     spec_value: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]],
     pre_XW: ColumnTransformer,
     is_discrete: bool,
-    missingness: MissingnessMode,
+    missingness: bool,
     random_state: Optional[int],
     n_jobs: Optional[int],
 ) -> Sequence[BaseEstimator]:
@@ -108,10 +107,10 @@ def _normalize_model_spec_to_wrapped_list(
     Returns: list of fully wrapped sklearn estimators (Pipeline(pre -> [dense] -> model)).
 
     missingness:
-      - "none": usual candidate menu.
-      - "present": restrict to NaN-tolerant candidates (HGB), avoiding models that error on NaNs.
+      - True: restrict to NaN-tolerant candidates (HGB), avoiding models that error on NaNs.
+      - False: usual candidate menu.
     """
-    missing_present = (missingness == "present")
+    missing_present = missingness
 
     def build_boosting_candidates_nan_safe() -> Sequence[BaseEstimator]:
         # NaN-safe fallback (dense); good when you truly cannot impute upstream.
@@ -243,7 +242,7 @@ def _get_default_models_for_t_and_y(
     specs: Any,  # CausalSpec
     pre_XW: ColumnTransformer,
     *,
-    missingness: MissingnessMode = "none",
+    missingness: bool,
     random_state: Optional[int] = None,
     n_jobs: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -382,7 +381,7 @@ class CausalForestDMLCausalModel(CausalModel):
             order_X: Optional[List[str]] = command.order_X
             order_W: Optional[List[str]] = command.order_W
             data_summary: DatasetSummaryModel = command.data_summary
-            transformation_plan: TransformPlan = command.transformation_plan
+            transformation_plan: Optional[TransformPlan] = command.transformation_plan
             
             
 
@@ -403,7 +402,9 @@ class CausalForestDMLCausalModel(CausalModel):
 
             # CHANGED (Forest): CausalForestDML does NOT allow missing X via allow_missing;
             # allow_missing only applies to W. If X contains NaNs, force upstream imputation/cleaning.
-            if miss["X"] and not is_X_missing_handled(plan=transformation_plan,summary=data_summary):
+            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
+            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
+            if missingness_X:
                 raise ModelSpecError(
                     "CausalForestDML does not support missing values in X via allow_missing "
                     "(only W is allowed). Impute/clean X upstream before fit."
@@ -426,14 +427,14 @@ class CausalForestDMLCausalModel(CausalModel):
 
             # CHANGED (Forest): allow_missing only controls W-missing acceptance
             # (safe to set True always; it just relaxes W checks).
-            defaults["allow_missing"] = True
+            defaults["allow_missing"] = missingness_W
 
             if pre_xw is not None:
                 defaults.update(
                     _get_default_models_for_t_and_y(
                         specs,
                         pre_XW=pre_xw,
-                        missingness=command.inputs.missingness_mode,
+                        missingness=missingness_W,
                     )
                 )
 

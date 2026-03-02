@@ -359,53 +359,49 @@ def validate_columns_exist(df: pd.DataFrame, cols: Sequence[str]) -> None:
 
 
 #========================================================================
-# Misgineess allow or not
+# Missingness allow or not
 #=========================================================================
-def is_X_missing_handled(*, plan: TransformPlan, summary: DatasetSummaryModel, strict: bool = True) -> bool:
-    """
-    Decide whether the downstream causal estimator should be configured with allow_missing=True.
-
-    Intuition:
-      - Think of missing values as "holes" in columns.
-      - Some encodings "patch the hole" (impute / map / dummy category).
-      - Others let the hole pass through (passthrough, some datetime conversions, etc.).
-      - If any hole can pass through -> allow_missing=True.
-
-    strict=True behavior:
-      - If the plan says missing must error (missing='error') but data has missing, raise ValueError
-        because allow_missing cannot fix a pipeline that is configured to fail.
-    """
+def is_missing_handled(
+    *,
+    plan: TransformPlan,
+    summary: DatasetSummaryModel,
+    col_name_list: List[str],
+    strict: bool = True,
+) -> bool:
     missing_by_col: Dict[str, int] = {p.name: int(p.n_missing) for p in summary.profiles}
+
+    # Index plan by column for O(1) lookup
+    plan_by_col = {cp.column: cp for cp in plan.columns}
 
     forbidden: List[str] = []
     needs_allow_missing: List[str] = []
 
-    for col_plan in plan.columns:
-        col = col_plan.column
+    for col in col_name_list:
+        col_plan = plan_by_col.get(col)
+        if col_plan is None:
+            if strict:
+                raise ValueError(f"Column '{col}' is in col_name_list but not present in TransformPlan.")
+            continue
+
         enc = col_plan.encoding
 
-        # Dropped columns don't matter for downstream missingness.
         if enc.preset == "drop":
-            continue
+            continue  # dropped => irrelevant downstream
 
         n_missing = missing_by_col.get(col)
         if n_missing is None:
             if strict:
-                raise ValueError(f"Column '{col}' is in TransformPlan but not present in DatasetSummaryModel.")
+                raise ValueError(f"Column '{col}' is in col_name_list but not present in DatasetSummaryModel.")
             continue
 
         if n_missing <= 0:
-            continue  # no hole to worry about
+            continue
 
         status = _missingness_handling(enc)
-
         if status == "FORBIDS":
             forbidden.append(col)
         elif status == "UNHANDLED":
             needs_allow_missing.append(col)
-        else:
-            # HANDLED -> safe
-            pass
 
     if forbidden and strict:
         raise ValueError(
@@ -414,7 +410,6 @@ def is_X_missing_handled(*, plan: TransformPlan, summary: DatasetSummaryModel, s
             + ". Fix by changing encoding missing=..., imputing upstream, or dropping the column."
         )
 
-    # If any used column has missing that can pass through -> allow_missing=True
     return bool(needs_allow_missing)
 
 

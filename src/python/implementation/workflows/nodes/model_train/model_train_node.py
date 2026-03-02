@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 import logging
-from typing import Any, Dict, List, Optional, Sequence, cast
+from typing import Any, Optional, Sequence, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -40,7 +40,7 @@ from python.implementation.workflows.tools.causal.causal_spec import (
 )
 
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
-from python.implementation.workflows.tools.common.model.encoding_plan import CatOneHotParams, DateTimeEpochParams, DropParams, EncodingPresetSpec, MapBinaryParams, MapOrdinalParams, NumLog1pParams, NumMinMaxParams, NumStandardParams, PassthroughParams, TransformPlan
+from python.implementation.workflows.tools.common.model.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.encoding.encoding_tool import EncodingTool
 
 
@@ -352,18 +352,18 @@ class ModelTrainNode(Node):
            
         # Build command + execute
         run_id = uuid4()
-        causal_spec = _protocol_to_causal_spec(protocol)
-        allow_missing = False
-        if state.payload.column_transformation_plan is not None: 
-          allow_missing= decide_allow_missing(plan=state.payload.column_transformation_plan , summary=dataset_summary, strict=True)
+        causal_spec = _protocol_to_causal_spec(protocol)        
         
-
         cmd = FitCommand(
             model_name=estimator_fqcn,
             dataset_id=clean_dataset_id,
             run_id=run_id,
             protocol_specs=causal_spec,
-            inputs=FitInputs(pre_X=pre_X, pre_XW=pre_XW, order_X=order_X, order_W=order_W, missingness_mode="present" if allow_missing else "none"),
+            data_summary=dataset_summary,
+            order_X=order_X,
+            order_W=order_W,
+            transformation_plan=state.payload.column_transformation_plan if not state.payload.col_tranformation_not_needed else None,
+            inputs=FitInputs(pre_X=pre_X, pre_XW=pre_XW),
         )
 
         res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)

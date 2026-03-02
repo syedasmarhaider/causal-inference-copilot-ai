@@ -27,7 +27,7 @@ class BaseCommand:
     order_X: Optional[List[str]] = None
     order_W: Optional[List[str]] = None
     data_summary: DatasetSummaryModel
-    transformation_plan: TransformPlan
+    transformation_plan: Optional[TransformPlan] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     protocol_specs: CausalSpec
     options: Dict[str, Any] = field(default_factory=lambda: {})

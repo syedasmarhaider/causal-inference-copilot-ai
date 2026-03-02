@@ -453,7 +453,7 @@ class _BaseDRLearnerAdapter(CausalModel):
             order_X: Optional[List[str]] = command.order_X
             order_W: Optional[List[str]] = command.order_W
             data_summary: DatasetSummaryModel = command.data_summary
-            transformation_plan: TransformPlan = command.transformation_plan
+            transformation_plan: Optional[TransformPlan] = command.transformation_plan
 
             # DRLearner assumes discrete treatments
             if specs.T.kind not in ("binary", "categorical"):
@@ -471,7 +471,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 raise ModelSpecError(f"Y/T contain missing values; must be fixed upstream. missing={miss}")
 
             # FIX(2): do NOT silently allow missing X; allow_missing in EconML is about W.
-            if miss["X"] and not is_X_missing_handled(plan=transformation_plan,summary=data_summary):
+            if len(specs.X or []) > 0 and miss["X"] and (transformation_plan is None or not is_X_missing_handled(plan=transformation_plan,summary=data_summary)):
                 raise ModelSpecError(
                     f"{self.BACKEND_NAME} does not support missing values in X. "
                     f"Impute/clean X upstream. missing={miss}"

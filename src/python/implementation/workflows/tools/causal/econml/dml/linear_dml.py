@@ -42,12 +42,11 @@ from python.implementation.workflows.tools.causal.causal_command import (
     ErrorInfo,
     FitCommand,
     FitSuccess,
-    MissingnessMode,
 )
 from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.econml.models_info import  get_linear_dml_causal_model_info
-from python.implementation.workflows.tools.causal.econml.utils import ModelSpecError, build_init_fit_options_param_maps, categorical_t0_t1_pairs, get_input_params_from_spec, has_missing, is_X_missing_handled, now_utc, raise_if_x_rows_not_exactly_match_fit_x_cols, required_init_keys, serialize_inference_obj
+from python.implementation.workflows.tools.causal.econml.utils import ModelSpecError, build_init_fit_options_param_maps, categorical_t0_t1_pairs, get_input_params_from_spec, has_missing, is_missing_handled, now_utc, raise_if_x_rows_not_exactly_match_fit_x_cols, required_init_keys, serialize_inference_obj
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.tools.common.model.encoding_plan import TransformPlan
 
@@ -152,7 +151,7 @@ class LinearDMLCausalModel(CausalModel):
             order_X: Optional[List[str]] = command.order_X
             order_W: Optional[List[str]] = command.order_W
             data_summary: DatasetSummaryModel = command.data_summary
-            transformation_plan: TransformPlan = command.transformation_plan
+            transformation_plan: Optional[TransformPlan] = command.transformation_plan
             
             if pre_x is None and len(specs.X or []) > 0:
                 raise ModelSpecError("Spec declares effect modifiers (spec.X) but no pre_X transformer provided in inputs. Provide a ColumnTransformer that at least passes through spec.X columns.")
@@ -167,7 +166,9 @@ class LinearDMLCausalModel(CausalModel):
             if miss["Y"] or miss["T"]:
                 raise ModelSpecError(f"Y/T contain missing values; must be fixed upstream. missing={miss}")
             
-            if miss["X"] and not is_X_missing_handled(plan=transformation_plan,summary=data_summary):
+            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
+            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
+            if missingness_X:
                 raise ModelSpecError(
                     "LinearDML does not support missing values in X via allow_missing (only W is allowed). "
                     "Impute/clean X upstream before fit."
@@ -189,7 +190,7 @@ class LinearDMLCausalModel(CausalModel):
                 defaults["discrete_outcome"] = True    
             
             if pre_xw is not None:
-                 default_models_for_t_and_y = _get_default_models_for_t_and_y(specs, pre_XW=pre_xw)
+                 default_models_for_t_and_y = _get_default_models_for_t_and_y(specs, pre_XW=pre_xw, missingness_W=missingness_W)
                  defaults.update(default_models_for_t_and_y)
             
             if pre_x is not None:
@@ -204,7 +205,7 @@ class LinearDMLCausalModel(CausalModel):
                     f"Provide them in options. (This adapter does not inject defaults.)"
                 )
 
-            defaults["allow_missing"] = True      
+            defaults["allow_missing"] = missingness_W      
             # 8) Fit
             est = LinearDML(**defaults)
             
@@ -593,7 +594,7 @@ def _normalize_model_spec_to_wrapped_list(
     spec_value: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]],
     pre_XW: ColumnTransformer,
     is_discrete: bool,
-    missingness: MissingnessMode,           
+    missingness_W: bool,           
     random_state: Optional[int],
     n_jobs: Optional[int],
 ) -> Sequence[BaseEstimator]:
@@ -601,12 +602,12 @@ def _normalize_model_spec_to_wrapped_list(
     Accepts: keyword ('auto', 'automl', 'linear'...), estimator, or list of these.
     Returns: list of fully wrapped sklearn estimators (Pipeline(pre -> [dense] -> model)).
 
-    missingness:
-      - "none": your usual candidate menu.
-      - "present": restrict to NaN-tolerant candidates (HGB), avoiding models that error on NaNs.
+    missingness_W:
+      - False: your usual candidate menu.
+      - True: restrict to NaN-tolerant candidates (HGB), avoiding models that error on NaNs.
     """
 
-    missing_present = (missingness == "present")
+    missing_present = missingness_W
 
     def build_boosting_candidates_nan_safe() -> Sequence[BaseEstimator]:
         # HistGradientBoosting supports NaNs natively; requires dense arrays.
@@ -742,7 +743,7 @@ def _get_default_models_for_t_and_y(
     specs: Any,  # CausalSpec
     pre_XW: ColumnTransformer,
     *,
-    missingness: MissingnessMode = "none",     # <--- NEW
+    missingness_W: bool,
     random_state: Optional[int] = None,
     n_jobs: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -764,7 +765,7 @@ def _get_default_models_for_t_and_y(
             spec_value=default_model_y,
             pre_XW=pre_XW,
             is_discrete=disc_y,
-            missingness=missingness,
+            missingness_W=missingness_W,
             random_state=random_state,
             n_jobs=n_jobs,
         )
@@ -774,7 +775,7 @@ def _get_default_models_for_t_and_y(
             spec_value=default_model_t,
             pre_XW=pre_XW,
             is_discrete=disc_t,
-            missingness=missingness,
+            missingness_W=missingness_W,
             random_state=random_state,
             n_jobs=n_jobs,
         )

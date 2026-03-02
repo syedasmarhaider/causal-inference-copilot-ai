@@ -42,7 +42,6 @@ from python.implementation.workflows.tools.causal.causal_command import (
     ErrorInfo,
     FitCommand,
     FitSuccess,
-    MissingnessMode,
 )
 from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
@@ -56,7 +55,7 @@ from python.implementation.workflows.tools.causal.econml.utils import (
     categorical_t0_t1_pairs,
     get_input_params_from_spec,
     has_missing,
-    is_X_missing_handled,
+    is_missing_handled,
     now_utc,
     raise_if_x_rows_not_exactly_match_fit_x_cols,
     required_init_keys,
@@ -99,7 +98,7 @@ def _normalize_model_spec_to_wrapped_list(
     spec_value: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]],
     pre_XW: ColumnTransformer,
     is_discrete: bool,
-    missingness: MissingnessMode,
+    missingness_W: bool,
     random_state: Optional[int],
     n_jobs: Optional[int],
 ) -> Sequence[BaseEstimator]:
@@ -111,7 +110,7 @@ def _normalize_model_spec_to_wrapped_list(
       - "none": your usual candidate menu.
       - "present": restrict to NaN-tolerant candidates (HGB), avoiding models that error on NaNs.
     """
-    missing_present = (missingness == "present")
+    missing_present = missingness_W
 
     def build_boosting_candidates_nan_safe() -> Sequence[BaseEstimator]:
         if is_discrete:
@@ -240,7 +239,7 @@ def _get_default_models_for_t_and_y(
     specs: Any,  # CausalSpec
     pre_XW: ColumnTransformer,
     *,
-    missingness: MissingnessMode = "none",
+    missingness_W: bool,
     random_state: Optional[int] = None,
     n_jobs: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -255,7 +254,7 @@ def _get_default_models_for_t_and_y(
             spec_value=default_model_y,
             pre_XW=pre_XW,
             is_discrete=disc_y,
-            missingness=missingness,
+            missingness_W=missingness_W,
             random_state=random_state,
             n_jobs=n_jobs,
         )
@@ -265,7 +264,7 @@ def _get_default_models_for_t_and_y(
             spec_value=default_model_t,
             pre_XW=pre_XW,
             is_discrete=disc_t,
-            missingness=missingness,
+            missingness_W=missingness_W,
             random_state=random_state,
             n_jobs=n_jobs,
         )
@@ -376,7 +375,7 @@ class SparseLinearDMLCausalModel(CausalModel):
             order_X: Optional[List[str]] = command.order_X
             order_W: Optional[List[str]] = command.order_W
             data_summary: DatasetSummaryModel = command.data_summary
-            tranformation_plan: TransformPlan = command.transformation_plan
+            transformation_plan: Optional[TransformPlan] = command.transformation_plan
             
 
             if pre_x is None and len(specs.X or []) > 0:
@@ -394,7 +393,9 @@ class SparseLinearDMLCausalModel(CausalModel):
             if miss["Y"] or miss["T"]:
                 raise ModelSpecError(f"Y/T contain missing values; must be fixed upstream. missing={miss}")
             
-            if miss["X"] and not is_X_missing_handled(plan=tranformation_plan,summary=data_summary):
+            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
+            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is not None and not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
+            if missingness_X:
                 raise ModelSpecError(
                     "SparseLinearDML does not support missing values in X via allow_missing (only W is allowed). "
                     "Impute/clean X upstream before fit."
@@ -425,7 +426,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                     _get_default_models_for_t_and_y(
                         specs,
                         pre_XW=pre_xw,
-                        missingness=command.inputs.missingness_mode,
+                        missingness_W=missingness_W,
                     )
                 )
 
@@ -441,7 +442,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 )
 
             # allow_missing must be True if W can contain NaNs (EconML pre-check bypass)
-            defaults["allow_missing"] = True
+            defaults["allow_missing"] = missingness_W
 
             est = SparseLinearDML(**defaults)
 
