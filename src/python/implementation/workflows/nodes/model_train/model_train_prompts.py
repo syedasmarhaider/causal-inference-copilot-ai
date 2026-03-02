@@ -42,6 +42,7 @@ Your job:
 - Do NOT include treatment or outcome in the plan even if they appear in lists by mistake.
 - Use best practices for the selected estimator:
   - If the estimator is linear-ish: prioritize stable scaling for numeric and one-hot for categorical.
+  - Consider Model name and characteristics when making encoding choices. For example like intercepts are always true so encoding needs to be adjusted such as baseline.
   - If the estimator is tree/forest-ish: scaling is less critical, but missing indicators still help; one-hot is still fine.
   - If the estimator is kernel-ish: be careful with high-dimensional one-hot; consider max_categories cap.
   
@@ -70,3 +71,11 @@ Dataset summary (JSON):
 
 Return JSON only.
 """.strip()
+
+
+
+FIT_SUCCESS_FAILURE_SYSTEM_PROMPT = """
+You are a Clinical Causal Copilot that helps to train causal inference models based on the selected model, compiled protocol, and cleaned dataset.
+Explain to the user in a clinician-friendly way the result of the training command execution, including any warnings or errors
+warnings or errors if it make sense to present to clinicians and their implications regarding training and reliablity not internal errors etc.
+"""

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 import logging
-from typing import Any, Optional, Sequence, cast
+from typing import Any, Dict, List, Optional, Sequence, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -24,6 +24,7 @@ from python.implementation.workflows.nodes.model_train.model_train_deps import M
 from python.implementation.workflows.nodes.model_train.model_train_prompts import (
     ENCODING_PLAN_SYSTEM_PROMPT,
     ENCODING_PLAN_USER_PROMPT_TEMPLATE,
+    FIT_SUCCESS_FAILURE_SYSTEM_PROMPT,
     get_model_train_node_info,
 )
 from python.implementation.workflows.nodes.model_train.model_train_state import ModelTrainPayload, ModelTrainState
@@ -38,7 +39,8 @@ from python.implementation.workflows.tools.causal.causal_spec import (
     ContinuousOutcomeSpecModel as CausalContinuousOutcomeSpecModel,
 )
 
-from python.implementation.workflows.tools.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
+from python.implementation.workflows.tools.encoding.encoding_plan import CatOneHotParams, DateTimeEpochParams, DropParams, EncodingPresetSpec, MapBinaryParams, MapOrdinalParams, NumLog1pParams, NumMinMaxParams, NumStandardParams, PassthroughParams, TransformPlan
 from python.implementation.workflows.tools.encoding.encoding_tool import EncodingTool
 
 
@@ -161,18 +163,11 @@ def _generate_encoding_plan(
     *,
     llm: LLMService,
     llm_config: LLMConfig,
-    deps: ModelTrainDeps,
+    protocol: ProtocolSpec,
+    selected_model: Any,
+    dataset_summary: DatasetSummaryModel,
     history: Optional[Sequence[ChatMessage]],
-) -> EncodingPlanLLMOutput:
-    protocol = deps.compile_protocol.payload.protocol
-    assert protocol is not None, "Protocol must be available for encoding plan generation."
-
-    selected_model = deps.model_selection.payload.confirmed_model_selection
-    assert selected_model is not None, "Selected model must be available for encoding plan generation."
-
-    dataset_summary = deps.clean_protocol.payload.summary
-    assert dataset_summary is not None, "Cleaned dataset summary must be available for encoding plan generation."
-    
+) -> EncodingPlanLLMOutput:    
     # Eligible columns = X+W minus treatment/outcome
     X_cols = list(protocol.covariates or [])
     W_cols = list(protocol.effect_modifiers or [])
@@ -257,6 +252,9 @@ class ModelTrainNode(Node):
         clean_dataset_id = getattr(deps.clean_protocol.payload, "clean_dataset_id", None)
         assert clean_dataset_id is not None, "Clean dataset ID must be available for model training."
         
+        dataset_summary = deps.clean_protocol.payload.summary
+        assert dataset_summary is not None, "Cleaned dataset summary must be available for encoding plan generation."
+        
         if len(protocol.covariates or []) == 0 and len(protocol.effect_modifiers or []) == 0:
                 return ModelTrainState(
                     payload= ModelTrainPayload(
@@ -287,8 +285,11 @@ class ModelTrainNode(Node):
             plan = _generate_encoding_plan(
                 llm=self.llm,
                 llm_config=LLMConfig(temperature=0.2, model=self.model_name),
-                deps=deps,
+                protocol=protocol,
+                selected_model=selected,
+                dataset_summary=dataset_summary,
                 history=messages_history,
+                
             )
             
             if plan.needs_user_input:
@@ -351,50 +352,176 @@ class ModelTrainNode(Node):
         # Build command + execute
         run_id = uuid4()
         causal_spec = _protocol_to_causal_spec(protocol)
+        allow_missing = False
+        if state.payload.column_transformation_plan is not None: 
+          allow_missing= decide_allow_missing(plan=state.payload.column_transformation_plan , summary=dataset_summary, strict=True)
+        
 
         cmd = FitCommand(
             model_name=estimator_fqcn,
             dataset_id=clean_dataset_id,
             run_id=run_id,
             protocol_specs=causal_spec,
-            inputs=FitInputs(pre_X=pre_X, pre_XW=pre_XW, order_X=order_X, order_W=order_W),
+            inputs=FitInputs(pre_X=pre_X, pre_XW=pre_XW, order_X=order_X, order_W=order_W, missingness_mode="present" if allow_missing else "none"),
         )
 
         res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)
         logging.warning(f"Model training command executed with result: {res}")
-        
         if not isinstance(res, FitResult):
             raise ValueError(f"Expected FitResult from model execution, got {type(res).__name__}")
-        
-        if  isinstance(res, FitSuccess):
-            fitted_model_id = res.fitted_model_id
-            warnings_list = res.warnings or []
-            warnings_str = "\n".join([str(w) for w in warnings_list]) if warnings_list else None
-            payload = state.payload.model_copy(
-                update={
+
+        match res:
+            case FitSuccess():
+                message = self.llm.generate(
+                    config=LLMConfig(temperature=0.2, model=self.model_name),
+                    system_prompt=FIT_SUCCESS_FAILURE_SYSTEM_PROMPT,
+                    user_prompt=f"Model training succeeded with warnings: {res.warnings}. Explain to the user in a clinician-friendly way.",
+                    history=messages_history,
+                ).content
+                    
+                fitted_model_id = res.fitted_model_id
+                warnings_list = res.warnings or []
+                warnings_str = "\n".join([str(w) for w in warnings_list]) if warnings_list else None
+                payload = state.payload.model_copy(
+                   update={
                     "trained_model_id": fitted_model_id,
                     "training_warnings": warnings_str,
                     "order_X": order_X,
                     "order_W": order_W,
                     "needs_user_input": False,
                     "error": None,
-                    "user_message": "Training completed successfully.",
-                }
-            )
+                    "user_message": message,
+                 }
+                )
+                return ModelTrainState(payload=payload)
             
-        if isinstance(res, CommandFailure):
-            err_obj = res.error
-            err_msg = getattr(err_obj, "message", None) or str(err_obj) or "Training failed for an unknown reason."
-            payload = state.payload.model_copy(
-                update={
-                    "trained_model_id": None,
-                    "needs_user_input": False,
-                    "error": err_msg,
-                    "user_message": f"Retrying. Training failed: {err_msg}",
-                }
-            )
+            case CommandFailure():
+                
+                err_obj = res.error
+                err_msg = getattr(err_obj, "message", None) or str(err_obj) or "Training failed for an unknown reason."
+                message = self.llm.generate(
+                    config=LLMConfig(temperature=0.2, model=self.model_name),
+                    system_prompt=FIT_SUCCESS_FAILURE_SYSTEM_PROMPT,
+                    user_prompt=f"Model training failed with error: {err_msg}. Explain to the user in a clinician-friendly way and suggest next steps.",
+                    history=messages_history,
+                ).content
+                payload = state.payload.model_copy(
+                    update={
+                        "trained_model_id": None,
+                        "needs_user_input": False,
+                        "error": err_msg,
+                        "user_message": message,
+                    }
+                )
+                return ModelTrainState(payload=payload)
             
-        raise ValueError(f"Unexpected FitResult status: {getattr(res, 'status', None)}")   
+            case _:
+                 raise ValueError(f"Unexpected FitResult status: {getattr(res, 'status', None)}")
+                
+                
+   
 
 
+#========================================================================
+# Misgineess allow or not
+#=========================================================================
+def decide_allow_missing(*, plan: TransformPlan, summary: DatasetSummaryModel, strict: bool = True) -> bool:
+    """
+    Decide whether the downstream causal estimator should be configured with allow_missing=True.
+
+    Intuition:
+      - Think of missing values as "holes" in columns.
+      - Some encodings "patch the hole" (impute / map / dummy category).
+      - Others let the hole pass through (passthrough, some datetime conversions, etc.).
+      - If any hole can pass through -> allow_missing=True.
+
+    strict=True behavior:
+      - If the plan says missing must error (missing='error') but data has missing, raise ValueError
+        because allow_missing cannot fix a pipeline that is configured to fail.
+    """
+    missing_by_col: Dict[str, int] = {p.name: int(p.n_missing) for p in summary.profiles}
+
+    forbidden: List[str] = []
+    needs_allow_missing: List[str] = []
+
+    for col_plan in plan.columns:
+        col = col_plan.column
+        enc = col_plan.encoding
+
+        # Dropped columns don't matter for downstream missingness.
+        if enc.preset == "drop":
+            continue
+
+        n_missing = missing_by_col.get(col)
+        if n_missing is None:
+            if strict:
+                raise ValueError(f"Column '{col}' is in TransformPlan but not present in DatasetSummaryModel.")
+            continue
+
+        if n_missing <= 0:
+            continue  # no hole to worry about
+
+        status = _missingness_handling(enc)
+
+        if status == "FORBIDS":
+            forbidden.append(col)
+        elif status == "UNHANDLED":
+            needs_allow_missing.append(col)
+        else:
+            # HANDLED -> safe
+            pass
+
+    if forbidden and strict:
+        raise ValueError(
+            "Missingness is present in columns that are configured to forbid missing values: "
+            + ", ".join(sorted(forbidden))
+            + ". Fix by changing encoding missing=..., imputing upstream, or dropping the column."
+        )
+
+    # If any used column has missing that can pass through -> allow_missing=True
+    return bool(needs_allow_missing)
+
+
+def _missingness_handling(enc: EncodingPresetSpec) -> str:
+    """
+    Returns one of: "HANDLED", "UNHANDLED", "FORBIDS"
+    """
+    # Structural
+    if isinstance(enc, DropParams):
+        return "HANDLED"  # ignored upstream
+    if isinstance(enc, PassthroughParams):
+        return "UNHANDLED"  # NaNs pass straight through
+
+    # Categorical
+    if isinstance(enc, CatOneHotParams):
+        # - impute_token: explicit fill_value -> no NaNs
+        # - dummy_na: missing represented as its own category -> no NaNs (conceptually)
+        # - error: pipeline should fail if missing exists
+        if enc.missing in ("impute_token", "dummy_na"):
+            return "HANDLED"
+        return "FORBIDS"  # missing == "error"
+
+    # Numeric: all your Num* presets explicitly impute -> handled
+    if isinstance(enc, (NumStandardParams, NumMinMaxParams, NumLog1pParams)):
+        return "HANDLED"
+
+    # Datetime epoch seconds:
+    # Your params include errors/coerce and add_missing_indicator, but no explicit imputation knob.
+    # That means NaNs can still exist after conversion -> treat as UNHANDLED.
+    if isinstance(enc, DateTimeEpochParams):
+        return "UNHANDLED"
+
+    # Explicit mapping: handled unless missing='error'
+    if isinstance(enc, MapBinaryParams):
+        if enc.missing == "error":
+            return "FORBIDS"
+        return "HANDLED"
+
+    if isinstance(enc, MapOrdinalParams): # pyright: ignore[reportUnnecessaryIsInstance]
+        if enc.missing == "error":
+            return "FORBIDS"
+        return "HANDLED"
+
+    # Should be unreachable if EncodingPresetSpec is exhaustive
+    return "UNHANDLED"
 
