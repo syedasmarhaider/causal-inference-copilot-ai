@@ -616,6 +616,7 @@ def generate_overlap_graphs(
             continue
 
         e = _fit_propensity_binary(Wk, tk)
+        fig = make_comparability_bins(e, tk, title=f"Comparability bins: {t_col} ({baseline} vs {lvl})")
         fig = _plot_overlap_propensity(e, tk, title=f"Overlap: {t_col} ({baseline} vs {lvl})")
         out.append(
             CausalGraphImage(
@@ -855,3 +856,152 @@ def generate_weight_stability_graphs(
             )
         )
     return out
+
+
+
+
+
+BinStatus = Literal["GOOD", "WEAK", "NONE"]  # green / yellow / red
+
+
+@dataclass(frozen=True)
+class ComparabilityBin:
+    """
+    One bin = patients with similar baseline profiles (similar likelihood of receiving treatment).
+    """
+    index: int  # 1-based (1..k)
+    left: float
+    right: float
+    n_total: int
+    n_treated: int
+    n_control: int
+    status: BinStatus
+    label: str  # short UI label like "T=40 / C=35"
+
+
+@dataclass(frozen=True)
+class ComparabilityBinningResult:
+    bins: List[ComparabilityBin]
+    n_bins_effective: int
+    # Convenience masks (same length as inputs)
+    bin_index: np.ndarray  # 0..k-1 per row, -1 if unassigned (shouldn't happen)
+    good_mask: np.ndarray  # True if row falls into a GOOD bin
+
+
+def make_comparability_bins(
+    score: np.ndarray,
+    t: np.ndarray,
+    *,
+    n_bins: int = 10,
+    min_each_group: int = 30,
+    strategy: Literal["quantiles", "fixed_width"] = "quantiles",
+    fixed_width: Optional[float] = None,
+    clip_eps: float = 1e-6,
+) -> ComparabilityBinningResult:
+    """
+    Clinician-friendly binning:
+      - score: baseline-profile likelihood of treatment, one per patient (float in [0,1])
+      - t: treatment indicator (0=control, 1=treated)
+
+    Returns bins labeled:
+      GOOD: enough treated AND enough controls in the bin (safe comparison zone)
+      WEAK: both present but one side is small (caution)
+      NONE: one side absent (no comparable patients -> extrapolation risk)
+
+    Notes:
+      - `quantiles` makes bins with ~equal patient counts (stable and easy to explain as "10 strata").
+      - `fixed_width` makes bins like [0.0–0.1), [0.1–0.2), ... (more literal on the probability scale).
+    """
+    score = np.asarray(score, dtype=float).reshape(-1)
+    t = np.asarray(t, dtype=int).reshape(-1)
+
+    if score.shape[0] != t.shape[0]:
+        raise ValueError("score and t must have the same length")
+    if score.size == 0:
+        raise ValueError("empty input")
+    if not np.isin(t, [0, 1]).all():
+        raise ValueError("t must be 0/1")
+
+    # Clean score defensively (keeps plotting stable)
+    score = np.clip(score, clip_eps, 1.0 - clip_eps)
+    if not np.isfinite(score).all():
+        raise ValueError("score contains NaN/Inf")
+
+    # -------------------------
+    # Build bin edges
+    # -------------------------
+    if strategy == "quantiles":
+        q = np.linspace(0.0, 1.0, n_bins + 1)
+        edges = np.quantile(score, q)
+        # Drop duplicate edges (happens when many patients have identical score)
+        edges = np.unique(edges)
+        if edges.size < 3:
+            # fewer than 2 bins possible
+            raise ValueError("Not enough unique score values to form bins (scores are too tied).")
+    else:
+        if fixed_width is None:
+            fixed_width = 1.0 / float(n_bins)
+        if fixed_width <= 0 or fixed_width > 1:
+            raise ValueError("fixed_width must be in (0,1].")
+        edges = np.arange(0.0, 1.0 + fixed_width, fixed_width)
+        edges[0] = 0.0
+        edges[-1] = 1.0
+
+    # Ensure edges cover score range
+    edges[0] = 0.0
+    edges[-1] = 1.0
+    k = int(edges.size - 1)  # effective number of bins
+
+    # Assign each row to a bin index 0..k-1
+    # Use right=True so that exact edge values go into the lower bin consistently.
+    bin_idx = np.digitize(score, edges[1:-1], right=True)
+
+    # -------------------------
+    # Count per bin
+    # -------------------------
+    bins: List[ComparabilityBin] = []
+    good_mask = np.zeros_like(bin_idx, dtype=bool)
+
+    for i in range(k):
+        left = float(edges[i])
+        right = float(edges[i + 1])
+
+        in_bin = (bin_idx == i)
+        n_total = int(in_bin.sum())
+        if n_total == 0:
+            # Keep empty bins (useful for UI consistency), mark as NONE
+            status: BinStatus = "NONE"
+            n_treated = 0
+            n_control = 0
+        else:
+            n_treated = int(((t == 1) & in_bin).sum())
+            n_control = int(((t == 0) & in_bin).sum())
+
+            if n_treated == 0 or n_control == 0:
+                status = "NONE"
+            elif n_treated < min_each_group or n_control < min_each_group:
+                status = "WEAK"
+            else:
+                status = "GOOD"
+                good_mask[in_bin] = True
+
+        label = f"T={n_treated} / C={n_control}"
+        bins.append(
+            ComparabilityBin(
+                index=i + 1,
+                left=left,
+                right=right,
+                n_total=n_total,
+                n_treated=n_treated,
+                n_control=n_control,
+                status=status,
+                label=label,
+            )
+        )
+
+    return ComparabilityBinningResult(
+        bins=bins,
+        n_bins_effective=k,
+        bin_index=bin_idx,
+        good_mask=good_mask,
+    )

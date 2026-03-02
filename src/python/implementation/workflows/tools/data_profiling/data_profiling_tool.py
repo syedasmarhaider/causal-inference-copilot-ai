@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,16 +14,13 @@ from pandas.api.types import (
 
 from python.domain.workflows.tool import Tool
 
-import io
-from dataclasses import dataclass
-
 import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
-
 from python.domain.workflows.tool import Tool
+from python.implementation.workflows.tools.data_profiling.plots.data_missingness import generate_data_completeness_graph
+from python.implementation.workflows.tools.data_profiling.plots.measure_relationships import generate_measure_relationships_graph
+from python.implementation.workflows.tools.data_profiling.plots.measure_relationships import generate_measure_relationships_graph
+from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
 
-ImageMime = Literal["image/png", "image/jpeg", "image/webp"]
 
 InferredKind = Literal["NUMERIC", "DATETIME", "BOOLEAN", "CATEGORICAL", "OTHER"]
 
@@ -164,21 +161,6 @@ class DatasetSummaryModel(BaseModel):
 # =============================================================================
 # Public output contract
 # =============================================================================
-
-@dataclass(frozen=True)
-class GraphImage:
-    key: Literal[
-        "missingness_by_column",
-        "distinctness_vs_missingness",
-        "numeric_correlation_heatmap",
-    ]
-    title: str
-    mime: ImageMime
-    content: bytes
-# =============================================================================
-# Public API (STATE-style profiling tool; no constructor; pure funcs)
-# =============================================================================
-
 class DatasetProfilingTool(Tool):
     NAME: ClassVar[str] = "DATA_PROFILING"
     """
@@ -198,69 +180,13 @@ class DatasetProfilingTool(Tool):
     
     def generate_basic_stats_graphs(
         self,
-        df: pd.DataFrame,
         *,
-        # graph sizing / caps
-        max_columns_missingness: int = 60,
-        max_numeric_for_corr: int = 25,
-        max_rows_for_corr: int = 50_000,
-        corr_method: Literal["pearson", "spearman"] = "pearson",
-        dpi: int = 150,
-    ) -> List[GraphImage]:
-        _validate_df(df)
-        _validate_int("max_columns_missingness", max_columns_missingness, min_value=1)
-        _validate_int("max_numeric_for_corr", max_numeric_for_corr, min_value=2)
-        _validate_int("max_rows_for_corr", max_rows_for_corr, min_value=100)
-        _validate_int("dpi", dpi, min_value=72)
-
-        metrics = _compute_column_metrics(df)
-
-        out: List[GraphImage] = []
-
-        # 1) Missingness bar chart
-        fig1 = _plot_missingness_bar(metrics, max_columns=max_columns_missingness)
-        out.append(
-            GraphImage(
-                key="missingness_by_column",
-                title="Missingness by column",
-                mime="image/png",
-                content=_fig_to_png_bytes(fig1, dpi=dpi),
-            )
-        )
-
-        # 2) Distinctness vs missingness scatter
-        fig2 = _plot_distinctness_vs_missingness(metrics)
-        out.append(
-            GraphImage(
-                key="distinctness_vs_missingness",
-                title="Distinctness vs missingness",
-                mime="image/png",
-                content=_fig_to_png_bytes(fig2, dpi=dpi),
-            )
-        )
-
-        # 3) Correlation heatmap for selected numeric columns
-        fig3 = _plot_numeric_correlation_heatmap(
-            df,
-            metrics,
-            max_numeric=max_numeric_for_corr,
-            max_rows=max_rows_for_corr,
-            method=corr_method,
-        )
-        out.append(
-            GraphImage(
-                key="numeric_correlation_heatmap",
-                title="Numeric correlation heatmap",
-                mime="image/png",
-                content=_fig_to_png_bytes(fig3, dpi=dpi),
-            )
-        )
-
-        return out
-
-
-
-
+        df: pd.DataFrame,
+    ) -> List[GraphImage]:  
+        return [
+             generate_data_completeness_graph(df),
+             generate_measure_relationships_graph(df),
+         ]
 
     def extract_dataset_summary(
         self,
@@ -701,276 +627,7 @@ def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummaryModel:
                 evidence={"error": repr(e)},
             )
         )   
-
-
-
-
-# =============================================================================
-# Internals
-# =============================================================================
-
-@dataclass(frozen=True)
-class _ColMetric:
-    name: str
-    dtype_str: str
-    inferred_kind: InferredKind
-    n_rows: int
-    n_missing: int
-    missing_rate: float
-    distinct_count: Optional[int]
-    variance: Optional[float]  # only for numeric-ish columns
-
-
-def _validate_df(df: Any) -> None:
-    if not isinstance(df, pd.DataFrame):
-        raise TypeError(f"df must be a pandas DataFrame, got {type(df).__name__}")
-    if df.shape[1] == 0:
-        raise ValueError("df has zero columns")
-    # note: zero rows is allowed; graphs will be mostly empty but valid
-
-
-def _validate_int(name: str, v: int, *, min_value: int) -> None:
-    if not isinstance(v, int):
-        raise TypeError(f"{name} must be int, got {type(v).__name__}")
-    if v < min_value:
-        raise ValueError(f"{name} must be >= {min_value}, got {v}")
-
-
-def _safe_float(v: Any) -> Optional[float]:
-    try:
-        if v is None:
-            return None
-        fv = float(v)
-        if not math.isfinite(fv):
-            return None
-        return fv
-    except Exception:
-        return None
-
-
-def _compute_column_metrics(df: pd.DataFrame) -> List[_ColMetric]:
-    n_rows = int(df.shape[0])
-    dtypes = df.dtypes
-
-    metrics: List[_ColMetric] = []
-    for col in df.columns:
-        name = str(col).strip()
-        if not name:
-            name = str(col)  # keep something stable
-
-        dtype_str = str(dtypes[col])
-        s = df[col]
-        kind = _infer_kind(s)
-
-        s = df[col]
-        # missingness
-        try:
-            n_missing = int(s.isna().sum())
-        except Exception:
-            # very defensive fallback
-            vals = list(s)
-            n_missing = sum(1 for x in vals if x is None)
-        missing_rate = float(n_missing / n_rows) if n_rows > 0 else 0.0
-
-        # distinct count (dropna)
-        distinct_count: Optional[int]
-        try:
-            distinct_count = int(s.nunique(dropna=True))
-        except Exception:
-            distinct_count = None
-
-        # variance (only for numeric columns; used for correlation selection ranking)
-        variance: Optional[float] = None
-        if kind == "NUMERIC":
-            try:
-                variance = _safe_float(pd.to_numeric(s, errors="coerce").var(skipna=True))
-            except Exception:
-                variance = None
-
-        metrics.append(
-            _ColMetric(
-                name=name,
-                dtype_str=dtype_str,
-                inferred_kind=kind,
-                n_rows=n_rows,
-                n_missing=n_missing,
-                missing_rate=missing_rate,
-                distinct_count=distinct_count,
-                variance=variance,
-            )
-        )
-    return metrics
-
-
-def _fig_to_png_bytes(fig: Figure, *, dpi: int) -> bytes:
-    try:
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
-        return buf.getvalue()
-    finally:
-        plt.close(fig)
-
-
-# -----------------------------------------------------------------------------
-# Plot 1: Missingness bar chart
-# -----------------------------------------------------------------------------
-
-def _plot_missingness_bar(metrics: Sequence[_ColMetric], *, max_columns: int) -> Figure:
-    # sort by missing desc; show top K
-    ordered = sorted(metrics, key=lambda m: m.missing_rate, reverse=True)
-    shown = ordered[:max_columns]
-
-    names = [m.name for m in shown]
-    rates = [m.missing_rate for m in shown]
-
-    fig, ax = plt.subplots(figsize=(max(8, min(16, 0.25 * len(shown) + 6)), 6))
-    ax.bar(range(len(shown)), rates)
-    ax.set_title("Missingness by column (top columns)")
-    ax.set_ylabel("Missing rate")
-    ax.set_ylim(0.0, 1.0)
-
-    ax.set_xticks(range(len(shown)))
-    ax.set_xticklabels(names, rotation=60, ha="right", fontsize=8)
-
-    if len(metrics) > max_columns:
-        ax.text(
-            0.0,
-            -0.18,
-            f"Showing top {max_columns} by missingness out of {len(metrics)} columns.",
-            transform=ax.transAxes,
-            fontsize=9,
-        )
-
-    fig.tight_layout()
-    return fig
-
-
-# -----------------------------------------------------------------------------
-# Plot 2: Distinctness vs Missingness scatter (log-x)
-# -----------------------------------------------------------------------------
-
-_KIND_MARKERS: Dict[InferredKind, str] = {
-    "NUMERIC": "o",
-    "DATETIME": "s",
-    "BOOLEAN": "^",
-    "CATEGORICAL": "D",
-    "OTHER": "x",
-}
-
-def _plot_distinctness_vs_missingness(metrics: Sequence[_ColMetric]) -> Figure:
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.set_title("Distinctness vs missingness (log distinct count)")
-    ax.set_xlabel("Distinct count (log scale)")
-    ax.set_ylabel("Missing rate")
-    ax.set_ylim(0.0, 1.0)
-
-    # group by kind; let matplotlib auto-assign colors via cycle
-    for kind in ["NUMERIC", "DATETIME", "BOOLEAN", "CATEGORICAL", "OTHER"]:
-        pts = [m for m in metrics if m.inferred_kind == kind]
-        if not pts:
-            continue
-
-        xs: List[float] = []
-        ys: List[float] = []
-        for m in pts:
-            # if distinct_count missing, skip point
-            if m.distinct_count is None:
-                continue
-            # avoid log(0)
-            xs.append(float(max(1, m.distinct_count)))
-            ys.append(float(m.missing_rate))
-
-        if xs:
-            ax.scatter(xs, ys, marker=_KIND_MARKERS[kind], alpha=0.75, label=kind)
-
-    ax.set_xscale("log")
-    ax.legend(title="Inferred kind", loc="best", fontsize=9)
-    fig.tight_layout()
-    return fig
-
-
-# -----------------------------------------------------------------------------
-# Plot 3: Numeric correlation heatmap (selected columns)
-# -----------------------------------------------------------------------------
-
-def _select_numeric_for_corr(
-    df: pd.DataFrame,
-    metrics: Sequence[_ColMetric],
-    *,
-    max_numeric: int,
-) -> List[str]:
-    # select NUMERIC columns; rank by low missingness then high variance (fallback to 0)
-    numeric = [m for m in metrics if m.inferred_kind == "NUMERIC"]
-    if not numeric:
-        return []
-
-    def key(m: _ColMetric) -> Tuple[float, float]:
-        var = m.variance if m.variance is not None else 0.0
-        return (m.missing_rate, -var)
-
-    ordered = sorted(numeric, key=key)
-    cols = [m.name for m in ordered]
-
-    # ensure these names exist as df columns (handles whitespace normalization mismatch)
-    df_cols = set(map(str, df.columns))
-    present = [c for c in cols if c in df_cols]
-    return present[:max_numeric]
-
-
-def _plot_numeric_correlation_heatmap(
-    df: pd.DataFrame,
-    metrics: Sequence[_ColMetric],
-    *,
-    max_numeric: int,
-    max_rows: int,
-    method: Literal["pearson", "spearman"],
-) -> Figure:
-    cols = _select_numeric_for_corr(df, metrics, max_numeric=max_numeric)
-
-    fig, ax = plt.subplots(figsize=(10, 8))
-
-    if len(cols) < 2:
-        ax.axis("off")
-        ax.set_title("Numeric correlation heatmap")
-        ax.text(
-            0.5,
-            0.5,
-            "Not enough numeric columns to compute correlations.",
-            ha="center",
-            va="center",
-            transform=ax.transAxes,
-            fontsize=12,
-        )
-        fig.tight_layout()
-        return fig
-
-    work = df[cols]
-    # cap rows for speed on huge datasets
-    if len(work) > max_rows:
-        work = work.sample(n=max_rows, random_state=0)
-
-    # coerce to numeric and compute correlation
-    work_num = work.apply(pd.to_numeric, errors="coerce")
-    corr = work_num.corr(method=method, min_periods=10)
-
-    # fill NaNs for display (e.g., constant columns); keep it stable
-    corr_disp = corr.fillna(0.0).to_numpy(dtype=float)
-
-    im = ax.imshow(corr_disp, vmin=-1.0, vmax=1.0)
-    ax.set_title(f"Numeric correlation heatmap ({method}), n={len(cols)} cols")
-    ax.set_xticks(range(len(cols)))
-    ax.set_yticks(range(len(cols)))
-    ax.set_xticklabels(cols, rotation=60, ha="right", fontsize=8)
-    ax.set_yticklabels(cols, fontsize=8)
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-    fig.tight_layout()
-    return fig        
-
-
-
-
-
+        
 def _infer_kind(
     series: pd.Series,
     *,

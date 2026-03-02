@@ -119,7 +119,7 @@ class LoadDatasetNode(Node):
                 compute_quantiles=True,
                 strict=True,
             )
-            graphs_list = data_profiling_tool.generate_basic_stats_graphs(df)
+            graphs_list = data_profiling_tool.generate_basic_stats_graphs(df=df)
             artifact_ids : Sequence[UUID] = []
             for graph in graphs_list:
                 artifact_id = uuid.uuid4()
