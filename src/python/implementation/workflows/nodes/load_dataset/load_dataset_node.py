@@ -4,6 +4,7 @@ from collections.abc import Mapping
 import json
 from typing import ClassVar, Optional, Sequence, cast
 from uuid import UUID
+import uuid
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
@@ -121,7 +122,7 @@ class LoadDatasetNode(Node):
             graphs_list = data_profiling_tool.generate_basic_stats_graphs(df)
             artifact_ids : Sequence[UUID] = []
             for graph in graphs_list:
-                artifact_id = UUID()
+                artifact_id = uuid.uuid4()
                 graph_bytes = graph.content
                 graph_mime = graph.mime
                 _ = self._data_repo.save_artifact(

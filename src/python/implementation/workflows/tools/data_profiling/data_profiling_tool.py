@@ -6,6 +6,11 @@ from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Sequ
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
+from pandas.api.types import (
+    is_bool_dtype,
+    is_datetime64_any_dtype,
+    is_numeric_dtype,
+)
 
 from python.domain.workflows.tool import Tool
 
@@ -51,7 +56,7 @@ class DatasetProfilingError(RuntimeError):
 # Pydantic output schema (discriminated union)
 # =============================================================================
 
-InferredKind = Literal["NUMERIC", "DATETIME", "BOOLEAN", "CATEGORICAL", "OTHER"]
+
 
 
 class NumericSummaryModel(BaseModel):
@@ -291,7 +296,7 @@ class DatasetProfilingTool(Tool):
             try:
                 s = _get_series(df, col_key, name, strict=strict)
                 dtype_str = _dtype_to_str(dtypes, col_key)
-                kind = _infer_kind(s, dtype_str)
+                kind = _infer_kind(s)
 
                 n_missing, missing_rate = _missingness(s, n_rows=n_rows)
                 distinct = _distinct_count(s)
@@ -498,19 +503,6 @@ def _dtype_to_str(dtypes: Any, col_key: Any) -> Optional[str]:
         return str(dtypes[col_key])
     except Exception:
         return None
-
-
-def _infer_kind(series: Any, dtype_str: Optional[str]) -> InferredKind:
-    ds = (dtype_str or "").lower()
-    if "datetime" in ds or "date" in ds or "timestamp" in ds:
-        return "DATETIME"
-    if "bool" in ds:
-        return "BOOLEAN"
-    if any(x in ds for x in ("int", "float", "double", "numeric", "decimal")):
-        return "NUMERIC"
-    if any(x in ds for x in ("object", "string", "category")):
-        return "CATEGORICAL"
-    return "OTHER"
 
 
 def _missingness(series: Any, *, n_rows: int) -> Tuple[int, float]:
@@ -744,19 +736,6 @@ def _validate_int(name: str, v: int, *, min_value: int) -> None:
         raise ValueError(f"{name} must be >= {min_value}, got {v}")
 
 
-def _infer_kind(dtype_str: str) -> InferredKind:
-    ds = (dtype_str or "").lower()
-    if "datetime" in ds or "date" in ds or "timestamp" in ds:
-        return "DATETIME"
-    if "bool" in ds:
-        return "BOOLEAN"
-    if any(x in ds for x in ("int", "float", "double", "numeric", "decimal")):
-        return "NUMERIC"
-    if any(x in ds for x in ("object", "string", "category")):
-        return "CATEGORICAL"
-    return "OTHER"
-
-
 def _safe_float(v: Any) -> Optional[float]:
     try:
         if v is None:
@@ -780,7 +759,8 @@ def _compute_column_metrics(df: pd.DataFrame) -> List[_ColMetric]:
             name = str(col)  # keep something stable
 
         dtype_str = str(dtypes[col])
-        kind = _infer_kind(dtype_str)
+        s = df[col]
+        kind = _infer_kind(s)
 
         s = df[col]
         # missingness
@@ -986,3 +966,52 @@ def _plot_numeric_correlation_heatmap(
 
     fig.tight_layout()
     return fig        
+
+
+
+
+
+def _infer_kind(
+    series: pd.Series,
+    *,
+    numeric_coerce_threshold: float = 0.90,
+    datetime_coerce_threshold: float = 0.90,
+    sample_size: int = 2000,
+) -> InferredKind:
+    # 1) Fast path: real dtypes
+    if is_datetime64_any_dtype(series):
+        return "DATETIME"
+    if is_bool_dtype(series):
+        return "BOOLEAN"
+    if is_numeric_dtype(series):
+        return "NUMERIC"
+
+    # 2) Sample non-missing for heuristics (deterministic)
+    s = series.dropna()
+    if s.empty:
+        return "OTHER"
+
+    if len(s) > sample_size:
+        s = s.sample(n=sample_size, random_state=0)
+
+    # 3) Detect complex objects -> OTHER
+    if s.map(lambda x: isinstance(x, (dict, list, set, tuple))).any():
+        return "OTHER"
+
+    # 4) Boolean-like strings
+    low = s.astype(str).str.strip().str.lower()
+    bool_vocab = {"true", "false", "0", "1", "yes", "no", "y", "n"}
+    if float(low.isin(bool_vocab).mean()) >= 0.95:
+        return "BOOLEAN"
+
+    # 5) Numeric-like strings
+    num = pd.to_numeric(s, errors="coerce")
+    if float(num.notna().mean()) >= numeric_coerce_threshold:
+        return "NUMERIC"
+
+    # 6) Datetime-like strings
+    dt = pd.to_datetime(s, errors="coerce")
+    if float(dt.notna().mean()) >= datetime_coerce_threshold:
+        return "DATETIME"
+
+    return "CATEGORICAL"

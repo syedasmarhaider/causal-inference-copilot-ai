@@ -179,7 +179,7 @@ class CleanProtocolNode(Node):
             for graph in graphs_list:
                 graph_bytes = graph.content
                 graph_mime = graph.mime
-                artifact_id = UUID()
+                artifact_id = uuid4()
                 _ = self.data_repo.save_artifact(
                     user_id=user_id,
                     conversation_id=conversation_id,
