@@ -14,3 +14,4 @@ econml
 langchain-core 
 langchain-google-genai
 langchain-openai
+matplotlib

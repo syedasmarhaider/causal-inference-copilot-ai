@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional, Sequence
 
 Status = Literal["PENDING", "DONE", "ABORTED"]
 ACTION = Literal["NONE", "NEEDS_INPUT"]
 
 
+@dataclass(frozen=True, slots=True)
+class StateMessage:
+    txt_message: str
+    artifact_ids: Optional[Sequence[str]] = None
+
 class State(ABC):
-    
-    
     @property
     @abstractmethod
     def name(self) -> str:
@@ -22,7 +26,7 @@ class State(ABC):
 
     @property
     @abstractmethod
-    def message(self) -> str:
+    def message(self) -> StateMessage:
         raise NotImplementedError
 
     @property

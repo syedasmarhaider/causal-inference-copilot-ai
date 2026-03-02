@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from python.domain.workflows.state import ACTION, State, Status
+from python.domain.workflows.state import ACTION, State, StateMessage, Status
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
 from python.implementation.workflows.utils.utils import  uuid_from_any
 
@@ -16,6 +16,7 @@ class LoadDatasetPayloadModel(BaseModel):
     id: Optional[UUID] = UUID("486f4975-6cd9-4261-a122-e6b0fc46462d")
     summary: Optional[DatasetSummaryModel] = None
     load_error: Optional[str] = None
+    graph_picture_ids: Optional[Sequence[UUID]] = None
     # TODO: solve this problem later of prerun
     user_message: Optional[str] = "Not run yet"
 
@@ -56,10 +57,13 @@ class LoadDatasetState(State):
         return "PENDING"
 
     @property
-    def message(self) -> str:
+    def message(self) -> StateMessage:
         if self.payload.user_message is None:
             raise ValueError("LoadDatasetState message is required but missing. State must have user message. Dont call this property if this is not runned in the node context where user_message is guaranteed to be set.")
-        return self.payload.user_message
+        artifact_ids : Sequence[str] = []
+        if self.payload.graph_picture_ids:
+            artifact_ids.extend(str(id) for id in self.payload.graph_picture_ids)
+        return StateMessage(txt_message=self.payload.user_message, artifact_ids=artifact_ids)
 
     @property
     def error(self) -> Optional[str]:

@@ -5,7 +5,7 @@ from typing import Any, ClassVar, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict
 
-from python.domain.workflows.state import ACTION, State, Status
+from python.domain.workflows.state import ACTION, State, StateMessage, Status
 from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import CausalInferenceDeps
 
 
@@ -49,13 +49,13 @@ class CausalInferenceState(State):
         return "PENDING"
 
     @property
-    def message(self) -> str:
+    def message(self) -> StateMessage:
         if self.payload.user_message is None:
             raise ValueError(
                 "CausalInferenceState.message is required but missing. "
                 "Don't access .message outside the node/UI context where user_message is guaranteed."
             )
-        return self.payload.user_message
+        return StateMessage(txt_message=self.payload.user_message)
 
     @property
     def needs_action(self) -> ACTION:

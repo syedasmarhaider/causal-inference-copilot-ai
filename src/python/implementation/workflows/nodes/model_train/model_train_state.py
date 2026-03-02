@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from python.domain.workflows.state import ACTION, State, Status
+from python.domain.workflows.state import ACTION, State, StateMessage, Status
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.tools.encoding.encoding_plan import TransformPlan
 
@@ -51,13 +51,13 @@ class ModelTrainState(State):
         return "PENDING"
 
     @property
-    def message(self) -> str:
+    def message(self) -> StateMessage:
         if self.payload.user_message is None:
             raise ValueError(
                 "ModelTrainState.message is required but missing. "
                 "Don't access .message outside the node/UI context where user_message is guaranteed."
             )
-        return self.payload.user_message
+        return StateMessage(txt_message=self.payload.user_message)
 
     @property
     def needs_action(self) -> ACTION:

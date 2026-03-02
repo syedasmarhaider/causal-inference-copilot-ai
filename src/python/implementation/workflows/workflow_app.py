@@ -181,7 +181,7 @@ class WorkflowApp:
         self._repo.append_message(
                     user_id=req.user_id,
                     conversation_id=req.conversation_id,
-                    message=ChatMessage(role="assistant", content=new_state.message),
+                    message=ChatMessage(role="assistant", content=new_state.message.txt_message),
             
         )
         
@@ -193,11 +193,11 @@ class WorkflowApp:
         )
             
         return WorkflowResponse(
-            node_message=new_state.message,
+            node_message=new_state.message.txt_message,
             needs_input=(new_state.needs_action == "NEEDS_INPUT"),
             current_stage=new_state.name,
             current_stage_status=new_state.status,
-            artifact_ids=[str("486f4975-6cd9-4261-a122-e6b0fc46462d")]
+            artifact_ids=new_state.message.artifact_ids,
         )
 
     # ------------------------

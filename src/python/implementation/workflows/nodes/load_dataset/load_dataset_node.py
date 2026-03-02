@@ -118,6 +118,22 @@ class LoadDatasetNode(Node):
                 compute_quantiles=True,
                 strict=True,
             )
+            graphs_list = data_profiling_tool.generate_basic_stats_graphs(df)
+            artifact_ids : Sequence[UUID] = []
+            for graph in graphs_list:
+                artifact_id = UUID()
+                graph_bytes = graph.content
+                graph_mime = graph.mime
+                _ = self._data_repo.save_artifact(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    artifact_id=artifact_id,
+                    content=graph_bytes,
+                    mime=graph_mime,
+                    overwrite=True,
+                )
+                artifact_ids.append(artifact_id)
+                
         except DatasetProfilingError as pe:
             details = getattr(pe, "details", None)
             snapshot: JSONDict = {
@@ -163,6 +179,7 @@ class LoadDatasetNode(Node):
             payload=LoadDatasetPayloadModel(
                 id=state.payload.id,
                 summary=summary,
+                graph_picture_ids=artifact_ids,
                 load_error=None,
                 user_message=final_msg,
             )

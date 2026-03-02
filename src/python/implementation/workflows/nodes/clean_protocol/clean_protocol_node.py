@@ -24,6 +24,7 @@ from python.implementation.workflows.nodes.compile_protocol.protocol_specs impor
     ContinuousOutcomeSpecModel,
     ProtocolSpec,
 )
+from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import CausalDataProfilingTool
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool
 from python.implementation.workflows.utils.utils import BOOL_FALSE, BOOL_TRUE
 
@@ -72,6 +73,7 @@ class CleanProtocolNode(Node):
     ) -> State:
         try:
             data_profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))  
+            causal_data_profiling_tool = cast(CausalDataProfilingTool, tool_factory.get_tool(CausalDataProfilingTool.NAME))
             deps = CleanProtocolDeps.from_loaded(previous_state_dependencies)
             dataset_id = deps.load_dataset.payload.id
             if dataset_id is None:
@@ -172,6 +174,22 @@ class CleanProtocolNode(Node):
                 compute_quantiles=True,
                 strict=False,
             )
+            artifact_ids : Sequence[UUID] = []
+            graphs_list = causal_data_profiling_tool.generate_causal_graphs(df3, compiled_protocol)
+            for graph in graphs_list:
+                graph_bytes = graph.content
+                graph_mime = graph.mime
+                artifact_id = UUID()
+                _ = self.data_repo.save_artifact(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    artifact_id=artifact_id,
+                    content=graph_bytes,
+                    mime=graph_mime,
+                    overwrite=True,
+                )
+                artifact_ids.append(artifact_id)
+                # Collect artifact ids to include in the state message for user reference 
             
 
             # 6) Success state
@@ -190,6 +208,7 @@ class CleanProtocolNode(Node):
                 payload=CleanProtocolPayloadModel(
                     clean_dataset_id=clean_id,
                     cleaning_error=None,
+                    graph_picture_ids=artifact_ids,
                     summary=summary,
                     user_message=msg_ok,
                 )

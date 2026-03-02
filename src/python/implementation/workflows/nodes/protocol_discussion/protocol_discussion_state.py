@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar, Dict, Optional, Sequence
 from pydantic import BaseModel, ConfigDict, field_validator
-from python.domain.workflows.state import ACTION, State, Status
+from python.domain.workflows.state import ACTION, State, StateMessage, Status
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import ProtocolDiscussionDeps
 
 
@@ -53,10 +53,10 @@ class ProtocolDiscussionState(State):
         return self.payload.node_status
 
     @property
-    def message(self) -> str:
+    def message(self) -> StateMessage:
         if self.payload.node_message is None:
             raise ValueError("ProtocolDiscussionState message is required but missing. State must have node message. Dont call this property if this is not runned in the node context where node_message is guaranteed to be set.")
-        return self.payload.node_message
+        return StateMessage(txt_message=self.payload.node_message)
 
     @property
     def error(self) -> Optional[str]:
