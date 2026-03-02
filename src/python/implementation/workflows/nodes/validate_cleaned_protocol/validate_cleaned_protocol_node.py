@@ -343,4 +343,4 @@ class ValidateCleanProtocolNode(Node):
 class _UserAcceptanceModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     message_for_user: str
-    user_acceptance: bool      
+    user_acceptance: Optional[bool] = None      

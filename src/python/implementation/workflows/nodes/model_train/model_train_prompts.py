@@ -1,8 +1,9 @@
 def get_model_train_node_info() -> str:
-    return (
-        "ModelTrainNode: trains the selected causal model using the cleaned dataset and compiled protocol. "
+    return """        "ModelTrainNode: trains the selected causal model using the cleaned dataset and compiled protocol. "
         "Returns state with trained_model_id, column_transformation_plan, and any training warnings."
-    )
+        "It does data transformation but requires user input to have a suggestion on transformation if transformation is failed"
+        "It runs the training automatically and does not requires user input on that"
+    """
 
 
 ENCODING_PLAN_SYSTEM_PROMPT = """

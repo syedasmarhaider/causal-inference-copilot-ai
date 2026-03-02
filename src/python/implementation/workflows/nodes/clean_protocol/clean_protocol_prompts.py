@@ -3,6 +3,8 @@ def get_clean_protocol_node_info() -> str:
             "CleanProtocolNode: prepares an inference-ready dataset by dropping to protocol-required columns, "
             "purging missing values, applying exclusions, enforcing treatment/outcome domains, and persisting a cleaned "
             "dataset artifact. Returns state with clean_dataset_id."
+            "Cleaning does not require user's input and is automated, but it requires user acceptance after cleaning to proceed with the cleaned dataset or not."
+            ""
         )
    
  

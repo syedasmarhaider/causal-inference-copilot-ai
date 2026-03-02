@@ -184,7 +184,8 @@ Inputs (some may be null)
 Hard Rules
 1) You MUST select exactly ONE state_name from allowed_previous_states.
 2) The selected state_name MUST be a key in node_name_to_description_map.
-3) Prefer the closest previous state that can fix the error with minimal rollback.
+3) Prefer the closest previous state that can fix the error with minimal rollback and those states which requires user input.
+4) Focus on last messages in error so that you can understand which state to return to best fix the error.
 
 Output (STRICT JSON ONLY; no extra text)
 {

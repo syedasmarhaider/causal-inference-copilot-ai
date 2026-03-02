@@ -40,12 +40,13 @@ class CausalInferenceState(State):
             return self.payload.abort_error_message or self.payload.ate_inference_error
         return self.payload.ate_inference_error
 
+    # TODO: chnage
     @property
     def status(self) -> Status:
         if self.payload.should_abort:
-            return "ABORTED"
+            return "PENDING"
         if self.error is not None:
-            return "ABORTED"
+            return "PENDING"
         return "PENDING"
 
     @property
@@ -57,10 +58,11 @@ class CausalInferenceState(State):
             )
         return StateMessage(txt_message=self.payload.user_message)
 
+    # change later
     @property
     def needs_action(self) -> ACTION:
         if self.status in ("DONE", "ABORTED"):
-            return "NONE"
+            return "NEEDS_INPUT"
         return "NEEDS_INPUT"
 
     def pre_required_states_names(self) -> Sequence[str]:
