@@ -40,7 +40,7 @@ from python.implementation.workflows.tools.causal.causal_spec import (
 )
 
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
-from python.implementation.workflows.tools.encoding.encoding_plan import CatOneHotParams, DateTimeEpochParams, DropParams, EncodingPresetSpec, MapBinaryParams, MapOrdinalParams, NumLog1pParams, NumMinMaxParams, NumStandardParams, PassthroughParams, TransformPlan
+from python.implementation.workflows.tools.common.model.encoding_plan import CatOneHotParams, DateTimeEpochParams, DropParams, EncodingPresetSpec, MapBinaryParams, MapOrdinalParams, NumLog1pParams, NumMinMaxParams, NumStandardParams, PassthroughParams, TransformPlan
 from python.implementation.workflows.tools.encoding.encoding_tool import EncodingTool
 
 

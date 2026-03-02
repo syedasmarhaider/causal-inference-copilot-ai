@@ -11,7 +11,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from python.implementation.workflows.tools.encoding.encoding_plan import EncodingPresetSpec, TransformPlan
+from python.implementation.workflows.tools.common.model.encoding_plan import EncodingPresetSpec, TransformPlan
 from python.domain.workflows.tool import Tool
 
 

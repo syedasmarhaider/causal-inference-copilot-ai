@@ -18,7 +18,7 @@ from python.implementation.workflows.tools.encoding.encoding_tool import (  # no
     compile_plan_to_transformers,
 )
 
-from python.implementation.workflows.tools.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.common.model.encoding_plan import TransformPlan
 import python.implementation.workflows.tools.encoding.encoding_tool as m
 
 

@@ -387,7 +387,7 @@ class SparseLinearDMLCausalModel(CausalModel):
             miss = {"Y": has_missing(Y), "T": has_missing(T), "X": has_missing(X), "W": has_missing(W)}
             if miss["Y"] or miss["T"]:
                 raise ModelSpecError(f"Y/T contain missing values; must be fixed upstream. missing={miss}")
-
+        
             # (kept) parameter-map machinery for required-init enforcement
             maps = build_init_fit_options_param_maps(
                 SparseLinearDML,
@@ -426,7 +426,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                     f"(Adapter is not exposing command.options yet.)"
                 )
 
-            # allow_missing must be True if X/W can contain NaNs (EconML pre-check bypass)
+            # allow_missing must be True if W can contain NaNs (EconML pre-check bypass)
             defaults["allow_missing"] = True
 
             est = SparseLinearDML(**defaults)
