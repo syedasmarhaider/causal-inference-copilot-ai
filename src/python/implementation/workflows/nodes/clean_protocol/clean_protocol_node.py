@@ -28,6 +28,7 @@ from python.implementation.workflows.nodes.compile_protocol.protocol_specs impor
 )
 from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import CausalDataProfilingTool
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool
+from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
 from python.implementation.workflows.utils.utils import BOOL_FALSE, BOOL_TRUE
 
 
@@ -178,21 +179,27 @@ class CleanProtocolNode(Node):
                 compute_quantiles=True,
                 strict=False,
             )
+            
             artifact_ids : Sequence[UUID] = []
-            graphs_list = causal_data_profiling_tool.generate_causal_graphs(df3, compiled_protocol)
-            for graph in graphs_list:
-                graph_bytes = graph.content
-                graph_mime = graph.mime
-                artifact_id = uuid4()
-                _ = self.data_repo.save_artifact(
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    artifact_id=artifact_id,
-                    content=graph_bytes,
-                    mime=graph_mime,
-                    overwrite=True,
-                )
-                artifact_ids.append(artifact_id)
+            if compiled_protocol.treatment_spec.kind == "binary" and (len(compiled_protocol.covariates) + len(compiled_protocol.effect_modifiers)) > 0:
+                graphs_list: list[GraphImage] = [
+                    causal_data_profiling_tool.generate_causal_missingness_by_group_graph(df=df3, protocol=compiled_protocol),
+                    causal_data_profiling_tool.generate_comparability_overlap_histogram(df=df3, protocol=compiled_protocol),
+                ]
+                graphs_list.extend(causal_data_profiling_tool.generate_propensity_vs_top_confounders_graphs(df=df3, protocol=compiled_protocol))
+                for graph in graphs_list:
+                        graph_bytes = graph.content
+                        graph_mime = graph.mime
+                        artifact_id = uuid4()
+                        self.data_repo.save_artifact(
+                            user_id=user_id,
+                            conversation_id=conversation_id,
+                            artifact_id=artifact_id,
+                            content=graph_bytes,
+                            mime=graph_mime,
+                            overwrite=True,
+                        )
+                        artifact_ids.append(artifact_id)
                 # Collect artifact ids to include in the state message for user reference 
             
 

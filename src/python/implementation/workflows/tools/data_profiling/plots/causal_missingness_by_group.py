@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from python.domain.repo.data_repo import ImageMime
 from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
 from python.implementation.workflows.tools.data_profiling.plots.utils import (
     fig_to_png_bytes,

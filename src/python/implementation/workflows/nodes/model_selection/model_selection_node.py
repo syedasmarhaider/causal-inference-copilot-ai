@@ -236,7 +236,7 @@ class ModelSelectionNode(Node):
             update={
                 "confirmed_model_selection": decision,
                 "error": None,
-                "system_choice_message": final_msg,
+                "user_message": final_msg,
             }
         )
         return ModelSelectionState(payload=payload)
