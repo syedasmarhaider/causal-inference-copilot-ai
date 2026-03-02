@@ -11,6 +11,7 @@ import pandas as pd
 from scipy.sparse import issparse  # type: ignore[import]
 
 from econml.dml import CausalForestDML
+import inspect
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
@@ -283,7 +284,24 @@ class CausalForestDMLCausalModel(CausalModel):
 
     def get_info(self) -> str:
         return get_causal_forest_dml_causal_model_info()
-        
+
+    def get_command_info(self, command: CausalCommand) -> str | None:
+        match command:
+            case FitCommand():
+                fit_doc = inspect.getdoc(CausalForestDML.fit) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                base_doc = inspect.getdoc(CausalForestDML) or ""
+                return base_doc + fit_doc
+            case ATECommand():
+                ate_doc = inspect.getdoc(CausalForestDML.ate) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                return ate_doc
+            case CATECommand():
+                effect_doc = inspect.getdoc(CausalForestDML.effect) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                return effect_doc    
+            case _:
+                return None
+            
+             
+
 
     def execute(
         self,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import inspect
 from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID
 import warnings
@@ -287,6 +288,21 @@ class KernelDMLCausalModel(CausalModel):
 
     def get_info(self) -> str:
         return get_kernel_dml_causal_model_info()
+    
+    def get_command_info(self, command: CausalCommand) -> str | None:
+        match command:
+            case FitCommand():
+                fit_doc = inspect.getdoc(KernelDML.fit) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                base_doc = inspect.getdoc(KernelDML) or ""
+                return base_doc + fit_doc
+            case ATECommand():
+                ate_doc = inspect.getdoc(KernelDML.ate) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                return ate_doc
+            case CATECommand():
+                effect_doc = inspect.getdoc(KernelDML.effect) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                return effect_doc    
+            case _:
+                return None
         
 
     def execute(

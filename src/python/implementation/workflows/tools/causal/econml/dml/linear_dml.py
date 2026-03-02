@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import inspect
 from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID
 import warnings
@@ -55,6 +56,21 @@ class LinearDMLCausalModel(CausalModel):
 
     def get_info(self) -> str:
         return get_linear_dml_causal_model_info()
+    
+    def get_command_info(self, command: CausalCommand) -> str | None:
+        match command:
+            case FitCommand():
+                fit_doc = inspect.getdoc(LinearDML.fit) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                base_doc = inspect.getdoc(LinearDML) or ""
+                return base_doc + fit_doc
+            case ATECommand():
+                ate_doc = inspect.getdoc(LinearDML.ate) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                return ate_doc
+            case CATECommand():
+                effect_doc = inspect.getdoc(LinearDML.effect) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                return effect_doc    
+            case _:
+                return None
 
     def execute(
         self,

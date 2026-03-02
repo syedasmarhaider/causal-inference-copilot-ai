@@ -18,7 +18,8 @@ CausalResult = Union[
 ]  
 
 class CausalModel(Protocol):
-    def get_info(self) -> str: ...  
+    def get_info(self) -> str: ...
+    def get_command_info(self, command: CausalCommand) -> str | None: ...
     def execute(
         self,
         *,
