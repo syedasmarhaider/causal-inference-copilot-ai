@@ -22,7 +22,6 @@ from python.implementation.workflows.nodes.compile_protocol.protocol_specs impor
 )
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.nodes.model_train.model_train_prompts import (
-    ENCODING_PLAN_SYSTEM_PROMPT,
     ENCODING_PLAN_USER_PROMPT_TEMPLATE,
     FIT_SUCCESS_FAILURE_SYSTEM_PROMPT,
     get_model_train_node_info,
@@ -184,7 +183,6 @@ def _generate_encoding_plan(
   
 
     user_prompt = ENCODING_PLAN_USER_PROMPT_TEMPLATE.format(
-        model_selection_json=_dumps(_safe_model_dump(selected_model)),
         selected_model_json=_dumps(_safe_model_dump(selected_model)),
         protocol_json=_dumps(_safe_model_dump(protocol)),
         dataset_summary_json=_dumps(_safe_model_dump(dataset_summary)),
@@ -197,7 +195,7 @@ def _generate_encoding_plan(
 
     out = llm.generate_json(
         schema=EncodingPlanLLMOutput,
-        system_prompt=ENCODING_PLAN_SYSTEM_PROMPT,
+        system_prompt=None,
         user_prompt=user_prompt,
         config=llm_config,
         history=last_3_messages,
