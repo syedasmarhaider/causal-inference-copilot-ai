@@ -4,7 +4,10 @@ from dataclasses import dataclass
 import json
 import logging
 from typing import Any, Optional, Sequence, cast
+from typing_extensions import Literal
 from uuid import UUID, uuid4
+
+from pydantic import BaseModel
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
@@ -16,6 +19,8 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_dep
 from python.implementation.workflows.nodes.causal_inference.causal_inference_prompts import (
     CAUSAL_INFERENCE_ATE_SUMMARY_SYSTEM_PROMPT,
     CAUSAL_INFERENCE_ATE_SUMMARY_USER_PROMPT_TEMPLATE,
+    CAUSAL_INFERENCE_MAIN_SYSTEM_PROMPT,
+    SMALL_ROUTER_PROMPT,
 )
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
     CausalInferenceState,
@@ -41,6 +46,7 @@ from python.implementation.workflows.nodes.compile_protocol.protocol_specs impor
     BinaryOutcomeSpecModel as ProtocolBinaryOutcomeSpecModel,
     ContinuousOutcomeSpecModel as ProtocolContinuousOutcomeSpecModel,
 )
+from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 
 def _dumps(obj: Any) -> str:
@@ -186,7 +192,7 @@ class CausalInferenceNode(Node):
         # ============================================================
         # Step 1: Compute ATE once (idempotent)
         # ============================================================
-        if True:
+        if state.payload.ate_result_raw_json_str is None:
                 spec = _protocol_to_causal_spec(protocol)
 
                 # Build ATECommand (fields must match your dataclass)
@@ -231,7 +237,6 @@ class CausalInferenceNode(Node):
                                 payload=state.payload.model_copy(
                                     update={
                                         "ate_result_raw_json_str": result,
-                                        "ate_result_summary": summary_out,
                                         "ate_inference_error": None,
                                         "should_abort": False,
                                         "abort_error_message": None,
@@ -247,7 +252,8 @@ class CausalInferenceNode(Node):
                                 payload=state.payload.model_copy(
                                     update={
                                         "ate_result_raw_json_str": None,
-                                        "ate_result_summary": None,
+                                        "error": res.error.message,
+                                        "should_abort": True,
                                         "user_message": error_message,
                                     }
                                 )
@@ -256,12 +262,70 @@ class CausalInferenceNode(Node):
                         raise TypeError(f"Unhandled ATEResult type: {type(res).__name__}") 
         
         return state             
+
               
+
+#===============================================================
+# internal small router
+#===============================================================
+
+_Question_Type = Literal["ate", "cate", "other"]
+
+class _QuestionDecisonPayload(BaseModel):
+    type: Optional[_Question_Type] = None
+    reasoning: Optional[str] = None
+def is_question_about_ate_or_cate_abort(
+    llm: LLMService,
+    model_name: str,
+    messages_history: Optional[Sequence[ChatMessage]],
+                                        ) -> _QuestionDecisonPayload:
+    last_8_messages = messages_history[-8:] if messages_history else None
+    return llm.generate_json(
+        schema=_QuestionDecisonPayload,
+        system_prompt=None,
+        user_prompt=SMALL_ROUTER_PROMPT,
+        config=LLMConfig(temperature=0.2, model=model_name),
+        history=last_8_messages,
+        max_attempts=3,
+    )
+
+#===============================================================
+# ATE questions 
+#===============================================================
+
+def process_ate_question(
+    llm: LLMService,
+    model_name: str,
+    ate_model_output_json_str: str,
+    state: CausalInferenceState,
+    data_summary: DatasetSummaryModel,
+    selected_model_fqcn: str,
+    messages_history: Optional[Sequence[ChatMessage]],
+                                        ) -> str:
+    last_8_messages = messages_history[-8:] if messages_history else None
+    return llm.generate(
+        system_prompt=CAUSAL_INFERENCE_MAIN_SYSTEM_PROMPT.format(
+            data_summary=data_summary.model_dump(mode="json"),
+            ate_model_output_json_str=ate_model_output_json_str,
+            selected_model_fqcn=selected_model_fqcn,
+        ),
+        user_prompt="{user_question}",
+        config=LLMConfig(temperature=0.7, model=model_name),
+        history=last_8_messages,
+    ).content.strip()
+    
+#===============================================================
+# Cate    
+    
+    
     
                         
                 
-                
-                
+            
+            
+
+
+                            
                 
      
 

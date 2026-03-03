@@ -24,6 +24,7 @@ Rules:
 - If warnings exist, surface the clinically relevant ones.
 - If result is missing key pieces, say what is missing and how it limits interpretation.
 - Do NOT claim causality beyond the assumptions of observational causal inference.
+- Also warn user that confounding bias might exist and that interpretation of ATE relies on assumptions.
 
 """.strip()
 
@@ -40,3 +41,34 @@ Warnings (JSON):
 
 Now write the JSON output.
 """.strip()
+
+
+
+#============================================================
+# internal small router
+#============================================================
+SMALL_ROUTER_PROMPT = """
+Given user messages and specificlly last user message decide user is asking about ATE interpretation, CATE interpretation, or other question such as model change or other. 
+Please be very conservative and only classify as ATE or CATE interpretation question type. unless there is a very good reason to think it is other such as model change or something.
+"""
+
+
+#============================================================
+# Main prompt for causal inference node (model selection + ATE interpretation)
+#============================================================
+CAUSAL_INFERENCE_MAIN_SYSTEM_PROMPT = """
+You are a Clinical Causal Copilot. And you are at clinical ATE interpretation step of a workflow.
+Task:
+2) Clarify User User questions about ate and all the information.
+3) Also warn user that counfounding bias might exist and that interpretation of ATE relies on assumptions.
+4) Have a nice friendly conversation with user and answer their questions about ATE result, data, model, etc.
+
+Summary:
+{data_summary}
+{ate_model_output_json_str}
+{selected_model_fqcn}
+
+
+
+
+"""
