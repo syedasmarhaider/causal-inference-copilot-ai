@@ -5,8 +5,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from python.domain.workflows.state import ACTION, State, Status
+from python.domain.workflows.state import ACTION, State, StateMessage, Status
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_deps import CleanProtocolDeps
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
 from python.implementation.workflows.utils.utils import uuid_from_any
 
 
@@ -19,6 +20,9 @@ class CleanProtocolPayloadModel(BaseModel):
     clean_dataset_id: Optional[UUID] = None
     cleaning_error: Optional[str] = None
     user_message: Optional[str] = None
+    summary: Optional[DatasetSummaryModel] = None
+    user_acceptance: Optional[bool] = None
+    graph_picture_ids: Optional[Sequence[UUID]] = None
 
     @field_validator("cleaning_error", "user_message", mode="before")
     @classmethod
@@ -52,17 +56,18 @@ class CleanProtocolState(State):
 
     @property
     def status(self) -> Status:
-        if self.payload.cleaning_error is not None:
+        if self.payload.cleaning_error is not None or (self.payload.user_acceptance is not None and not self.payload.user_acceptance):
             return "ABORTED"
-        if self.payload.clean_dataset_id is not None:
-            return "DONE"
+        if self.payload.clean_dataset_id is not None and self.payload.summary is not None and self.payload.user_acceptance is not None and self.payload.user_acceptance:
+            return "DONE"     
         return "PENDING"
 
     @property
-    def message(self) -> str:
+    def message(self) -> StateMessage:
         if self.payload.user_message is None:
             raise ValueError("CleanProtocolState message is required but missing. State must have user message. Dont call this property if this is not runned in the node context where user_message is guaranteed to be set.")
-        return self.payload.user_message
+        return StateMessage(txt_message=self.payload.user_message,
+                             artifact_ids=[str(id) for id in self.payload.graph_picture_ids] if self.payload.graph_picture_ids else [])
 
     @property
     def error(self) -> Optional[str]:
@@ -70,7 +75,9 @@ class CleanProtocolState(State):
 
     @property
     def needs_action(self) -> ACTION:
-        return "NONE"
+        if self.status in ("ABORTED", "DONE"):
+            return "NONE"
+        return "NEEDS_INPUT"
 
     def pre_required_states_names(self) -> Sequence[str]:
         return CleanProtocolDeps.pre_required_states_names()

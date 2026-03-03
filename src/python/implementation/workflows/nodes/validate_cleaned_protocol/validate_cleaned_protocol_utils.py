@@ -11,7 +11,6 @@ from typing import cast
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
     BinaryOutcomeSpecModel,
     BinaryTreatmentSpecModel,
-    CategoricalOutcomeSpecModel,
     CategoricalTreatmentSpecModel,
     ContinuousOutcomeSpecModel,
 )
@@ -168,10 +167,10 @@ def validate_protocol_role_columns_invariants(protocol: ProtocolSpec) -> List[Va
     if overlap:
         issues.append(
             _issue(
-                severity="WARN",
+                severity="FAIL",
                 message="covariates and effect_modifiers overlap: some columns appear in both lists.",
                 evidence={"overlap_cols": overlap, "n_overlap": len(overlap)},
-                fix_hint="Allowed, but redundant. Downstream code should dedupe combined feature lists.",
+                fix_hint="This is allowed is some estimation frameworks, but it's clearer to separate covariates (for adjustment) from effect modifiers (for heterogeneity). Consider assigning each column to one role. So we dont allow it",
             )
         )
 
@@ -608,8 +607,6 @@ def _outcome_allowed_literals(protocol: ProtocolSpec) -> List[str] | None:
     ys = protocol.outcome_spec
     if isinstance(ys, BinaryOutcomeSpecModel):
         return [ys.event, ys.non_event]
-    if isinstance(ys, CategoricalOutcomeSpecModel):
-        return list(ys.levels)
     if isinstance(ys, ContinuousOutcomeSpecModel):  # pyright: ignore[reportUnnecessaryIsInstance]
         return None
     raise ValueError(f"Unknown outcome_spec type: {type(ys)}")
@@ -899,20 +896,6 @@ def validate_outcome(
             )
         )
         return issues, metrics
-
-    # Require enough observed levels to estimate anything
-    if isinstance(ys, BinaryOutcomeSpecModel):
-        # binary: require both classes observed among NON-MISSING
-        if len(obs_set) < 2:
-            issues.append(
-                _issue(
-                    severity="FAIL",
-                    message="Binary outcome has <2 observed values among non-missing entries; cannot estimate effect.",
-                    evidence=metrics,
-                    fix_hint="Relax filters, increase cohort, or redefine outcome so both event/non-event appear.",
-                )
-            )
-            return issues, metrics
     else:
         # categorical: require at least 2 observed levels among NON-MISSING
         if len(obs_set) < 2:
@@ -1271,7 +1254,7 @@ def validate_covariate_and_effect_modifier_missingness(
                 severity="FAIL",
                 message="Some covariate/effect-modifier features have high missingness.",
                 evidence=metrics,
-                fix_hint="Drop/impute these columns explicitly in transform, or fix upstream null-handling.",
+                fix_hint="Drop these columns or fix your data",
             )
         )
     if warn_off:

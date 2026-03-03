@@ -108,9 +108,13 @@ class LangChainLLMService(LLMService):
             try:
                 return parser.parse(text)
             except (ValidationError, OutputParserException, ValueError) as e:
-                last_err = e
+                last_err : str
                 if attempt >= max_attempts:
                     break
+                try:
+                   last_err = json.dumps(e.errors(), indent=2) # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+                except (AttributeError, TypeError):
+                   last_err = str(e)
 
                 # Repair attempt: no history, deterministic, strongly constrained
                 repair_prompt = (
@@ -120,6 +124,7 @@ class LangChainLLMService(LLMService):
                     "1) Output MUST be valid JSON\n"
                     "2) Output MUST match the schema exactly\n"
                     "3) Output ONLY JSON (no markdown, no explanations)\n\n"
+                     f"last error was: {last_err}\n"
                     f"{fmt}\n\n"
                     f"Invalid output:\n{last_text}\n"
                 )
@@ -129,7 +134,7 @@ class LangChainLLMService(LLMService):
         raise RuntimeError(
             f"Failed JSON schema={schema.__name__} after {max_attempts} attempts. "
             f"Last error: {type(last_err).__name__}: {last_err}"
-        ) from last_err
+        ) 
 
     # ---------------- internals ----------------
 

@@ -13,7 +13,6 @@ from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import ChatMessage
 from python.domain.workflows.state import State
 
-
 @dataclass(frozen=True)
 class JsonFileRepoConfig:
     file_name_suffix: str = ".json"

@@ -4,7 +4,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from python.domain.workflows.state import ACTION, State, Status
+from python.domain.workflows.state import ACTION, State, StateMessage, Status
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_deps import ValidateCleanProtocolDeps
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
@@ -14,6 +14,7 @@ class ValidateCleanProtocolPayloadModel(BaseModel):
 
     issues: List[ValidationIssueModel] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     validation_error: Optional[str] = None
+    user_acceptance: Optional[bool] = None
     user_message: Optional[str] = None
 
     @field_validator("validation_error", "user_message", mode="before")
@@ -40,15 +41,17 @@ class ValidateCleanProtocolState(State):
     @property
     def status(self) -> Status:
         # ABORTED if any FAIL issue; else DONE
-        if any(i.severity == "FAIL" for i in self.payload.issues):
+        if any(i.severity == "FAIL" for i in self.payload.issues) or (self.payload.user_acceptance is not None and not self.payload.user_acceptance):
             return "ABORTED"
-        return "DONE"
+        if self.payload.user_acceptance is not None and self.payload.user_acceptance:
+            return "DONE"
+        return "PENDING"
 
     @property
-    def message(self) -> str:
+    def message(self) -> StateMessage:
         if self.payload.user_message is None:
             raise ValueError("ValidateCleanProtocolState message is required but missing. State must have user message. Dont call this property if this is not runned in the node context where user_message is guaranteed to be set.")
-        return self.payload.user_message
+        return StateMessage(txt_message=self.payload.user_message)
 
     @property
     def error(self) -> Optional[str]:
@@ -56,7 +59,9 @@ class ValidateCleanProtocolState(State):
 
     @property
     def needs_action(self) -> ACTION:
-        return "NONE"
+        if self.status in ("ABORTED", "DONE"):
+            return "NONE"
+        return "NEEDS_INPUT"
 
     def pre_required_states_names(self) -> Sequence[str]:
         return ValidateCleanProtocolDeps.pre_required_states_names()

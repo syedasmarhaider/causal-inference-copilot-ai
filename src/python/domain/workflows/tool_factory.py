@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+
+from python.domain.workflows.tool import Tool
 
 class ToolFactory(ABC):
     @abstractmethod
@@ -21,5 +22,5 @@ class ToolFactory(ABC):
         raise NotImplementedError
     
     @abstractmethod
-    def get_tool(self, name: str) -> Any:
+    def get_tool(self, name: str) -> Tool:
         raise NotImplementedError 

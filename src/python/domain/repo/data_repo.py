@@ -1,10 +1,23 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, Optional
 from uuid import UUID
 
 import pandas as pd
+
+ImageMime = Literal["image/png", "image/jpeg", "image/webp"]
+
+@dataclass(frozen=True)
+class ArtifactRef:
+    user_id: UUID
+    conversation_id: UUID
+    artifact_id: UUID
+    mime: ImageMime
+    path: Path
+    size_bytes: int
 
 
 class DataRepo(ABC):
@@ -50,3 +63,37 @@ class DataRepo(ABC):
         :param include_index: If True, write the DataFrame index into the CSV.
         :return: Path/URI to the persisted CSV (Path for file-backed repos).
         """
+    @abstractmethod
+    def save_artifact(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        artifact_id: UUID,
+        content: bytes,
+        *,
+        mime: ImageMime,
+        overwrite: bool = True,
+    ) -> ArtifactRef:
+        """
+        Persist an image (bytes) to durable storage.
+
+        Expected storage layout (file-backed impl):
+          ./data/<user_id>/<conversation_id>/images/<artifact_id>.<ext>
+
+        :param mime: MUST match content encoding (repo does not transcode).
+        :param overwrite: If False, raise if target exists.
+        :return: ArtifactRef with path + metadata
+        """
+
+    @abstractmethod
+    def get_artifact_ref(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        artifact_id: UUID,
+        *,
+        expected_mime: Optional[ImageMime] = None,
+    ) -> ArtifactRef:
+        """
+        Return ArtifactRef (path + mime). If expected_mime is provided and mismatched, raise.
+        """    

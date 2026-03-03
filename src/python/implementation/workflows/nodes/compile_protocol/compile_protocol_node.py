@@ -17,8 +17,8 @@ from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.compile_protocol import compile_protocol_prompt
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_deps import CompileProtocolDeps
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolPayloadModel, CompileProtocolState
-from python.implementation.workflows.nodes.compile_protocol.protocol_specs import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CategoricalOutcomeSpecModel, CategoricalTreatmentSpecModel, ContinuousOutcomeSpecModel,ProtocolSpec
-from python.implementation.workflows.tools.data.data_profiling_tool import DatasetProfilingStateTool, DatasetSummaryModel
+from python.implementation.workflows.nodes.compile_protocol.protocol_specs import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CategoricalTreatmentSpecModel, ContinuousOutcomeSpecModel,ProtocolSpec
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool, DatasetSummaryModel
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class CompileProtocolNode(Node):
         previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
-        dataset_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))
+        dataset_profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))
         deps = CompileProtocolDeps.from_loaded(previous_state_dependencies)
         ld = deps.load_dataset
         ds_summary: DatasetSummaryModel | None = ld.payload.summary
@@ -660,22 +660,6 @@ def _semantic_validate_values_against_dataset_summary(
                     evidence={"dtype": dtype_of(p)},
                 )
 
-    elif isinstance(ys, CategoricalOutcomeSpecModel):
-        ycol = ys.column
-        p = prof(ycol)
-        if p is not None and kind_of(p) != "CATEGORICAL":
-            add_issue(
-                path="outcome_spec.column",
-                message=f"Categorical outcome requires CATEGORICAL column, got {kind_of(p)!r} for {ycol!r}",
-                typ="column_kind_mismatch",
-                val={"column": ycol, "inferred_kind": kind_of(p)},
-                severity="ERROR",
-                evidence={"dtype": dtype_of(p)},
-            )
-
-        for j, lvl in enumerate(ys.levels):
-            check_value_membership_if_possible(col=ycol, path=f"outcome_spec.levels.{j}", value=lvl, label="Outcome level")
-
     elif isinstance(ys, ContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         ycol = ys.column
         p = prof(ycol)
@@ -699,71 +683,7 @@ def _semantic_validate_values_against_dataset_summary(
             )
 
         raise ValueError(f"Unknown outcome_spec type: {type(ys).__name__}")       
-
-        ep = prof(ecol)
-        if ep is not None:
-            k = kind_of(ep)
-
-            if norm(ys.event_value) == norm(ys.censor_value):
-                add_issue(
-                    path="outcome_spec",
-                    message=f"event_value and censor_value must differ, got {ys.event_value!r} == {ys.censor_value!r}",
-                    typ="event_equals_censor",
-                    val={"event_value": ys.event_value, "censor_value": ys.censor_value},
-                    severity="ERROR",
-                )
-
-            if k == "BOOLEAN":
-                if not is_bool_literal(ys.event_value):
-                    add_issue(
-                        path="outcome_spec.event_value",
-                        message=f"event_value not boolean-like for boolean column {ecol!r}: {ys.event_value!r}",
-                        typ="invalid_boolean_literal",
-                        val=ys.event_value,
-                        severity="ERROR",
-                        evidence={"column": ecol, "dtype": dtype_of(ep)},
-                    )
-                if not is_bool_literal(ys.censor_value):
-                    add_issue(
-                        path="outcome_spec.censor_value",
-                        message=f"censor_value not boolean-like for boolean column {ecol!r}: {ys.censor_value!r}",
-                        typ="invalid_boolean_literal",
-                        val=ys.censor_value,
-                        severity="ERROR",
-                        evidence={"column": ecol, "dtype": dtype_of(ep)},
-                    )
-            elif k == "NUMERIC":
-                if parse_float(ys.event_value) is None:
-                    add_issue(
-                        path="outcome_spec.event_value",
-                        message=f"event_value not parseable as float for numeric column {ecol!r}: {ys.event_value!r}",
-                        typ="invalid_numeric_literal",
-                        val=ys.event_value,
-                        severity="ERROR",
-                        evidence={"column": ecol, "dtype": dtype_of(ep)},
-                    )
-                if parse_float(ys.censor_value) is None:
-                    add_issue(
-                        path="outcome_spec.censor_value",
-                        message=f"censor_value not parseable as float for numeric column {ecol!r}: {ys.censor_value!r}",
-                        typ="invalid_numeric_literal",
-                        val=ys.censor_value,
-                        severity="ERROR",
-                        evidence={"column": ecol, "dtype": dtype_of(ep)},
-                    )
-            elif k == "CATEGORICAL":
-                check_value_membership_if_possible(col=ecol, path="outcome_spec.event_value", value=ys.event_value, label="Outcome event_value")
-                check_value_membership_if_possible(col=ecol, path="outcome_spec.censor_value", value=ys.censor_value, label="Outcome censor_value")
-            else:
-                add_issue(
-                    path="outcome_spec.event_column",
-                    message=f"event_column kind should be BOOLEAN/CATEGORICAL/NUMERIC, got {k!r} for {ecol!r}",
-                    typ="column_kind_mismatch",
-                    val={"column": ecol, "inferred_kind": k},
-                    severity="ERROR",
-                    evidence={"dtype": dtype_of(ep)},
-                )
-
+    
     return issues
 
 # =============================================================================

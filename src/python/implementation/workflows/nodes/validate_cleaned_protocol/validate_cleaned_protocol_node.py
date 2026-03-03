@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence
 from uuid import UUID
 
-from pydantic import ValidationError
+from openai import BaseModel
+from pydantic import ConfigDict, ValidationError
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
@@ -14,7 +15,7 @@ from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_prompts import (
-    system_prompt_validate_cleaned_protocol,
+    VALIDATE_CLEAN_PROTOCOL_PROMPT,
     validate_cleaned_protocol_get_info,
 )
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_deps import (
@@ -218,8 +219,9 @@ class ValidateCleanProtocolNode(Node):
 
             payload = ValidateCleanProtocolPayloadModel(
                 issues=issue_models,
+                user_acceptance=msg.user_acceptance,
                 validation_error="validation error occurs and protocol discussion is required as the protocol has some issues." if has_fail else None,
-                user_message=msg,
+                user_message=msg.message_for_user,
             )
             return ValidateCleanProtocolState(payload=payload)
 
@@ -282,7 +284,7 @@ class ValidateCleanProtocolNode(Node):
         payload = ValidateCleanProtocolPayloadModel(
             issues=issue_models,
             validation_error=validation_error,
-            user_message=msg,
+            user_message=msg.message_for_user,
         )
         return ValidateCleanProtocolState(payload=payload)
 
@@ -312,6 +314,7 @@ class ValidateCleanProtocolNode(Node):
             "n_covariates": int(len(list(getattr(proto, "covariates", []) or []))),
             "n_effect_modifiers": int(len(list(getattr(proto, "effect_modifiers", []) or []))),
         }
+       
 
     def _make_user_message(
         self,
@@ -321,74 +324,23 @@ class ValidateCleanProtocolNode(Node):
         metrics: Dict[str, Any],
         issues: List[Dict[str, Any]],
         has_fail: bool,
-    ) -> str:
-        try:
-            txt = self._try_llm_summary(
-                messages_history=messages_history,
-                protocol_summary=protocol_summary,
-                metrics=metrics,
-                issues=issues,
-                has_fail=has_fail,
+    ) -> _UserAcceptanceModel:
+            user_payload = { # pyright: ignore[reportUnknownVariableType]
+                "protocol_summary": protocol_summary,
+                "validation_metrics": metrics,
+                "validation_issues": issues,
+                "has_hard_fail": has_fail,
+            }
+            msg = self.llm.generate_json(
+                schema=_UserAcceptanceModel,
+                config=LLMConfig(model=self.model_name, temperature=0.6),
+                system_prompt=VALIDATE_CLEAN_PROTOCOL_PROMPT,
+                user_prompt=json.dumps(user_payload, ensure_ascii=False),
+                history=messages_history,
             )
-            if isinstance(txt, str) and txt.strip():
-                return txt.strip()
-        except Exception:
-            pass
-        return self._fallback_summary(issues=issues, has_fail=has_fail)
+            return msg
 
-    def _try_llm_summary(
-        self,
-        *,
-        messages_history: Optional[Sequence[ChatMessage]],
-        protocol_summary: Optional[Dict[str, Any]],
-        metrics: Dict[str, Any],
-        issues: List[Dict[str, Any]],
-        has_fail: bool,
-    ) -> Optional[str]:
-        system = system_prompt_validate_cleaned_protocol()
-        history_only_last_6 = messages_history[-6:] if messages_history else None
-        payload: Dict[str, Any] = {
-            "has_fail": bool(has_fail),
-            "protocol_summary": protocol_summary,
-            "metrics": metrics,
-            "issues": issues,
-        }
-        user = (
-            "Generate the user-facing message for these validation results.\n"
-            "Return plain text (no JSON).\n\n"
-            f"INPUT:\n{json.dumps(payload, ensure_ascii=False)[:60000]}"
-        )
-        config = LLMConfig(model=self.model_name, temperature=0.7)
-        resp = self.llm.generate(
-            system_prompt=system,
-            user_prompt=user,
-            config=config,
-            history=history_only_last_6,
-        )
-        return resp.content
-
-    def _fallback_summary(self, *, issues: List[Dict[str, Any]], has_fail: bool) -> str:
-        fails = [x for x in issues if str(x.get("severity")) == "FAIL"]
-        warns = [x for x in issues if str(x.get("severity")) == "WARN"]
-
-        lines: List[str] = []
-        if has_fail:
-            lines.append("Validation failed. Fix the following blockers before continuing:")
-            top = fails[:10]
-        else:
-            lines.append("Validation passed.")
-            if warns:
-                lines.append("Warnings detected (you can continue, but results may be unstable):")
-            top = warns[:10]
-
-        for i, it in enumerate(top, start=1):
-            msg = str(it.get("message", "")).strip()
-            hint = it.get("fix_hint")
-            if isinstance(hint, str) and hint.strip():
-                lines.append(f"{i}. {msg}  →  {hint.strip()}")
-            else:
-                lines.append(f"{i}. {msg}")
-
-        if not has_fail:
-            lines.append("Next: run TRANSFORM (encoding/typing) and then post-transform validation.")
-        return "\n".join(lines)
+class _UserAcceptanceModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    message_for_user: str
+    user_acceptance: Optional[bool] = None      

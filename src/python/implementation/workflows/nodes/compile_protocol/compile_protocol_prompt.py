@@ -6,6 +6,7 @@ def compile_protocol_node_info() -> str:
         "Convert the confirmed discussion record into a strict ProtocolState. "
         "Enforce schema/enums; do not invent columns/windows/semantics. "
         "If compilation fails, route back to PROTOCOL_DISCUSSION with precise fix instructions."
+        "It is an automated step and does not require user's input."
     """
 
 def compile_protocol_prompt() -> str:

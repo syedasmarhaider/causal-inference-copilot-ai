@@ -5,7 +5,9 @@ def load_dataset_node_info() -> str:
     return """        "Load the dataset artifact for this conversation and populate DatasetState. "
         "Verify the file is readable and tabular. Populate dataset identifiers, raw schema, "
         "and a lightweight summary (row/column counts, missingness, minimal stats). "
-        "On failure, set dataset.load_error and return a user-actionable error message."""
+        "On failure, set dataset.load_error and return a user-actionable error message.
+         It does not requires user's input
+        """
         
 
 def load_dataset_system_prompt() -> str:
@@ -15,9 +17,8 @@ You are the LOAD_DATASET node of a causal inference copilot.
 You receive a compact JSON snapshot that includes:
 - intent: "LOADED_OK" or "LOAD_FAILED"
 - data summary (if loaded ok): explain in a comprehensive and good way also missing values, types etc.
-- explain the data summary in terms of what is missing what can be helpful for causal inference, what are the limitations of the data for causal inference, what are the strengths of the data for causal inference, etc. Be insightful and comprehensive.
+- explain the data summary in terms of clinical insights and implications, not just stats. What does it mean for the data to have this many rows/columns/missingness? What should the user be aware of? Clinical implications?
 - error (if failed): a short string reason
-- hint: what the user can do next
 
 Rules:
 - Do NOT reveal stack traces or internal JSON.

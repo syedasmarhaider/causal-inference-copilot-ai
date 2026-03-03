@@ -4,6 +4,7 @@ from collections.abc import Mapping
 import json
 from typing import ClassVar, Optional, Sequence, cast
 from uuid import UUID
+import uuid
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
@@ -12,7 +13,7 @@ from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.load_dataset.load_dataset_prompts import load_dataset_node_info, load_dataset_system_prompt
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetPayloadModel, LoadDatasetState
-from python.implementation.workflows.tools.data.data_profiling_tool import DatasetProfilingError, DatasetProfilingStateTool
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingError, DatasetProfilingTool
 from python.implementation.workflows.utils.utils import DEFAULT_MODEL_GEMNI, JSONDict
 
 
@@ -68,7 +69,7 @@ class LoadDatasetNode(Node):
         state: State,
     ) -> State:
         
-        data_profiling_tool = cast(DatasetProfilingStateTool, tool_factory.get_tool("DATA_PROFILING_TOOL"))        
+        data_profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))        
         if not isinstance(state, LoadDatasetState):
             raise TypeError(f"{self.name}: expected LoadDatasetState, got {type(state).__name__}")
         
@@ -118,6 +119,22 @@ class LoadDatasetNode(Node):
                 compute_quantiles=True,
                 strict=True,
             )
+            graphs_list = data_profiling_tool.generate_basic_stats_graphs(df=df)
+            artifact_ids : Sequence[UUID] = []
+            for graph in graphs_list:
+                artifact_id = uuid.uuid4()
+                graph_bytes = graph.content
+                graph_mime = graph.mime
+                _ = self._data_repo.save_artifact(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    artifact_id=artifact_id,
+                    content=graph_bytes,
+                    mime=graph_mime,
+                    overwrite=True,
+                )
+                artifact_ids.append(artifact_id)
+                
         except DatasetProfilingError as pe:
             details = getattr(pe, "details", None)
             snapshot: JSONDict = {
@@ -163,6 +180,7 @@ class LoadDatasetNode(Node):
             payload=LoadDatasetPayloadModel(
                 id=state.payload.id,
                 summary=summary,
+                graph_picture_ids=artifact_ids,
                 load_error=None,
                 user_message=final_msg,
             )

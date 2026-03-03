@@ -1,0 +1,61 @@
+econml.dml.LinearDML
+What it is (mechanism): Double / Debiased Machine Learning with a linear final CATE stage (optionally on a featurized XXX and/or featurized TTT); uses cross-fitting (cv) and Neyman orthogonality ideas from DML.
+CATE predictor (final stage):
+Learns a linear CATE surface in featurizer(X) (or raw X if no featurizer).
+
+
+Identification assumptions (what you must assume):
+Unconfoundedness given observed covariates + overlap/positivity (not removed by DML; DML reduces nuisance-model bias).
+
+
+Compatibility scores (same semantics as your matrix)
+Binary T: good — set discrete_treatment=True; model_t must be a classifier when discrete_treatment=True.
+
+
+Categorical T: good — categories controls encoding; first category is treated as control/baseline.
+
+
+Continuous T: ok — supported;
+
+
+Continuous Y: good — model_y is a regressor (or 'auto').
+
+
+Binary Y: ok — supported via discrete_outcome=True; then model_y should be a classifier.
+
+
+Count/other Y: ok (practical, not a dedicated mode) — EconML doesn’t have a “count outcome” flag; you can still pass a regressor for E[Y∣⋅]E[Y\mid\cdot]E[Y∣⋅]. Interpretation is mean-scale and depends on your model_y. (This is practice, not a specific EconML guarantee.)
+
+
+Strong heterogeneity need: ok — heterogeneity is linear in featurized XXX; not a fully nonparametric CATE model.
+
+
+High-dimensional W: ok — W enters nuisance stages; feasibility depends on model_y/model_t capacity. (No special “high-dim W” final-stage constraint in the API; the final-stage constraint is mostly on X.)
+
+
+High-dimensional X: poor — final stage is linear without sparse regularization; if X is high-dim and sparse, EconML explicitly positions SparseLinearDML for that regime (next model).
+
+
+Sparse linear signal expected: good — linear CATE surface matches this assumption.
+
+
+Nonlinear signal expected: poor unless you explicitly featurize XXX (and/or TTT).
+
+
+Weak overlap robustness: ok — overlap is required; DML orthogonality helps nuisance error, not positivity violations (still needs trimming/restriction in practice).
+
+
+Interpretability: good — linear coefficients in final stage.
+
+
+Compute cost: ok — cross-fitting adds cost (cv), but much lighter than forests.
+
+
+Sample-size regime (heuristic)
+Works well as a default in small–mid samples when you keep XXX modest and want stable inference; large nnn is not required, but helps nuisance learning. (Heuristic tied to “linear final stage + cross-fitting”, not an EconML hard rule.)
+
+
+Links (docs/papers)
+Docs: https://www.pywhy.org/EconML/_autosummary/econml.dml.LinearDML.html
+DML paper (journal): https://doi.org/10.1111/ectj.12097
+NBER working paper: https://www.nber.org/papers/w23564

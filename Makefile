@@ -37,27 +37,22 @@ venv:
 install: venv
 	@$(PIP) install -r requirements.txt
 
-dev-tools: venv
-	@command -v $(PYBIN)/ruff >/dev/null 2>&1 || $(PIP) install -r dev-requirements.txt
-	@command -v $(PYBIN)/black >/dev/null 2>&1 || $(PIP) install -r dev-requirements.txt
-	@command -v $(PYBIN)/pytest >/dev/null 2>&1 || $(PIP) install -r dev-requirements.txt
-
-lint: dev-tools
+lint: install
 	@$(PYBIN)/ruff check .
 
-lint-fix: dev-tools
-	@$(PYBIN)/ruff check . --fix
+# lint-fix: install
+# 	@$(PYBIN)/ruff check . --fix
 
-format: dev-tools
-	@$(PYBIN)/black . --check
+# format: install
+# 	@$(PYBIN)/black . --check
 
-format-fix: dev-tools
-	@$(PYBIN)/black .
+# format-fix: install
+# 	@$(PYBIN)/black .
 
-test: dev-tools
-	@$(PYBIN)/pytest -c pytest.ini --cov=python --cov-report=term-missing --maxfail=1 -q
+# test: install
+# 	@$(PYBIN)/pytest -c pytest.ini --cov=python --cov-report=term-missing --maxfail=1 -q
 
-test-quick: dev-tools
+test: install
 	@$(PYBIN)/pytest -c pytest.ini -q
 
 run-cli: venv

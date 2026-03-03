@@ -1,0 +1,57 @@
+econml.dml.SparseLinearDML
+What it is: DML with a sparse linear final stage using debiased lasso machinery.
+CATE predictor:
+Sparse linear τ(x)=⟨θ,ϕ(x)⟩\tau(x)=\langle \theta,\phi(x)\rangleτ(x)=⟨θ,ϕ(x)⟩ with regularization + debiasing in the final stage.
+
+
+Identification assumptions: same unconfoundedness + overlap as DML.
+Compatibility scores
+Binary T: good — supports discrete_treatment.
+
+
+Categorical T: good — same DML discrete machinery (categories baseline).
+
+
+Continuous T: ok — supported; final stage is sparse linear in featurized treatment if you provide treatment_featurizer.
+
+
+Continuous Y: good — nuisance model_y is regressor/auto.
+
+
+Binary Y: ok — discrete_outcome=True supported.
+
+
+Count/other Y: ok (practical) — same caveat as above.
+
+
+Strong heterogeneity need: ok — only if true heterogeneity is well-approximated by a sparse linear surface in ϕ(X)\phi(X)ϕ(X).
+
+
+High-dimensional W: ok — W in nuisances; depends on nuisance learners.
+
+
+High-dimensional X: good — this is explicitly the intended use case (“high-dimensional features of heterogeneity” + sparse coefficients).
+
+
+Sparse linear signal expected: good — exactly the design target.
+
+
+Nonlinear signal expected: poor — not a nonlinear final model.
+
+
+Weak overlap robustness: ok — still needs overlap; DML doesn’t “fix” positivity.
+
+
+Interpretability: ok→good — interpretable if sparsity assumption is reasonable.
+
+
+Compute cost: ok — heavier than LinearDML due to regularization path / debiasing (see alpha, n_alphas, etc.).
+
+
+Sample-size regime (heuristic)
+Best when pXp_XpX​ is large and nnn is moderate-to-large, and you believe sparsity. Otherwise you’ll underfit heterogeneity.
+
+
+Links
+Docs: https://econml.azurewebsites.net/_autosummary/econml.dml.SparseLinearDML.html
+DML paper: https://doi.org/10.1111/ectj.12097

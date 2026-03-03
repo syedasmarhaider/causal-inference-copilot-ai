@@ -1,0 +1,53 @@
+econml.dr.SparseLinearDRLearner
+What it is: DRLearner with Debiased Lasso final model; designed for sparse high-dimensional linear CATE approximation; inference uses debiased lasso asymptotics.
+CATE predictor:
+Sparse linear approximation of CATE; EconML explicitly notes inference on the best sparse linear approximation when the true CATE might be nonlinear.
+
+
+Identification assumptions: unconfoundedness + overlap; propensity clipping min_propensity.
+Compatibility scores
+Binary T: good — discrete treatment.
+
+
+Categorical T: good — same baseline category semantics.
+
+
+Continuous T: poor — discrete-treatment DR learner.
+
+
+Continuous Y: good — regression nuisance.
+
+
+Binary Y: ok — discrete_outcome=True.
+
+
+Count/other Y: ok (practical) — same caveat.
+
+
+Strong heterogeneity need: ok — if heterogeneity is well captured by a sparse linear surface.
+
+
+High-dimensional W: ok — nuisance-driven.
+
+
+High-dimensional X: good — explicitly supported via debiased lasso final stage.
+
+
+Sparse linear signal expected: good — intended regime.
+
+
+Nonlinear signal expected: poor — it’s still sparse linear final stage.
+
+
+Weak overlap robustness: poor — same inverse-propensity sensitivity; clipping is only a guardrail.
+
+
+Interpretability: ok→good — sparse coefficients + asymptotic inference.
+
+
+Compute cost: ok — heavier than LinearDR due to lasso/debiasing knobs (alpha, n_alphas, etc.).
+
+
+Links
+Docs: https://econml.azurewebsites.net/_autosummary/econml.dr.SparseLinearDRLearner.html
+DR learner source: https://www.pywhy.org/EconML/_modules/econml/dr/_drlearner.html

@@ -1,0 +1,52 @@
+econml.dr.LinearDRLearner
+What it is: Doubly Robust learner: constructs DR potential outcome differences and regresses them on XXX with a linear final model. EconML spells out the exact OLS objective.
+CATE predictor:
+Linear θt(X)=⟨θt,ϕ(X)⟩+βt\theta_t(X)=\langle \theta_t,\phi(X)\rangle + \beta_tθt​(X)=⟨θt​,ϕ(X)⟩+βt​.
+
+
+Compatibility scores
+Binary T: good — DRLearner is built around discrete treatments; model_propensity is a classifier for P(T=t∣X,W)P(T=t\mid X,W)P(T=t∣X,W).
+
+
+Categorical T: good — one-hot encoding of treatments excludes the baseline; first category is control.
+
+
+Continuous T: poor — DRLearner here is explicitly a discrete-treatment learner in EconML’s DR module design.
+
+
+Continuous Y: good — model_regression estimates E[Y∣X,W,T]E[Y\mid X,W,T]E[Y∣X,W,T] with a regressor.
+
+
+Binary Y: ok — discrete_outcome=True supported; then model_regression should be a classifier.
+
+
+Count/other Y: ok (practical) — same caveat.
+
+
+Strong heterogeneity need: ok — only linear-in-ϕ(X)\phi(X)ϕ(X) heterogeneity.
+
+
+High-dimensional W: ok — W goes into propensity/regression nuisances.
+
+
+High-dimensional X: poor — LinearDRLearner is explicitly “low dimensional set of features” in final stage.
+
+
+Sparse linear signal expected: good (use SparseLinearDRLearner if high-dim).
+
+
+Nonlinear signal expected: poor — use ForestDRLearner for nonlinear final stage.
+
+
+Weak overlap robustness: poor — DR pseudo-outcomes contain inverse propensities; EconML only safeguards by clipping with min_propensity (not a cure).
+
+
+Interpretability: good — linear final model; inference via statsmodels asymptotic normality.
+
+
+Compute cost: ok — cross-fitting + nuisances; lighter than forest DR.
+
+
+Links
+Docs: https://econml.azurewebsites.net/_autosummary/econml.dr.LinearDRLearner.html
+DR learner source: https://www.pywhy.org/EconML/_modules/econml/dr/_drlearner.html
