@@ -13,6 +13,7 @@ from python.implementation.workflows.tools.causal.econml.dml.linear_dml import L
 from python.implementation.workflows.tools.causal.econml.dml.sparse_linear_dml import SparseLinearDMLCausalModel
 from python.implementation.workflows.tools.causal.econml.dr.dr_learner import ForestDRLearnerCausalModel, LinearDRLearnerCausalModel, SparseLinearDRLearnerCausalModel
 from python.implementation.workflows.tools.causal.econml.models_meta import SupportedModelsLiteralType
+from python.implementation.workflows.tools.causal.encoding_util import EncodingUtil
 
 
 
@@ -24,15 +25,16 @@ class CausalModelFactoryTool(Tool):
     
     @classmethod
     def create_default(cls, *, data_repo: DataRepo, models_repo: ModelsRepo) -> "CausalModelFactoryTool":
+        encoding_util = EncodingUtil()
         return cls(
             _by_fqcn={
-                "econml.dml.LinearDML": LinearDMLCausalModel(data_repo=data_repo, models_repo=models_repo),
-                "econml.dml.SparseLinearDML": SparseLinearDMLCausalModel(data_repo=data_repo, models_repo=models_repo),
-                "econml.dml.KernelDML": KernelDMLCausalModel(data_repo=data_repo, models_repo=models_repo),
-                "econml.dml.CausalForestDML": CausalForestDMLCausalModel(data_repo=data_repo, models_repo=models_repo),
-                "econml.dr.LinearDRLearner": LinearDRLearnerCausalModel(data_repo=data_repo, models_repo=models_repo),
-                "econml.dr.SparseLinearDRLearner": SparseLinearDRLearnerCausalModel(data_repo=data_repo, models_repo=models_repo),
-                "econml.dr.ForestDRLearner": ForestDRLearnerCausalModel(data_repo=data_repo, models_repo=models_repo),
+                "econml.dml.LinearDML": LinearDMLCausalModel(data_repo=data_repo, models_repo=models_repo, encoding_util=encoding_util),
+                "econml.dml.SparseLinearDML": SparseLinearDMLCausalModel(data_repo=data_repo, models_repo=models_repo, encoding_util=encoding_util),
+                "econml.dml.KernelDML": KernelDMLCausalModel(data_repo=data_repo, models_repo=models_repo, encoding_util=encoding_util),
+                "econml.dml.CausalForestDML": CausalForestDMLCausalModel(data_repo=data_repo, models_repo=models_repo, encoding_util=encoding_util),
+                "econml.dr.LinearDRLearner": LinearDRLearnerCausalModel(data_repo=data_repo, models_repo=models_repo, encoding_util=encoding_util),
+                "econml.dr.SparseLinearDRLearner": SparseLinearDRLearnerCausalModel(data_repo=data_repo, models_repo=models_repo, encoding_util=encoding_util),
+                "econml.dr.ForestDRLearner": ForestDRLearnerCausalModel(data_repo=data_repo, models_repo=models_repo, encoding_util=encoding_util),
             }
         )
      

@@ -15,7 +15,7 @@ CAUSAL_INFERENCE_ATE_SUMMARY_SYSTEM_PROMPT = """
 You are a Clinical Causal Copilot.
 
 Task:
-Summarize an ATE (average treatment effect) result from a causal model in clinician-friendly language. and return a string
+Summarize an ATE (average treatment effect) result from a causal model in clinician-friendly language and return a string
  
 Rules:
 - Use plain, clinical wording. Avoid ML jargon.

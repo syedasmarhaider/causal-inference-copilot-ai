@@ -6,11 +6,10 @@ from typing import Any, Dict, List, Literal,  Optional,  Union
 from uuid import UUID
 
 import pandas as pd
-from sklearn.compose import ColumnTransformer
 
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
-from python.implementation.workflows.tools.common.model.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 
 CommandType = Literal["FIT", "ATE", "CATE"]
 
@@ -40,10 +39,6 @@ class BaseCommand:
 @dataclass(frozen=True, slots=True)
 class FitInputs:
     model_spec: Optional[Dict[str, Any]] = None
-    pre_X:  Optional[ColumnTransformer] = None
-    pre_XW: Optional[ColumnTransformer] = None
-    
-
 
 @dataclass(frozen=True, slots=True)
 class FitCommand(BaseCommand):

@@ -8,7 +8,7 @@ import pandas as pd
 
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
-from python.implementation.workflows.tools.common.model.encoding_plan import CatOneHotParams, DateTimeEpochParams, DropParams, EncodingPresetSpec, MapBinaryParams, MapOrdinalParams, NumLog1pParams, NumMinMaxParams, NumStandardParams, PassthroughParams, TransformPlan
+from python.implementation.workflows.tools.causal.encoding_plan import CatOneHotParams, DateTimeEpochParams, DropParams, EncodingPresetSpec, MapBinaryParams, MapOrdinalParams, NumLog1pParams, NumMinMaxParams, NumStandardParams, PassthroughParams, TransformPlan
 
 
 class ModelSpecError(ValueError):

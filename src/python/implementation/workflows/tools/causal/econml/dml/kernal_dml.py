@@ -59,8 +59,9 @@ from python.implementation.workflows.tools.causal.econml.utils import (
     required_init_keys,
     serialize_inference_obj,
 )
+from python.implementation.workflows.tools.causal.encoding_util import EncodingUtil
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
-from python.implementation.workflows.tools.common.model.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 
 # =============================================================================
 # Helpers: same as your nuisance wrapper approach
@@ -288,6 +289,7 @@ def _raise_if_x_not_numeric(X: Any) -> None:
 class KernelDMLCausalModel(CausalModel):
     data_repo: DataRepo
     models_repo: ModelsRepo
+    encoding_util: EncodingUtil
 
     def get_info(self) -> str:
         return get_kernel_dml_causal_model_info()
@@ -361,12 +363,19 @@ class KernelDMLCausalModel(CausalModel):
     ) -> CausalResult:
         try:
             specs: CausalSpec = command.protocol_specs
-            pre_x: ColumnTransformer | None = command.inputs.pre_X
-            pre_xw: ColumnTransformer | None = command.inputs.pre_XW
             order_X: Optional[List[str]] = command.order_X
             order_W: Optional[List[str]] = command.order_W
             data_summary: DatasetSummaryModel = command.data_summary
             transformation_plan: Optional[TransformPlan] = command.transformation_plan
+            plan = self.encoding_util.compile(
+                plan=transformation_plan,
+                X_order=order_X or [],
+                W_order=order_W or [],
+                dense_output=True,
+            ) if transformation_plan is not None else None
+            
+            pre_x = plan.pre_X if plan is not None else None
+            pre_xw = plan.pre_XW if plan is not None else None
 
             # Same presence checks as before
             if pre_x is None and len(specs.X or []) > 0:

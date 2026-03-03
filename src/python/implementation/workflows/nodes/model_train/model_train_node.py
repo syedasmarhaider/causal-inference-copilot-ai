@@ -40,8 +40,7 @@ from python.implementation.workflows.tools.causal.causal_spec import (
 )
 
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
-from python.implementation.workflows.tools.common.model.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.encoding.encoding_tool import EncodingTool
+from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 
 
 # ---------------------------------------------------------------------
@@ -331,26 +330,13 @@ class ModelTrainNode(Node):
                     }
                 )
             )
-         
-        pre_X = None
-        pre_XW = None
+            
         order_X = None
         order_W = None 
         if not state.payload.col_tranformation_not_needed:
             assert state.payload.column_transformation_plan is not None, "Column transformation plan must be available if transformation is needed."
-            encoding_tool = cast(EncodingTool, tool_factory.get_tool(EncodingTool.NAME))
             order_X = [c.column for c in state.payload.column_transformation_plan.columns if c.role == "X"]
             order_W = [c.column for c in state.payload.column_transformation_plan.columns if c.role == "W"]
-            transformers = encoding_tool.compile(
-            plan=state.payload.column_transformation_plan,
-            X_order=order_X,
-            W_order=order_W,
-            dense_output=True,
-           )
-            pre_X = transformers.pre_X
-            pre_XW = transformers.pre_XW
-           
-        # Build command + execute
         run_id = uuid4()
         causal_spec = _protocol_to_causal_spec(protocol)        
         
@@ -363,7 +349,7 @@ class ModelTrainNode(Node):
             order_X=order_X,
             order_W=order_W,
             transformation_plan=state.payload.column_transformation_plan if not state.payload.col_tranformation_not_needed else None,
-            inputs=FitInputs(pre_X=pre_X, pre_XW=pre_XW),
+            inputs=FitInputs(),
         )
 
         res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)

@@ -11,17 +11,12 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from python.implementation.workflows.tools.common.model.encoding_plan import EncodingPresetSpec, TransformPlan
-from python.domain.workflows.tool import Tool
+from python.implementation.workflows.tools.causal.encoding_plan import EncodingPresetSpec, TransformPlan
 
 
 
-class EncodingTool(Tool):
+class EncodingUtil:
     NAME: ClassVar[str] = "ENCODING"
-    def get_tool_name(self) -> str:
-        return self.NAME
-    def get_tool_info(self) -> str:
-        return "Tool for compiling encoding plans into sklearn ColumnTransformers for preprocessing features before causal inference modeling."
     def compile(self,plan: TransformPlan, *, X_order: Sequence[str], W_order: Sequence[str], dense_output: bool = True) -> CompiledTransformers:
         return compile_plan_to_transformers(
             plan=plan,

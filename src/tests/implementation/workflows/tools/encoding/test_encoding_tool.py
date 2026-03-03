@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 # ✅ ADJUST THIS IMPORT PATH IF YOUR FILE NAME DIFFERS
-from python.implementation.workflows.tools.encoding.encoding_tool import (  # noqa: E501
+from python.implementation.workflows.tools.causal.encoding_util import (  # noqa: E501
     BinaryMapTransformer,
     DateTimeToEpochSecondsTransformer,
     EncodingTool,
@@ -18,8 +18,8 @@ from python.implementation.workflows.tools.encoding.encoding_tool import (  # no
     compile_plan_to_transformers,
 )
 
-from python.implementation.workflows.tools.common.model.encoding_plan import TransformPlan
-import python.implementation.workflows.tools.encoding.encoding_tool as m
+from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
+import python.implementation.workflows.tools.causal.encoding_util as m
 
 
 def _mk_plan(*cols: dict) -> TransformPlan:

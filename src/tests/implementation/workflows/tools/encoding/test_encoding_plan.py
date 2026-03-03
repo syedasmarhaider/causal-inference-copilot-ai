@@ -1,7 +1,7 @@
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from python.implementation.workflows.tools.common.model.encoding_plan import (
+from python.implementation.workflows.tools.causal.encoding_plan import (
     EncodingPresetSpec,
     TransformPlan,
 )

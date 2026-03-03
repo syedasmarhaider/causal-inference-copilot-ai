@@ -9,7 +9,7 @@ from python.implementation.workflows.tools.causal.causal_model_factory_tool impo
 from python.implementation.workflows.tools.data_processing.data_processing_tool import DataProcessingTool
 from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import CausalDataProfilingTool
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool
-from python.implementation.workflows.tools.encoding.encoding_tool import EncodingTool
+from python.implementation.workflows.tools.causal.encoding_util import EncodingTool
 
 
 class DefaultToolFactory(ToolFactory):
