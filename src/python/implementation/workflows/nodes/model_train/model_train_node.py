@@ -6,7 +6,7 @@ import logging
 from typing import Any, Optional, Sequence, cast
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
@@ -22,7 +22,8 @@ from python.implementation.workflows.nodes.compile_protocol.protocol_specs impor
 )
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.nodes.model_train.model_train_prompts import (
-    ENCODING_PLAN_USER_PROMPT_TEMPLATE,
+    ENCODING_PLAN_PLAN_USER_PROMPT_TEMPLATE,
+    ENCODING_PLAN_TRIAGE_USER_PROMPT_TEMPLATE,
     FIT_SUCCESS_FAILURE_SYSTEM_PROMPT,
     get_model_train_node_info,
 )
@@ -45,22 +46,10 @@ from python.implementation.workflows.tools.causal.encoding_plan import Transform
 # ---------------------------------------------------------------------
 # LLM output schema
 # ---------------------------------------------------------------------
-class EncodingPlanLLMOutput(BaseModel):
+class UserPlanInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    plan: Optional[TransformPlan] = None
     message: str = Field(..., min_length=1)
-    needs_user_input: bool = False
-
-    @model_validator(mode="after")
-    def _coherence(self) -> "EncodingPlanLLMOutput":
-        if self.needs_user_input:
-            if self.plan is not None:
-                raise ValueError("needs_user_input=True requires plan=null.")
-        else:
-            if self.plan is None:
-                raise ValueError("needs_user_input=False requires a non-null plan.")
-        return self
+    needs_user_input: bool
 
 
 def _dumps(obj: Any) -> str:
@@ -167,7 +156,7 @@ def _generate_encoding_plan(
     prev_training_error: Optional[str] = None,
     documentation: Optional[str] = None,
     history: Optional[Sequence[ChatMessage]],
-) -> EncodingPlanLLMOutput:    
+) -> tuple[UserPlanInput, Optional[TransformPlan]]:    
     # Eligible columns = X+W minus treatment/outcome
     X_cols = list(protocol.covariates or [])
     W_cols = list(protocol.effect_modifiers or [])
@@ -182,7 +171,7 @@ def _generate_encoding_plan(
     
   
 
-    user_prompt = ENCODING_PLAN_USER_PROMPT_TEMPLATE.format(
+    user_prompt_discussion = ENCODING_PLAN_TRIAGE_USER_PROMPT_TEMPLATE.format(
         selected_model_json=_dumps(_safe_model_dump(selected_model)),
         protocol_json=_dumps(_safe_model_dump(protocol)),
         dataset_summary_json=_dumps(_safe_model_dump(dataset_summary)),
@@ -191,28 +180,47 @@ def _generate_encoding_plan(
 
     )
     
-    last_3_messages = list(history[-3:]) if history else None
+    last_8_messages = list(history[-8:]) if history else None
 
     out = llm.generate_json(
-        schema=EncodingPlanLLMOutput,
+        schema=UserPlanInput,
         system_prompt=None,
-        user_prompt=user_prompt,
+        user_prompt=user_prompt_discussion,
         config=llm_config,
-        history=last_3_messages,
-        max_attempts=3,
+        history=last_8_messages,
+        max_attempts=2,
     )
 
     if out.needs_user_input:
-        return out
+        return out, None
+    
+    user_prompt_plan = ENCODING_PLAN_PLAN_USER_PROMPT_TEMPLATE.format(
+        selected_model_json=_dumps(_safe_model_dump(selected_model)),
+        protocol_json=_dumps(_safe_model_dump(protocol)),
+        dataset_summary_json=_dumps(_safe_model_dump(dataset_summary)),
+        prev_training_errors_string=prev_training_error,
+        documentation_string=documentation,
 
-    assert out.plan is not None
+    )
+    
+    plan = llm.generate_json(
+        schema=TransformPlan,
+        system_prompt=None,
+        user_prompt=user_prompt_plan,
+        config=llm_config,
+        history=last_8_messages,
+        max_attempts=3,
+    )
+ 
+    
     _validate_plan_against_constraints(
-        plan=out.plan,
+        plan=plan,
         eligible_cols=eligible,
         treatment_col=treatment_col,
         outcome_col=outcome_col,
     )
-    return out
+    
+    return out, plan
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,7 +299,7 @@ class ModelTrainNode(Node):
                     )
                 )
             
-            plan = _generate_encoding_plan(
+            user_discssion ,plan = _generate_encoding_plan(
                 llm=self.llm,
                 llm_config=LLMConfig(temperature=0.2, model=self.model_name),
                 protocol=protocol,
@@ -302,30 +310,30 @@ class ModelTrainNode(Node):
                 documentation=model.get_command_info("FIT"),
             )
             
-            if plan.needs_user_input:
+            if user_discssion.needs_user_input:
                 logging.warning("ModelTrainNode: LLM indicated user input needed for encoding plan clarification.")
                 payload = state.payload.model_copy(
                     update={
                         "needs_user_input": True,
                         "error": None,
-                        "user_message": plan.message,
+                        "user_message": user_discssion.message,
                         "column_transformation_plan": None,
                         "col_tranformation_not_needed": None,
                     }
                 )
                 return ModelTrainState(payload=payload)   
             
-            if plan.plan is None:
+            if plan is None:
                 raise ValueError("LLM indicated no user input needed but did not return a plan.")
             
             return ModelTrainState(
                 payload=state.payload.model_copy(
                     update={
-                        "column_transformation_plan": plan.plan,
+                        "column_transformation_plan": plan,
                         "col_tranformation_not_needed": False,
                         "needs_user_input": False,
                         "error": None,
-                        "user_message": plan.message + "\n\nProceeding to the training.",
+                        "user_message": user_discssion.message + "\n\nProceeding to the training.",
                     }
                 )
             )

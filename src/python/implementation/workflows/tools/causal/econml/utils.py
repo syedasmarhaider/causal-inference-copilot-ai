@@ -6,8 +6,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Typ
 import numpy as np
 import pandas as pd
 
-from python.implementation.workflows.nodes.compile_protocol.protocol_specs import BinaryOutcomeSpecModel
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.causal_spec import BinaryOutcomeSpecModel, CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.tools.causal.encoding_plan import CatOneHotParams, DateTimeEpochParams, DropParams, EncodingPresetSpec, MapBinaryParams, MapOrdinalParams, NumLog1pParams, NumMinMaxParams, NumStandardParams, PassthroughParams, TransformPlan
 
@@ -163,85 +162,97 @@ def has_missing(arr: Any) -> bool:
 
 def get_input_params_from_spec(
     df: pd.DataFrame,
-    specs: CausalSpec, 
+    specs: CausalSpec,
     order_X: Optional[List[str]] = None,
     order_W: Optional[List[str]] = None,
     *,
     strict_order: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, Any]]:
-    """
-    Returns (y, t, x, w, meta) where x/w are ordered to match the transformer expectations.
 
-    Ordering rules:
-      - If oder_X/order_W are provided, they MUST match exactly the X/W columns from specs (strict_order=True).
-      - Otherwise we use the specs-defined order.
-    """
     y_col = str(specs.Y.column)
     t_col = str(specs.T.column)
 
-    x_cols = specs.X or []
-    w_cols = specs.W or []
+    x_cols = [str(c) for c in (specs.X or [])]
+    w_cols = [str(c) for c in (specs.W or [])]
 
+    X_order = [str(c) for c in (order_X if order_X is not None else x_cols)]
+    W_order = [str(c) for c in (order_W if order_W is not None else w_cols)]
 
-    # Validate all required columns exist
-    validate_columns_exist(df, [y_col, t_col] + (order_X or []) + (order_W or []))
+    if strict_order:
+        if order_X is not None and X_order != x_cols:
+            raise ValueError(f"order_X must match specs.X exactly. specs.X={x_cols}, order_X={X_order}")
+        if order_W is not None and W_order != w_cols:
+            raise ValueError(f"order_W must match specs.W exactly. specs.W={w_cols}, order_W={W_order}")
 
-    # Build arrays in the exact order that downstream transformer/model expects
-    y: np.ndarray = df[[y_col]].to_numpy()
-    t: np.ndarray = df[[t_col]].to_numpy()
-    x: Optional[np.ndarray] = df[order_X].to_numpy() if order_X else None
-    w: Optional[np.ndarray] = df[order_W].to_numpy() if order_W else None
-    
+    validate_columns_exist(df, [y_col, t_col] + X_order + W_order)
+
+    # ---- ALWAYS start from Series (1D) ----
+    y_ser = df[y_col]
+    t_ser = df[t_col]
+
+    # ---- Outcome Y ----
     if isinstance(specs.Y, BinaryOutcomeSpecModel):
-        y_ser = df[y_col]
         if y_ser.isna().any():
             raise ValueError(f"Binary outcome {y_col!r} contains missing values.")
 
-        if str(y_ser.dtype) in ("bool", "boolean"):
-            y = y_ser.astype(bool).to_numpy()
-
-        elif np.issubdtype(y_ser.dtype, np.number):
+        if pd.api.types.is_bool_dtype(y_ser.dtype):
+            Y = y_ser.astype(int).to_numpy(dtype=float)  # 0.0/1.0
+        elif pd.api.types.is_numeric_dtype(y_ser.dtype):
             uniq = set(pd.unique(y_ser))
-            if not uniq.issubset({0, 1, 0.0, 1.0}):
+            if not uniq.issubset({0, 1, 0.0, 1.0, True, False}):
                 raise ValueError(f"Binary numeric outcome {y_col!r} must be 0/1; got {list(uniq)[:10]!r}")
-            y = (y_ser.astype(float) == 1.0).to_numpy(dtype=bool)
-
+            Y = (y_ser.astype(float) == 1.0).to_numpy(dtype=float)
         else:
-            if not hasattr(specs.Y, "event_values") or not hasattr(specs.Y, "non_event_values"):
-                raise ValueError(f"Binary outcome {y_col!r} requires event_values and non_event_values.")
-            
-            event_vals = getattr(specs.Y, "event_values", [])
-            non_event_vals = getattr(specs.Y, "non_event_values", [])
-            pos = set(event_vals) if event_vals else set()
-            neg = set(non_event_vals) if non_event_vals else set()
+            # map strings via event_values/non_event_values
+            pos = set(getattr(specs.Y, "event_values", []) or [])
+            neg = set(getattr(specs.Y, "non_event_values", []) or [])
+            if not pos or not neg:
+                raise ValueError(
+                    f"Binary outcome {y_col!r} is non-numeric but event_values/non_event_values are missing."
+                )
             vals = y_ser.to_numpy()
-            out = np.empty(len(vals), dtype=bool)
+            out = np.empty(len(vals), dtype=float)
             for i, v in enumerate(vals):
                 if v in pos:
-                    out[i] = True
+                    out[i] = 1.0
                 elif v in neg:
-                    out[i] = False
+                    out[i] = 0.0
                 else:
                     raise ValueError(f"Unmapped binary outcome value {v!r} for column {y_col!r}.")
-            y = out
+            Y = out
+    else:
+        # continuous/other: must be numeric for EconML
+        if y_ser.isna().any():
+            raise ValueError(f"Outcome {y_col!r} contains missing values.")
+        Y = pd.to_numeric(y_ser, errors="raise").to_numpy(dtype=float)
 
-    if y.ndim == 2 and y.shape[1] == 1:
-        y = y[:, 0]
-    if t.ndim == 2 and t.shape[1] == 1:
-        t = t[:, 0]
+    # ---- Treatment T (at minimum: make it 1D numeric) ----
+    if t_ser.isna().any():
+        raise ValueError(f"Treatment {t_col!r} contains missing values.")
+    T = pd.to_numeric(t_ser, errors="raise").to_numpy(dtype=float)
 
-    overlap_XW = sorted(set(order_X or []).intersection(order_W or []))
+    # ---- X/W ----
+    X = df[X_order].to_numpy() if X_order else None
+    W = df[W_order].to_numpy() if W_order else None
+
+    # Hard guard: never let object arrays reach EconML
+    if np.asarray(Y).dtype == object:
+        raise ValueError(f"Outcome {y_col!r} resolved to dtype=object. Example={Y[:5]!r}")
+    if np.asarray(T).dtype == object:
+        raise ValueError(f"Treatment {t_col!r} resolved to dtype=object. Example={T[:5]!r}")
+
+    overlap_XW = sorted(set(X_order).intersection(W_order))
 
     meta: Dict[str, Any] = {
         "y": y_col,
         "t": t_col,
         "x_cols": x_cols,
         "w_cols": w_cols,
-        "X_order": order_X,  # <- this is what your ColumnTransformer should use
-        "W_order": order_W,  # <- this is what your ColumnTransformer should use
-        "overlap_XW": overlap_XW,  # useful for diagnostics if user put same col in both
+        "X_order": X_order,
+        "W_order": W_order,
+        "overlap_XW": overlap_XW,
     }
-    return y, t, x, w, meta
+    return Y, T, X, W, meta
 
 
 

@@ -228,7 +228,6 @@ class ModelSelectionNode(Node):
 
         final_msg = (
             f"Confirmed model selection: {selected}\n"
-            f"Rationale: {decision.reasoning or ''}\n\n"
             "Next, I will fit this model and estimate the treatment effect."
         ).strip()
 
