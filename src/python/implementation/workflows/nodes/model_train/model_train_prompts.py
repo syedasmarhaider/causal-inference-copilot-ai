@@ -32,15 +32,17 @@ Your job:
 - Build a TransformPlan for ONLY the eligible columns:
   Eligible columns = (covariates + effect_modifiers) MINUS (treatment column, outcome column).
 - Use best practices for the selected estimator:
-  - If the estimator is linear-ish: prioritize stable scaling for numeric and one-hot for categorical.
+- If X has missing values consider encoding and mutation strageties that are robust to missingness such as missing indicators, and consider avoiding encodings that would drop rows with missing values. If there are critical errors about missing values please consider strategies to handle them such as imputation or dropping with caution and explain in the message. 
   - Consider Model name and characteristics when making encoding choices. For example like intercepts are always true so encoding needs to be adjusted such as baseline.
   
-- Output would be encoding plan:
-- Or encoding clarification in of clarification such as dropping etc but in a simple clinician-friendly language without jargon.
-- 'message' filled with clarification if clarification is needed otherwise plan summary in a nice clinical way without jargon
-- user message to clinician if needed to clarify tradeoffs or ask for missing info
-- needs_user_input if you are doing something critical such as dropping etc and and making sure to onbaord. Please if message says something to user please mark it true
-- 
+- Output (JSON):
+   needs_user_input: bool true when you have to involve user in making decision
+   user_message: str clinician-friendly explanation of the encoding plan and any issues/warnings that require user attention. Be specific about what the issue is, which columns it affects, and what the potential implications are for modeling and results interpretation. Ask user action whenever needs_user_input is true otherwise just tell.
+   plan: dict the actual encoding plan for the eligible columns it can be null when you need clarification and needs_user_input is true.
+    
+  
+  
+ 
 Supported presets (JSON):
 
 

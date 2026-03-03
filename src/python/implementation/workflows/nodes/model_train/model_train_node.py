@@ -305,6 +305,7 @@ class ModelTrainNode(Node):
             )
             
             if plan.needs_user_input:
+                logging.warning("ModelTrainNode: LLM indicated user input needed for encoding plan clarification.")
                 payload = state.payload.model_copy(
                     update={
                         "needs_user_input": True,

@@ -51,7 +51,7 @@ class ModelTrainState(State):
     def status(self) -> Status:
         if self.error is not None:
             return "ABORTED"
-        if self.payload.trained_model_id is not None and (self.payload.column_transformation_plan is not None or self.payload.col_tranformation_not_needed):
+        if self.payload.trained_model_id is not None and (self.payload.column_transformation_plan is not None or self.payload.col_tranformation_not_needed is not None and self.payload.col_tranformation_not_needed is True):
             return "DONE"
         return "PENDING"
 
@@ -66,7 +66,7 @@ class ModelTrainState(State):
 
     @property
     def needs_action(self) -> ACTION:
-        if self.payload.needs_user_input:
+        if self.payload.needs_user_input is not None and self.payload.needs_user_input:
             return "NEEDS_INPUT"
         return "NONE"
 
