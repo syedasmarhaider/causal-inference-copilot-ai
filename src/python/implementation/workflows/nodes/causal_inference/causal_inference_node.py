@@ -198,6 +198,7 @@ class CausalInferenceNode(Node):
                     options={},
                 )
 
+                logging.warning(f"Executing ATECommand with model {selected_model_fqcn}, dataset_id {clean_dataset_id}, fitted_model_id {trained_model_id}, command: {cmd}")
                 res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)
                 logging.warning(f"ATECommand executed with result: {res}")
                 

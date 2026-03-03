@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID
 import warnings
@@ -586,7 +587,9 @@ class CausalForestDMLCausalModel(CausalModel):
 
                 item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1_val}}
                 item["ate"] = est.ate(X=X, T0=t0, T1=t1_val)
-
+                logging_info = f"Computed ATE for contrast t0={t0} vs t1={t1_val}: {item['ate']}"
+                logging.info(logging_info)
+                
                 try:
                     lo, hi = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
                     if lo is not None and hi is not None:
