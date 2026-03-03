@@ -186,6 +186,7 @@ Hard Rules
 2) The selected state_name MUST be a key in node_name_to_description_map.
 3) Prefer the closest previous state that can fix the error with minimal rollback and those states which requires user input.
 4) Focus on last messages in error so that you can understand which state to return to best fix the error.
+5) Always try to solve error with directing to some node without distrubing user about techincal messages.
 
 Output (STRICT JSON ONLY; no extra text)
 {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 from typing import Any, Optional, Sequence, cast
 from uuid import UUID, uuid4
 
@@ -198,65 +199,69 @@ class CausalInferenceNode(Node):
                 )
 
                 res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)
+                logging.warning(f"ATECommand executed with result: {res}")
                 
                 if not isinstance(res, ATEResult):
                     raise TypeError(f"Expected ATEResult from model.execute, got {type(res).__name__}")
                 
+                match res:
+                    case ATESuccess():
+                            result = _serialize_result_to_json_str(res.ate)
+                            warnings = res.warnings if hasattr(res, "warnings") else []
+                            summary_out = self.llm.generate(
+                                system_prompt=CAUSAL_INFERENCE_ATE_SUMMARY_SYSTEM_PROMPT,
+                                user_prompt=CAUSAL_INFERENCE_ATE_SUMMARY_USER_PROMPT_TEMPLATE.format(
+                                    context_json=_dumps(context),
+                                    ate_result_json=result,
+                                    warnings_json=_dumps(warnings),
+                                ),
+                                config=LLMConfig(temperature=0.2, model=self.model_name),
+                                history=messages_history[-8:] if messages_history else None,
+                            ).content.strip()
+                            
+                            return CausalInferenceState(
+                                payload=state.payload.model_copy(
+                                    update={
+                                        "ate_result_raw_json_str": result,
+                                        "ate_result_summary": summary_out,
+                                        "ate_inference_error": None,
+                                        "should_abort": False,
+                                        "abort_error_message": None,
+                                        "user_message": summary_out.strip(),
+                                    }
+                                )
+                            )
+                        
+                        
+                    case CommandFailure():
+                            error_message = f"ATE computation failed: {res.error.message}"
+                            return CausalInferenceState(
+                                payload=state.payload.model_copy(
+                                    update={
+                                        "ate_result_raw_json_str": None,
+                                        "ate_result_summary": None,
+                                        "user_message": error_message,
+                                    }
+                                )
+                            ) 
+                    case _:
+                        raise TypeError(f"Unhandled ATEResult type: {type(res).__name__}") 
+        
+        return state             
+              
+    
+                        
                 
-                if isinstance(res, ATESuccess):
-                    result = _serialize_result_to_json_str(res.ate)
-                    warnings = res.warnings if hasattr(res, "warnings") else []
-                    summary_out = self.llm.generate(
-                        system_prompt=CAUSAL_INFERENCE_ATE_SUMMARY_SYSTEM_PROMPT,
-                        user_prompt=CAUSAL_INFERENCE_ATE_SUMMARY_USER_PROMPT_TEMPLATE.format(
-                            context_json=_dumps(context),
-                            ate_result_json=result,
-                            warnings_json=_dumps(warnings),
-                        ),
-                        config=LLMConfig(temperature=0.2, model=self.model_name),
-                        history=messages_history[-8:] if messages_history else None,
-                    ).content.strip()
-                    
-                    return CausalInferenceState(
-                        payload=state.payload.model_copy(
-                            update={
-                                "ate_result_raw_json_str": result,
-                                "ate_result_summary": summary_out,
-                                "ate_inference_error": None,
-                                "should_abort": False,
-                                "abort_error_message": None,
-                                "user_message": summary_out.strip(),
-                            }
-                        )
-                    )
+                
+                
+                
+     
+
                                         
 
-                if isinstance(res, CommandFailure): # pyright: ignore[reportUnnecessaryIsInstance]
-                    error_message = f"ATE computation failed: {res.error.message}"
-                    return CausalInferenceState(
-                        payload=state.payload.model_copy(
-                            update={
-                                "ate_result_raw_json_str": None,
-                                "ate_result_summary": None,
-                                "user_message": error_message,
-                            }
-                        )
-                    ) 
+
+                  
                 
-                raise TypeError(f"Unhandled ATEResult type: {type(res).__name__}")    
+ 
             
-        message = self.llm.generate(
-            system_prompt= "Talk to user",
-            user_prompt= state.payload.ate_result_summary if state.payload.ate_result_summary else "The ATE result is available. How can I assist you with it?",
-            config=LLMConfig(temperature=0.2, model=self.model_name),
-            history=messages_history[-8:] if messages_history else None,
-        ).content.strip()
-        
-        return CausalInferenceState(
-            payload=state.payload.model_copy(
-                update={
-                    "user_message": message,
-                    "needs_user_input": True,
-                }
-            )
-        )
+      

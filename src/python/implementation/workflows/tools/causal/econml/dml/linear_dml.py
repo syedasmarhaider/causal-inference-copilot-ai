@@ -292,6 +292,8 @@ class LinearDMLCausalModel(CausalModel):
             warnings: List[str] = []
             # 1) load fitted model + metadata
             spec: CausalSpec = command.protocol_specs
+            order_X: Optional[List[str]] = command.order_X
+            order_W: Optional[List[str]] = command.order_W
             model_record: ModelRecord | None = self.models_repo.load_model(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -311,17 +313,15 @@ class LinearDMLCausalModel(CausalModel):
             else:
                 raise ModelSpecError(f"Unsupported treatment kind {spec.T.kind!r} for ATE.")
             effects: List[Dict[ATEModelResult, Any]] = []
-            X_for_ate = None
-            if spec.X:
-                X_for_ate = df[spec.X]
+            _, _, X, _, _ = get_input_params_from_spec(df, spec, order_X=order_X, order_W=order_W)
             for t1_val in t1s:
                 if t1_val == t0:
                     raise ModelSpecError(f"Invalid contrast: t1 value {t1_val} is the same as t0 baseline {t0}.")
                 item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1_val}}
                 # point estimate
-                item["ate"] = est.ate(X=X_for_ate, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownMemberType]
+                item["ate"] = est.ate(X=X, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownMemberType]
                 try:
-                    lo, hi = est.ate_interval(X=X_for_ate, T0=t0, T1=t1_val, alpha=command.inputs.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+                    lo, hi = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
                     if lo is not None and hi is not None:
                         item["ate_interval"] = (list(lo), list(hi)) # pyright: ignore[reportUnknownArgumentType]
                     else:
@@ -332,7 +332,7 @@ class LinearDMLCausalModel(CausalModel):
                     item["ate_interval"] = None
 
                 try:
-                    inference = est.ate_inference(X=X_for_ate, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+                    inference = est.ate_inference(X=X, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
                     if inference is not None:
                         item["ate_inference"] = serialize_inference_obj(inference)
                     else:

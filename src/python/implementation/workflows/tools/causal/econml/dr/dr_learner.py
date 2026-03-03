@@ -621,6 +621,8 @@ class _BaseDRLearnerAdapter(CausalModel):
         try:
             warnings_list: List[str] = []
             spec: CausalSpec = command.protocol_specs
+            order_X: Optional[List[str]] = command.order_X
+            order_W: Optional[List[str]] = command.order_W
 
             model_record: ModelRecord | None = self.models_repo.load_model(
                 user_id=user_id,
@@ -643,17 +645,17 @@ class _BaseDRLearnerAdapter(CausalModel):
                 raise ModelSpecError(f"Unsupported treatment kind {spec.T.kind!r} for ATE.")
 
             effects: List[Dict[ATEModelResult, Any]] = []
-            X_for_ate = df[spec.X] if spec.X else None
+            _, _, X, _, _ = get_input_params_from_spec(df, spec, order_X=order_X, order_W=order_W)
 
             for t1_val in t1s:
                 if t1_val == t0:
                     raise ModelSpecError(f"Invalid contrast: t1 value {t1_val} is the same as t0 baseline {t0}.")
 
                 item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1_val}}
-                item["ate"] = est.ate(X=X_for_ate, T0=t0, T1=t1_val)
+                item["ate"] = est.ate(X=X, T0=t0, T1=t1_val)
 
                 try:
-                    lo, hi = est.ate_interval(X=X_for_ate, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
+                    lo, hi = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
                     item["ate_interval"] = (list(lo), list(hi)) if lo is not None and hi is not None else None  # pyright: ignore
                     if item["ate_interval"] is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")
@@ -662,7 +664,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                     item["ate_interval"] = None
 
                 try:
-                    inf = est.ate_inference(X=X_for_ate, T0=t0, T1=t1_val)  # pyright: ignore
+                    inf = est.ate_inference(X=X, T0=t0, T1=t1_val)  # pyright: ignore
                     item["ate_inference"] = serialize_inference_obj(inf) if inf is not None else None
                     if inf is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
