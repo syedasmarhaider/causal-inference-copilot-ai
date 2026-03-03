@@ -544,7 +544,7 @@ class _BaseDRLearnerAdapter(CausalModel):
             fit_warnings: list[str] = []
             with warnings.catch_warnings(record=True) as ws:
                 warnings.simplefilter("always")
-                est.fit(Y, T, X=X, W=W)  # pyright: ignore[reportUnknownMemberType]
+                est.fit(Y=Y, T=T, X=X, W=W)  # pyright: ignore[reportUnknownMemberType]
             fit_warnings = [f"{w.category.__name__}: {str(w.message)}" for w in ws]
 
             n = int(df.shape[0])
@@ -597,6 +597,7 @@ class _BaseDRLearnerAdapter(CausalModel):
             )
 
         except ModelSpecError as e:
+            logging.exception(e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
@@ -606,6 +607,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 meta={},
             )
         except Exception as e:
+            logging.exception(e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
