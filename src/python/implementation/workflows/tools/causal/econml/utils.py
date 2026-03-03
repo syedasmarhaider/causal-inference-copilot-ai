@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Typ
 import numpy as np
 import pandas as pd
 
+from python.implementation.workflows.nodes.compile_protocol.protocol_specs import BinaryOutcomeSpecModel
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.tools.causal.encoding_plan import CatOneHotParams, DateTimeEpochParams, DropParams, EncodingPresetSpec, MapBinaryParams, MapOrdinalParams, NumLog1pParams, NumMinMaxParams, NumStandardParams, PassthroughParams, TransformPlan
@@ -190,8 +191,40 @@ def get_input_params_from_spec(
     t: np.ndarray = df[[t_col]].to_numpy()
     x: Optional[np.ndarray] = df[order_X].to_numpy() if order_X else None
     w: Optional[np.ndarray] = df[order_W].to_numpy() if order_W else None
+    
+    if isinstance(specs.Y, BinaryOutcomeSpecModel):
+        y_ser = df[y_col]
+        if y_ser.isna().any():
+            raise ValueError(f"Binary outcome {y_col!r} contains missing values.")
 
-    # squeeze singleton dims
+        if str(y_ser.dtype) in ("bool", "boolean"):
+            y = y_ser.astype(bool).to_numpy()
+
+        elif np.issubdtype(y_ser.dtype, np.number):
+            uniq = set(pd.unique(y_ser))
+            if not uniq.issubset({0, 1, 0.0, 1.0}):
+                raise ValueError(f"Binary numeric outcome {y_col!r} must be 0/1; got {list(uniq)[:10]!r}")
+            y = (y_ser.astype(float) == 1.0).to_numpy(dtype=bool)
+
+        else:
+            if not hasattr(specs.Y, "event_values") or not hasattr(specs.Y, "non_event_values"):
+                raise ValueError(f"Binary outcome {y_col!r} requires event_values and non_event_values.")
+            
+            event_vals = getattr(specs.Y, "event_values", [])
+            non_event_vals = getattr(specs.Y, "non_event_values", [])
+            pos = set(event_vals) if event_vals else set()
+            neg = set(non_event_vals) if non_event_vals else set()
+            vals = y_ser.to_numpy()
+            out = np.empty(len(vals), dtype=bool)
+            for i, v in enumerate(vals):
+                if v in pos:
+                    out[i] = True
+                elif v in neg:
+                    out[i] = False
+                else:
+                    raise ValueError(f"Unmapped binary outcome value {v!r} for column {y_col!r}.")
+            y = out
+
     if y.ndim == 2 and y.shape[1] == 1:
         y = y[:, 0]
     if t.ndim == 2 and t.shape[1] == 1:
