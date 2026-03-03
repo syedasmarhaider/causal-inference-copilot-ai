@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import inspect
+import logging
 from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID
 import warnings
@@ -508,6 +509,7 @@ class KernelDMLCausalModel(CausalModel):
                 meta={},
             )
         except Exception as e:
+            logging.exception(e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
@@ -617,6 +619,7 @@ class KernelDMLCausalModel(CausalModel):
             )
 
         except Exception as e:
+            logging.exception(e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,

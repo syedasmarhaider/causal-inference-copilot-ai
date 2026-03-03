@@ -325,6 +325,7 @@ class CausalForestDMLCausalModel(CausalModel):
                 limit=None,
             )
         except Exception as e:
+            logging.exception(e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started,
@@ -536,6 +537,7 @@ class CausalForestDMLCausalModel(CausalModel):
                 meta={},
             )
         except Exception as e:
+            logging.exception(e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
@@ -648,6 +650,7 @@ class CausalForestDMLCausalModel(CausalModel):
             )
 
         except Exception as e:
+            logging.exception(e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,

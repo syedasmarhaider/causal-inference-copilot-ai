@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import inspect
+import logging
 from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID
 import warnings
@@ -274,10 +275,7 @@ class LinearDMLCausalModel(CausalModel):
                 meta={},
             )
         except Exception as e:
-            # If persist fails, it's also an exception; we return ARTIFACT_PERSIST_FAILED only if
-            # we *know* fit succeeded and save failed. Everything else is ESTIMATOR_ERROR.
-            #
-            # If you want exact split, we can wrap save_model() in its own try/except block.
+            logging.exception(e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
@@ -381,6 +379,7 @@ class LinearDMLCausalModel(CausalModel):
                 ate=effects,
             )
         except Exception as e:
+            logging.exception(e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
