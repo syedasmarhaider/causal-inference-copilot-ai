@@ -500,7 +500,10 @@ class _BaseDRLearnerAdapter(CausalModel):
 
             defaults: Dict[str, Any] = {}
 
+            disc_t = specs.T.kind in ("binary", "categorical")
             disc_y = specs.Y.kind == "binary"
+            if disc_t:
+                defaults["discrete_treatment"] = True
             if disc_y:
                 defaults["discrete_outcome"] = True
 

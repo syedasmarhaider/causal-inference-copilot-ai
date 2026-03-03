@@ -210,7 +210,7 @@ class ModelSelectionNode(Node):
                 update={
                     "confirmed_model_selection": None,
                     "error": None,
-                    "user_message": decision.reasoning 
+                    "message": decision.reasoning 
                 }
             )
             return ModelSelectionState(payload=payload)
@@ -221,7 +221,7 @@ class ModelSelectionNode(Node):
             payload = state.payload.model_copy(
                 update={
                     "confirmed_model_selection": None,
-                    "user_message": "Sorry but the selected model is not recognized. Please choose one of the recommended options.",
+                    "message": "Sorry but the selected model is not recognized. Please choose one of the recommended options.",
                 }
             )
             return ModelSelectionState(payload=payload)
@@ -235,7 +235,7 @@ class ModelSelectionNode(Node):
             update={
                 "confirmed_model_selection": decision,
                 "error": None,
-                "user_message": final_msg,
+                "message": final_msg,
             }
         )
         return ModelSelectionState(payload=payload)

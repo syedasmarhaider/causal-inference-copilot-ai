@@ -163,10 +163,9 @@ def has_missing(arr: Any) -> bool:
 def get_input_params_from_spec(
     df: pd.DataFrame,
     specs: CausalSpec,
+    *,
     order_X: Optional[List[str]] = None,
     order_W: Optional[List[str]] = None,
-    *,
-    strict_order: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, Any]]:
 
     y_col = str(specs.Y.column)
@@ -177,12 +176,6 @@ def get_input_params_from_spec(
 
     X_order = [str(c) for c in (order_X if order_X is not None else x_cols)]
     W_order = [str(c) for c in (order_W if order_W is not None else w_cols)]
-
-    if strict_order:
-        if order_X is not None and X_order != x_cols:
-            raise ValueError(f"order_X must match specs.X exactly. specs.X={x_cols}, order_X={X_order}")
-        if order_W is not None and W_order != w_cols:
-            raise ValueError(f"order_W must match specs.W exactly. specs.W={w_cols}, order_W={W_order}")
 
     validate_columns_exist(df, [y_col, t_col] + X_order + W_order)
 
@@ -229,7 +222,7 @@ def get_input_params_from_spec(
     # ---- Treatment T (at minimum: make it 1D numeric) ----
     if t_ser.isna().any():
         raise ValueError(f"Treatment {t_col!r} contains missing values.")
-    T = pd.to_numeric(t_ser, errors="raise").to_numpy(dtype=float)
+    T = t_ser.to_numpy()
 
     # ---- X/W ----
     X = df[X_order].to_numpy() if X_order else None
@@ -238,8 +231,6 @@ def get_input_params_from_spec(
     # Hard guard: never let object arrays reach EconML
     if np.asarray(Y).dtype == object:
         raise ValueError(f"Outcome {y_col!r} resolved to dtype=object. Example={Y[:5]!r}")
-    if np.asarray(T).dtype == object:
-        raise ValueError(f"Treatment {t_col!r} resolved to dtype=object. Example={T[:5]!r}")
 
     overlap_XW = sorted(set(X_order).intersection(W_order))
 
