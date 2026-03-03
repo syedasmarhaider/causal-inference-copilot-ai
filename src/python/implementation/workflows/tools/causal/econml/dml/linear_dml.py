@@ -330,9 +330,9 @@ class LinearDMLCausalModel(CausalModel):
                 # point estimate
                 item["ate"] = est.ate(X=X, T0=t0, T1=t1_val) # pyright: ignore[reportUnknownMemberType]
                 try:
-                    lo, hi = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-                    if lo is not None and hi is not None:
-                        item["ate_interval"] = (list(lo), list(hi)) # pyright: ignore[reportUnknownArgumentType]
+                    ate_interval = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+                    if ate_interval is not None:
+                        item["ate_interval"] = ate_interval
                     else:
                         item["ate_interval"] = None
                         warnings.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")    

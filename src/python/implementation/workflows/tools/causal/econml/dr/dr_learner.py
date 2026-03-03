@@ -664,8 +664,8 @@ class _BaseDRLearnerAdapter(CausalModel):
                 item["ate"] = est.ate(X=X, T0=t0, T1=t1_val)
 
                 try:
-                    lo, hi = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
-                    item["ate_interval"] = (list(lo), list(hi)) if lo is not None and hi is not None else None  # pyright: ignore
+                    ate_interval = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
+                    item["ate_interval"] = ate_interval
                     if item["ate_interval"] is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")
                 except Exception as e:

@@ -598,9 +598,9 @@ class CausalForestDMLCausalModel(CausalModel):
                 logging.info(logging_info)
                 
                 try:
-                    lo, hi = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
-                    if lo is not None and hi is not None:
-                        item["ate_interval"] = (list(lo), list(hi))  # pyright: ignore
+                    ate_interval = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha) 
+                    if ate_interval is not None:
+                        item["ate_interval"] = ate_interval
                     else:
                         item["ate_interval"] = None
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")

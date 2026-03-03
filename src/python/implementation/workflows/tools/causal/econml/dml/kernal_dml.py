@@ -567,10 +567,12 @@ class KernelDMLCausalModel(CausalModel):
                 item["ate"] = est.ate(X=X, T0=t0, T1=t1_val)  # pyright: ignore[reportUnknownMemberType]
 
                 try:
-                    lo, hi = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
-                    item["ate_interval"] = (list(lo), list(hi)) if lo is not None and hi is not None else None
-                    if lo is None or hi is None:
+                    ate_interval = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
+    
+                    if ate_interval is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")
+                    else:
+                        item["ate_interval"] = ate_interval    
                 except Exception as e:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                     item["ate_interval"] = None
