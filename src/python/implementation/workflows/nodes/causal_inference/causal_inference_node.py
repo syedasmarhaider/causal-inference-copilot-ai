@@ -163,6 +163,11 @@ class CausalInferenceNode(Node):
         
         data_summary = deps.clean_protocol.payload.summary
         assert data_summary is not None, "dataset_summary is required in CleanProtocolState"
+        
+        order_X = deps.model_train.payload.order_X
+        order_W = deps.model_train.payload.order_W
+        assert order_X is not None, "order_X is required in ModelTrainState payload"
+        assert order_W is not None, "order_W is required in ModelTrainState payload"
 
         # Resolve model tool
         mf_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
@@ -181,7 +186,7 @@ class CausalInferenceNode(Node):
         # ============================================================
         # Step 1: Compute ATE once (idempotent)
         # ============================================================
-        if state.payload.ate_result_raw_json_str is None:
+        if True:
                 spec = _protocol_to_causal_spec(protocol)
 
                 # Build ATECommand (fields must match your dataclass)
@@ -194,6 +199,8 @@ class CausalInferenceNode(Node):
                     transformation_plan=deps.model_train.payload.column_transformation_plan,
                     protocol_specs=spec,
                     fitted_model_id=trained_model_id,
+                    order_X=order_X,
+                    order_W=order_W,
                     inputs=ATEInputsModel(),
                     options={},
                 )
