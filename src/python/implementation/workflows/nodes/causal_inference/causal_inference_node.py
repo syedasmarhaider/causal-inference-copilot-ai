@@ -246,7 +246,7 @@ class CausalInferenceNode(Node):
                                         "ate_inference_error": None,
                                         "should_abort": False,
                                         "abort_error_message": None,
-                                        "user_message": summary_out.strip(),
+                                        "message": summary_out.strip(),
                                     }
                                 )
                             )
@@ -260,7 +260,7 @@ class CausalInferenceNode(Node):
                                         "ate_result_raw_json_str": None,
                                         "error": res.error.message,
                                         "should_abort": True,
-                                        "user_message": error_message,
+                                        "message": error_message,
                                     }
                                 )
                             ) 
