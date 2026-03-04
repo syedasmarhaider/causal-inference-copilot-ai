@@ -101,6 +101,9 @@ Goal
   - “difference between …”, “compare …”, “A vs B”, “men vs women”, “young vs old”, etc.
 - Also detect whether the user is asking a **counterfactual direction** question (reverse comparison like “what if NOT treated instead of treated?”) and flag it.
 
+Very Important:
+User will infer some column name but col name would be not exact. It is your job to figure out which column they likely mean based on dataset summary, and use the exact column name in your output rules. Dont use user stated col as it is.
+
 Inputs (provided below)
 1) PROTOCOL_SPEC (JSON): includes the list of effect modifiers X (the ONLY columns you may use).
 2) DATA_SUMMARY (JSON): dtype info, ranges, and example categories for columns.
@@ -153,26 +156,6 @@ Counterfactual flag (is_counterfactual)
 - This flag is purely interpretive and should not add non-X rules.
 
 Output format (MUST be valid JSON only; no prose)
-Return a single JSON object matching this structure:
-
-{
-  "rules": [
-    {
-      "group_key": "1",
-      "is_counterfactual": false,
-      "inclusion_rules": [
-        { "column": "<X column>", "op": "<op>", "values": [<value(s)>] }
-      ]
-    },
-    {
-      "group_key": "2",
-      "is_counterfactual": false,
-      "inclusion_rules": [
-        { "column": "<X column>", "op": "<op>", "values": [<value(s)>] }
-      ]
-    }
-  ]
-}
 
 Notes about "values":
 - Always provide "values" as a list.
@@ -183,10 +166,16 @@ Notes about "values":
 Now process the inputs.
 
 PROTOCOL_SPEC_JSON:
-{{PROTOCOL_SPEC_JSON}}
+{{TREATMENT_INFO}}
+{{OUTCOME_INFO}}
 
-DATA_SUMMARY_JSON:
-{{DATA_SUMMARY_JSON}}
+COL_EFECT_MODIFIERS (VERY IMPORTANT, this is the ONLY place you can get column names for rules; use exact names from here. You will try best to match user stated columns to these):
+- Infer col from COL_EFECT_MODIFIERS VALUES if col is not explicitly mentioned but implied (e.g., “older vs younger” likely refers to an age column)
+{{COL_EFFECT_MODIFIERS_LIST}}
+
+COL_EFECT_MODIFIERS VALUES you can also interpret user questions to these col values so that it can be consistent.
+{{COL_EFFECT_MODIFIERS_LIST_VALUES}}
+
 """.strip()
 
 

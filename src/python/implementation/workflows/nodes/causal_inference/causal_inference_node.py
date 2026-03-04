@@ -508,7 +508,8 @@ def _extract_effect_fields(effect_obj: Dict[CATEModelResult, Any]) -> Tuple[Opti
     lo = None
     hi = None
     inf = None
-    
+    logging.warning("effect_obj type=%s", type(effect_obj))
+    logging.warning("effect_obj class=%s", type(effect_obj).__name__)
     cate_raw = effect_obj["cate"]
     cate = _to_1d_float(cate_raw)
     
@@ -655,6 +656,8 @@ def _process_cate_question(
     user_q = _last_user_text(messages_history)
     error_message: Optional[str] = None
     plan: Optional[InclusionPlanModel] = None
+    
+    effect_modifiers_summary = _filter_dataset_summary_to_effect_modifiers(summary=data_summary, effect_modifiers=protocol.effect_modifiers)
 
     for attempt in range(3):
         plan = llm.generate_json(
@@ -662,8 +665,9 @@ def _process_cate_question(
             system_prompt=None,
             user_prompt=(
                 CATE_INCLUSION_PROMPT.format(
-                    PROTOCOL_SPEC_JSON=protocol.model_dump(mode="json"),
-                    DATA_SUMMARY_JSON=data_summary.model_dump(mode="json"),
+                    PROTOCOL_SPEC_JSON=protocol.treatment_spec.model_dump(mode="json"),
+                    COL_EFFECT_MODIFIERS=protocol.effect_modifiers,
+                    COL_EFFECT_MODIFIERS_VALUES= effect_modifiers_summary.model_dump(mode="json")
                 )
                 + f"\n\nUSER_QUESTION:\n{user_q}\n"
                 + (f"\nPrevious error message:\n{error_message}\n" if error_message else "")
@@ -674,23 +678,28 @@ def _process_cate_question(
         )
 
         issues = _validate_inclusion_plan_semantic(plan=plan, effect_modifiers=protocol.effect_modifiers)
-        if not issues:
+        if not issues or (len(issues) == 0 and len(plan.rules) > 0):
             break
 
         logging.warning(f"Invalid inclusion plan (attempt {attempt + 1}): {plan}")
         error_message = (
-            "Your inclusion plan has the following issues:\n"
+            "Your inclusion plan has the following issues or plan rules are empty:\n"
             + "\n".join(f"- {i.message}" for i in issues)
             + "\nFix them and output JSON only in the required schema."
-        )
-        plan = None
-
-    if plan is None:
+        )  
+    
+    if not _is_valid_inclusion_plan(
+        plan,
+        effect_modifiers=protocol.effect_modifiers,
+        require_single_cohort=True,  # set False if you support multiple cohorts
+    ):
         return CausalInferenceState(
             payload=current_state.payload.model_copy(
-                update={"message": "Sorry, I couldn’t derive valid inclusion rules from your question. Please rephrase and try again."}
+                update={"message": _invalid_plan_message(effect_modifiers=protocol.effect_modifiers, effect_modifiers_summary=effect_modifiers_summary) }
             )
         )
+              
+    logging.warning(f"Final inclusion plan: {plan}")    
 
     # ---------------------------
     # 3) Load X dataframe and compute CATE per cohort
@@ -774,7 +783,7 @@ def _process_cate_question(
                         t0=t0,
                         t1=t1,
                         outcome_kind=outcome_kind,
-                        effect_obj=res,
+                        effect_obj=res.effects,
                     )
                 )
 
@@ -831,3 +840,150 @@ def _process_cate_question(
     return CausalInferenceState(
         payload=current_state.payload.model_copy(update={"message": answer})
     )
+
+def _is_valid_inclusion_plan(
+    plan: InclusionPlanModel | None,
+    *,
+    effect_modifiers: Sequence[str],
+    require_single_cohort: bool = True,
+) -> bool:
+    if plan is None:
+        return False
+
+    if not plan.rules:
+        return False
+
+    if require_single_cohort and len(plan.rules) != 1:
+        return False
+
+    allowed = {str(c) for c in effect_modifiers}
+
+    for cohort in plan.rules:
+        if not cohort.inclusion_rules:
+            return False
+
+        for rule in cohort.inclusion_rules:
+            if str(rule.column) not in allowed:
+                return False
+
+    return True
+
+
+def _filter_dataset_summary_to_effect_modifiers(
+    summary: DatasetSummaryModel,
+    effect_modifiers: Sequence[str],
+    *,
+    strict: bool = True,
+) -> DatasetSummaryModel:
+    """
+    Return a DatasetSummaryModel containing only column profiles whose names are in `effect_modifiers`.
+
+    - Preserves original profile order (df.columns order).
+    - Updates n_rows consistently (keeps original summary.n_rows).
+    - strict=True raises if any requested effect modifier is missing from summary.profiles.
+    """
+    wanted = [str(c) for c in effect_modifiers]
+    wanted_set = set(wanted)
+
+    # Keep deterministic order: follow summary.profiles order
+    kept = [p for p in summary.profiles if str(p.name) in wanted_set]
+
+    if strict:
+        present = {str(p.name) for p in summary.profiles}
+        missing = [c for c in wanted if c not in present]
+        if missing:
+            raise KeyError(
+                f"Effect modifier columns missing from DatasetSummaryModel.profiles: {missing}. "
+                f"Available: {sorted(present)}"
+            )
+
+    # Rebuild via model_dump to avoid any mutation / union quirks
+    return DatasetSummaryModel.model_validate(
+        {
+            "n_rows": int(summary.n_rows),
+            "profiles": [p.model_dump(mode="python") for p in kept],
+        }
+    )   
+
+def _format_effect_modifiers_summary(
+    summary: DatasetSummaryModel,
+    effect_modifiers: Sequence[str],
+    *,
+    max_cats: int = 6,
+) -> str:
+    wanted = {str(c) for c in effect_modifiers}
+
+    lines: list[str] = []
+    for p in summary.profiles:
+        name = str(p.name)
+        if name not in wanted:
+            continue
+
+        kind = getattr(p, "inferred_kind", "UNKNOWN")
+        miss = f"{p.n_missing}/{p.n_rows} ({p.missing_rate:.1%})"
+
+        # Render per kind
+        if kind == "NUMERIC":
+            s = p.summary
+            q = s.quantiles or {}
+            q25 = q.get("0.25")
+            q50 = q.get("0.50")
+            q75 = q.get("0.75")
+            q_part = ""
+            if q25 is not None and q50 is not None and q75 is not None:
+                q_part = f", IQR≈[{q25:.3g}, {q75:.3g}], median≈{q50:.3g}"
+
+            lines.append(
+                f"- {name} (numeric): min={s.min}, max={s.max}, mean={s.mean}, std={s.std}{q_part}; missing={miss}"
+            )
+
+        elif kind == "CATEGORICAL":
+            s = p.summary
+            top = s.top_categories[:max_cats]
+            top_str = ", ".join([f"{c.value} ({c.count})" for c in top]) if top else "—"
+            more = f", +{s.other_count} other" if s.other_count else ""
+            lines.append(
+                f"- {name} (categorical): top={top_str}{more}; missing={miss}"
+            )
+
+        elif kind == "BOOLEAN":
+            s = p.summary
+            # counts keys are stringified bools
+            top_str = ", ".join([f"{k}={v}" for k, v in s.counts.items()])
+            lines.append(
+                f"- {name} (boolean): {top_str}; missing={miss}"
+            )
+
+        elif kind == "DATETIME":
+            s = p.summary
+            lines.append(
+                f"- {name} (datetime): min={s.min}, max={s.max}; missing={miss}"
+            )
+
+        else:  # OTHER
+            s = p.summary
+            sample = ", ".join(s.distinct_values_sample[:max_cats]) if s.distinct_values_sample else "—"
+            lines.append(
+                f"- {name} (other): sample values={sample}; missing={miss}"
+            )
+
+    return "\n".join(lines) if lines else "(No effect modifier profiles available.)"
+
+
+def _invalid_plan_message(
+    *,
+    effect_modifiers: Sequence[str],
+    effect_modifiers_summary: DatasetSummaryModel,
+) -> str:
+    cols = [str(c) for c in effect_modifiers]
+    summary_txt = _format_effect_modifiers_summary(effect_modifiers_summary, cols)
+
+    return (
+        "I couldn't build a valid cohort from your question after multiple attempts.\n\n"
+        "How to ask a cohort question (constraints):\n"
+        "• Cohort rules must use ONLY effect modifiers (X)\n"
+        "Allowed effect modifiers (X):\n"
+        f"• {', '.join(cols)}\n\n"
+        "Effect modifiers — available values / ranges (to help you pick valid filters):\n"
+        f"{summary_txt}\n\n"
+    )         
