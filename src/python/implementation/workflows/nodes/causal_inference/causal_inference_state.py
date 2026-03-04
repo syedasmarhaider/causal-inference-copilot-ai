@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, Optional, Sequence
+from typing import Any, ClassVar, List, Optional, Sequence
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
@@ -19,12 +20,14 @@ class CausalInferencePayload(BaseModel):
 
     # UI / node-local
     message: Optional[str] = None
+    artifacts: Optional[List[UUID]] = None
 
 
 @dataclass(frozen=True, slots=True)
 class CausalInferenceState(State):
     NAME: ClassVar[str] = "CAUSAL_INFERENCE"
     payload: CausalInferencePayload
+    current_artifact_ids: Optional[List[UUID]] = None
 
     @property
     def name(self) -> str:
@@ -50,7 +53,10 @@ class CausalInferenceState(State):
                 "CausalInferenceState.message is required but missing. "
                 "Don't access .message outside the node/UI context where user_message is guaranteed."
             )
-        return StateMessage(txt_message=self.payload.message)
+        return StateMessage(
+            txt_message=self.payload.message,
+            artifact_ids=[str(aid) for aid in self.current_artifact_ids] if self.current_artifact_ids else None,
+        )
 
     # TODO: change later
     @property

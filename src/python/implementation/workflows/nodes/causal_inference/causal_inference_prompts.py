@@ -147,6 +147,7 @@ Ranges and comparisons
 
 Cohort construction
   Very important Compare and Contrast is allowed, but you MUST NOT create cross-product cohorts unless explicitly requested.
+  Questions like who benefits most in terms of specific col then you can create cohorts based on that col, but do NOT create cohorts based on combinations of cols unless user explicitly asks for interactions or combined effects.
 - If the user asks for a comparison (“A vs B”, “compare …”, “difference between …”):
   - Output one cohort per group requested.
   - Example: “men vs women” → 2 cohorts

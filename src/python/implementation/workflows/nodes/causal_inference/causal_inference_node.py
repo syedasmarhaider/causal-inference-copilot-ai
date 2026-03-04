@@ -65,6 +65,7 @@ from python.implementation.workflows.tools.data_processing.data_processing_tool 
     InclusionRuleModel,
 )
 from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import CausalDataProfilingTool
+from python.implementation.workflows.tools.data_profiling.plots.model import CohortCate, GraphImage
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
 # ============================================================
@@ -240,6 +241,7 @@ class CausalInferenceNode(Node):
             order_W=order_W,
             model=model,
             data_processing_tool=data_processing_tool,
+            data_profiling_tool=_data_profiling_tool,
         )
 
 
@@ -633,6 +635,7 @@ def _process_cate_question(
     order_W: List[str],
     model: CausalModel,
     data_processing_tool: DataProcessingTool,
+    data_profiling_tool: CausalDataProfilingTool,
 ) -> CausalInferenceState:
     last_8 = messages_history[-8:] if messages_history else None
     last_4_messages = messages_history[-4:] if messages_history else None
@@ -662,7 +665,7 @@ def _process_cate_question(
     plan: Optional[InclusionPlanModel] = None
     
     effect_modifiers_summary = _filter_dataset_summary_to_effect_modifiers(summary=data_summary, effect_modifiers=protocol.effect_modifiers)
-
+    plot_cohorts: List[CohortCate] = [] 
     for attempt in range(3):
         plan = llm.generate_json(
             schema=InclusionPlanModel,
@@ -773,9 +776,9 @@ def _process_cate_question(
 
         if not isinstance(res, CATEResult):
             raise TypeError(f"Expected CATEResult from model.execute, got {type(res).__name__}")
-
+        
         match res:
-            case CATESuccess():
+            case CATESuccess():           
                 group_payloads.append(
                     _make_llm_cate_payload_for_group(
                         group_key=gk,
@@ -786,6 +789,16 @@ def _process_cate_question(
                         outcome_kind=outcome_kind,
                         effect_obj=res.effects,
                     )
+                )
+                cate_arr, lo_arr, hi_arr, _ = _extract_effect_fields(res.effects)
+                if cate_arr is not None and cate_arr.size > 0:
+                    plot_cohorts.append(
+                        CohortCate(
+                            group_key=gk,
+                            cate=cate_arr,
+                            lower=lo_arr,
+                            upper=hi_arr,
+                        )
                 )
 
             case CommandFailure():
@@ -816,7 +829,27 @@ def _process_cate_question(
                 }
             )
         )
+    
+    graphs: List[GraphImage] = []
+    artifacts: Optional[List[UUID]] = []
+    if len(plot_cohorts) > 0:
+        graphs.append(data_profiling_tool.plot_cate_distribution(plot_cohorts, protocol))
+    if len(plot_cohorts) == 1:
+        graphs.append(data_profiling_tool.plot_cate_sorted_curve(plot_cohorts, protocol))
+    else:
+        graphs.append(data_profiling_tool.plot_cate_forest_mean_ci(plot_cohorts, protocol))
 
+    # Persist artifacts (you said you'll wire return processing)
+    for g in graphs:
+        aid = uuid4()
+        artifacts.append(aid)
+        data_repo.save_artifact(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            artifact_id=aid,
+            content=g.content,
+            mime=g.mime,
+        )
     # ---------------------------
     # 4) LLM summarization (clinician-friendly)
     #    - For n<=5 we included raw values
@@ -839,7 +872,10 @@ def _process_cate_question(
     ).content.strip()
 
     return CausalInferenceState(
-        payload=current_state.payload.model_copy(update={"message": answer})
+        payload=current_state.payload.model_copy(update={"message": answer,
+                                                         "artifacts": (current_state.payload.artifacts or []) + (artifacts if artifacts else [])
+                                                         }),
+        current_artifact_ids=artifacts
     )
 
 
