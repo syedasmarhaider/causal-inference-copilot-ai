@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import logging
-from typing import Any, Optional, Sequence, cast
+from typing import Any, List, Optional, Sequence, cast
+import pandas as pd
 from typing_extensions import Literal
 from uuid import UUID, uuid4
 
@@ -18,6 +19,8 @@ from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import CausalInferenceDeps
 from python.implementation.workflows.nodes.causal_inference.causal_inference_prompts import (
     CATE_GENERAL_PROMPT,
+    CATE_INCLUSION_PROMPT,
+    CATE_SUMMARY_PROMPT,
     CAUSAL_INFERENCE_ATE_SUMMARY_SYSTEM_PROMPT,
     CAUSAL_INFERENCE_ATE_SUMMARY_USER_PROMPT_TEMPLATE,
     CAUSAL_INFERENCE_MAIN_SYSTEM_PROMPT,
@@ -26,10 +29,6 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_pro
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
     CausalInferenceState,
 )
-
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
-from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
-from python.implementation.workflows.nodes.model_train.model_train_state import ModelTrainState
 from python.implementation.workflows.tools.causal.causal_model import CausalModel
 from python.implementation.workflows.tools.causal.causal_spec import (
     CausalSpec,
@@ -39,7 +38,7 @@ from python.implementation.workflows.tools.causal.causal_spec import (
 )
 
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import ProtocolSpec
-from python.implementation.workflows.tools.causal.causal_command import ATECommand, ATEInputsModel, ATEResult, ATESuccess, CommandFailure  # adjust if needed
+from python.implementation.workflows.tools.causal.causal_command import ATECommand, ATEInputsModel, ATEResult, ATESuccess, CATECommand, CATEInputs, CATEResult, CATESuccess, CommandFailure  # adjust if needed
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.causal_model_factory_tool import CausalModelFactoryTool
 
@@ -49,9 +48,12 @@ from python.implementation.workflows.nodes.compile_protocol.protocol_specs impor
     BinaryOutcomeSpecModel as ProtocolBinaryOutcomeSpecModel,
     ContinuousOutcomeSpecModel as ProtocolContinuousOutcomeSpecModel,
 )
+
+from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
-from python.implementation.workflows.tools.data_processing.data_processing_tool import DataProcessingTool
+from python.implementation.workflows.tools.data_processing.data_processing_tool import DataProcessingTool, InclusionRulesModel
 from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import CausalDataProfilingTool
+from python.implementation.workflows.utils.validation import ValidationIssueModel
 
 
 def _dumps(obj: Any) -> str:
@@ -179,6 +181,12 @@ class CausalInferenceNode(Node):
 
         model = model_factory.resolve(selected_model_fqcn)
         assert model is not None, f"Model factory could not resolve model for fqcn: {selected_model_fqcn}"
+        
+        data_profiling_tool_raw = tool_factory.get_tool(CausalDataProfilingTool.NAME)
+        data_profiling_tool = cast(CausalDataProfilingTool, data_profiling_tool_raw)
+        data_processing_tool_raw = tool_factory.get_tool(DataProcessingTool.NAME)
+        data_processing_tool = cast(DataProcessingTool, data_processing_tool_raw)
+        
 
         # Context bundle for prompts
         context: dict[str, Any] = {
@@ -259,15 +267,78 @@ class CausalInferenceNode(Node):
                     case _:
                         raise TypeError(f"Unhandled ATEResult type: {type(res).__name__}") 
         
-        return state             
+        question_type = _is_question_about_ate_or_cate_abort(
+            llm=self.llm,
+            model_name=self.model_name,
+            messages_history=messages_history,
+        )
 
+        
+        match question_type.type:
+            case "ate":
+                return _process_ate_question(
+                    llm=self.llm,
+                    current_state=state, 
+                    model_name=self.model_name,
+                    ate_model_output_json_str=state.payload.ate_result_raw_json_str,
+                    state=state,
+                    data_summary=data_summary,
+                    selected_model_fqcn=selected_model_fqcn,
+                    messages_history=messages_history,
+                )    
+            
+            case "cate":
+                return _process_cate_question(
+                    llm=self.llm,
+                    data_repo=self.data_repo,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    model_name=self.model_name,
+                    ate_model_output_json_str=state.payload.ate_result_raw_json_str,
+                    messages_history=messages_history,
+                    current_state=state,
+                    protocol=protocol,
+                    clean_dataset_id=clean_dataset_id,
+                    data_summary=data_summary,
+                    tranformation_plan=deps.model_train.payload.column_transformation_plan,
+                    selected_model_fqcn=selected_model_fqcn,
+                    trained_model_id=trained_model_id,
+                    order_X=order_X,
+                    order_W=order_W,
+                    model=model,
+                    data_profiling_tool=data_profiling_tool,
+                    data_processing_tool=data_processing_tool,
+                )
+            case "other":
+                    return CausalInferenceState(
+                        payload=state.payload.model_copy(
+                            update={
+                                "message": "Are you sure you want to go to the prev step? You will lose all the info.",
+                            }
+                        )
+                    )  
+            
+            case "abort":
+                    return CausalInferenceState(
+                        payload=state.payload.model_copy(
+                            update={
+                                "message": "Aborting the workflow as per your request. If you want to start over, please re-run the workflow.",
+                                "should_abort": True,
+                            }
+                        )
+                    )
+            
+            case _:
+                raise ValueError(f"Invalid question type: {question_type.type}")                  
+                               
+        raise ValueError("Unexpected error: question type could not be determined")
               
 
 #===============================================================
 # internal small router
 #===============================================================
 
-_Question_Type = Literal["ate", "cate", "other"]
+_Question_Type = Literal["ate", "cate", "other","abort"]
 
 class _QuestionDecisonPayload(BaseModel):
     type: Optional[_Question_Type] = None
@@ -327,14 +398,21 @@ class _CateIntentPayload(BaseModel):
 
 def _process_cate_question(
     llm: LLMService,
+    data_repo: DataRepo,
+    user_id: UUID,
+    conversation_id: UUID,
     model_name: str,
     ate_model_output_json_str: str,
     messages_history: Optional[Sequence[ChatMessage]],
-    compile_protocol_state: CompileProtocolState,
     current_state: CausalInferenceState,
-    clean_protocol: CleanProtocolState,
-    model_train: ModelTrainState,
-    data_repo: DataRepo,
+    protocol: ProtocolSpec,
+    clean_dataset_id: UUID,
+    data_summary: DatasetSummaryModel,
+    tranformation_plan: Optional[TransformPlan],
+    selected_model_fqcn: str,
+    trained_model_id: UUID,
+    order_X: List[str],
+    order_W: List[str],
     model: CausalModel,
     data_profiling_tool: CausalDataProfilingTool,
     data_processing_tool: DataProcessingTool) -> CausalInferenceState:
@@ -348,6 +426,7 @@ def _process_cate_question(
         history=last_8_messages,
         max_attempts=3,
      )
+    
     if intent.prev_context_relevant and intent.answer is not None:
         return CausalInferenceState(
             payload=current_state.payload.model_copy(
@@ -356,8 +435,205 @@ def _process_cate_question(
                 }
              )
         )
+    
+    encoding_plan: Optional[InclusionRulesModel] = None
+    error_message: Optional[str] = None
+    for attempt in range(3):
+            encoding_plan = llm.generate_json(
+                schema=InclusionRulesModel, 
+                system_prompt=None,
+                user_prompt= CATE_INCLUSION_PROMPT.format(
+                    PROTOCOL_SPEC_JSON=protocol.model_dump(mode="json"),
+                    DATA_SUMMARY_JSON=data_summary.model_dump(mode="json"),
+                ) + (f"\nPrevious error message: {error_message}" if error_message else ""),
+                config=LLMConfig(temperature=0.2, model=model_name),
+                max_attempts=3,
+                history=last_8_messages,
+            )
+            issues = _validate_inclusion_rules_semantic(effect_modifiers=protocol.effect_modifiers, plan=encoding_plan)
+            if len(issues) == 0:
+                break
+            else:
+                logging.warning(f"Invalid inclusion plan generated by LLM on attempt {attempt+1}: {encoding_plan}")
+                error_message = "The inclusion rules you provided have the following issues:\n" + "\n".join(f"- {issue.message}" for issue in issues) + "\nPlease revise your inclusion rules to fix these issues."
+                encoding_plan = None
+    
+    if encoding_plan is None:
+        return CausalInferenceState(
+            payload=current_state.payload.model_copy(
+                update={
+                    "message": "Sorry, I was not able to process your response. Please clarify your question or try again.",
+                }
+             )
+        )
+    
+    df = data_repo.get_csv_data(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        dataset_id=clean_dataset_id,
+    )
+    df_effect_modifier= _extract_cols_data(df=df, cols=order_X) 
+    df_effect_modifier = data_processing_tool.apply_inclusion_rules(
+        df=df_effect_modifier,
+        rules=encoding_plan.rules,
+    )
+    
+    cmd = CATECommand(
+                    model_name=selected_model_fqcn,
+                    dataset_id=clean_dataset_id,
+                    run_id=uuid4(),
+                    data_summary=data_summary,
+                    transformation_plan=tranformation_plan,
+                    protocol_specs=_protocol_to_causal_spec(protocol),
+                    fitted_model_id=trained_model_id,
+                    order_X=order_X,
+                    order_W=order_W,
+                    inputs=CATEInputs(x_rows=df_effect_modifier),
+                    options={},
+                )
+    res = model.execute(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        command=cmd,
+    )
+    
+    if not isinstance(res, CATEResult):
+        raise TypeError(f"Expected CATEResult from model.execute, got {type(res).__name__}")
+    
+    match res:
+        case CATESuccess():
+            result = _serialize_result_to_json_str(res.effects) + _serialize_result_to_json_str(res.warnings)
+            answer = llm.generate(
+                system_prompt=CATE_SUMMARY_PROMPT,
+                user_prompt=result,
+                config=LLMConfig(temperature=0.2, model=model_name),
+                history=last_8_messages,
+            ).content.strip()
+            return CausalInferenceState(
+                payload=current_state.payload.model_copy(
+                    update={
+                        "message": answer,
+                    }
+                )
+            )
+        
+        case CommandFailure():
+            error_message = f"CATE computation failed: {res.error.message} Please try again sorry for inconvenience."
+            return CausalInferenceState(
+                payload=current_state.payload.model_copy(
+                    update={
+                        "message": error_message,
+                    }
+                )
+            )
+        case _:
+            raise TypeError(f"Unhandled CATEResult type: {type(res).__name__}")     
+            
+            
+def _validate_inclusion_rules_semantic(
+    *,
+    plan: InclusionRulesModel,
+    effect_modifiers: Sequence[str],
+) -> List[ValidationIssueModel]:
+    issues: List[ValidationIssueModel] = []
+    allowed_x = {str(c) for c in effect_modifiers}
+
+    for idx, r in enumerate(plan.rules):
+        col = str(r.column)
+
+        # (1) X-only column restriction
+        if col not in allowed_x:
+            issues.append(
+                ValidationIssueModel(
+                    severity="FAIL",
+                    message=f"Inclusion rule column '{col}' is not an effect modifier (X).",
+                    evidence={
+                        "rule_index": idx,
+                        "column": col,
+                        "op": r.op,
+                        "values": r.values,
+                        "allowed_effect_modifiers": sorted(allowed_x),
+                    },
+                    fix_hint="Use only columns from protocol.effect_modifiers (X).",
+                )
+            )
+
+        # (2) values cardinality by op
+        if r.op in ("==", ">=", "<=", ">", "<"):
+            if len(r.values) != 1:
+                issues.append(
+                    ValidationIssueModel(
+                        severity="FAIL",
+                        message=f"Rule {idx} on '{col}' with op '{r.op}' requires exactly 1 value; got {len(r.values)}.",
+                        evidence={
+                            "rule_index": idx,
+                            "column": col,
+                            "op": r.op,
+                            "values": r.values,
+                        },
+                        fix_hint="For scalar ops (==, >=, <=, >, <), set values=[single_value].",
+                    )
+                )
+        elif r.op in ("in", "not_in"):
+            if len(r.values) < 1:
+                issues.append(
+                    ValidationIssueModel(
+                        severity="FAIL",
+                        message=f"Rule {idx} on '{col}' with op '{r.op}' requires a non-empty values list.",
+                        evidence={
+                            "rule_index": idx,
+                            "column": col,
+                            "op": r.op,
+                            "values": r.values,
+                        },
+                        fix_hint="For membership ops (in, not_in), set values=[v1, v2, ...].",
+                    )
+                )
+        else:
+            # Should be unreachable due to Literal typing, but keep safety if data bypasses typing.
+            issues.append(
+                ValidationIssueModel(
+                    severity="FAIL",
+                    message=f"Unsupported operator '{r.op}' in rule {idx} for column '{col}'.",
+                    evidence={
+                        "rule_index": idx,
+                        "column": col,
+                        "op": r.op,
+                        "values": r.values,
+                    },
+                    fix_hint="Use one of: ==, in, not_in, >=, <=, >, <",
+                )
+            )
+
+    return issues
+ 
 
     
+
+
+def _extract_cols_data(df: pd.DataFrame, cols: Sequence[str]) -> pd.DataFrame:
+    """
+    Return a dataframe with exactly `cols` in the given order.
+
+    Strict behavior:
+      - Raises KeyError if any requested column is missing.
+      - Returns a shallow copy of the selected columns (safe to mutate columns without touching `df`).
+      - Preserves original index.
+
+    Notes:
+      - Use this to build X_query from effect modifier column names.
+    """
+    cols_list = [str(c) for c in cols]
+    missing = [c for c in cols_list if c not in df.columns]
+    if missing:
+        raise KeyError(
+            f"Requested columns not found in df: {missing}. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    # Keep exact order requested
+    return df.loc[:, cols_list].copy()
+   
     
     
     

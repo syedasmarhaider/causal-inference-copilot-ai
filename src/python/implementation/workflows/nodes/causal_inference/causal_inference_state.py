@@ -8,7 +8,6 @@ from pydantic import BaseModel, ConfigDict
 from python.domain.workflows.state import ACTION, State, StateMessage, Status
 from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import CausalInferenceDeps
 
-
 class CausalInferencePayload(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

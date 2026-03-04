@@ -50,6 +50,8 @@ Now write the JSON output.
 SMALL_ROUTER_PROMPT = """
 Given user messages and specificlly last user message decide user is asking about ATE interpretation, CATE interpretation, or other question such as model change or other. 
 Please be very conservative and only classify as ATE or CATE interpretation question type. unless there is a very good reason to think it is other such as model change or something.
+if user choose other things like exept graphs of ate cate or cate ate then ask user if they want to abort the workflow or they want to continue with discussion.
+if prev message suggest user wants to abort then classify as abort.
 """
 
 
@@ -83,9 +85,55 @@ JSON with 2 fields:
 """
 
 CATE_INCLUSION_PROMPT = """
-You are a CATE QA stage of cinference copilot. 
-You need to plan inclusion rule of X (effect modifier) col only effect modifiers please,
-convert user intent to inclison 
+You are the **CATE Inclusion Planner** in the Causal Inference Copilot.
 
+Goal
+- Convert the user's natural-language CATE question into **inclusion rules over X only** (effect modifiers).
+- You MUST NOT produce rules for Y, T, W, ID columns, dates of treatment/outcome windows, or any non-X field.
+
+Inputs (provided below)
+1) PROTOCOL_SPEC (JSON): contains the causal protocol, including the list of effect modifiers X.
+2) DATA_SUMMARY (JSON): dataset profiling for columns (dtype, missingness, numeric ranges, and top categories/examples).
+3) USER_QUESTION (text): the user's query.
+
+Strict constraints
+- Use **only** columns listed in PROTOCOL_SPEC.X (effect modifiers).
+- Allowed operators: ["==", "in", "not_in", ">=", "<=", ">", "<"].
+- Rules are **ANDed** together (conjunction).
+- Rows with NA in a ruled column are implicitly excluded by filtering semantics (do not add explicit NA rules).
+- Do not invent columns.
+- Do not coerce types silently. If a numeric threshold is implied, output a numeric-like string (e.g., "65") and rely on downstream strict application (no guessing units).
+- If the user asks for a range (e.g., "between 40 and 60"), express it as TWO rules: >=40 AND <=60.
+- If the user gives too few modifiers (e.g., only age/sex), that's OK: output only those constraints; do not force extra constraints.
+
+Value normalization rules
+- For categorical columns: choose values EXACTLY as they appear in DATA_SUMMARY for that column (case-insensitive matching allowed; output the canonical value from DATA_SUMMARY).
+- For multi-category statements  use op="in" with multiple values.
+- For negations prefer op="not_in" when the user excludes a set; otherwise op="!=" is NOT allowed (use not_in).
+- For comparisons (>, >=, <, <=): only use them for numeric/date-like columns (per DATA_SUMMARY dtype). If the column is categorical, do NOT use comparisons; instead use ==/in/not_in.
+- If the user requests a categorical value not present in DATA_SUMMARY, add the value too anyway because it would be ingored by compiler
+
+Output format (MUST be valid JSON only; no prose)
+Return a single JSON object
+Notes about "values":
+- Always provide "values" as a list.
+- For scalar comparisons (==, >=, <=, >, <): values MUST contain exactly one element.
+- For in/not_in: values MUST contain at least one element.
+
+Now process the inputs.
+
+PROTOCOL_SPEC_JSON:
+{{PROTOCOL_SPEC_JSON}}
+
+DATA_SUMMARY_JSON:
+{{DATA_SUMMARY_JSON}}
 
 """.strip()
+
+
+CATE_SUMMARY_PROMPT = """
+You are a CATE summarizer in the Causal Inference Copilot.
+Summarize the CATE (conditional average treatment effect) results in clinician-friendly language.
+Ignore system warnings for this summary, just focus on interpreting the CATE results.
+Add warnings if it is helpful to the user, otherwise do not add them like technical warnings.
+"""
