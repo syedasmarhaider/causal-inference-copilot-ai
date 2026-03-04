@@ -632,6 +632,7 @@ def _process_cate_question(
     data_processing_tool: DataProcessingTool,
 ) -> CausalInferenceState:
     last_8 = messages_history[-8:] if messages_history else None
+    last_4_messages = messages_history[-4:] if messages_history else None
 
     # ---------------------------
     # 1) Context router (answer from history/ATE if possible)
@@ -667,13 +668,13 @@ def _process_cate_question(
                 CATE_INCLUSION_PROMPT.format(
                     PROTOCOL_SPEC_JSON=protocol.treatment_spec.model_dump(mode="json"),
                     COL_EFFECT_MODIFIERS=protocol.effect_modifiers,
-                    COL_EFFECT_MODIFIERS_VALUES= effect_modifiers_summary.model_dump(mode="json")
+                    COL_EFFECT_MODIFIERS_VALUES= _format_effect_modifiers_summary(effect_modifiers_summary, effect_modifiers=protocol.effect_modifiers)
                 )
                 + f"\n\nUSER_QUESTION:\n{user_q}\n"
                 + (f"\nPrevious error message:\n{error_message}\n" if error_message else "")
             ),
-            config=LLMConfig(temperature=0.2, model=model_name),
-            history=last_8,
+            config=LLMConfig(temperature=0.7, model="gemini-3-flash-preview"),
+            history=last_4_messages,
             max_attempts=3,
         )
 
