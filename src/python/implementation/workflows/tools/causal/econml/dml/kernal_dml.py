@@ -660,10 +660,22 @@ class KernelDMLCausalModel(CausalModel):
 
             est: KernelDML = model_record.model  # CHANGED (KernelDML)
             spec: CausalSpec = command.protocol_specs
+            X_order: Optional[List[str]] = command.order_X
 
-            X_query = command.inputs.x_rows
+            X_df = command.inputs.x_rows
             x_cols = spec.X
-            raise_if_x_rows_not_exactly_match_fit_x_cols(x_rows=X_query, x_cols=x_cols)
+            raise_if_x_rows_not_exactly_match_fit_x_cols(x_rows=X_df, x_cols=x_cols)
+            X_query = X_df[X_order].to_numpy() if X_order else None
+            
+            if X_query is None or X_query.shape[1] == 0:
+                return CommandFailure(
+                    run_id=command.run_id,
+                    started_at=started_at,
+                    finished_at=now_utc(),
+                    error=ErrorInfo(code="OPTIONS_INVALID", message="CATE requires non-empty X for effect modification; none provided.", details={}),
+                    warnings=[],
+                    meta={},
+                )
             
             effects: List[Dict[CATEModelResult, Any]] = []
 
