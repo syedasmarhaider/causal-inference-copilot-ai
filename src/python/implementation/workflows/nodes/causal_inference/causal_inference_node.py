@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
@@ -40,6 +40,7 @@ from python.implementation.workflows.tools.causal.causal_command import (
     ATESuccess,
     CATECommand,
     CATEInputs,
+    CATEModelResult,
     CATEResult,
     CATESuccess,
     CommandFailure,
@@ -496,7 +497,7 @@ def _interval_stats(lower: Optional[np.ndarray], upper: Optional[np.ndarray]) ->
     }
 
 
-def _extract_effect_fields(effect_obj: CATESuccess) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Any]:
+def _extract_effect_fields(effect_obj: Dict[CATEModelResult, Any]) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Any]:
     """
     Supports dict-like payloads with keys:
       - "cate"
@@ -508,20 +509,16 @@ def _extract_effect_fields(effect_obj: CATESuccess) -> Tuple[Optional[np.ndarray
     hi = None
     inf = None
     
-    cate = effect_obj.effects["cate"]
-
-    if isinstance(effect_obj, dict):
-        cate = _to_1d_float(effect_obj.get("cate"))
-        inf = effect_obj.get("cate_inference")
-
-        ci = effect_obj.get("cate_interval")
-        if isinstance(ci, (list, tuple)) and len(ci) == 2:
-            lo = _to_1d_float(ci[0])
-            hi = _to_1d_float(ci[1])
-        elif isinstance(ci, dict):
-            lo = _to_1d_float(ci.get("lower"))
-            hi = _to_1d_float(ci.get("upper"))
-
+    cate_raw = effect_obj["cate"]
+    cate = _to_1d_float(cate_raw)
+    
+    if effect_obj["cate_interval"] is not None:
+        interval_raw = effect_obj["cate_interval"]
+        lo = _to_1d_float(interval_raw[0])
+        hi = _to_1d_float(interval_raw[1])
+    if effect_obj["cate_inference"] is not None:
+        inf = effect_obj["cate_inference"]
+        
     return cate, lo, hi, inf
 
 
@@ -533,7 +530,7 @@ def _make_llm_cate_payload_for_group(
     t0: Any,
     t1: Any,
     outcome_kind: str,
-    effect_obj: Any,
+    effect_obj: Dict[CATEModelResult, Any],
 ) -> Dict[str, Any]:
     cate, lo, hi, inf = _extract_effect_fields(effect_obj)
 
@@ -602,7 +599,7 @@ def _apply_rules_with_tool(
 
 def _binary_t0_t1(protocol: ProtocolSpec, *, is_counterfactual: bool) -> Tuple[Any, Any]:
     t = protocol.treatment_spec
-    if not isinstance(t, ProtocolBinaryTreatmentSpecModel):
+    if not isinstance(t, ProtocolBinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         raise TypeError(f"Binary treatment required, got {type(t).__name__}")
     treated = t.treated
     control = t.control
@@ -610,28 +607,6 @@ def _binary_t0_t1(protocol: ProtocolSpec, *, is_counterfactual: bool) -> Tuple[A
         # reverse direction: "no treatment vs treatment" -> swap
         return treated, control  # (t0, t1) swapped relative to normal
     return control, treated
-
-
-def _build_cate_inputs(
-    *,
-    x_rows: pd.DataFrame,
-    t0: Any,
-    t1: Any,
-) -> Tuple[CATEInputs, Dict[str, Any]]:
-    """
-    Try to put t0/t1 into CATEInputs as requested.
-    If your CATEInputs doesn’t support t0/t1 yet, we fallback to options.
-    """
-    options: Dict[str, Any] = {}
-    try:
-        inputs = CATEInputs(x_rows=x_rows, t0=t0, t1=t1)  # type: ignore[call-arg]
-        return inputs, options
-    except TypeError:
-        logging.warning("CATEInputs does not accept t0/t1; passing t0/t1 via options instead.")
-        inputs = CATEInputs(x_rows=x_rows)
-        options["t0"] = t0
-        options["t1"] = t1
-        return inputs, options
 
 
 def _process_cate_question(
@@ -695,7 +670,6 @@ def _process_cate_question(
             ),
             config=LLMConfig(temperature=0.2, model=model_name),
             history=last_8,
-            # IMPORTANT: generate_json already has its own retries for JSON formatting
             max_attempts=3,
         )
 
@@ -731,7 +705,7 @@ def _process_cate_question(
     outcome_kind = "unknown"
     if isinstance(protocol.outcome_spec, ProtocolBinaryOutcomeSpecModel):
         outcome_kind = "binary"
-    elif isinstance(protocol.outcome_spec, ProtocolContinuousOutcomeSpecModel):
+    elif isinstance(protocol.outcome_spec, ProtocolContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         outcome_kind = "continuous"
 
     group_payloads: List[Dict[str, Any]] = []
@@ -765,7 +739,7 @@ def _process_cate_question(
         # Decide t0/t1 for THIS cohort (binary treatment; swap if counterfactual)
         t0, t1 = _binary_t0_t1(protocol, is_counterfactual=bool(cohort.is_counterfactual))
 
-        cate_inputs, extra_options = _build_cate_inputs(x_rows=cohort_df, t0=t0, t1=t1)
+        cate_inputs = CATEInputs(x_rows=cohort_df, t0=t0, t1=t1)
 
         cmd = CATECommand(
             model_name=selected_model_fqcn,
@@ -778,7 +752,7 @@ def _process_cate_question(
             order_X=order_X,
             order_W=order_W,
             inputs=cate_inputs,
-            options=extra_options,
+            options={},
         )
 
         res = model.execute(
@@ -792,19 +766,6 @@ def _process_cate_question(
 
         match res:
             case CATESuccess():
-                # res.effects should contain cate / cate_interval / cate_inference
-                # Keep it robust: accept dict or list[dict]
-                effects_obj: Any = res.effects
-                if isinstance(effects_obj, list) and effects_obj:
-                    # If backend returns list-of-effect dicts, take first as “this query”
-                    # (your backend can change this; keep stable and simple)
-                    if len(effects_obj) == 1:
-                        effects_obj = effects_obj[0]
-                    else:
-                        # if it returns many objects, pass the list to extractor (extractor expects dict)
-                        # so we keep raw list + also compute from first dict if possible
-                        pass
-
                 group_payloads.append(
                     _make_llm_cate_payload_for_group(
                         group_key=gk,
@@ -813,7 +774,7 @@ def _process_cate_question(
                         t0=t0,
                         t1=t1,
                         outcome_kind=outcome_kind,
-                        effect_obj=effects_obj,
+                        effect_obj=res,
                     )
                 )
 
