@@ -772,8 +772,6 @@ class _BaseDRLearnerAdapter(CausalModel):
                     )
                 t0 = spec.T.control_values[0]
                 t1s = [spec.T.treated_values[0]]
-            elif spec.T.kind == "categorical":
-                t0, t1s = categorical_t0_t1_pairs(spec)
             else:
                 return CommandFailure(
                     run_id=command.run_id,
@@ -803,8 +801,8 @@ class _BaseDRLearnerAdapter(CausalModel):
                     )
 
                 try:
-                    lo, hi = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
-                    item["cate_interval"] = (list(lo), list(hi)) if lo is not None and hi is not None else None  # pyright: ignore
+                    interval = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
+                    item["cate_interval"] = interval  # pyright: ignore
                     if item["cate_interval"] is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
                 except Exception as e:

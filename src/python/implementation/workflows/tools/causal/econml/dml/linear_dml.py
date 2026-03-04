@@ -453,10 +453,7 @@ class LinearDMLCausalModel(CausalModel):
 
                     t0 = spec.T.control_values[0]
                     t1s = [spec.T.treated_values[0]]
-
-                elif spec.T.kind == "categorical":
-                    t0, t1s = categorical_t0_t1_pairs(spec)  # baseline first / spec.T.baseline if present
-
+                    
                 else:
                     return CommandFailure(
                         run_id=command.run_id,
@@ -497,11 +494,11 @@ class LinearDMLCausalModel(CausalModel):
 
     
                     try:
-                        lo, hi = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-                        if lo is None or hi is None:
+                        interval = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+                        if interval is None:
                             warnings.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
                         else:
-                            item["cate_interval"] = (list(lo), list(hi)) if lo is not None and hi is not None else None     # pyright: ignore[reportUnknownArgumentType]
+                            item["cate_interval"] = interval     # pyright: ignore[reportUnknownArgumentType]
                     except Exception as e:
                         warnings.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                         item["cate_interval"] = None

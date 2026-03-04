@@ -664,10 +664,7 @@ class KernelDMLCausalModel(CausalModel):
             X_query = command.inputs.x_rows
             x_cols = spec.X
             raise_if_x_rows_not_exactly_match_fit_x_cols(x_rows=X_query, x_cols=x_cols)
-
-            # CHANGED (KernelDML): X must be numeric at query time too
-            _raise_if_x_not_numeric(X_query)
-
+            
             effects: List[Dict[CATEModelResult, Any]] = []
 
             if spec.T.kind == "binary":
@@ -686,8 +683,6 @@ class KernelDMLCausalModel(CausalModel):
                     )
                 t0 = spec.T.control_values[0]
                 t1s = [spec.T.treated_values[0]]
-            elif spec.T.kind == "categorical":
-                t0, t1s = categorical_t0_t1_pairs(spec)
             else:
                 return CommandFailure(
                     run_id=command.run_id,
@@ -717,9 +712,9 @@ class KernelDMLCausalModel(CausalModel):
                     )
 
                 try:
-                    lo, hi = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
-                    item["cate_interval"] = (list(lo), list(hi)) if lo is not None and hi is not None else None
-                    if lo is None or hi is None:
+                    interval = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
+                    item["cate_interval"] = interval
+                    if interval is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
                 except Exception as e:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))

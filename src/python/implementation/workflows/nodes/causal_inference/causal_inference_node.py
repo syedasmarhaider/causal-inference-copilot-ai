@@ -478,6 +478,16 @@ def _process_cate_question(
         rules=encoding_plan.rules,
     )
     
+    if df_effect_modifier.empty:
+        return CausalInferenceState(
+            payload=current_state.payload.model_copy(
+                update={
+                    "message": "After processing your question I was unable to find even a single row that matches your question. Please revise your question rules to include some data points. Remember that your rules must be based on the effect modifiers columns: " + ", ".join(protocol.effect_modifiers) +" I will refrain to add outside data points values that are not in the effect modifiers columns during training in order to give you a more accurate answer. ",
+                    
+                }
+            )
+        )
+        
     cmd = CATECommand(
                     model_name=selected_model_fqcn,
                     dataset_id=clean_dataset_id,
