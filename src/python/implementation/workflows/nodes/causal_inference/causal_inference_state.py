@@ -19,7 +19,7 @@ class CausalInferencePayload(BaseModel):
     should_abort: Optional[bool] = None
 
     # UI / node-local
-    user_message: Optional[str] = None
+    message: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,12 +46,12 @@ class CausalInferenceState(State):
 
     @property
     def message(self) -> StateMessage:
-        if self.payload.user_message is None:
+        if self.payload.message is None:
             raise ValueError(
                 "CausalInferenceState.message is required but missing. "
                 "Don't access .message outside the node/UI context where user_message is guaranteed."
             )
-        return StateMessage(txt_message=self.payload.user_message)
+        return StateMessage(txt_message=self.payload.message)
 
     # TODO: change later
     @property

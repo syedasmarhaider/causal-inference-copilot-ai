@@ -47,7 +47,6 @@ SCHEMA (must match exactly):
 
   "treatment_spec": (
      {"kind":"binary","column":string,"treated_values":[string],"control_values":[string]}
-   | {"kind":"categorical","column":string,"included_levels":[string]}
   ),
   "treatment_window_start": string,
   "treatment_window_end": string,
@@ -56,7 +55,6 @@ SCHEMA (must match exactly):
   "outcome_spec": (
      {"kind":"binary","column":string,"event_values":[string],"non_event_values":[string]}
    | {"kind":"continuous","column":string,"valid_min":number?,"valid_max":number?}
-   | {"kind":"categorical","column":string,"included_levels":[string]}
   ),
   "outcome_window": string,
   "outcome_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",
@@ -122,7 +120,6 @@ SCHEMA (must match exactly):
 
   "treatment_spec": (
      {"kind":"binary","column":string,"treated_values":[string],"control_values":[string]}
-   | {"kind":"categorical","column":string,"included_levels":[string]}
   ),
   "treatment_window_start": string,
   "treatment_window_end": string,
@@ -131,7 +128,6 @@ SCHEMA (must match exactly):
   "outcome_spec": (
      {"kind":"binary","column":string,"event_values":[string],"non_event_values":[string]}
    | {"kind":"continuous","column":string,"valid_min":number?,"valid_max":number?}
-   | {"kind":"categorical","column":string,"included_levels":[string]}
   ),
   "outcome_window": string,
   "outcome_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",

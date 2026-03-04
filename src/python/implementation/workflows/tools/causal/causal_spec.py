@@ -24,7 +24,7 @@ class CategoricalTreatmentSpecModel(BaseModel):
 
 
 TreatmentSpecModel = Annotated[
-    Union[BinaryTreatmentSpecModel, CategoricalTreatmentSpecModel],
+    Union[BinaryTreatmentSpecModel],
     Field(discriminator="kind"),
 ]
 

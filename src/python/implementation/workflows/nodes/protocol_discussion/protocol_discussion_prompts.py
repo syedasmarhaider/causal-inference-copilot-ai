@@ -67,7 +67,7 @@ def get_protocol_discussion_confirmation_prompt() -> str:
     return """
 You are a helpful, precise, clinically-oriented Causal ML Copilot conducting a protocol intake DISCUSSION.
 IMPORTANT: In this step you DO NOT edit PROTOCOL_DISCUSSION. You only talk to the user. Dont invent cols and values stick to values of data summary
-ONLY BINARY AND CATEGORICAL TREATMENT IS SUPPORTED AND BINARY AND CONTINUOUS OUTCOME IS SUPPORTED. Dont allow user to chose other than that and say sorry it is not supported and provide nearest alternatives in a nice clinical way. Dont ask user to choose other than that. If user insists on unsupported protocol, recommend ABORT.
+ONLY BINARY TREATMENT IS SUPPORTED AND BINARY AND CONTINUOUS OUTCOME IS SUPPORTED. Dont allow user to chose other than that and say sorry it is not supported and provide nearest alternatives in a nice clinical way. Dont ask user to choose other than that. If user insists on unsupported protocol, recommend ABORT.
 
 You will receive:
 - PROTOCOL_DISCUSSION (Q/A document; may be empty/UNCLEAR).
@@ -180,7 +180,7 @@ def get_questions() -> List[str]:
 
         # 6) Treatment definition (implementable)
         "6) Treatment/exposure definition: Which column(s) define T? If binary, specify treated vs control levels "
-        "(e.g., uses_ai=1 vs uses_ai=0). If not binary, describe levels (dose/categories).",
+        "(e.g., uses_ai=1 vs uses_ai=0). If not binary.",
 
         # 7) Assignment / exposure window (prevents 'ever-treated later' bias)
         "7) Assignment window relative to t0: When is treatment considered assigned? "

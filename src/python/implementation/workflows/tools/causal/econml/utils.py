@@ -189,12 +189,12 @@ def get_input_params_from_spec(
             raise ValueError(f"Binary outcome {y_col!r} contains missing values.")
 
         if pd.api.types.is_bool_dtype(y_ser.dtype):
-            Y = y_ser.astype(int).to_numpy(dtype=float)  # 0.0/1.0
+            y = y_ser.astype(int).to_numpy(dtype=float)  # 0.0/1.0
         elif pd.api.types.is_numeric_dtype(y_ser.dtype):
             uniq = set(pd.unique(y_ser))
             if not uniq.issubset({0, 1, 0.0, 1.0, True, False}):
                 raise ValueError(f"Binary numeric outcome {y_col!r} must be 0/1; got {list(uniq)[:10]!r}")
-            Y = (y_ser.astype(float) == 1.0).to_numpy(dtype=float)
+            y = (y_ser.astype(float) == 1.0).to_numpy(dtype=float)
         else:
             # map strings via event_values/non_event_values
             pos = set(getattr(specs.Y, "event_values", []) or [])
@@ -212,12 +212,12 @@ def get_input_params_from_spec(
                     out[i] = 0.0
                 else:
                     raise ValueError(f"Unmapped binary outcome value {v!r} for column {y_col!r}.")
-            Y = out
+            y = out
     else:
         # continuous/other: must be numeric for EconML
         if y_ser.isna().any():
             raise ValueError(f"Outcome {y_col!r} contains missing values.")
-        Y = pd.to_numeric(y_ser, errors="raise").to_numpy(dtype=float)
+        y = pd.to_numeric(y_ser, errors="raise").to_numpy(dtype=float)
 
     # ---- Treatment T (at minimum: make it 1D numeric) ----
     if t_ser.isna().any():
@@ -229,8 +229,8 @@ def get_input_params_from_spec(
     W = df[W_order].to_numpy() if W_order else None
 
     # Hard guard: never let object arrays reach EconML
-    if np.asarray(Y).dtype == object:
-        raise ValueError(f"Outcome {y_col!r} resolved to dtype=object. Example={Y[:5]!r}")
+    if np.asarray(y).dtype == object:
+        raise ValueError(f"Outcome {y_col!r} resolved to dtype=object. Example={y[:5]!r}")
 
     overlap_XW = sorted(set(X_order).intersection(W_order))
 
@@ -243,7 +243,7 @@ def get_input_params_from_spec(
         "W_order": W_order,
         "overlap_XW": overlap_XW,
     }
-    return Y, T, X, W, meta
+    return y, T, X, W, meta
 
 
 

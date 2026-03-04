@@ -67,8 +67,25 @@ Summary:
 {data_summary}
 {ate_model_output_json_str}
 {selected_model_fqcn}
+""".strip()
 
 
-
-
+#============================================================
+# CATE
+#============================================================
+CATE_GENERAL_PROMPT = """
+You are a CATE QA stage of cinference copilot. You will answer questions about CATE (conditional average treatment effect) results.
+First determine if user is asking about its prev messages with giving the new requirement. if yes asnwer the question. If not you have to set prev_context to false.
+Output format:
+JSON with 2 fields:
+- prev_context_relevant: bool (is the user question relevant to the previous context of CATE results and discussion? or is it a new question that is not related to previous context?)
+- answer: str (if prev_context_relevant is true, answer the user's question about CATE results and discussion. If prev_context_relevant is false empty string.
 """
+
+CATE_INCLUSION_PROMPT = """
+You are a CATE QA stage of cinference copilot. 
+You need to plan inclusion rule of X (effect modifier) col only effect modifiers please,
+convert user intent to inclison 
+
+
+""".strip()

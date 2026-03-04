@@ -32,16 +32,8 @@ class BinaryTreatmentSpecModel(BaseModel):
     treated: NonEmptyStr
     control: NonEmptyStr
 
-
-class CategoricalTreatmentSpecModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    kind: Literal["categorical"]
-    column: NonEmptyStr
-    levels: List[NonEmptyStr] = Field(..., min_length=2)
-
-
 TreatmentSpecModel = Annotated[
-    Union[BinaryTreatmentSpecModel, CategoricalTreatmentSpecModel],
+    Union[BinaryTreatmentSpecModel],
     Field(discriminator="kind"),
 ]
 

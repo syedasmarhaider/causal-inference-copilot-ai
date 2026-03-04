@@ -11,7 +11,6 @@ from typing import cast
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
     BinaryOutcomeSpecModel,
     BinaryTreatmentSpecModel,
-    CategoricalTreatmentSpecModel,
     ContinuousOutcomeSpecModel,
 )
 
@@ -314,14 +313,11 @@ def _treatment_allowed_literals(protocol: ProtocolSpec) -> List[str]:
     """
     Returns the allowed literal domain for treatment_spec.
     - binary -> [treated, control]
-    - categorical -> levels
     - continuous -> None (no finite domain)
     """
     ts = protocol.treatment_spec
-    if isinstance(ts, BinaryTreatmentSpecModel):
+    if isinstance(ts, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         return [ts.treated, ts.control]
-    if isinstance(ts, CategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        return list(ts.levels)
     # Should not happen if schema is enforced
     raise ValueError(f"Unknown treatment_spec type: {type(ts)}")
 
@@ -1365,13 +1361,9 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
 
     arm_masks: Dict[str, pd.Series] = {}
 
-    if isinstance(ts, BinaryTreatmentSpecModel):
+    if isinstance(ts, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         arm_masks["treated"] = _mask_equals_literal(sT, ts.treated)
         arm_masks["control"] = _mask_equals_literal(sT, ts.control)
-
-    elif isinstance(ts, CategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        for lvl in list(ts.levels):
-            arm_masks[str(lvl)] = _mask_equals_literal(sT, str(lvl))
             
     else:
         issues.append(
@@ -2015,7 +2007,7 @@ def validate_covariate_and_effect_modifier_type_risks(
 # 6) Overlap / positivity diagnostics (pre-transform, df-backed)
 # =============================================================================
 
-ArmKind = Literal["binary", "categorical", "continuous"]
+ArmKind = Literal["binary", "continuous"]
 
 
 @dataclass(frozen=True)
@@ -2112,19 +2104,12 @@ def compute_arm_masks_from_protocol(
     ts = protocol.treatment_spec
     s = df[tcol]
 
-    if isinstance(ts, BinaryTreatmentSpecModel):
+    if isinstance(ts, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         m_t = _mask_equals_literal(s, ts.treated)
         m_c = _mask_equals_literal(s, ts.control)
         masks = {"treated": m_t, "control": m_c}
         counts = {k: int(v.sum()) for k, v in masks.items()}
         return ArmMasks(kind="binary", treatment_col=tcol, masks=masks, counts=counts)
-
-    if isinstance(ts, CategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        masks: Dict[str, pd.Series] = {}
-        for lvl in list(ts.levels):
-            masks[str(lvl)] = _mask_equals_literal(s, str(lvl))
-        counts = {k: int(v.sum()) for k, v in masks.items()}
-        return ArmMasks(kind="categorical", treatment_col=tcol, masks=masks, counts=counts)
 
     raise ValueError(f"Unknown treatment_spec kind={getattr(ts, 'kind', None)!r}")
 

@@ -22,7 +22,6 @@ from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state i
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
     BinaryOutcomeSpecModel,
     BinaryTreatmentSpecModel,
-    CategoricalTreatmentSpecModel,
     ContinuousOutcomeSpecModel,
     ProtocolSpec,
 )
@@ -262,14 +261,10 @@ def _feasibility_error(df: pd.DataFrame, protocol: ProtocolSpec) -> Optional[str
 
     # Treatment variability
     ts = protocol.treatment_spec
-    if isinstance(ts, BinaryTreatmentSpecModel):
+    if isinstance(ts, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         nunq = int(df[tcol].nunique(dropna=True))
         if nunq < 2:
             return f"Binary treatment column '{tcol}' has <2 unique values after filtering."
-    elif isinstance(ts, CategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        nunq = int(df[tcol].nunique(dropna=True))
-        if nunq < 2:
-            return f"Categorical treatment column '{tcol}' has <2 levels present after filtering."
     else:
         return f"Unsupported treatment spec kind: {getattr(ts, 'kind', None)!r}"    
 
@@ -429,7 +424,7 @@ def edit_df_drop_cols_expect_required(
 
     # outcome column(s)
     ys = compiled_protocol.outcome_spec
-    if ys.kind in ("binary", "categorical", "continuous"):
+    if ys.kind in ("binary", "continuous"):
         required.add(ys.column) 
     else:
         raise ValueError(f"Unsupported outcome_spec kind: {getattr(ys, 'kind', None)!r}")
@@ -722,7 +717,6 @@ def apply_treatment_outcome_domain_keep(
 
     Args:
       keep_treatment_domain: apply treatment domain whitelist if treatment is binary/categorical
-      keep_outcome_domain: apply outcome domain whitelist if outcome is binary/categorical/duration
       dropna_on_domain_cols: if True, drop NA on the specific domain columns before whitelisting
                             (even if you already did global dropna earlier)
 
@@ -746,10 +740,9 @@ def apply_treatment_outcome_domain_keep(
             raise KeyError(f"Treatment column not found in df: {tcol!r}")
 
         allowed_t: Optional[List[str]] = None
-        if isinstance(ts, BinaryTreatmentSpecModel):
+        if isinstance(ts, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
             allowed_t = [ts.treated, ts.control]
-        elif isinstance(ts, CategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-            allowed_t = list(ts.levels)
+            
         else:
             raise ValueError(f"Unknown treatment_spec kind: {getattr(ts, 'kind', None)!r}")   
 

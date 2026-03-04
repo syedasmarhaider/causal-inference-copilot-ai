@@ -16,7 +16,6 @@ from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
     ProtocolSpec,
     BinaryTreatmentSpecModel as ProtocolBinaryTreatmentSpecModel,
-    CategoricalTreatmentSpecModel as ProtocolCategoricalTreatmentSpecModel,
     BinaryOutcomeSpecModel as ProtocolBinaryOutcomeSpecModel,
     ContinuousOutcomeSpecModel as ProtocolContinuousOutcomeSpecModel,
 )
@@ -34,7 +33,6 @@ from python.implementation.workflows.tools.causal.causal_model_factory_tool impo
 from python.implementation.workflows.tools.causal.causal_spec import (
     CausalSpec,
     BinaryTreatmentSpecModel as CausalBinaryTreatmentSpecModel,
-    CategoricalTreatmentSpecModel as CausalCategoricalTreatmentSpecModel,
     BinaryOutcomeSpecModel as CausalBinaryOutcomeSpecModel,
     ContinuousOutcomeSpecModel as CausalContinuousOutcomeSpecModel,
 )
@@ -66,19 +64,12 @@ def _safe_model_dump(x: Any) -> Any:
 def _protocol_to_causal_spec(protocol: ProtocolSpec) -> CausalSpec:
     # -------- Treatment (T) --------
     t = protocol.treatment_spec
-    if isinstance(t, ProtocolBinaryTreatmentSpecModel):
+    if isinstance(t, ProtocolBinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         t_specs = CausalBinaryTreatmentSpecModel(
             kind="binary",
             column=t.column,
             treated_values=[t.treated],
             control_values=[t.control],
-        )
-    elif isinstance(t, ProtocolCategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        t_specs = CausalCategoricalTreatmentSpecModel(
-            kind="categorical",
-            column=t.column,
-            levels=list(t.levels),
-            baseline=None,
         )
     else:
         raise TypeError(f"Unsupported treatment_spec type: {type(t).__name__}")

@@ -17,7 +17,7 @@ from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.compile_protocol import compile_protocol_prompt
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_deps import CompileProtocolDeps
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolPayloadModel, CompileProtocolState
-from python.implementation.workflows.nodes.compile_protocol.protocol_specs import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CategoricalTreatmentSpecModel, ContinuousOutcomeSpecModel,ProtocolSpec
+from python.implementation.workflows.nodes.compile_protocol.protocol_specs import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, ContinuousOutcomeSpecModel,ProtocolSpec
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool, DatasetSummaryModel
 
 log = logging.getLogger(__name__)
@@ -495,7 +495,7 @@ def _semantic_validate_values_against_dataset_summary(
     # -------------------------
     ts = protocol.treatment_spec
 
-    if isinstance(ts, BinaryTreatmentSpecModel):
+    if isinstance(ts, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         tcol = ts.column
         p = prof(tcol)
         if p is not None:
@@ -559,35 +559,9 @@ def _semantic_validate_values_against_dataset_summary(
                     val={"column": tcol, "inferred_kind": k},
                     severity="ERROR",
                     evidence={"dtype": dtype_of(p)},
-                )
-
-    elif isinstance(ts, CategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        tcol = ts.column
-        p = prof(tcol)
-        if p is not None and kind_of(p) != "CATEGORICAL":
-            add_issue(
-                path="treatment_spec.column",
-                message=f"Categorical treatment requires CATEGORICAL column, got {kind_of(p)!r} for {tcol!r}",
-                typ="column_kind_mismatch",
-                val={"column": tcol, "inferred_kind": kind_of(p)},
-                severity="ERROR",
-                evidence={"dtype": dtype_of(p)},
-            )
-
-        for j, lvl in enumerate(ts.levels):
-            check_value_membership_if_possible(col=tcol, path=f"treatment_spec.levels.{j}", value=lvl, label="Treatment level") 
-            
+                )            
     else:
         raise ValueError(f"Unknown treatment_spec type: {type(ts).__name__}")        
-
-        if ts.clip_min is not None and ts.clip_max is not None and ts.clip_min > ts.clip_max:
-            add_issue(
-                path="treatment_spec",
-                message=f"clip_min must be <= clip_max, got {ts.clip_min} > {ts.clip_max}",
-                typ="invalid_clip_bounds",
-                val={"clip_min": ts.clip_min, "clip_max": ts.clip_max},
-                severity="ERROR",
-            )
 
     # -------------------------
     # Outcome values validation

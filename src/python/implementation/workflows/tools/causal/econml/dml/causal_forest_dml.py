@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import issparse  # type: ignore[import]
 
-from econml.dml import CausalForestDML
+from econml.dml import CausalForestDML # pyright: ignore[reportMissingTypeStubs]
 import inspect
 
 from sklearn.base import BaseEstimator, TransformerMixin

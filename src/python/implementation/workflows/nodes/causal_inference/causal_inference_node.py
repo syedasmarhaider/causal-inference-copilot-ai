@@ -17,6 +17,7 @@ from python.domain.workflows.tool_factory import ToolFactory
 
 from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import CausalInferenceDeps
 from python.implementation.workflows.nodes.causal_inference.causal_inference_prompts import (
+    CATE_GENERAL_PROMPT,
     CAUSAL_INFERENCE_ATE_SUMMARY_SYSTEM_PROMPT,
     CAUSAL_INFERENCE_ATE_SUMMARY_USER_PROMPT_TEMPLATE,
     CAUSAL_INFERENCE_MAIN_SYSTEM_PROMPT,
@@ -26,10 +27,13 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_sta
     CausalInferenceState,
 )
 
+from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
+from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
+from python.implementation.workflows.nodes.model_train.model_train_state import ModelTrainState
+from python.implementation.workflows.tools.causal.causal_model import CausalModel
 from python.implementation.workflows.tools.causal.causal_spec import (
     CausalSpec,
     BinaryTreatmentSpecModel as CausalBinaryTreatmentSpecModel,
-    CategoricalTreatmentSpecModel as CausalCategoricalTreatmentSpecModel,
     BinaryOutcomeSpecModel as CausalBinaryOutcomeSpecModel,
     ContinuousOutcomeSpecModel as CausalContinuousOutcomeSpecModel,
 )
@@ -42,11 +46,12 @@ from python.implementation.workflows.tools.causal.causal_model_factory_tool impo
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
     ProtocolSpec,
     BinaryTreatmentSpecModel as ProtocolBinaryTreatmentSpecModel,
-    CategoricalTreatmentSpecModel as ProtocolCategoricalTreatmentSpecModel,
     BinaryOutcomeSpecModel as ProtocolBinaryOutcomeSpecModel,
     ContinuousOutcomeSpecModel as ProtocolContinuousOutcomeSpecModel,
 )
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
+from python.implementation.workflows.tools.data_processing.data_processing_tool import DataProcessingTool
+from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import CausalDataProfilingTool
 
 
 def _dumps(obj: Any) -> str:
@@ -58,19 +63,12 @@ def _dumps(obj: Any) -> str:
 def _protocol_to_causal_spec(protocol: ProtocolSpec) -> CausalSpec:
     # -------- Treatment (T) --------
     t = protocol.treatment_spec
-    if isinstance(t, ProtocolBinaryTreatmentSpecModel):
+    if isinstance(t, ProtocolBinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         t_specs = CausalBinaryTreatmentSpecModel(
             kind="binary",
             column=t.column,
             treated_values=[t.treated],
             control_values=[t.control],
-        )
-    elif isinstance(t, ProtocolCategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        t_specs = CausalCategoricalTreatmentSpecModel(
-            kind="categorical",
-            column=t.column,
-            levels=list(t.levels),
-            baseline=None,
         )
     else:
         raise TypeError(f"Unsupported treatment_spec type: {type(t).__name__}")
@@ -274,7 +272,7 @@ _Question_Type = Literal["ate", "cate", "other"]
 class _QuestionDecisonPayload(BaseModel):
     type: Optional[_Question_Type] = None
     reasoning: Optional[str] = None
-def is_question_about_ate_or_cate_abort(
+def _is_question_about_ate_or_cate_abort(
     llm: LLMService,
     model_name: str,
     messages_history: Optional[Sequence[ChatMessage]],
@@ -293,17 +291,17 @@ def is_question_about_ate_or_cate_abort(
 # ATE questions 
 #===============================================================
 
-def process_ate_question(
+def _process_ate_question(
     llm: LLMService,
+    current_state: CausalInferenceState,
     model_name: str,
     ate_model_output_json_str: str,
     state: CausalInferenceState,
     data_summary: DatasetSummaryModel,
     selected_model_fqcn: str,
-    messages_history: Optional[Sequence[ChatMessage]],
-                                        ) -> str:
+    messages_history: Optional[Sequence[ChatMessage]]) -> CausalInferenceState:
     last_8_messages = messages_history[-8:] if messages_history else None
-    return llm.generate(
+    answer = llm.generate(
         system_prompt=CAUSAL_INFERENCE_MAIN_SYSTEM_PROMPT.format(
             data_summary=data_summary.model_dump(mode="json"),
             ate_model_output_json_str=ate_model_output_json_str,
@@ -313,9 +311,65 @@ def process_ate_question(
         config=LLMConfig(temperature=0.7, model=model_name),
         history=last_8_messages,
     ).content.strip()
+    return CausalInferenceState(
+        payload=state.payload.model_copy(
+            update={
+                "message": answer,
+            }        )
+    )
     
 #===============================================================
-# Cate    
+# Cate  Questions
+#===============================================================
+class _CateIntentPayload(BaseModel):
+    prev_context_relevant: bool 
+    answer: Optional[str] = None
+
+def _process_cate_question(
+    llm: LLMService,
+    model_name: str,
+    ate_model_output_json_str: str,
+    messages_history: Optional[Sequence[ChatMessage]],
+    compile_protocol_state: CompileProtocolState,
+    current_state: CausalInferenceState,
+    clean_protocol: CleanProtocolState,
+    model_train: ModelTrainState,
+    data_repo: DataRepo,
+    model: CausalModel,
+    data_profiling_tool: CausalDataProfilingTool,
+    data_processing_tool: DataProcessingTool) -> CausalInferenceState:
+    
+    last_8_messages = messages_history[-8:] if messages_history else None
+    intent = llm.generate_json(
+        schema=_CateIntentPayload,
+        user_prompt=CATE_GENERAL_PROMPT,
+        system_prompt=None,
+        config=LLMConfig(temperature=0.2, model=model_name),
+        history=last_8_messages,
+        max_attempts=3,
+     )
+    if intent.prev_context_relevant and intent.answer is not None:
+        return CausalInferenceState(
+            payload=current_state.payload.model_copy(
+                update={
+                    "message": intent.answer,
+                }
+             )
+        )
+
+    
+    
+    
+    
+    
+    
+
+    
+     
+    
+
+
+
     
     
     
