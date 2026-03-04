@@ -57,6 +57,9 @@ from python.implementation.workflows.tools.causal.causal_spec import (
 from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.tools.data_processing.data_processing_tool import (
+    ALLOWED_OPS,
+    SCALAR_OPS,
+    SET_OPS,
     DataProcessingTool,
     InclusionPlanModel,
     InclusionRuleModel,
@@ -673,7 +676,7 @@ def _process_cate_question(
                 + f"\n\nUSER_QUESTION:\n{user_q}\n"
                 + (f"\nPrevious error message:\n{error_message}\n" if error_message else "")
             ),
-            config=LLMConfig(temperature=0.7, model="gemini-3-flash-preview"),
+            config=LLMConfig(temperature=0.7, model=model_name),
             history=last_4_messages,
             max_attempts=3,
         )
@@ -689,19 +692,16 @@ def _process_cate_question(
             + "\nFix them and output JSON only in the required schema."
         )  
     
-    if not _is_valid_inclusion_plan(
-        plan,
-        effect_modifiers=protocol.effect_modifiers,
-        require_single_cohort=True,  # set False if you support multiple cohorts
-    ):
+    logging.warning(f"Inclusion plan after validation attempts: {plan}")
+    is_valid, log = _validate_inclusion_plan(plan, effect_modifiers=protocol.effect_modifiers)
+    if not is_valid:
+        logging.warning(f"Final inclusion plan is invalid: {log}")
         return CausalInferenceState(
             payload=current_state.payload.model_copy(
                 update={"message": _invalid_plan_message(effect_modifiers=protocol.effect_modifiers, effect_modifiers_summary=effect_modifiers_summary) }
             )
         )
               
-    logging.warning(f"Final inclusion plan: {plan}")    
-
     # ---------------------------
     # 3) Load X dataframe and compute CATE per cohort
     # ---------------------------
@@ -842,32 +842,49 @@ def _process_cate_question(
         payload=current_state.payload.model_copy(update={"message": answer})
     )
 
-def _is_valid_inclusion_plan(
-    plan: InclusionPlanModel | None,
+
+
+def _validate_inclusion_plan(
+    plan: Optional[InclusionPlanModel],
     *,
     effect_modifiers: Sequence[str],
-    require_single_cohort: bool = True,
-) -> bool:
+    require_rules_per_cohort: bool = True,   # comparisons should be True
+) -> Tuple[bool, str]:
     if plan is None:
-        return False
-
+        return False, "plan is None"
     if not plan.rules:
-        return False
+        return False, "plan.rules is empty"
 
-    if require_single_cohort and len(plan.rules) != 1:
-        return False
-
-    allowed = {str(c) for c in effect_modifiers}
+    allowed_cols = {str(c).strip() for c in effect_modifiers}
+    if not allowed_cols:
+        return False, "effect_modifiers is empty"
 
     for cohort in plan.rules:
-        if not cohort.inclusion_rules:
-            return False
+        gk = str(cohort.group_key).strip()
+        if not gk:
+            return False, "missing/empty group_key"
 
-        for rule in cohort.inclusion_rules:
-            if str(rule.column) not in allowed:
-                return False
+        rules = cohort.inclusion_rules or []
+        if require_rules_per_cohort and len(rules) == 0:
+            return False, f"group '{gk}': inclusion_rules is empty"
 
-    return True
+        for rule in rules:
+            col = str(rule.column).strip()
+            op = str(rule.op).strip()
+
+            if col not in allowed_cols:
+                return False, f"group '{gk}': column '{col}' not in effect modifiers (X={sorted(allowed_cols)})"
+
+            if op not in ALLOWED_OPS:
+                return False, f"group '{gk}': unsupported op '{op}'"
+
+            nvals = len(rule.values)
+            if op in SCALAR_OPS and nvals != 1:
+                return False, f"group '{gk}': op '{op}' requires exactly 1 value (got {nvals})"
+            if op in SET_OPS and nvals < 1:
+                return False, f"group '{gk}': op '{op}' requires at least 1 value"
+
+    return True, ""
 
 
 def _filter_dataset_summary_to_effect_modifiers(

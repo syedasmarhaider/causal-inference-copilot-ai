@@ -16,6 +16,9 @@ from python.domain.workflows.tool import Tool
 # -----------------------------------------------------------------------------
 
 InclusionOperator = Literal["==", "in", "not_in", ">=", "<=", ">", "<"]
+SCALAR_OPS = {"==", ">=", "<=", ">", "<"}
+SET_OPS = {"in", "not_in"}
+ALLOWED_OPS = SCALAR_OPS | SET_OPS
 
 # Allow numerics/bools too (no coercion; we validate and compare "as-is")
 InclusionValue = Union[NonEmptyStr, int, float, bool]
