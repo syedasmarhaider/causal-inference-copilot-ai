@@ -138,6 +138,8 @@ FilterOp = Literal["==", "!=","in", "not_in", ">=", "<=", ">", "<"]
 @dataclass(frozen=True, slots=True)
 class CATEInputs:
     x_rows: pd.DataFrame   # already-transformed X in exact training columns/order
+    t1 : Any
+    t0 : Any
     alpha: float = 0.05
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -157,7 +159,7 @@ class CATESuccess(BaseResult):
     fitted_model_id: UUID
     x_cols: List[str]
     # one item per contrast (binary -> 1 item, categorical -> many items)
-    effects: List[Dict[CATEModelResult, Any]] = field(default_factory=lambda: [])
+    effects: Dict[CATEModelResult, Any] = field(default_factory=lambda: {})
     status: Literal["SUCCEEDED"] = field(init=False, default="SUCCEEDED")
 
 

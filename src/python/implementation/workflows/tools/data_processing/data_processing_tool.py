@@ -51,9 +51,19 @@ class InclusionRuleModel(BaseModel):
                 out.append(item)
         return out
  
+
 class InclusionRulesModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    group_key: NonEmptyStr
+    inclusion_rules: List[InclusionRuleModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
+    is_counterfactual: bool = False  
+    
+class InclusionPlanModel(BaseModel):
      model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-     rules: List[InclusionRuleModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]   
+     rules: List[InclusionRulesModel] = Field(default_factory=list)     # pyright: ignore[reportUnknownVariableType]
+    
+     
+     
 
 
 # -----------------------------------------------------------------------------

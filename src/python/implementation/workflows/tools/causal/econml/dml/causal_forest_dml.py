@@ -713,8 +713,7 @@ class CausalForestDMLCausalModel(CausalModel):
                     meta={},
                 )
 
-            effects: List[Dict[CATEModelResult, Any]] = []
-
+    
             if spec.T.kind == "binary":
                 if len(spec.T.control_values) != 1 or len(spec.T.treated_values) != 1:
                     return CommandFailure(
@@ -732,8 +731,18 @@ class CausalForestDMLCausalModel(CausalModel):
                         warnings=[],
                         meta={},
                     )
-                t0 = spec.T.control_values[0]
-                t1s = [spec.T.treated_values[0]]
+                t0 = command.inputs.t0
+                t1 = command.inputs.t1
+                if t0 == t1 or t0 is None or t1 is None:
+                    return CommandFailure(
+                        run_id=command.run_id,
+                        started_at=started_at,
+                        finished_at=now_utc(),
+                        error=ErrorInfo(code="OPTIONS_INVALID", message=f"Invalid contrast: t0 value {t0} is the same as t1 value {t1}.", details={}),
+                        warnings=[],
+                        meta={},
+                    )
+                    
                 
             else:
                 return CommandFailure(
@@ -745,15 +754,13 @@ class CausalForestDMLCausalModel(CausalModel):
                     meta={},
                 )
 
-            for t1_val in t1s:
-                if t1_val == t0:
-                    continue
+  
 
-                item: Dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1_val}}
+            effects: Dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
 
-                try:
-                    item["cate"] = est.effect(X_query, T0=t0, T1=t1_val)  # pyright: ignore
-                except Exception as e:
+            try:
+                effects["cate"] = est.effect(X_query, T0=t0, T1=t1)  # pyright: ignore
+            except Exception as e:
                     return CommandFailure(
                         run_id=command.run_id,
                         started_at=started_at,
@@ -761,33 +768,32 @@ class CausalForestDMLCausalModel(CausalModel):
                         error=ErrorInfo(code="ESTIMATOR_ERROR", message="CATE computation failed (effect).", details={"exception": repr(e)}),
                         warnings=[],
                         meta={},
-                    )
+                )
 
-                try:
-                    interval = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
-                    if interval is None:
-                        warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
-                        item["cate_interval"] = None
-                    else:
-                        item["cate_interval"] = interval
-                except Exception as e:
+            try:
+                interval = est.effect_interval(X_query, T0=t0, T1=t1, alpha=command.inputs.alpha)  # pyright: ignore
+                if interval is None:
+                    warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
+                    effects["cate_interval"] = None
+                else:
+                        effects["cate_interval"] = interval
+            except Exception as e:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
-                    item["cate_interval"] = None
+                    effects["cate_interval"] = None
 
-                try:
+            try:
                     inf = est.effect_inference(X_query, T0=t0, T1=t1_val)  # pyright: ignore
                     if inf is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_inference returned None")
-                        item["cate_inference"] = None
+                        effects["cate_inference"] = None
                     else:
-                        item["cate_inference"] = serialize_inference_obj(inf)
-                except Exception as e:
+                        effects["cate_inference"] = serialize_inference_obj(inf)
+            except Exception as e:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
-                    item["cate_inference"] = None
+                    effects["cate_inference"] = None
 
-                effects.append(item)
 
-            if not effects:
+            if effects.get("cate", None) is None:
                 return CommandFailure(
                     run_id=command.run_id,
                     started_at=started_at,
