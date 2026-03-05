@@ -23,6 +23,7 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_pro
     CATE_SUMMARY_PROMPT,
     CAUSAL_INFERENCE_ATE_SUMMARY_SYSTEM_PROMPT,
     CAUSAL_INFERENCE_ATE_SUMMARY_USER_PROMPT_TEMPLATE,
+    INVALID_PLAN_MESSAGE_PROMPT,
 )
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import CausalInferenceState
 
@@ -444,7 +445,7 @@ def _to_1d_float(arr: Any) -> Optional[np.ndarray]:
     if arr is None:
         return None
     if isinstance(arr, np.ndarray):
-        a = arr
+        a = arr # pyright: ignore[reportUnknownVariableType]
     elif isinstance(arr, (list, tuple)):
         try:
             a = np.asarray(arr, dtype=float)
@@ -453,7 +454,7 @@ def _to_1d_float(arr: Any) -> Optional[np.ndarray]:
     else:
         return None
     if a.ndim == 0:
-        a = a.reshape(1)
+        a = a.reshape(1) # pyright: ignore[reportUnknownVariableType]
     return a.astype(float, copy=False).ravel()
 
 
@@ -540,7 +541,7 @@ def _make_llm_cate_payload_for_group(
 ) -> Dict[str, Any]:
     cate, lo, hi, inf = _extract_effect_fields(effect_obj)
 
-    rules_compact = [
+    rules_compact = [ # pyright: ignore[reportUnknownVariableType]
         {"column": str(r.column), "op": r.op, "values": list(r.values)}
         for r in inclusion_rules
     ]
@@ -674,7 +675,7 @@ def _process_cate_question(
                 CATE_INCLUSION_PROMPT.format(
                     PROTOCOL_SPEC_JSON=protocol.treatment_spec.model_dump(mode="json"),
                     COL_EFFECT_MODIFIERS=protocol.effect_modifiers,
-                    COL_EFFECT_MODIFIERS_VALUES= _format_effect_modifiers_summary(effect_modifiers_summary, effect_modifiers=protocol.effect_modifiers)
+                    COL_EFFECT_MODIFIERS_VALUES= effect_modifiers_summary.model_dump(mode="json")
                 )
                 + f"\n\nUSER_QUESTION:\n{user_q}\n"
                 + (f"\nPrevious error message:\n{error_message}\n" if error_message else "")
@@ -699,12 +700,21 @@ def _process_cate_question(
     is_valid, log = _validate_inclusion_plan(plan, effect_modifiers=protocol.effect_modifiers)
     if not is_valid:
         logging.warning(f"Final inclusion plan is invalid: {log}")
+        invalid_plan_message = _invalid_plan_message(
+            llm=llm,
+            model_name=model_name,
+            effect_modifiers_summary=effect_modifiers_summary,
+            effect_modifiers=protocol.effect_modifiers
+        )
+                                                     
         return CausalInferenceState(
             payload=current_state.payload.model_copy(
-                update={"message": _invalid_plan_message(effect_modifiers=protocol.effect_modifiers, effect_modifiers_summary=effect_modifiers_summary) }
+                update={
+                    "message": invalid_plan_message, 
+                }
             )
         )
-              
+        
     # ---------------------------
     # 3) Load X dataframe and compute CATE per cohort
     # ---------------------------
@@ -724,7 +734,7 @@ def _process_cate_question(
     group_payloads: List[Dict[str, Any]] = []
     non_empty_any = False
 
-    for cohort in plan.rules:
+    for cohort in plan.rules: # pyright: ignore[reportOptionalMemberAccess]
         gk = str(cohort.group_key)
         cohort_df = _apply_rules_with_tool(
             tool=data_processing_tool,
@@ -855,7 +865,7 @@ def _process_cate_question(
     #    - For n<=5 we included raw values
     #    - For n>5 we included robust stats
     # ---------------------------
-    llm_payload = {
+    llm_payload = { # pyright: ignore[reportUnknownVariableType]
         "selected_model": selected_model_fqcn,
         "outcome_kind": outcome_kind,
         "treatment_column": getattr(protocol.treatment_spec, "column", None),
@@ -959,85 +969,25 @@ def _filter_dataset_summary_to_effect_modifiers(
         }
     )   
 
-def _format_effect_modifiers_summary(
-    summary: DatasetSummaryModel,
-    effect_modifiers: Sequence[str],
-    *,
-    max_cats: int = 6,
-) -> str:
-    wanted = {str(c) for c in effect_modifiers}
-
-    lines: list[str] = []
-    for p in summary.profiles:
-        name = str(p.name)
-        if name not in wanted:
-            continue
-
-        kind = getattr(p, "inferred_kind", "UNKNOWN")
-        miss = f"{p.n_missing}/{p.n_rows} ({p.missing_rate:.1%})"
-
-        # Render per kind
-        if kind == "NUMERIC":
-            s = p.summary
-            q = s.quantiles or {}
-            q25 = q.get("0.25")
-            q50 = q.get("0.50")
-            q75 = q.get("0.75")
-            q_part = ""
-            if q25 is not None and q50 is not None and q75 is not None:
-                q_part = f", IQR≈[{q25:.3g}, {q75:.3g}], median≈{q50:.3g}"
-
-            lines.append(
-                f"- {name} (numeric): min={s.min}, max={s.max}, mean={s.mean}, std={s.std}{q_part}; missing={miss}"
-            )
-
-        elif kind == "CATEGORICAL":
-            s = p.summary
-            top = s.top_categories[:max_cats]
-            top_str = ", ".join([f"{c.value} ({c.count})" for c in top]) if top else "—"
-            more = f", +{s.other_count} other" if s.other_count else ""
-            lines.append(
-                f"- {name} (categorical): top={top_str}{more}; missing={miss}"
-            )
-
-        elif kind == "BOOLEAN":
-            s = p.summary
-            # counts keys are stringified bools
-            top_str = ", ".join([f"{k}={v}" for k, v in s.counts.items()])
-            lines.append(
-                f"- {name} (boolean): {top_str}; missing={miss}"
-            )
-
-        elif kind == "DATETIME":
-            s = p.summary
-            lines.append(
-                f"- {name} (datetime): min={s.min}, max={s.max}; missing={miss}"
-            )
-
-        else:  # OTHER
-            s = p.summary
-            sample = ", ".join(s.distinct_values_sample[:max_cats]) if s.distinct_values_sample else "—"
-            lines.append(
-                f"- {name} (other): sample values={sample}; missing={miss}"
-            )
-
-    return "\n".join(lines) if lines else "(No effect modifier profiles available.)"
-
 
 def _invalid_plan_message(
     *,
+    llm: LLMService,
+    model_name: str,
     effect_modifiers: Sequence[str],
     effect_modifiers_summary: DatasetSummaryModel,
+    history: Optional[Sequence[ChatMessage]] = None,
 ) -> str:
+    last_user_message = _last_user_text(history)
     cols = [str(c) for c in effect_modifiers]
-    summary_txt = _format_effect_modifiers_summary(effect_modifiers_summary, cols)
-
-    return (
-        "I couldn't build a valid cohort from your question after multiple attempts.\n\n"
-        "How to ask a cohort question (constraints):\n"
-        "• Cohort rules must use ONLY effect modifiers (X)\n"
-        "Allowed effect modifiers (X):\n"
-        f"• {', '.join(cols)}\n\n"
-        "Effect modifiers — available values / ranges (to help you pick valid filters):\n"
-        f"{summary_txt}\n\n"
-    )         
+    return llm.generate(
+        system_prompt=None,
+        user_prompt=INVALID_PLAN_MESSAGE_PROMPT.format(
+            EFFECT_MODIFIERS=cols,
+            DATA_SUMMARY= effect_modifiers_summary.model_dump(mode="json"),
+            LAST_USER_MESSAGE=last_user_message,
+        ),
+        config=LLMConfig(temperature=0.7, model=model_name),
+        history=None,
+ 
+    ).content.strip()        
