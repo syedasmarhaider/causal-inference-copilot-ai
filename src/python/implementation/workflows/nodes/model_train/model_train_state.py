@@ -18,7 +18,6 @@ class ModelTrainPayload(BaseModel):
     trained_model_id: Optional[UUID] = None
     
     column_transformation_plan: Optional[TransformPlan] = None
-    col_tranformation_not_needed: Optional[bool] = None  # in case LLM determines no transformation needed, to distinguish from not run yet
     training_warnings: Optional[str] = None
     order_X: Optional[List[str]] = None
     order_W: Optional[List[str]] = None
@@ -51,7 +50,7 @@ class ModelTrainState(State):
     def status(self) -> Status:
         if self.error is not None:
             return "ABORTED"
-        if self.payload.trained_model_id is not None and (self.payload.column_transformation_plan is not None or self.payload.col_tranformation_not_needed is not None and self.payload.col_tranformation_not_needed is True):
+        if self.payload.trained_model_id is not None:
             return "DONE"
         return "PENDING"
 

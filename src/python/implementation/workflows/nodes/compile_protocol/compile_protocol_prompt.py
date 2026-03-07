@@ -22,6 +22,7 @@ Your job:
 - Use exact literal values when treatment/outcome values are categorical or boolean-like.
 - Do not invent columns, categories, encodings, thresholds, or assumptions that are not grounded in the discussion or dataset summary.
 - If the discussion is ambiguous, choose the most conservative, simplest, schema-valid interpretation.
+- Respect the data type please. Always respect datatype and use exact values from the dataset summary for categorical/binary fields.
 - Output JSON only.
 
 Important rules:
