@@ -62,8 +62,8 @@ from python.implementation.workflows.tools.data_processing.data_processing_tool 
     SCALAR_OPS,
     SET_OPS,
     DataProcessingTool,
+    IncExcRuleModel,
     InclusionPlanModel,
-    InclusionRuleModel,
 )
 from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import CausalDataProfilingTool
 from python.implementation.workflows.tools.data_profiling.plots.model import CohortCate, GraphImage
@@ -530,7 +530,7 @@ def _extract_effect_fields(effect_obj: Dict[CATEModelResult, Any]) -> Tuple[Opti
 def _make_llm_cate_payload_for_group(
     *,
     group_key: str,
-    inclusion_rules: Sequence[InclusionRuleModel],
+    inclusion_rules: Sequence[IncExcRuleModel],
     is_counterfactual: bool,
     t0: Any,
     t1: Any,
@@ -589,7 +589,7 @@ def _apply_rules_with_tool(
     *,
     tool: DataProcessingTool,
     df: pd.DataFrame,
-    rules: Sequence[InclusionRuleModel],
+    rules: Sequence[IncExcRuleModel],
 ) -> pd.DataFrame:
     """
     Use your existing DataProcessingTool (do not reimplement filtering logic).

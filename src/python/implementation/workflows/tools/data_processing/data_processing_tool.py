@@ -90,7 +90,6 @@ class IncExcRuleModel(BaseModel):
 
 class ExclusionRulesModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
     exclusion_rules: List[IncExcRuleModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
 
 

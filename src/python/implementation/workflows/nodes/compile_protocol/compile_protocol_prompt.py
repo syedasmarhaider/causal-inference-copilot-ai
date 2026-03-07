@@ -2,177 +2,150 @@ from __future__ import annotations
 
 
 def compile_protocol_node_info() -> str:
- return """
-        "Convert the confirmed discussion record into a strict ProtocolState. "
-        "Enforce schema/enums; do not invent columns/windows/semantics. "
-        "If compilation fails, route back to PROTOCOL_DISCUSSION with precise fix instructions."
-        "It is an automated step and does not require user's input."
-    """
+    return (
+        "Compiles the user discussion plus dataset summary into a structured ProtocolSpec. "
+        "This node extracts only the causal protocol (treatment, outcome, covariates, effect modifiers, etc.). "
+        "Exclusion rules are compiled separately by a dedicated structured call."
+    )
+
 
 def compile_protocol_prompt() -> str:
     return """
-You are a STRICT compiler that converts protocol text + dataset metadata into a JSON object.
-If there is a router message, follow the routers intructions.
+You are compiling a causal inference protocol into a strict JSON object that must match the ProtocolSpec schema exactly.
 
-HARD OUTPUT RULES:
-- Output MUST be valid JSON and NOTHING else.
-- No markdown. No commentary.
-- Must match the schema EXACTLY (all keys present).
-- NEVER invent dataset column names.
-- For any field that requires a column name (exclusions/treatment_spec/outcome_spec/covariates/effect_modifiers),
-  you MUST choose from DATASET_COLUMNS only.
-- For any field that requires categorical values (treated_values/control_values/event_values/non_event_values/included_levels),
-  you MUST choose EXACT string tokens from DATASET_VALUE_VOCAB for that column.
+Your job:
+- Read the protocol discussion carefully.
+- Read the dataset summary carefully.
+- Produce ONLY the protocol specification.
+- Do NOT include exclusion rules here. Exclusions are compiled separately.
+- Use only column names that exist in the dataset summary.
+- Use exact literal values when treatment/outcome values are categorical or boolean-like.
+- Do not invent columns, categories, encodings, thresholds, or assumptions that are not grounded in the discussion or dataset summary.
+- If the discussion is ambiguous, choose the most conservative, simplest, schema-valid interpretation.
+- Output JSON only.
 
-STRICT VALUE RULE:
-- If protocol says "Former/Current" but the dataset tokens are ["Former","Current"], you must output:
-  treated_values=["Former","Current"] (exact tokens).
-- Do NOT output labels that do not appear in the dataset vocabulary for that column.
+Important rules:
+- Treatment and outcome columns must be real dataset columns.
+- For binary treatment/outcome values, use exact values consistent with the dataset summary whenever possible.
+- For continuous outcomes, select a numeric outcome column only.
+- Do not emit explanatory text.
+- Do not wrap JSON in markdown.
 
-EXCLUSIONS SEMANTICS:
-- "exclusions" are ROWS TO DROP.
-- Do NOT use exclusions to implement treatment/outcome inclusion.
-- If no explicit exclusions -> exclusions: [].
-- Nul/miising values are automatically excluded, do NOT add exclusions for that.
-
-SCHEMA (must match exactly):
-{
-  "exclusions": [
-    {"column": string, "op": "=="|"in"|"not_in"|">="|"<="|">"|"<", "values": [string], "reason": string}
-  ],
-
-  "time_zero_type": "COLUMN"|"CONCEPTUAL",
-  "time_zero": string,
-  "time_zero_definition": string,
-
-  "treatment_spec": (
-     {"kind":"binary","column":string,"treated_values":[string],"control_values":[string]}
-  ),
-  "treatment_window_start": string,
-  "treatment_window_end": string,
-  "treatment_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",
-
-  "outcome_spec": (
-     {"kind":"binary","column":string,"event_values":[string],"non_event_values":[string]}
-   | {"kind":"continuous","column":string,"valid_min":number?,"valid_max":number?}
-  ),
-  "outcome_window": string,
-  "outcome_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",
-
-  "covariates": [string],
-  "effect_modifiers": [string],
-
-  "experiment_type": "RCT"|"Observational"
-}
-
-DEFAULTS:
-- experiment_type: "Observational" unless randomization is explicitly described.
-- If dataset has no time/date columns -> time_zero_type="CONCEPTUAL".
-- If time_zero_type="CONCEPTUAL":
-  - time_zero="CONCEPTUAL_BASELINE"
-  - time_zero_definition="shared conceptual baseline at data cut-off"
-  - treatment_window_start="0", treatment_window_end="0", treatment_window_unit="days"
-  - outcome_window="0", outcome_window_unit="days"
-- covariates/effect_modifiers: ONLY dataset columns explicitly mentioned in the protocol text; else [].
-
-INPUTS:
-PROTOCOL_TEXT:
+Protocol discussion:
 {{PROTOCOL_TEXT}}
-{{ROUTER_MESSAGE}}
 
-DATASET_COLUMNS (ONLY allowed column names):
-{{DATASET_COLUMNS_JSON}}
-
-DATASET_VALUE_VOCAB (EXACT allowed categorical tokens per column):
-{{DATASET_VALUE_VOCAB_JSON}}
-
-DATASET_SUMMARY_JSON:
+Dataset summary JSON:
 {{DATASET_SUMMARY_JSON}}
 """.strip()
 
 
 def compile_protocol_repair_prompt() -> str:
     return """
-You are a STRICT JSON repair tool.
+You are repairing a previously generated ProtocolSpec JSON.
 
-HARD OUTPUT RULES:
-- Output MUST be valid JSON and NOTHING else.
-- No markdown. No commentary.
-- Must match the schema EXACTLY (all keys present).
-- NEVER invent dataset column names (must use DATASET_COLUMNS).
-- NEVER invent categorical tokens (must use DATASET_VALUE_VOCAB for that column).
+Your job:
+- Read the protocol discussion.
+- Read the dataset summary.
+- Read the previous protocol JSON.
+- Read the validation errors.
+- Return a corrected ProtocolSpec JSON only.
+- Do NOT include exclusion rules here. Exclusions are compiled separately.
+- Fix only what is necessary to make the protocol valid and faithful to the discussion and dataset.
+- Do not invent columns, values, or assumptions.
+- Output JSON only.
 
-Fix the JSON so that:
-- all required keys exist
-- enums are correct
-- columns exist in DATASET_COLUMNS
-- categorical tokens are EXACT members of DATASET_VALUE_VOCAB[column]
+Repair priorities:
+1. Use only real dataset columns.
+2. Use exact literal values grounded in the dataset summary.
+3. Keep the protocol semantically faithful to the user discussion.
+4. Prefer omission over speculation.
 
-SCHEMA (must match exactly):
-{
-  "exclusions": [
-    {"column": string, "op": "=="|"in"|"not_in"|">="|"<="|">"|"<", "values": [string], "reason": string}
-  ],
-
-  "time_zero_type": "COLUMN"|"CONCEPTUAL",
-  "time_zero": string,
-  "time_zero_definition": string,
-
-  "treatment_spec": (
-     {"kind":"binary","column":string,"treated_values":[string],"control_values":[string]}
-  ),
-  "treatment_window_start": string,
-  "treatment_window_end": string,
-  "treatment_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",
-
-  "outcome_spec": (
-     {"kind":"binary","column":string,"event_values":[string],"non_event_values":[string]}
-   | {"kind":"continuous","column":string,"valid_min":number?,"valid_max":number?}
-  ),
-  "outcome_window": string,
-  "outcome_window_unit": "minutes"|"hours"|"days"|"weeks"|"months"|"years",
-
-  "covariates": [string],
-  "effect_modifiers": [string],
-
-  "experiment_type": "RCT"|"Observational"
-}
-
-INPUTS:
-PROTOCOL_TEXT:
+Protocol discussion:
 {{PROTOCOL_TEXT}}
 
-DATASET_COLUMNS:
-{{DATASET_COLUMNS_JSON}}
-
-DATASET_VALUE_VOCAB:
-{{DATASET_VALUE_VOCAB_JSON}}
-
-DATASET_SUMMARY_JSON:
+Dataset summary JSON:
 {{DATASET_SUMMARY_JSON}}
 
-PREVIOUS_JSON:
-{{PREVIOUS_JSON}}
+Previous protocol JSON:
+{{PREVIOUS_PROTOCOL_JSON}}
 
-VALIDATION_ERRORS:
+Previous exclusion JSON (for context only; do not output exclusions here):
+{{PREVIOUS_EXCLUSION_JSON}}
+
+Validation errors:
 {{VALIDATION_ERRORS}}
 """.strip()
 
 
+def compile_exclusion_prompt() -> str:
+    return """
+You are compiling dataset exclusion rules into a strict JSON object that must match the ExclusionRulesModel schema exactly.
 
-def protocol_validate_through_llm_prompt() -> str:
-    return """You are a STRICT protocol validator.
-  You will see the protcol JSON, the original protocol discussion 
-  text, and the dataset summary.
-  Validate that the JSON is a correct interpretation of the protocol discussion and is semantically consistent with the dataset summary.
-  Check if columes specified exists their types are correct, inclusion crtieria is good.
-  return detail response what is wrong and how to fix it if there are any issues otherwise return only one token "VALID".
-INPUTS:
-PROTOCOL_JSON:
+Your job:
+- Read the protocol discussion.
+- Read the compiled protocol JSON.
+- Read the dataset summary.
+- Extract ONLY row-level exclusion rules.
+- Output JSON only.
+
+What counts as an exclusion rule:
+- Conditions that remove rows from the analysis cohort.
+- Example patterns: impossible values, ineligible groups, records outside requested cohort, rows with unwanted category values, rows outside requested numeric/date thresholds.
+- But exclusion rules should be grounded in the protocol discussion. Do not come up with your own exclusion rules.
+
+Important rules:
+- Use only real dataset columns.
+- Use exact values grounded in the dataset summary whenever possible.
+- Prefer an empty exclusion_rules list over speculative exclusions.
+- Use None only if the discussion explicitly indicates missing/NA/null-based exclusion logic.
+- Do not duplicate protocol fields here unless they are genuinely row-exclusion logic.
+- Output JSON only.
+- Do not wrap JSON in markdown.
+- If there are no exclusion discussions in the Protocol discussion, return an empty exclusion_rules list.
+
+Protocol discussion:
+{{PROTOCOL_TEXT}}
+
+Compiled protocol JSON:
 {{PROTOCOL_JSON}}
-PROTOCOL_DISCUSSION_TEXT:
-{{PROTOCOL_DISCUSSION_TEXT}}
-DATASET_SUMMARY_JSON:
+
+Dataset summary JSON:
 {{DATASET_SUMMARY_JSON}}
 """.strip()
-  
+
+
+def compile_exclusion_repair_prompt() -> str:
+    return """
+You are repairing a previously generated ExclusionRulesModel JSON.
+
+Your job:
+- Read the protocol discussion.
+- Read the compiled protocol JSON.
+- Read the dataset summary.
+- Read the previous exclusion JSON.
+- Read the validation errors.
+- Return a corrected ExclusionRulesModel JSON only.
+- Output JSON only.
+
+Repair priorities:
+1. Use only real dataset columns.
+2. Use exact values grounded in the dataset summary.
+3. Keep only true row-level exclusion logic.
+4. Prefer fewer rules over speculative rules.
+5. Preserve valid rules and fix only what is broken.
+
+Protocol discussion:
+{{PROTOCOL_TEXT}}
+
+Compiled protocol JSON:
+{{PROTOCOL_JSON}}
+
+Dataset summary JSON:
+{{DATASET_SUMMARY_JSON}}
+
+Previous exclusion JSON:
+{{PREVIOUS_EXCLUSION_JSON}}
+
+Validation errors:
+{{VALIDATION_ERRORS}}
+""".strip()
