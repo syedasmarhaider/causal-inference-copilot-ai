@@ -29,7 +29,6 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_node import ValidateCleanProtocolNode
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import ValidateCleanProtocolState
-from python.implementation.workflows.utils.utils import DEFAULT_MODEL_GEMNI
 
 class LLMAssistedRouterRouter(Router):
     def __init__(
@@ -39,7 +38,6 @@ class LLMAssistedRouterRouter(Router):
         model_name: Optional[str] = None,
     ) -> None:
         self._llm = llm
-        self._model_name = model_name or DEFAULT_MODEL_GEMNI
         self._next_state_names_map: Mapping[str, Optional[str]] = init_next_state_names()
         self._node_name_to_description_map: Mapping[str, str] = get_node_name_with_description()
     
@@ -79,7 +77,7 @@ class LLMAssistedRouterRouter(Router):
         if status == "ABORTED":
             return _decision_on_aborted_state(
                 llm=self._llm,
-                model_name=self._model_name,
+                model_name="basic",
                 current_state=current_state,
                 get_next_state_names_map=self._next_state_names_map,
                 get_node_name_to_description_map=self._node_name_to_description_map,

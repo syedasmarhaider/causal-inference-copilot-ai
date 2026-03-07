@@ -19,8 +19,8 @@ Provider = Literal["gemini"]
 DEFAULT_GEMINI_MODEL_MAP: Mapping[AvailableModelsKey, str] = {
     "mini": "gemini-2.5-flash",
     "basic": "gemini-2.5-flash",
-    "pro": "gemini-3.0-pro",
-    "thinking": "gemini-2.5-pro",
+    "pro": "gemini-3-flash-preview",
+    "thinking": "gemini-3.1-pro-preview",
 }
 
 
