@@ -12,18 +12,6 @@ from python.domain.models.models import NonEmptyStr
 # ----------------------------
 TimeZeroType = Literal["COLUMN", "CONCEPTUAL"]
 WindowUnit = Literal["minutes", "hours", "days", "weeks", "months", "years"]
-FilterOp = Literal["==", "in", "not_in", ">=", "<=", ">", "<"]
-
-
-# ----------------------------
-# Models
-# ----------------------------
-class ExclusionRuleModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    column: NonEmptyStr
-    op: FilterOp
-    values: List[NonEmptyStr]  # allow empty list for is_null/not_null; items must be non-empty if present
-
 
 class BinaryTreatmentSpecModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -63,9 +51,6 @@ OutcomeSpecModel = Annotated[
 
 class ProtocolSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    
-    exclusions: List[ExclusionRuleModel]
-
     time_zero_type: TimeZeroType
     time_zero: NonEmptyStr
     time_zero_definition: NonEmptyStr

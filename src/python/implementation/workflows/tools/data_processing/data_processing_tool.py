@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, List, Sequence, Union
+from typing import ClassVar, List, Sequence, Union, cast
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 from typing_extensions import Literal
 
 from python.domain.models.models import NonEmptyStr
@@ -12,61 +21,91 @@ from python.domain.workflows.tool import Tool
 
 
 # -----------------------------------------------------------------------------
-# Models
+# Types / constants
 # -----------------------------------------------------------------------------
 
-InclusionOperator = Literal["==", "in", "not_in", ">=", "<=", ">", "<"]
+IncExcOperator = Literal["==", "in", "not_in", ">=", "<=", ">", "<"]
+RuleCombineMode = Literal["all", "any"]
+
 SCALAR_OPS = {"==", ">=", "<=", ">", "<"}
 SET_OPS = {"in", "not_in"}
 ALLOWED_OPS = SCALAR_OPS | SET_OPS
 
-# Allow numerics/bools too (no coercion; we validate and compare "as-is")
-InclusionValue = Union[NonEmptyStr, int, float, bool]
+# Strict, no coercion, plus explicit NA/null support via None.
+ExcIncValue = Union[NonEmptyStr, StrictInt, StrictFloat, StrictBool, None]
 
 
-class InclusionRuleModel(BaseModel):
-    """
-    A single rule applied to df[column], ANDed with other rules.
+# -----------------------------------------------------------------------------
+# Models
+# -----------------------------------------------------------------------------
 
-    Notes:
-      - values are not parsed/coerced. They are used as provided.
-      - for ops requiring a scalar threshold, values must have exactly 1 element.
-      - for membership ops, values must be non-empty.
-    """
+class IncExcRuleModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     column: NonEmptyStr
-    op: InclusionOperator
-    values: List[InclusionValue] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
+    op: IncExcOperator
+    values: List[ExcIncValue] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
 
     @field_validator("values")
     @classmethod
-    def _strip_string_values(cls, v: List[InclusionValue]) -> List[InclusionValue]:
-        # NonEmptyStr already strips, but if caller passes plain str, keep things clean.
-        out: List[InclusionValue] = []
+    def _strip_string_values(cls, v: List[ExcIncValue]) -> List[ExcIncValue]:
+        out: List[ExcIncValue] = []
         for item in v:
+            if item is None:
+                out.append(item)
+                continue
+
             if isinstance(item, str):
                 s = item.strip()
                 if not s:
                     raise ValueError("values cannot contain empty strings")
-                out.append(s)
+                out.append(cast(ExcIncValue, s))
             else:
                 out.append(item)
         return out
- 
+
+    @model_validator(mode="after")
+    def _validate_op_values(self) -> "IncExcRuleModel":
+        if self.op in SCALAR_OPS:
+            if len(self.values) != 1:
+                raise ValueError(
+                    f"Rule on '{self.column}' with op '{self.op}' requires exactly 1 value; "
+                    f"got {len(self.values)}."
+                )
+            if self.op in {">=", "<=", ">", "<"} and self.values[0] is None:
+                raise ValueError(
+                    f"Rule on '{self.column}' with op '{self.op}' cannot use None/NA."
+                )
+
+        elif self.op in SET_OPS:
+            if len(self.values) < 1:
+                raise ValueError(
+                    f"Rule on '{self.column}' with op '{self.op}' requires a non-empty values list."
+                )
+        else:
+            raise ValueError(f"Unsupported op '{self.op}' for column '{self.column}'.")
+
+        return self
+
+
+class ExclusionRulesModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    exclusion_rules: List[IncExcRuleModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
+
 
 class InclusionRulesModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     group_key: NonEmptyStr
-    inclusion_rules: List[InclusionRuleModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
-    is_counterfactual: bool = False  
-    
+    inclusion_rules: List[IncExcRuleModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
+    is_counterfactual: bool = False
+
+
 class InclusionPlanModel(BaseModel):
-     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-     rules: List[InclusionRulesModel] = Field(default_factory=list)     # pyright: ignore[reportUnknownVariableType]
-    
-     
-     
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    rules: List[InclusionRulesModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
 
 
 # -----------------------------------------------------------------------------
@@ -77,136 +116,217 @@ class InclusionPlanModel(BaseModel):
 class DataProcessingTool(Tool):
     NAME: ClassVar[str] = "DATA_PROCESSING"
 
-    """
-    Strict semantics:
-      - No value coercion/parsing. Values are applied as provided.
-      - If the operation cannot be applied (dtype mismatch, invalid compare), raise.
-      - Rows with NA in the target column are excluded for all ops.
-      - Rules are ANDed together.
-    """
-
     def get_tool_name(self) -> str:
         return self.NAME
 
     def get_tool_info(self) -> str:
         return (
-            "Tool for processing datasets, including applying inclusion rules "
-            "to filter rows based on column values."
+            "Tool for processing datasets, including applying inclusion and exclusion "
+            "rules to filter rows based on column values."
         )
+
+    # -------------------------------------------------------------------------
+    # Public API
+    # -------------------------------------------------------------------------
 
     def apply_inclusion_rules(
         self,
         df: pd.DataFrame,
-        rules: Sequence[InclusionRuleModel],
+        rules: Sequence[IncExcRuleModel],
         *,
+        combine: RuleCombineMode = "all",
         copy: bool = True,
         deep_copy: bool = True,
     ) -> pd.DataFrame:
         """
-        Apply inclusion rules to `df` and return filtered df.
+        Keep rows that match the inclusion rules.
 
-        Parameters
-        ----------
-        df:
-            Input dataframe.
-        rules:
-            Rules ANDed together.
-        copy / deep_copy:
-            If copy=True, return a copy of the filtered df (deep=deep_copy).
-
-        Returns
-        -------
-        pd.DataFrame
-            Filtered dataframe (possibly empty).
+        Defaults to AND semantics via combine='all'.
         """
+        matched_mask = self._evaluate_rules(df=df, rules=rules, combine=combine)
+        out = df.loc[matched_mask]
+        return out.copy(deep=deep_copy) if copy else out
+
+    def apply_exclusion_rules(
+        self,
+        df: pd.DataFrame,
+        rules: Sequence[IncExcRuleModel],
+        *,
+        combine: RuleCombineMode = "any",
+        copy: bool = True,
+        deep_copy: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Remove rows that match the exclusion rules.
+
+        Defaults to OR semantics via combine='any':
+        if a row matches any exclusion rule, it is removed.
+        """
+        matched_mask = self._evaluate_rules(df=df, rules=rules, combine=combine)
+        out = df.loc[~matched_mask]
+        return out.copy(deep=deep_copy) if copy else out
+
+    def apply_inclusion_model(
+        self,
+        df: pd.DataFrame,
+        model: InclusionRulesModel,
+        *,
+        copy: bool = True,
+        deep_copy: bool = True,
+    ) -> pd.DataFrame:
+        return self.apply_inclusion_rules(
+            df=df,
+            rules=model.inclusion_rules,
+            combine="all",
+            copy=copy,
+            deep_copy=deep_copy,
+        )
+
+    def apply_exclusion_model(
+        self,
+        df: pd.DataFrame,
+        model: ExclusionRulesModel,
+        *,
+        copy: bool = True,
+        deep_copy: bool = True,
+    ) -> pd.DataFrame:
+        return self.apply_exclusion_rules(
+            df=df,
+            rules=model.exclusion_rules,
+            combine="any",
+            copy=copy,
+            deep_copy=deep_copy,
+        )
+
+    # -------------------------------------------------------------------------
+    # Core evaluation
+    # -------------------------------------------------------------------------
+
+    def _evaluate_rules(
+        self,
+        *,
+        df: pd.DataFrame,
+        rules: Sequence[IncExcRuleModel],
+        combine: RuleCombineMode,
+    ) -> pd.Series:
+        if combine not in {"all", "any"}:
+            raise ValueError(f"Unsupported combine mode: {combine!r}")
+
         if not rules:
-            return df.copy(deep=deep_copy) if copy else df
+            identity = True if combine == "all" else False
+            return pd.Series(identity, index=df.index, dtype=bool)
 
-        # Column existence validation up front
-        missing_cols = [str(r.column) for r in rules if str(r.column) not in df.columns]
-        if missing_cols:
-            raise KeyError(
-                f"InclusionRuleModel.column not found in df: {missing_cols}. "
-                f"Available columns: {list(df.columns)}"
-            )
+        self._validate_columns_exist(df=df, rules=rules)
 
-        mask = pd.Series(True, index=df.index, dtype=bool)
-
+        masks: List[pd.Series] = []
         for r in rules:
-            col = str(r.column)
-            s = df[col]
-            non_na = s.notna()
-
-            self._validate_rule_values(col=col, op=r.op, values=r.values)
+            s = df[str(r.column)]
 
             try:
-                rule_mask = self._apply_op(series=s, non_na=non_na, op=r.op, values=r.values, column=col)
+                rule_mask = self._build_rule_mask(
+                    series=s,
+                    op=r.op,
+                    values=r.values,
+                    column=str(r.column),
+                )
             except Exception as e:
                 raise TypeError(
-                    f"Failed applying inclusion rule: column='{col}', op='{r.op}', "
+                    f"Failed applying rule: column='{r.column}', op='{r.op}', "
                     f"values={r.values}, series_dtype='{s.dtype}'. Reason: {e}"
                 ) from e
 
-            mask &= rule_mask
-            if not mask.any():
-                empty = df.iloc[0:0]
-                return empty.copy(deep=deep_copy) if copy else empty
+            masks.append(rule_mask)
 
-        out = df.loc[mask]
-        return out.copy(deep=deep_copy) if copy else out
+        if combine == "all":
+            out = pd.Series(True, index=df.index, dtype=bool)
+            for m in masks:
+                out &= m
+                if not out.any():
+                    break
+            return out
 
-    @staticmethod
-    def _validate_rule_values(*, col: str, op: InclusionOperator, values: List[InclusionValue]) -> None:
-        if op in ("==", ">=", "<=", ">", "<"):
-            if len(values) != 1:
-                raise ValueError(
-                    f"Rule on '{col}' with op '{op}' requires exactly 1 value; got {len(values)}."
-                )
-        elif op in ("in", "not_in"):
-            if len(values) < 1:
-                raise ValueError(f"Rule on '{col}' with op '{op}' requires a non-empty values list.")
-        else:
-            raise ValueError(f"Unsupported op '{op}' for column '{col}'.")
+        out = pd.Series(False, index=df.index, dtype=bool)
+        for m in masks:
+            out |= m
+            if out.all():
+                break
+        return out
 
     @staticmethod
-    def _is_numeric_like_series(series: pd.Series) -> bool:
-        # “numeric-like” for threshold comparisons
-        return (
-            pd.api.types.is_numeric_dtype(series)
-            or pd.api.types.is_bool_dtype(series)
-            or pd.api.types.is_datetime64_any_dtype(series)
-            or pd.api.types.is_timedelta64_dtype(series)
-        )
+    def _validate_columns_exist(
+        *,
+        df: pd.DataFrame,
+        rules: Sequence[IncExcRuleModel],
+    ) -> None:
+        missing_cols = [str(r.column) for r in rules if str(r.column) not in df.columns]
+        if missing_cols:
+            raise KeyError(
+                f"Rule columns not found in df: {missing_cols}. "
+                f"Available columns: {list(df.columns)}"
+            )
+
+    # -------------------------------------------------------------------------
+    # Rule application
+    # -------------------------------------------------------------------------
 
     @classmethod
-    def _apply_op(
+    def _build_rule_mask(
         cls,
         *,
         series: pd.Series,
-        non_na: pd.Series,
-        op: InclusionOperator,
-        values: List[InclusionValue],
+        op: IncExcOperator,
+        values: List[ExcIncValue],
         column: str,
     ) -> pd.Series:
-        # Equality / membership work for most dtypes (strict: no coercion)
+        is_na = series.isna()
+        non_na = ~is_na
+
         if op == "==":
             v = values[0]
+            if v is None:
+                return is_na
             return non_na & (series == v)
 
         if op == "in":
-            return non_na & series.isin(values)
+            non_null_values = [v for v in values if v is not None]
+            wants_null = any(v is None for v in values)
+
+            mask = pd.Series(False, index=series.index, dtype=bool)
+
+            if non_null_values:
+                mask |= series.isin(non_null_values)
+            if wants_null:
+                mask |= is_na
+
+            return mask
 
         if op == "not_in":
-            return non_na & ~series.isin(values)
+            non_null_values = [v for v in values if v is not None]
+            excludes_null = any(v is None for v in values)
 
-        # Threshold comparisons: guard against silent lexicographic object comparisons
-        if not cls._is_numeric_like_series(series):
+            # Base strict behavior: missing rows are not kept unless explicitly
+            # expressing "not_in [None]" semantics, which still means "keep non-missing only".
+            mask = non_na.copy()
+
+            if non_null_values:
+                mask &= ~series.isin(non_null_values)
+            if excludes_null:
+                mask &= non_na
+
+            return mask
+
+        if not cls._is_threshold_compatible_series(series):
             raise TypeError(
-                f"Threshold op '{op}' requires numeric/bool/datetime-like column; "
+                f"Threshold op '{op}' requires numeric/bool/datetime/timedelta-like column; "
                 f"got dtype '{series.dtype}' for column '{column}'."
             )
 
         v = values[0]
+        if v is None:
+            raise TypeError(
+                f"Threshold op '{op}' cannot be used with None/NA on column '{column}'."
+            )
+
         if op == ">=":
             return non_na & (series >= v)
         if op == "<=":
@@ -216,5 +336,13 @@ class DataProcessingTool(Tool):
         if op == "<":
             return non_na & (series < v)
 
-        # unreachable due to Literal typing
         raise ValueError(f"Unsupported op '{op}' for column '{column}'.")
+
+    @staticmethod
+    def _is_threshold_compatible_series(series: pd.Series) -> bool:
+        return (
+            pd.api.types.is_numeric_dtype(series)
+            or pd.api.types.is_bool_dtype(series)
+            or pd.api.types.is_datetime64_any_dtype(series)
+            or pd.api.types.is_timedelta64_dtype(series)
+        )

@@ -4,12 +4,12 @@ from datetime import datetime
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from uuid import UUID
 
 from pydantic import ValidationError
 
-from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
+from python.domain.service.llm_service import AvailableModelsKey, ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
@@ -18,7 +18,8 @@ from python.implementation.workflows.nodes.compile_protocol import compile_proto
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_deps import CompileProtocolDeps
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolPayloadModel, CompileProtocolState
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, ContinuousOutcomeSpecModel,ProtocolSpec
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool, DatasetSummaryModel
+from python.implementation.workflows.tools.data_processing.data_processing_tool import ExclusionRulesModel
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +54,6 @@ class CompileProtocolNode(Node):
         previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
     ) -> State:
-        dataset_profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))
         deps = CompileProtocolDeps.from_loaded(previous_state_dependencies)
         ld = deps.load_dataset
         ds_summary: DatasetSummaryModel | None = ld.payload.summary
@@ -61,11 +61,11 @@ class CompileProtocolNode(Node):
         protocol_discussion = deps.protocol_discussion.payload.discussion
         if len(protocol_discussion.strip()) < 10:
             raise ValueError("CompileProtocolNode requires non-empty protocol discussion from ProtocolDiscussionState")
-        
-        dataset_summary_json_str = dataset_profiling_tool.dataset_summary_to_json(ds_summary) # sanity check for serializability
+    
         last_json: str = ""
         last_errors: List[str] = []
         last_issues: List[Dict[str, Any]] = []
+        dataset_summary_json_str = ds_summary.model_dump_json()
 
         for attempt in range(1, max(1, self.max_attempts) + 1):
             prompt = _build_prompt(
@@ -79,7 +79,7 @@ class CompileProtocolNode(Node):
             try:
                 protocol_model = _llm_protocol_model(
                     llm=self.llm,
-                    model_name=self.model_name,
+                    model_name="basic",
                     prompt=prompt,
                     history=messages_history,
                     json_attempts=max(1, self.json_attempts),
@@ -93,7 +93,7 @@ class CompileProtocolNode(Node):
                 
                 llm_validate_response = _validate_through_llm(
                     llm=self.llm,
-                    model_name=self.model_name,
+                    model_name="basic",
                     protocol=protocol_model,
                     protocol_discussion=protocol_discussion,
                     dataset_summary_json_str=dataset_summary_json_str,
@@ -144,10 +144,10 @@ class CompileProtocolNode(Node):
 # LLM call
 # =============================================================================
 
-def _llm_protocol_model(
+def _get_protocol_model(
     *,
     llm: LLMService,
-    model_name: str,
+    model_name: AvailableModelsKey,
     prompt: str,
     history: Optional[Sequence[ChatMessage]],
     json_attempts: int,
@@ -161,12 +161,30 @@ def _llm_protocol_model(
         history=history,
         max_attempts=max(1, json_attempts),
     )
+    
+def _get_exclusion_model(
+    *,
+    llm: LLMService,
+    model_name: AvailableModelsKey,
+    prompt: str,
+    history: Optional[Sequence[ChatMessage]],
+    json_attempts: int,
+) -> ExclusionRulesModel:
+    cfg = LLMConfig(model=model_name, temperature=0.0)
+    return llm.generate_json(
+        schema=ExclusionRulesModel,
+        system_prompt="Return JSON only. No extra text.",
+        user_prompt=prompt,
+        config=cfg,
+        history=history,
+        max_attempts=max(1, json_attempts),
+    )    
 
 
 def _validate_through_llm(
     *,
     llm: LLMService,
-    model_name: str,
+    model_name: AvailableModelsKey,
     protocol: ProtocolSpec, 
     protocol_discussion: str, 
     dataset_summary_json_str: str):

@@ -7,12 +7,14 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from python.domain.workflows.state import ACTION, State, StateMessage, Status
 from python.implementation.workflows.nodes.compile_protocol.compile_protocol_deps import CompileProtocolDeps
 from python.implementation.workflows.nodes.compile_protocol.protocol_specs import ProtocolSpec
+from python.implementation.workflows.tools.data_processing.data_processing_tool import ExclusionRulesModel
 
 
 class CompileProtocolPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     protocol: Optional[ProtocolSpec] = None
+    exclusion: Optional[ExclusionRulesModel] = None
     compile_error: Optional[str] = None
     compile_issues: Optional[List[Dict[str, Any]]] = None
     user_message: Optional[str] = None
