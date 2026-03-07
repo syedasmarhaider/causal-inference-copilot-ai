@@ -401,7 +401,7 @@ class ModelTrainNode(Node):
 
             user_discussion, plan = _generate_encoding_plan(
                 llm=self.llm,
-                llm_config=LLMConfig(temperature=0.4, model="pro"),
+                llm_config=LLMConfig(temperature=0.1, model="basic"),
                 protocol=protocol,
                 selected_model=selected,
                 dataset_summary=dataset_summary,

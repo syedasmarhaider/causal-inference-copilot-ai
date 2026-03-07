@@ -11,6 +11,7 @@ from python.domain.models.models import NonEmptyStr
 # Core types
 # ----------------------------
 TimeZeroType = Literal["COLUMN", "CONCEPTUAL"]
+ExperimentType = Literal["RCT", "OBSERVATIONAL"]
 WindowUnit = Literal["minutes", "hours", "days", "weeks", "months", "years"]
 
 class BinaryTreatmentSpecModel(BaseModel):
@@ -66,7 +67,7 @@ class ProtocolSpec(BaseModel):
 
     covariates: List[NonEmptyStr]
     effect_modifiers: List[NonEmptyStr]
-    experiment_type: NonEmptyStr
+    experiment_type: ExperimentType
 
 # ----------------------------
 # Validation helpers
