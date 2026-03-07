@@ -28,8 +28,6 @@ from python.implementation.workflows.router.llm_assisted_router import (
 from python.implementation.workflows.tools.tools_factory import DefaultToolFactory
 from python.implementation.workflows.workflow_app import WorkflowApp
 
-from python.implementation.workflows.utils.utils import DEFAULT_MODEL_GEMNI
-
 @dataclass(frozen=True)
 class WorkflowSettings:
     """
@@ -65,7 +63,6 @@ def make_workflow_app(settings: WorkflowSettings) -> WorkflowApp:
     # 3) Router (LLM-assisted)
     router: Router = LLMAssistedRouterRouter(
         llm=llm,
-        model_name=settings.llm.model or DEFAULT_MODEL_GEMNI,
     )
 
     # 4) Nodes registry (keyed by node.name == State.NAME)
