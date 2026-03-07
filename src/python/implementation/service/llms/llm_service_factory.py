@@ -1,22 +1,27 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-from typing import Literal, Optional
+from dataclasses import dataclass, field
+from typing import Dict, Literal, Mapping, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from python.domain.service.llm_service import LLMService
+from python.domain.service.llm_service import AvailableModelsKey, LLMService
 from python.implementation.service.llms.langchain_llm_service import (
+    MAX_TIMEOUT_S,
     LangChainLLMService,
     ReliabilityPolicy,
 )
 
-# NOTE: keep this max cap centralized
-MAX_TIMEOUT_S: float = 300.0  # 5 minutes
-
-
 Provider = Literal["gemini"]
+
+
+DEFAULT_GEMINI_MODEL_MAP: Mapping[AvailableModelsKey, str] = {
+    "mini": "gemini-2.5-flash",
+    "basic": "gemini-2.5-flash",
+    "pro": "gemini-3.0-pro",
+    "thinking": "gemini-2.5-pro",
+}
 
 
 @dataclass(frozen=True)
@@ -24,74 +29,127 @@ class LLMServiceSettings:
     """
     Composition-root settings.
 
-    - backend: "langchain" keeps the domain clean
-    - provider: the underlying model provider
+    `config.model` at call time must be one of:
+      - "mini"
+      - "basic"
+      - "pro"
+      - "thinking"
+
+    This object maps those aliases to concrete provider model names.
     """
     backend: Literal["langchain"] = "langchain"
-
     provider: Provider = "gemini"
-    model: str = "gemini-2.5-flash"
+
+    model_map: Mapping[AvailableModelsKey, str] = field(
+        default_factory=lambda: dict(DEFAULT_GEMINI_MODEL_MAP)
+    )
 
     timeout_s: float = 300.0
     hard_deadline_s: Optional[float] = 300.0
     max_retries: int = 2
+    executor_workers: int = 4
 
 
 def make_llm_service(settings: LLMServiceSettings) -> LLMService:
-    _validate_timeouts(settings.timeout_s, settings.hard_deadline_s)
+    _validate_settings(settings)
 
     if settings.backend != "langchain":
         raise ValueError(f"Unsupported backend: {settings.backend}")
 
-    chat_model = _build_chat_model(
+    alias_models, alias_model_names = _build_chat_models(
         provider=settings.provider,
-        model=settings.model,
+        model_map=settings.model_map,
         timeout_s=settings.timeout_s,
-        max_retries=settings.max_retries,
     )
 
     return LangChainLLMService(
-        model=chat_model,
+        models=alias_models,
+        model_names=alias_model_names,
+        max_tokens_param_name="max_output_tokens",  # Gemini-specific
         reliability=ReliabilityPolicy(
             timeout_s=settings.timeout_s,
             hard_deadline_s=settings.hard_deadline_s,
             max_retries=settings.max_retries,
+            executor_workers=settings.executor_workers,
         ),
     )
 
 
-def _build_chat_model(*, provider: Provider, model: str, timeout_s: float, max_retries: int) -> BaseChatModel:
+def _build_chat_models(
+    *,
+    provider: Provider,
+    model_map: Mapping[AvailableModelsKey, str],
+    timeout_s: float,
+) -> tuple[Dict[AvailableModelsKey, BaseChatModel], Dict[AvailableModelsKey, str]]:
     """
-    Build a LangChain chat model instance.
+    Build one LangChain chat model per unique concrete provider model name,
+    then attach aliases to those instances.
 
-    Supports Gemini through LangChain chat providers.
+    This deduplicates instances when multiple aliases point to the same concrete model.
     """
-    if provider == "gemini":
-        # pip install langchain-google-genai
-        from langchain_google_genai import ChatGoogleGenerativeAI
+    if provider != "gemini":
+        raise ValueError(f"Unsupported provider: {provider}")
 
-        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("Missing API key. Set GOOGLE_API_KEY (preferred) or GEMINI_API_KEY.")
+    from langchain_google_genai import ChatGoogleGenerativeAI
 
-        return ChatGoogleGenerativeAI(
-            model=model,
-            api_key=api_key,
-            timeout=timeout_s,
-            max_retries=max_retries,
+    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("Missing API key. Set GOOGLE_API_KEY (preferred) or GEMINI_API_KEY.")
+
+    unique_models: Dict[str, BaseChatModel] = {}
+    alias_models: Dict[AvailableModelsKey, BaseChatModel] = {}
+    alias_model_names: Dict[AvailableModelsKey, str] = {}
+
+    for alias, concrete_model_name in model_map.items():
+        name = concrete_model_name.strip()
+        if not name:
+            raise ValueError(f"Concrete model name for alias '{alias}' must be non-empty.")
+
+        model = unique_models.get(name)
+        if model is None:
+            model = ChatGoogleGenerativeAI(
+                model=name,
+                api_key=api_key,
+                timeout=timeout_s,
+                max_retries=0,  # important: service owns retries
+            )
+            unique_models[name] = model
+
+        alias_models[alias] = model
+        alias_model_names[alias] = name
+
+    return alias_models, alias_model_names
+
+
+def _validate_settings(settings: LLMServiceSettings) -> None:
+    if settings.timeout_s <= 0 or settings.timeout_s > MAX_TIMEOUT_S:
+        raise ValueError(f"timeout_s must be in (0, {MAX_TIMEOUT_S}] seconds. Got {settings.timeout_s}.")
+
+    if settings.hard_deadline_s is not None and (
+        settings.hard_deadline_s <= 0 or settings.hard_deadline_s > MAX_TIMEOUT_S
+    ):
+        raise ValueError(
+            f"hard_deadline_s must be in (0, {MAX_TIMEOUT_S}] seconds or None. Got {settings.hard_deadline_s}."
         )
 
-    # Exhaustive for Literal, but keep runtime guard
-    raise ValueError(f"Unsupported provider: {provider}")
-
-
-def _validate_timeouts(timeout_s: float, hard_deadline_s: Optional[float]) -> None:
-    if timeout_s <= 0 or timeout_s > MAX_TIMEOUT_S:
-        raise ValueError(f"timeout_s must be in (0, {MAX_TIMEOUT_S}] seconds. Got {timeout_s}.")
-    if hard_deadline_s is not None and (hard_deadline_s <= 0 or hard_deadline_s > MAX_TIMEOUT_S):
-        raise ValueError(f"hard_deadline_s must be in (0, {MAX_TIMEOUT_S}] seconds or None. Got {hard_deadline_s}.")
-    if hard_deadline_s is not None and hard_deadline_s < timeout_s:
+    if settings.hard_deadline_s is not None and settings.hard_deadline_s < settings.timeout_s:
         raise ValueError("hard_deadline_s must be >= timeout_s (or None).")
-    if max_retries := 0:
-        # placeholder to avoid unused-style warnings if you later add more checks
-        _ = max_retries
+
+    if settings.max_retries < 0:
+        raise ValueError("max_retries must be >= 0")
+
+    if settings.executor_workers < 1:
+        raise ValueError("executor_workers must be >= 1")
+
+    required_keys = {"mini", "basic", "pro", "thinking"}
+    provided_keys = set(settings.model_map.keys())
+    if provided_keys != required_keys:
+        missing = sorted(required_keys - provided_keys)
+        extra = sorted(provided_keys - required_keys) # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType, reportOperatorIssue]
+        raise ValueError(
+            f"model_map must contain exactly {sorted(required_keys)}. Missing={missing}, extra={extra}"
+        )
+
+    for alias, concrete_model_name in settings.model_map.items():
+        if not isinstance(concrete_model_name, str) or not concrete_model_name.strip(): # pyright: ignore[reportUnnecessaryIsInstance]
+            raise ValueError(f"Concrete model name for alias '{alias}' must be a non-empty string.")

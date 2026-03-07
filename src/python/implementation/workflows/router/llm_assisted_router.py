@@ -126,7 +126,7 @@ def _decision_on_aborted_state(
     )
 
     decision = llm.generate_json(
-        config=LLMConfig(model=model_name, temperature=0.3),
+        config=LLMConfig(model="basic", temperature=0.3),
         system_prompt="Decide fallback state (must be previous). Output STRICT JSON matching schema.",
         user_prompt=prompt_filled,
         history=last_10_messages,
@@ -242,38 +242,31 @@ def init_all_nodoes_with_name_as_key(llm: LLMService, data_repo: DataRepo, model
     load_dataset_node = LoadDatasetNode(data_repo=data_repo, llm=llm)
     protocol_discussion_node = ProtocolDiscussionNode(
         llm=llm,
-        model_name=DEFAULT_MODEL_GEMNI,
      )
     compiled_protocol_node = CompileProtocolNode(
         llm=llm,
-        model_name=DEFAULT_MODEL_GEMNI,
      )
     clean_protocol_node = CleanProtocolNode(
          data_repo=data_repo,
         llm=llm,
-        model_name=DEFAULT_MODEL_GEMNI,
      )
      
     validate_cleaned_protocol_node = ValidateCleanProtocolNode(
         data_repo=data_repo,
         llm=llm,
-        model_name=DEFAULT_MODEL_GEMNI,
         )
     
     model_selection_node = ModelSelectionNode(
         llm=llm,
-        model_name=DEFAULT_MODEL_GEMNI,
      )
     
     model_train_node = ModelTrainNode(
         llm=llm,
-        model_name=DEFAULT_MODEL_GEMNI,
      )
     
     inference_node = CausalInferenceNode(
         llm=llm,
         data_repo=data_repo,
-        model_name=DEFAULT_MODEL_GEMNI,
      )
     
     

@@ -217,7 +217,6 @@ def _generate_encoding_plan(
 @dataclass(frozen=True, slots=True)
 class ModelTrainNode(Node):
     llm: LLMService
-    model_name: str
 
     @property
     def name(self) -> str:
@@ -292,7 +291,7 @@ class ModelTrainNode(Node):
             
             user_discssion ,plan = _generate_encoding_plan(
                 llm=self.llm,
-                llm_config=LLMConfig(temperature=0.2, model=self.model_name),
+                llm_config=LLMConfig(temperature=0.4, model="pro"),
                 protocol=protocol,
                 selected_model=selected,
                 dataset_summary=dataset_summary,
@@ -358,7 +357,7 @@ class ModelTrainNode(Node):
         match res:
             case FitSuccess():
                 message = self.llm.generate(
-                    config=LLMConfig(temperature=0.2, model=self.model_name),
+                    config=LLMConfig(temperature=0.2, model="basic"),
                     system_prompt=FIT_SUCCESS_FAILURE_SYSTEM_PROMPT,
                     user_prompt=f"Model training succeeded with warnings: {res.warnings}. Explain to the user in a clinician-friendly way.",
                     history=messages_history,
@@ -386,7 +385,7 @@ class ModelTrainNode(Node):
                 err_obj = res.error
                 err_msg = getattr(err_obj, "message", None) or str(err_obj) or "Training failed for an unknown reason."
                 message = self.llm.generate(
-                    config=LLMConfig(temperature=0.2, model=self.model_name),
+                    config=LLMConfig(temperature=0.2, model="basic"),
                     system_prompt=FIT_SUCCESS_FAILURE_SYSTEM_PROMPT,
                     user_prompt=f"Model training failed with error: {err_msg}. Explain to the user in a clinician-friendly way and suggest next steps.",
                     history=messages_history,

@@ -18,7 +18,7 @@ from python.implementation.workflows.utils.utils import DEFAULT_MODEL_GEMNI, JSO
 
 
 def _llm_message_strict(llm: LLMService, *, model_name: str, snapshot: JSONDict) -> str:
-    cfg = LLMConfig(model=model_name, temperature=0.5)
+    cfg = LLMConfig(model="basic", temperature=0.5)
     msg = llm.generate(
         config=cfg,
         system_prompt=load_dataset_system_prompt(),

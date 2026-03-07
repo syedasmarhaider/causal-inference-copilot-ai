@@ -77,7 +77,6 @@ from python.implementation.workflows.utils.validation import ValidationIssueMode
 class CausalInferenceNode(Node):
     llm: LLMService
     data_repo: DataRepo
-    model_name: str
 
     @property
     def name(self) -> str:
@@ -188,7 +187,7 @@ class CausalInferenceNode(Node):
                             ate_result_json=ate_json,
                             warnings_json=_dumps(warnings),
                         ),
-                        config=LLMConfig(temperature=0.2, model=self.model_name),
+                        config=LLMConfig(temperature=0.2, model="basic"),
                         history=last_8,
                     ).content.strip()
 
@@ -228,7 +227,6 @@ class CausalInferenceNode(Node):
             data_repo=self.data_repo,
             user_id=user_id,
             conversation_id=conversation_id,
-            model_name=self.model_name,
             ate_model_output_json_str=state.payload.ate_result_raw_json_str,
             messages_history=messages_history,
             current_state= state,
@@ -622,7 +620,6 @@ def _process_cate_question(
     data_repo: DataRepo,
     user_id: UUID,
     conversation_id: UUID,
-    model_name: str,
     ate_model_output_json_str: str,
     messages_history: Optional[Sequence[ChatMessage]],
     current_state: CausalInferenceState,
@@ -648,7 +645,7 @@ def _process_cate_question(
         schema=_CateIntentPayload,
         user_prompt=CATE_GENERAL_PROMPT.format(ATE_SUMMARY=ate_model_output_json_str),
         system_prompt=None,
-        config=LLMConfig(temperature=0.2, model=model_name),
+        config=LLMConfig(temperature=0.2, model="basic"),
         history=last_8,
         max_attempts=3,
     )
@@ -680,7 +677,7 @@ def _process_cate_question(
                 + f"\n\nUSER_QUESTION:\n{user_q}\n"
                 + (f"\nPrevious error message:\n{error_message}\n" if error_message else "")
             ),
-            config=LLMConfig(temperature=0.7, model=model_name),
+            config=LLMConfig(temperature=0.4, model="basic"),
             history=last_4_messages,
             max_attempts=3,
         )
@@ -702,7 +699,7 @@ def _process_cate_question(
         logging.warning(f"Final inclusion plan is invalid: {log}")
         invalid_plan_message = _invalid_plan_message(
             llm=llm,
-            model_name=model_name,
+            model_name="basic",
             effect_modifiers_summary=effect_modifiers_summary,
             effect_modifiers=protocol.effect_modifiers
         )
@@ -877,7 +874,7 @@ def _process_cate_question(
     answer = llm.generate(
         system_prompt=CATE_SUMMARY_PROMPT,
         user_prompt=_dumps(llm_payload),
-        config=LLMConfig(temperature=0.2, model=model_name),
+        config=LLMConfig(temperature=0.2, model="basic"),
         history=last_8,
     ).content.strip()
 
@@ -987,7 +984,7 @@ def _invalid_plan_message(
             DATA_SUMMARY= effect_modifiers_summary.model_dump(mode="json"),
             LAST_USER_MESSAGE=last_user_message,
         ),
-        config=LLMConfig(temperature=0.7, model=model_name),
+        config=LLMConfig(temperature=0.7, model="basic"),
         history=None,
  
     ).content.strip()        

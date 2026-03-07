@@ -28,7 +28,6 @@ class CompileProtocolNode(Node):
     NAME: ClassVar[str] = CompileProtocolState.NAME
 
     llm: LLMService
-    model_name: str
 
     # Compile-level attempts: attempt 1 (base prompt) -> attempt 2 (repair prompt)
     max_attempts: int = 2

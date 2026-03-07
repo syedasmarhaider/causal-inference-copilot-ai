@@ -51,7 +51,6 @@ class CleanProtocolNode(Node):
 
     data_repo: DataRepo
     llm: LLMService
-    model_name: str
 
     # behavior knobs
     strict_required_cols: bool = True
@@ -322,7 +321,7 @@ def _render_success_message(
     }
 
     # 2. Setup LLM configuration
-    config = LLMConfig(model=model_name, temperature=0.7)
+    config = LLMConfig(model="basic", temperature=0.7)
     
     # 3. Limit history to keep the context window clean
     recent_history = chat_history[-12:] if chat_history else None

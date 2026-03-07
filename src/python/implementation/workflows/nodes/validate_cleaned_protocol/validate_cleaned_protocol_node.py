@@ -53,7 +53,6 @@ log = logging.getLogger(__name__)
 class ValidateCleanProtocolNode(Node):
     data_repo: DataRepo
     llm: LLMService
-    model_name: str
 
     NAME: ClassVar[str] = ValidateCleanProtocolState.NAME
 
@@ -333,7 +332,7 @@ class ValidateCleanProtocolNode(Node):
             }
             msg = self.llm.generate_json(
                 schema=_UserAcceptanceModel,
-                config=LLMConfig(model=self.model_name, temperature=0.6),
+                config=LLMConfig(model="basic", temperature=0.6),
                 system_prompt=VALIDATE_CLEAN_PROTOCOL_PROMPT,
                 user_prompt=json.dumps(user_payload, ensure_ascii=False),
                 history=messages_history,

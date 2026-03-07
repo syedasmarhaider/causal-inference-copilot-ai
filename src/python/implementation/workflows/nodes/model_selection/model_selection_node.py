@@ -98,7 +98,6 @@ def _format_shortlist_message(shortlist: _ModelShortlist) -> str:
 @dataclass(frozen=True, slots=True)
 class ModelSelectionNode(Node):
     llm: LLMService
-    model_name: str
 
 
     @property
@@ -145,7 +144,7 @@ class ModelSelectionNode(Node):
                     schema=_ModelShortlist,
                     system_prompt=MODEL_SELECTION_RECOMMENDER_SYSTEM_PROMPT,
                     user_prompt=user_prompt,
-                    config= LLMConfig(temperature=0.2, model=self.model_name),
+                    config= LLMConfig(temperature=1.0, model="pro"),
                     history=messages_history,
                     max_attempts=3,
                 )
@@ -197,7 +196,7 @@ class ModelSelectionNode(Node):
                 schema=ConfirmedModelSelectionPayload,
                 system_prompt=MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
                 user_prompt=negotiator_user_prompt,
-                config= LLMConfig(temperature=0.2, model=self.model_name),
+                config= LLMConfig(temperature=0.2, model="basic"),
                 history=last_12_messages,
                 max_attempts=3,
             )
