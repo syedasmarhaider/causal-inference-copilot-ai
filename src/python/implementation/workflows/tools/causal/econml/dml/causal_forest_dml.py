@@ -402,7 +402,7 @@ class CausalForestDMLCausalModel(CausalModel):
                     "Spec declares controls (spec.W) and/or effect modifiers (spec.X) but no pre_XW transformer provided in inputs."
                 )
 
-            Y, T, X, W, col_meta = get_input_params_from_spec(df, specs, order_X=effect_modifiers_order, order_W=covariates_order)
+            Y, T, X, W, col_meta = get_input_params_from_spec(df, specs, effect_modifiers_order=effect_modifiers_order, covariates_order=covariates_order)
 
             miss = {"Y": has_missing(Y), "T": has_missing(T), "X": has_missing(X), "W": has_missing(W)}
             if miss["Y"] or miss["T"]:
