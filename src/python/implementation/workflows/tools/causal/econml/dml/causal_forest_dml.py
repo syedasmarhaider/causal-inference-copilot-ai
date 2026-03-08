@@ -54,6 +54,7 @@ from python.implementation.workflows.tools.causal.econml.utils import (
     ModelSpecError,
     build_init_fit_options_param_maps,
     get_input_params_from_spec,
+    get_treatment_t0_t1_from_spec,
     has_missing,
     is_missing_handled,
     now_utc,
@@ -426,8 +427,8 @@ class CausalForestDMLCausalModel(CausalModel):
 
             defaults: Dict[str, Any] = {}
 
-            disc_t = specs.T.kind in ("binary", "categorical")
-            disc_y = specs.Y.kind == "binary"
+            disc_t = specs.treatment_spec.kind in ("binary", "categorical")
+            disc_y = specs.outcome_spec.kind == "binary"
             if disc_t:
                 defaults["discrete_treatment"] = True
             if disc_y:
@@ -561,10 +562,10 @@ class CausalForestDMLCausalModel(CausalModel):
     ) -> CausalResult:
         try:
             warnings_list: List[str] = []
-            spec: CausalSpec = command.protocol_specs
-            order_X: Optional[List[str]] = command.order_X
-            order_W: Optional[List[str]] = command.order_W
-
+            spec: CausalSpec = command.causal_specs
+            order_effect_modifiers: Optional[List[str]] = command.order_effect_modifiers or []
+            order_covariates: Optional[List[str]] = command.order_covariates or []
+    
             model_record: ModelRecord | None = self.models_repo.load_model(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -576,47 +577,39 @@ class CausalForestDMLCausalModel(CausalModel):
             # CHANGED (Forest): estimator type
             est: CausalForestDML = model_record.model
 
-            if spec.T.kind == "binary":
-                if len(spec.T.control_values) != 1 or len(spec.T.treated_values) != 1:
-                    raise ModelSpecError("Binary ATE requires exactly one control_value and one treated_value (or pre-normalize T).")
-                t0 = spec.T.control_values[0]
-                t1s = [spec.T.treated_values[0]]
-            elif spec.T.kind == "categorical":
-                t0, t1s = categorical_t0_t1_pairs(spec)
-            else:
-                raise ModelSpecError(f"Unsupported treatment kind {spec.T.kind!r} for ATE.")
-
+            t0, t1 = get_treatment_t0_t1_from_spec(spec, is_global_counter_factual=False)  
             effects: List[Dict[ATEModelResult, Any]] = []
-            _, _, X, _, _ = get_input_params_from_spec(df, spec, order_X=order_X, order_W=order_W)
+            
+            _, _, X, _, _ = get_input_params_from_spec(df, spec, effect_modifiers_order=order_effect_modifiers, covariates_order=order_covariates)
 
-            for t1_val in t1s:
-                if t1_val == t0:
-                    raise ModelSpecError(f"Invalid contrast: t1 value {t1_val} is the same as t0 baseline {t0}.")
 
-                item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1_val}}
-                item["ate"] = est.ate(X=X, T0=t0, T1=t1_val)
-                logging_info = f"Computed ATE for contrast t0={t0} vs t1={t1_val}: {item['ate']}"
-                logging.info(logging_info)
+            if t1 == t0:
+                raise ModelSpecError(f"Invalid contrast: t1 value {t1} is the same as t0 baseline {t0}.")
+
+            item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
+            item["ate"] = est.ate(X=X, T0=t0, T1=t1)
+            logging_info = f"Computed ATE for contrast t0={t0} vs t1={t1}: {item['ate']}"
+            logging.info(logging_info)
                 
-                try:
-                    ate_interval = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha) 
-                    if ate_interval is not None:
-                        item["ate_interval"] = ate_interval
-                    else:
-                        item["ate_interval"] = None
-                        warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")
-                except Exception as e:
-                    warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+            try:
+                ate_interval = est.ate_interval(X=X, T0=t0, T1=t1, alpha=command.inputs.alpha)  
+                if ate_interval is not None:
+                    item["ate_interval"] = ate_interval
+                else:
                     item["ate_interval"] = None
+                    warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")
+            except Exception as e:
+                warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+                item["ate_interval"] = None
 
-                try:
-                    inference = est.ate_inference(X=X, T0=t0, T1=t1_val)  # pyright: ignore
-                    item["ate_inference"] = serialize_inference_obj(inference) if inference is not None else None
-                    if inference is None:
-                        warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
-                except Exception as e:
-                    warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
-                    item["ate_inference"] = None
+            try:
+                inference = est.ate_inference(X=X, T0=t0, T1=t1) 
+                item["ate_inference"] = serialize_inference_obj(inference) if inference is not None else None
+                if inference is None:
+                    warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
+            except Exception as e:
+                warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+                item["ate_inference"] = None
 
                 effects.append(item)
 
@@ -639,7 +632,7 @@ class CausalForestDMLCausalModel(CausalModel):
                 meta={
                     "backend": "econml.dml.CausalForestDML",  # CHANGED (Forest)
                     "n": int(df.shape[0]),
-                    "x_cols": spec.X if spec.X else None,
+                    "x_cols": spec.effect_modifiers if spec.effect_modifiers else None,
                     "contrast_kind": "baseline_vs_all",
                     "t0": t0,
                 },
@@ -694,13 +687,13 @@ class CausalForestDMLCausalModel(CausalModel):
 
             # CHANGED (Forest): estimator type
             est: CausalForestDML = model_record.model
-            spec: CausalSpec = command.protocol_specs
-            X_order: Optional[List[str]] = command.order_X
+            spec: CausalSpec = command.causal_specs
+            effect_modifiers_order: Optional[List[str]] = command.order_effect_modifiers
 
             X_df = command.inputs.x_rows
-            x_cols = spec.X
+            x_cols = spec.effect_modifiers
             raise_if_x_rows_not_exactly_match_fit_x_cols(x_rows=X_df, x_cols=x_cols)
-            X_query = X_df[X_order].to_numpy() if X_order else None
+            X_query = X_df[effect_modifiers_order].to_numpy() if effect_modifiers_order else None
             
             if X_query is None or X_query.shape[1] == 0:
                 return CommandFailure(
@@ -712,53 +705,10 @@ class CausalForestDMLCausalModel(CausalModel):
                     meta={},
                 )
 
-    
-            if spec.T.kind == "binary":
-                if len(spec.T.control_values) != 1 or len(spec.T.treated_values) != 1:
-                    return CommandFailure(
-                        run_id=command.run_id,
-                        started_at=started_at,
-                        finished_at=now_utc(),
-                        error=ErrorInfo(
-                            code="OPTIONS_INVALID",
-                            message="Binary treatment for CATE requires exactly one control_value and one treated_value (or pre-normalize T upstream).",
-                            details={
-                                "control_values": list(spec.T.control_values),
-                                "treated_values": list(spec.T.treated_values),
-                            },
-                        ),
-                        warnings=[],
-                        meta={},
-                    )
-                t0 = command.inputs.t0
-                t1 = command.inputs.t1
-                if t0 == t1 or t0 is None or t1 is None:
-                    return CommandFailure(
-                        run_id=command.run_id,
-                        started_at=started_at,
-                        finished_at=now_utc(),
-                        error=ErrorInfo(code="OPTIONS_INVALID", message=f"Invalid contrast: t0 value {t0} is the same as t1 value {t1}.", details={}),
-                        warnings=[],
-                        meta={},
-                    )
-                    
-                
-            else:
-                return CommandFailure(
-                    run_id=command.run_id,
-                    started_at=started_at,
-                    finished_at=now_utc(),
-                    error=ErrorInfo(code="UNSUPPORTED_QUERY", message=f"Unsupported treatment kind {spec.T.kind!r} for CATE.", details={}),
-                    warnings=[],
-                    meta={},
-                )
-
-  
-
+            t0, t1 = get_treatment_t0_t1_from_spec(spec, is_global_counter_factual=command.inputs.counterfactual)
             effects: Dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
-
             try:
-                effects["cate"] = est.effect(X_query, T0=t0, T1=t1)  # pyright: ignore
+                effects["cate"] = est.effect(X_query, T0=t0, T1=t1) 
             except Exception as e:
                     return CommandFailure(
                         run_id=command.run_id,
@@ -770,7 +720,7 @@ class CausalForestDMLCausalModel(CausalModel):
                 )
 
             try:
-                interval = est.effect_interval(X_query, T0=t0, T1=t1, alpha=command.inputs.alpha)  # pyright: ignore
+                interval = est.effect_interval(X_query, T0=t0, T1=t1, alpha=command.inputs.alpha)
                 if interval is None:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
                     effects["cate_interval"] = None
@@ -781,7 +731,7 @@ class CausalForestDMLCausalModel(CausalModel):
                     effects["cate_interval"] = None
 
             try:
-                    inf = est.effect_inference(X_query, T0=t0, T1=t1_val)  # pyright: ignore
+                    inf = est.effect_inference(X_query, T0=t0, T1=t1)  
                     if inf is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_inference returned None")
                         effects["cate_inference"] = None

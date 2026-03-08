@@ -285,6 +285,12 @@ def get_input_params_from_spec(
     return y, T, X, W, meta
 
 
+def get_treatment_t0_t1_from_spec(spec: CausalSpec, is_global_counter_factual: bool) -> tuple[float, float]:
+    if spec.treatment_spec.kind == "binary":
+        return (1.0, 0.0) if is_global_counter_factual else (0.0, 1.0)
+    raise ModelSpecError(
+        f"Unsupported treatment kind {spec.treatment_spec.kind!r} for encoded treatment contrast."
+    )
 
 def validate_semantic_consistency(spec: CausalSpec, init_kwargs: Mapping[str, Any]) -> None:
     """

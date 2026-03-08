@@ -138,8 +138,7 @@ FilterOp = Literal["==", "!=","in", "not_in", ">=", "<=", ">", "<"]
 @dataclass(frozen=True, slots=True)
 class CATEInputs:
     x_rows: pd.DataFrame   # already-transformed X in exact training columns/order
-    t1 : Any
-    t0 : Any
+    counterfactual: bool = False
     alpha: float = 0.05
 
 @dataclass(frozen=True, slots=True, kw_only=True)

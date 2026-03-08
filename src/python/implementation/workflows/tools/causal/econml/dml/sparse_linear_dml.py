@@ -10,9 +10,9 @@ import warnings
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import issparse  # type: ignore[import]
+from scipy.sparse import issparse  
 
-from econml.dml.dml import SparseLinearDML
+from econml.dml import SparseLinearDML  
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
@@ -44,17 +44,20 @@ from python.implementation.workflows.tools.causal.causal_command import (
     FitCommand,
     FitSuccess,
 )
-from python.implementation.workflows.tools.causal.causal_model import CausalCommand, CausalModel, CausalResult
+from python.implementation.workflows.tools.causal.causal_model import (
+    CausalCommand,
+    CausalModel,
+    CausalResult,
+)
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-
-# you probably want a parallel info provider like sparse_linear_dml_causal_model_info()
-from python.implementation.workflows.tools.causal.econml.models_info import get_sparse_linear_dml_causal_model_info
-
+from python.implementation.workflows.tools.causal.econml.models_info import (
+    get_sparse_linear_dml_causal_model_info,
+)
 from python.implementation.workflows.tools.causal.econml.utils import (
     ModelSpecError,
     build_init_fit_options_param_maps,
-    categorical_t0_t1_pairs,
     get_input_params_from_spec,
+    get_treatment_t0_t1_from_spec,
     has_missing,
     is_missing_handled,
     now_utc,
@@ -68,11 +71,12 @@ from python.implementation.workflows.tools.causal.encoding_plan import Transform
 
 
 # =============================================================================
-# Model spec and options (unchanged)
+# Model spec and options
 # =============================================================================
 
 class _ToDense(BaseEstimator, TransformerMixin):
     """Convert sparse -> dense for models that don't accept sparse."""
+
     def fit(self, X, y=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return self
 
@@ -100,7 +104,7 @@ def _normalize_model_spec_to_wrapped_list(
     spec_value: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]],
     pre_XW: ColumnTransformer,
     is_discrete: bool,
-    missingness_W: bool,
+    missingness: bool,
     random_state: Optional[int],
     n_jobs: Optional[int],
 ) -> Sequence[BaseEstimator]:
@@ -109,10 +113,10 @@ def _normalize_model_spec_to_wrapped_list(
     Returns: list of fully wrapped sklearn estimators (Pipeline(pre -> [dense] -> model)).
 
     missingness:
-      - "none": your usual candidate menu.
-      - "present": restrict to NaN-tolerant candidates (HGB), avoiding models that error on NaNs.
+      - True: restrict to NaN-tolerant candidates (HGB), avoiding models that error on NaNs.
+      - False: usual candidate menu.
     """
-    missing_present = missingness_W
+    missing_present = missingness
 
     def build_boosting_candidates_nan_safe() -> Sequence[BaseEstimator]:
         if is_discrete:
@@ -124,6 +128,7 @@ def _normalize_model_spec_to_wrapped_list(
                 early_stopping=True,
             )
             return [_wrap_with_pre(pre_XW=pre_XW, model=hgb, require_dense=True)]
+
         hgb = HistGradientBoostingRegressor(
             random_state=random_state,
             max_depth=None,
@@ -218,7 +223,6 @@ def _normalize_model_spec_to_wrapped_list(
             return build_boosting_candidates()
         raise ValueError(f"Unknown model keyword: {key!r}")
 
-    # Normalize input to list
     items: List[Union[str, BaseEstimator]]
     if isinstance(spec_value, (str, BaseEstimator)):
         items = [spec_value]
@@ -230,7 +234,13 @@ def _normalize_model_spec_to_wrapped_list(
         if isinstance(item, str):
             out.extend(candidates_for_keyword(item))
         else:
-            out.append(_wrap_with_pre(pre_XW=pre_XW, model=item, require_dense=True))  # pyright: ignore[reportArgumentType]
+            out.append(
+                _wrap_with_pre(
+                    pre_XW=pre_XW,
+                    model=item,
+                    require_dense=True,
+                )
+            )  # pyright: ignore[reportArgumentType]
 
     if not out:
         raise ValueError("Empty nuisance model candidate list.")
@@ -238,15 +248,15 @@ def _normalize_model_spec_to_wrapped_list(
 
 
 def _get_default_models_for_t_and_y(
-    specs: Any,  # CausalSpec
+    specs: CausalSpec,
     pre_XW: ColumnTransformer,
     *,
-    missingness_W: bool,
+    missingness: bool,
     random_state: Optional[int] = None,
     n_jobs: Optional[int] = None,
 ) -> Dict[str, Any]:
-    disc_t = specs.T.kind in ("binary", "categorical")
-    disc_y = specs.Y.kind == "binary"
+    disc_t = specs.treatment_spec.kind in ("binary", "categorical")
+    disc_y = specs.outcome_spec.kind == "binary"
 
     default_model_y: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
     default_model_t: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
@@ -256,7 +266,7 @@ def _get_default_models_for_t_and_y(
             spec_value=default_model_y,
             pre_XW=pre_XW,
             is_discrete=disc_y,
-            missingness_W=missingness_W,
+            missingness=missingness,
             random_state=random_state,
             n_jobs=n_jobs,
         )
@@ -266,7 +276,7 @@ def _get_default_models_for_t_and_y(
             spec_value=default_model_t,
             pre_XW=pre_XW,
             is_discrete=disc_t,
-            missingness_W=missingness_W,
+            missingness=missingness,
             random_state=random_state,
             n_jobs=n_jobs,
         )
@@ -287,19 +297,19 @@ class SparseLinearDMLCausalModel(CausalModel):
 
     def get_info(self) -> str:
         return get_sparse_linear_dml_causal_model_info()
-    
+
     def get_command_info(self, command: CommandType) -> str | None:
         match command:
             case "FIT":
-                fit_doc = inspect.getdoc(SparseLinearDML.fit) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                fit_doc = inspect.getdoc(SparseLinearDML.fit) or ""  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
                 base_doc = inspect.getdoc(SparseLinearDML) or ""
                 return base_doc + fit_doc
             case "ATE":
-                ate_doc = inspect.getdoc(SparseLinearDML.ate) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                ate_doc = inspect.getdoc(SparseLinearDML.ate) or ""  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
                 return ate_doc
             case "CATE":
-                effect_doc = inspect.getdoc(SparseLinearDML.effect) or "" # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-                return effect_doc    
+                effect_doc = inspect.getdoc(SparseLinearDML.effect) or ""  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                return effect_doc
             case _:
                 return None
 
@@ -319,6 +329,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 limit=None,
             )
         except Exception as e:
+            logging.exception(e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started,
@@ -348,7 +359,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 df=df,
                 started_at=started,
             )
-        if isinstance(command, CATECommand): # pyright: ignore[reportUnnecessaryIsInstance]
+        if isinstance(command, CATECommand):  # pyright: ignore[reportUnnecessaryIsInstance]
             return self._cate(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -372,71 +383,115 @@ class SparseLinearDMLCausalModel(CausalModel):
         started_at: datetime,
     ) -> CausalResult:
         try:
-            specs: CausalSpec = command.protocol_specs
-            order_X: Optional[List[str]] = command.order_X
-            order_W: Optional[List[str]] = command.order_W
+            specs: CausalSpec = command.causal_specs
             data_summary: DatasetSummaryModel = command.data_summary
             transformation_plan: Optional[TransformPlan] = command.transformation_plan
-            plan = self.encoding_util.compile(
-                plan=transformation_plan,
-                X_order=order_X or [],
-                W_order=order_W or [],
-                dense_output=True,
-            ) if transformation_plan is not None else None
-            
+
+            covariates_order: List[str] = list(specs.covariates or [])
+            effect_modifiers_order: List[str] = list(specs.effect_modifiers or [])
+
+            plan = (
+                self.encoding_util.compile(
+                    plan=transformation_plan,
+                    effect_modifiers_order=effect_modifiers_order,
+                    covariates_order=covariates_order,
+                    dense_output=True,
+                )
+                if transformation_plan is not None
+                else None
+            )
+
             pre_x = plan.pre_X if plan is not None else None
             pre_xw = plan.pre_XW if plan is not None else None
-            
 
-            if pre_x is None and len(specs.X or []) > 0:
+            if pre_x is None and len(specs.effect_modifiers or []) > 0:
                 raise ModelSpecError(
-                    "Spec declares effect modifiers (spec.X) but no pre_X transformer provided in inputs."
+                    "Spec declares effect modifiers (spec.effect_modifiers) but no pre_X transformer was provided."
                 )
-            if pre_xw is None and (len(specs.W or []) + len(specs.X or [])) > 0:
+            if pre_xw is None and (len(specs.covariates or []) + len(specs.effect_modifiers or [])) > 0:
                 raise ModelSpecError(
-                    "Spec declares controls (spec.W) and/or effect modifiers (spec.X) but no pre_XW transformer provided in inputs."
+                    "Spec declares covariates and/or effect modifiers but no pre_XW transformer was provided."
                 )
 
-            Y, T, X, W, col_meta = get_input_params_from_spec(df, specs, order_X=order_X, order_W=order_W)
+            Y, T, X, W, col_meta = get_input_params_from_spec(
+                df,
+                specs,
+                effect_modifiers_order=effect_modifiers_order,
+                covariates_order=covariates_order,
+            )
 
-            miss = {"Y": has_missing(Y), "T": has_missing(T), "X": has_missing(X), "W": has_missing(W)}
+            miss = {
+                "Y": has_missing(Y),
+                "T": has_missing(T),
+                "X": has_missing(X),
+                "W": has_missing(W),
+            }
             if miss["Y"] or miss["T"]:
                 raise ModelSpecError(f"Y/T contain missing values; must be fixed upstream. missing={miss}")
-            
-            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
-            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
+
+            missingness_X = (
+                len(specs.effect_modifiers or []) > 0
+                and miss["X"]
+                and (
+                    transformation_plan is None
+                    or not is_missing_handled(
+                        plan=transformation_plan,
+                        summary=data_summary,
+                        col_name_list=specs.effect_modifiers,
+                    )
+                )
+            )
+            missingness_W = (
+                len(specs.covariates or []) > 0
+                and miss["W"]
+                and (
+                    transformation_plan is None
+                    or not is_missing_handled(
+                        plan=transformation_plan,
+                        summary=data_summary,
+                        col_name_list=specs.covariates,
+                    )
+                )
+            )
+
             if missingness_X:
                 raise ModelSpecError(
-                    "SparseLinearDML does not support missing values in X via allow_missing (only W is allowed). "
-                    "Impute/clean X upstream before fit."
+                    "SparseLinearDML does not support missing values in X via allow_missing "
+                    "(only W is allowed). Impute/clean X upstream before fit."
                 )
-            
-            
-        
-            # (kept) parameter-map machinery for required-init enforcement
+
             maps = build_init_fit_options_param_maps(
                 SparseLinearDML,
-                fit_include_names={"cache_values", "inference", "sample_weight", "freq_weight", "sample_var", "groups"},
+                fit_include_names={
+                    "cache_values",
+                    "inference",
+                    "sample_weight",
+                    "freq_weight",
+                    "sample_var",
+                    "groups",
+                },
             )
             init_map = maps["init"]
 
             defaults: Dict[str, Any] = {}
 
-            disc_t = specs.T.kind in ("binary", "categorical")
-            disc_y = specs.Y.kind == "binary"
+            disc_t = specs.treatment_spec.kind in ("binary", "categorical")
+            disc_y = specs.outcome_spec.kind == "binary"
+
             if disc_t:
                 defaults["discrete_treatment"] = True
             if disc_y:
                 defaults["discrete_outcome"] = True
 
-            
+            # Same contract you used elsewhere: allow_missing only relaxes W.
+            defaults["allow_missing"] = missingness_W
 
             if pre_xw is not None:
                 defaults.update(
                     _get_default_models_for_t_and_y(
                         specs,
                         pre_XW=pre_xw,
-                        missingness_W=missingness_W,
+                        missingness=missingness_W,
                     )
                 )
 
@@ -450,9 +505,6 @@ class SparseLinearDMLCausalModel(CausalModel):
                     f"Missing required SparseLinearDML __init__ parameters: {missing_required}. "
                     f"(Adapter is not exposing command.options yet.)"
                 )
-
-            # allow_missing must be True if W can contain NaNs (EconML pre-check bypass)
-            defaults["allow_missing"] = missingness_W
 
             est = SparseLinearDML(**defaults)
 
@@ -511,11 +563,16 @@ class SparseLinearDMLCausalModel(CausalModel):
                 meta={},
             )
         except Exception as e:
+            logging.exception(e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
                 finished_at=now_utc(),
-                error=ErrorInfo(code="ESTIMATOR_ERROR", message="EconML SparseLinearDML.fit failed.", details={"exception": repr(e)}),
+                error=ErrorInfo(
+                    code="ESTIMATOR_ERROR",
+                    message="EconML SparseLinearDML.fit failed.",
+                    details={"exception": repr(e)},
+                ),
                 warnings=[],
                 meta={},
             )
@@ -535,10 +592,13 @@ class SparseLinearDMLCausalModel(CausalModel):
     ) -> CausalResult:
         try:
             warnings_list: List[str] = []
-            spec: CausalSpec = command.protocol_specs
-            order_X: Optional[List[str]] = command.order_X
-            order_W: Optional[List[str]] = command.order_W
-            
+            spec: CausalSpec = command.causal_specs
+            order_effect_modifiers: List[str] = list(
+                command.order_effect_modifiers or spec.effect_modifiers or []
+            )
+            order_covariates: List[str] = list(
+                command.order_covariates or spec.covariates or []
+            )
 
             model_record: ModelRecord | None = self.models_repo.load_model(
                 user_id=user_id,
@@ -550,54 +610,64 @@ class SparseLinearDMLCausalModel(CausalModel):
 
             est: SparseLinearDML = model_record.model
 
-            if spec.T.kind == "binary":
-                if len(spec.T.control_values) != 1 or len(spec.T.treated_values) != 1:
-                    raise ModelSpecError("Binary ATE requires exactly one control_value and one treated_value (or pre-normalize T).")
-                t0 = spec.T.control_values[0]
-                t1s = [spec.T.treated_values[0]]
-            elif spec.T.kind == "categorical":
-                t0, t1s = categorical_t0_t1_pairs(spec)
-            else:
-                raise ModelSpecError(f"Unsupported treatment kind {spec.T.kind!r} for ATE.")
+            t0, t1 = get_treatment_t0_t1_from_spec(
+                spec,
+                is_global_counter_factual=False,
+            )
+
+            _, _, X, _, _ = get_input_params_from_spec(
+                df,
+                spec,
+                effect_modifiers_order=order_effect_modifiers,
+                covariates_order=order_covariates,
+            )
+
+            if t1 == t0:
+                raise ModelSpecError(f"Invalid contrast: t1 value {t1} is the same as t0 baseline {t0}.")
 
             effects: List[Dict[ATEModelResult, Any]] = []
-            _, _, X, _, _ = get_input_params_from_spec(df, spec, order_X=order_X, order_W=order_W)
 
-            for t1_val in t1s:
-                if t1_val == t0:
-                    raise ModelSpecError(f"Invalid contrast: t1 value {t1_val} is the same as t0 baseline {t0}.")
+            item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
+            item["ate"] = est.ate(X=X, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+            logging.info("Computed ATE for contrast t0=%s vs t1=%s: %s", t0, t1, item["ate"])
 
-                item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1_val}}
-                item["ate"] = est.ate(X=X, T0=t0, T1=t1_val)  # pyright: ignore[reportUnknownMemberType]
-
-                try:
-                    ate_interval = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
-                    if ate_interval is not None:
-                        item["ate_interval"] = ate_interval  # pyright: ignore
-                    else:
-                        item["ate_interval"] = None
-                        warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")
-                except Exception as e:
-                    warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+            try:
+                ate_interval = est.ate_interval(
+                    X=X,
+                    T0=t0,
+                    T1=t1,
+                    alpha=command.inputs.alpha,
+                )  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+                if ate_interval is not None:
+                    item["ate_interval"] = ate_interval
+                else:
                     item["ate_interval"] = None
+                    warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")
+            except Exception as e:
+                warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+                item["ate_interval"] = None
 
-                try:
-                    inference = est.ate_inference(X=X, T0=t0, T1=t1_val)  # pyright: ignore
-                    item["ate_inference"] = serialize_inference_obj(inference) if inference is not None else None
-                    if inference is None:
-                        warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
-                except Exception as e:
-                    warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
-                    item["ate_inference"] = None
+            try:
+                inference = est.ate_inference(X=X, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+                item["ate_inference"] = serialize_inference_obj(inference) if inference is not None else None
+                if inference is None:
+                    warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
+            except Exception as e:
+                warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+                item["ate_inference"] = None
 
-                effects.append(item)
+            effects.append(item)
 
             if not effects:
                 return CommandFailure(
                     run_id=command.run_id,
                     started_at=started_at,
                     finished_at=now_utc(),
-                    error=ErrorInfo(code="OPTIONS_INVALID", message="No valid categorical contrasts found (baseline vs all).", details={}),
+                    error=ErrorInfo(
+                        code="OPTIONS_INVALID",
+                        message="No valid categorical contrasts found (baseline vs all).",
+                        details={},
+                    ),
                     warnings=[],
                     meta={},
                 )
@@ -611,7 +681,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 meta={
                     "backend": "econml.dml.SparseLinearDML",
                     "n": int(df.shape[0]),
-                    "x_cols": spec.X if spec.X else None,
+                    "x_cols": spec.effect_modifiers if spec.effect_modifiers else None,
                     "contrast_kind": "baseline_vs_all",
                     "t0": t0,
                 },
@@ -626,7 +696,11 @@ class SparseLinearDMLCausalModel(CausalModel):
                 run_id=command.run_id,
                 started_at=started_at,
                 finished_at=now_utc(),
-                error=ErrorInfo(code="ESTIMATOR_ERROR", message="ATE computation failed.", details={"exception": repr(e)}),
+                error=ErrorInfo(
+                    code="ESTIMATOR_ERROR",
+                    message="ATE computation failed.",
+                    details={"exception": repr(e)},
+                ),
                 warnings=[],
                 meta={},
             )
@@ -665,109 +739,92 @@ class SparseLinearDMLCausalModel(CausalModel):
                 )
 
             est: SparseLinearDML = model_record.model
-            spec: CausalSpec = command.protocol_specs
-            X_order: Optional[List[str]] = command.order_X
+            spec: CausalSpec = command.causal_specs
+            effect_modifiers_order: List[str] = list(
+                command.order_effect_modifiers or spec.effect_modifiers or []
+            )
+
             X_df = command.inputs.x_rows
-            x_cols = spec.X
+            x_cols = spec.effect_modifiers
             raise_if_x_rows_not_exactly_match_fit_x_cols(x_rows=X_df, x_cols=x_cols)
-            X_query = X_df[X_order].to_numpy() if X_order else None
-            
+
+            # Keep DataFrame columns intact for featurizer=pre_X.
+            X_query = X_df[effect_modifiers_order].copy() if effect_modifiers_order else None
+
             if X_query is None or X_query.shape[1] == 0:
                 return CommandFailure(
                     run_id=command.run_id,
                     started_at=started_at,
                     finished_at=now_utc(),
-                    error=ErrorInfo(code="OPTIONS_INVALID", message="CATE requires non-empty X for effect modification; none provided.", details={}),
-                    warnings=[],
-                    meta={},
-                )
-                
-            if spec.T.kind == "binary":
-                if len(spec.T.control_values) != 1 or len(spec.T.treated_values) != 1:
-                    return CommandFailure(
-                        run_id=command.run_id,
-                        started_at=started_at,
-                        finished_at=now_utc(),
-                        error=ErrorInfo(
-                            code="OPTIONS_INVALID",
-                            message="Binary treatment for CATE requires exactly one control_value and one treated_value (or pre-normalize T upstream).",
-                            details={
-                                "control_values": list(spec.T.control_values),
-                                "treated_values": list(spec.T.treated_values),
-                            },
-                        ),
-                        warnings=[],
-                        meta={},
-                    )
-                t0 = command.inputs.t0
-                t1 = command.inputs.t1
-                if t0 is None or t1 is None or t0 == t1:
-                    return CommandFailure(
-                        run_id=command.run_id,
-                        started_at=started_at,
-                        finished_at=now_utc(),
-                        error=ErrorInfo(
-                            code="OPTIONS_INVALID",
-                            message="For binary treatment, t0 and t1 values must be provided and different.",
-                            details={"t0": t0, "t1": t1},
-                        ),
-                        warnings=[],
-                        meta={},
-                    )
-                
-            else:
-                return CommandFailure(
-                    run_id=command.run_id,
-                    started_at=started_at,
-                    finished_at=now_utc(),
-                    error=ErrorInfo(code="UNSUPPORTED_QUERY", message=f"Unsupported treatment kind {spec.T.kind!r} for CATE.", details={}),
+                    error=ErrorInfo(
+                        code="OPTIONS_INVALID",
+                        message="CATE requires non-empty X for effect modification; none provided.",
+                        details={},
+                    ),
                     warnings=[],
                     meta={},
                 )
 
+            t0, t1 = get_treatment_t0_t1_from_spec(
+                spec,
+                is_global_counter_factual=command.inputs.counterfactual,
+            )
 
             effects: Dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
 
             try:
-                    effects["cate"] = est.effect(X_query, T0=t0, T1=t1)  # pyright: ignore
+                effects["cate"] = est.effect(X_query, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
             except Exception as e:
-                    return CommandFailure(
-                        run_id=command.run_id,
-                        started_at=started_at,
-                        finished_at=now_utc(),
-                        error=ErrorInfo(code="ESTIMATOR_ERROR", message="CATE computation failed (effect).", details={"exception": repr(e)}),
-                        warnings=[],
-                        meta={},
-                    )
-
-            try:
-                    interval = est.effect_interval(X_query, T0=t0, T1=t1, alpha=command.inputs.alpha)  # pyright: ignore
-                    if interval is None:
-                        warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
-                        effects["cate_interval"] = None
-                    else:
-                        effects["cate_interval"] = interval  # pyright: ignore
-            except Exception as e:
-                    warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
-                    effects["cate_interval"] = None
-
-            try:
-                    inf = est.effect_inference(X_query, T0=t0, T1=t1)  # pyright: ignore
-                    if inf is None:
-                        warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_inference returned None")
-                        effects["cate_inference"] = None
-                    else:
-                        effects["cate_inference"] = serialize_inference_obj(inf)
-            except Exception as e:
-                    warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
-                    effects["cate_inference"] = None
-
-            if  effects.get("cate", None) is None:
                 return CommandFailure(
                     run_id=command.run_id,
                     started_at=started_at,
                     finished_at=now_utc(),
-                    error=ErrorInfo(code="OPTIONS_INVALID", message="No valid contrasts produced for CATE.", details={}),
+                    error=ErrorInfo(
+                        code="ESTIMATOR_ERROR",
+                        message="CATE computation failed (effect).",
+                        details={"exception": repr(e)},
+                    ),
+                    warnings=[],
+                    meta={},
+                )
+
+            try:
+                interval = est.effect_interval(
+                    X_query,
+                    T0=t0,
+                    T1=t1,
+                    alpha=command.inputs.alpha,
+                )  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+                if interval is None:
+                    warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
+                    effects["cate_interval"] = None
+                else:
+                    effects["cate_interval"] = interval
+            except Exception as e:
+                warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+                effects["cate_interval"] = None
+
+            try:
+                inf = est.effect_inference(X_query, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+                if inf is None:
+                    warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_inference returned None")
+                    effects["cate_inference"] = None
+                else:
+                    effects["cate_inference"] = serialize_inference_obj(inf)
+            except Exception as e:
+                warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+                effects["cate_inference"] = None
+
+            if effects.get("cate") is None:
+                return CommandFailure(
+                    run_id=command.run_id,
+                    started_at=started_at,
+                    finished_at=now_utc(),
+                    error=ErrorInfo(
+                        code="OPTIONS_INVALID",
+                        message="No valid contrasts produced for CATE.",
+                        details={},
+                    ),
                     warnings=[],
                     meta={},
                 )
@@ -797,11 +854,16 @@ class SparseLinearDMLCausalModel(CausalModel):
                 meta={},
             )
         except Exception as e:
+            logging.exception(e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
                 finished_at=now_utc(),
-                error=ErrorInfo(code="ESTIMATOR_ERROR", message="CATE computation failed.", details={"exception": repr(e)}),
+                error=ErrorInfo(
+                    code="ESTIMATOR_ERROR",
+                    message="CATE computation failed.",
+                    details={"exception": repr(e)},
+                ),
                 warnings=[],
                 meta={},
             )

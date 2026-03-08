@@ -44,7 +44,6 @@ from python.implementation.workflows.tools.causal.causal_model import CausalMode
 from python.implementation.workflows.tools.causal.causal_model_factory_tool import CausalModelFactoryTool
 from python.implementation.workflows.tools.causal.causal_spec import (
     BinaryOutcomeSpecModel,
-    BinaryTreatmentSpecModel,
     CausalSpec,
     ContinuousOutcomeSpecModel,
 )
@@ -484,8 +483,6 @@ def _make_llm_cate_payload_for_group(
     group_key: str,
     inclusion_rules: Sequence[IncExcRuleModel],
     is_counterfactual: bool,
-    t0: Any,
-    t1: Any,
     outcome_kind: str,
     effect_obj: Dict[CATEModelResult, Any],
 ) -> Dict[str, Any]:
@@ -499,7 +496,6 @@ def _make_llm_cate_payload_for_group(
     out: Dict[str, Any] = {
         "group_key": group_key,
         "is_counterfactual": bool(is_counterfactual),
-        "contrast": {"t0": t0, "t1": t1},
         "outcome_kind": outcome_kind,
         "inclusion_rules": rules_compact,
         "cate": None,
@@ -552,19 +548,6 @@ def _apply_rules_with_tool(
     except TypeError:
         # some implementations prefer inclusion_rules=
         return tool.apply_inclusion_rules(df=df, inclusion_rules=rules)  # type: ignore[call-arg]
-
-
-def _binary_t0_t1(causal_specs: CausalSpec, *, is_counterfactual: bool) -> Tuple[Any, Any]:
-    t = causal_specs.treatment_spec
-    if not isinstance(t, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        raise TypeError(f"Binary treatment required, got {type(t).__name__}")
-    treated = t.treated
-    control = t.control
-    if is_counterfactual:
-        # reverse direction: "no treatment vs treatment" -> swap
-        return treated, control  # (t0, t1) swapped relative to normal
-    return control, treated
-
 
 def _process_cate_question(
     *,
@@ -717,10 +700,8 @@ def _process_cate_question(
 
         non_empty_any = True
 
-        # Decide t0/t1 for THIS cohort (binary treatment; swap if counterfactual)
-        t0, t1 = _binary_t0_t1(causal_specs, is_counterfactual=bool(cohort.is_counterfactual))
-
-        cate_inputs = CATEInputs(x_rows=cohort_df, t0=t0, t1=t1)
+    
+        cate_inputs = CATEInputs(x_rows=cohort_df, counterfactual=cohort.is_counterfactual)  
 
         cmd = CATECommand(
             model_name=selected_model_fqcn,
@@ -752,8 +733,6 @@ def _process_cate_question(
                         group_key=gk,
                         inclusion_rules=cohort.inclusion_rules,
                         is_counterfactual=bool(cohort.is_counterfactual),
-                        t0=t0,
-                        t1=t1,
                         outcome_kind=outcome_kind,
                         effect_obj=res.effects,
                     )
