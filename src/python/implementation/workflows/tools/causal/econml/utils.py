@@ -168,6 +168,18 @@ def get_input_params_from_spec(
     order_W: Optional[List[str]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, Any]]:
 
+    def _as_label_set(x: Any) -> set[Any]:
+        if isinstance(x, str):
+            return {x}
+        if isinstance(x, (list, tuple, set, frozenset, np.ndarray, pd.Series)):
+            return set(x) # pyright: ignore[reportUnknownArgumentType]
+        return {x}
+
+    def _norm_label(v: Any) -> Any:
+        if isinstance(v, str):
+            return v.strip().casefold()
+        return v
+
     y_col = str(specs.Y.column)
     t_col = str(specs.T.column)
 
@@ -188,31 +200,32 @@ def get_input_params_from_spec(
         if y_ser.isna().any():
             raise ValueError(f"Binary outcome {y_col!r} contains missing values.")
 
-        if pd.api.types.is_bool_dtype(y_ser.dtype):
-            y = y_ser.astype(int).to_numpy(dtype=float)  # 0.0/1.0
-        elif pd.api.types.is_numeric_dtype(y_ser.dtype):
-            uniq = set(pd.unique(y_ser))
-            if not uniq.issubset({0, 1, 0.0, 1.0, True, False}):
-                raise ValueError(f"Binary numeric outcome {y_col!r} must be 0/1; got {list(uniq)[:10]!r}")
-            y = (y_ser.astype(float) == 1.0).to_numpy(dtype=float)
-        else:
-            # map strings via event_values/non_event_values
-            pos = set(getattr(specs.Y, "event_values", []) or [])
-            neg = set(getattr(specs.Y, "non_event_values", []) or [])
-            if not pos or not neg:
+        pos = {_norm_label(v) for v in _as_label_set(specs.Y.event_values)}
+        neg = {_norm_label(v) for v in _as_label_set(specs.Y.non_event_values)}
+
+        overlap = pos.intersection(neg)
+        if overlap:
+            raise ValueError(
+                f"Binary outcome spec for {y_col!r} is invalid: "
+                f"event_values and non_event_values overlap after normalization: "
+                f"{sorted(repr(v) for v in overlap)}"
+            )
+
+        vals = y_ser.to_numpy()
+        out = np.empty(len(vals), dtype=float)
+
+        for i, v in enumerate(vals):
+            vv = _norm_label(v)
+            if vv in pos:
+                out[i] = 1.0
+            elif vv in neg:
+                out[i] = 0.0
+            else:
                 raise ValueError(
-                    f"Binary outcome {y_col!r} is non-numeric but event_values/non_event_values are missing."
+                    f"Unmapped binary outcome value {v!r} for column {y_col!r}."
                 )
-            vals = y_ser.to_numpy()
-            out = np.empty(len(vals), dtype=float)
-            for i, v in enumerate(vals):
-                if v in pos:
-                    out[i] = 1.0
-                elif v in neg:
-                    out[i] = 0.0
-                else:
-                    raise ValueError(f"Unmapped binary outcome value {v!r} for column {y_col!r}.")
-            y = out
+
+        y = out
     else:
         # continuous/other: must be numeric for EconML
         if y_ser.isna().any():
