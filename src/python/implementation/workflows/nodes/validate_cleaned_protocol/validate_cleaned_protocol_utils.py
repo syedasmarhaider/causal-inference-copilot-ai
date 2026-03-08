@@ -10,15 +10,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, Typ
 import pandas as pd
 import pandas.api.types as ptypes
 from typing import cast
-from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
-    BinaryOutcomeSpecModel,
-    BinaryTreatmentSpecModel,
-    ContinuousOutcomeSpecModel,
-)
-
-from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
-    ProtocolSpec,
-)
+from python.implementation.workflows.tools.causal.causal_spec import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CausalSpec, ContinuousOutcomeSpecModel
 from python.implementation.workflows.utils.utils import BOOL_FALSE, BOOL_TRUE
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, TypedDict, cast
 
@@ -62,7 +54,7 @@ def validate_min_rows(
     return [], metrics
 
 
-def validate_protocol_role_columns_invariants(protocol: ProtocolSpec) -> List[ValidationIssue]:
+def validate_protocol_role_columns_invariants(causal_spec: CausalSpec) -> List[ValidationIssue]:
     """
     Pure protocol invariants about referenced column names (no DataFrame needed).
 
@@ -80,24 +72,24 @@ def validate_protocol_role_columns_invariants(protocol: ProtocolSpec) -> List[Va
     # -------------------------
     # Treatment column
     # -------------------------
-    treatment_col: str = protocol.treatment_spec.column
+    treatment_col: str = causal_spec.treatment_spec.column
 
     # -------------------------
     # Outcome columns (duration has two)
     # -------------------------
 
-    outcome_cols = [protocol.outcome_spec.column]
+    outcome_cols = [causal_spec.outcome_spec.column]
 
     # -------------------------
     # Covariates / effect modifiers
     # -------------------------
-    covariates: List[str] = list(protocol.covariates or [])
-    effect_modifiers: List[str] = list(protocol.effect_modifiers or [])
+    covariates: List[str] = list(causal_spec.covariates or [])
+    effect_modifiers: List[str] = list(causal_spec.effect_modifiers or [])
 
     # -------------------------
     # time_zero is a real column only when time_zero_type == "COLUMN"
     # -------------------------
-    time_zero_col = protocol.time_zero if protocol.time_zero_type == "COLUMN" else None
+    time_zero_col = causal_spec.time_zero if causal_spec.time_zero_type == "COLUMN" else None
 
     # -------------------------
     # 1) Duplicates within lists (FAIL)
@@ -191,32 +183,32 @@ def validate_protocol_role_columns_invariants(protocol: ProtocolSpec) -> List[Va
 
 def validate_time_zero_semantics_protocol(
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     *,
     sample_n: int = 2000,
     parse_fail_rate_warn: float = 0.10,
     parse_fail_rate_fail: float = 0.50,
 ) -> Tuple[List[ValidationIssue], Dict[str, Any]]:
     """
-    Lightweight time_zero validation for ProtocolSpec.
+    Lightweight time_zero validation for CausalSpec.
 
-    Only applies when protocol.time_zero_type == "COLUMN".
+    Only applies when causal_spec.time_zero_type == "COLUMN".
     We do NOT enforce strict datetime dtype, but we flag clearly unparseable values.
     """
     issues: List[ValidationIssue] = []
 
-    tz_type = protocol.time_zero_type
+    tz_type = causal_spec.time_zero_type
     if tz_type != "COLUMN":
         return issues, {"time_zero_type": tz_type}
 
-    tz = protocol.time_zero
+    tz = causal_spec.time_zero
     if not tz.strip():
         issues.append(
             _issue(
                 severity="FAIL",
-                message="time_zero_type is 'COLUMN' but protocol.time_zero is missing/empty.",
+                message="time_zero_type is 'COLUMN' but causal_spec.time_zero is missing/empty.",
                 evidence={"time_zero": tz},
-                fix_hint="Set protocol.time_zero to a non-empty dataset column name when time_zero_type='COLUMN'.",
+                fix_hint="Set causal_spec.time_zero to a non-empty dataset column name when time_zero_type='COLUMN'.",
             )
         )
         return issues, {"time_zero_col": tz}
@@ -289,7 +281,7 @@ def validate_time_zero_semantics_protocol(
                 severity="FAIL",
                 message="time_zero values are largely unparseable as datetimes (sample-based).",
                 evidence=metrics,
-                fix_hint="Ensure time_zero contains ISO-like datetimes or a consistent parseable format.",
+                fix_hint="Ensure causal_spec.time_zero contains ISO-like datetimes or a consistent parseable format.",
             )
         )
     elif fail_rate >= float(parse_fail_rate_warn):
@@ -298,7 +290,7 @@ def validate_time_zero_semantics_protocol(
                 severity="WARN",
                 message="Some time_zero values are unparseable as datetimes (sample-based).",
                 evidence=metrics,
-                fix_hint="Standardize time_zero format (e.g., ISO-8601) to avoid downstream windowing issues.",
+                fix_hint="Standardize causal_spec.time_zero format (e.g., ISO-8601) to avoid downstream windowing issues.",
             )
         )
 
@@ -312,8 +304,8 @@ def _is_missing_scalar(v: Any) -> bool:
     Scalar-safe missing check.
     """
     try:
-        out = pd.isna(v)
-        return bool(out) if isinstance(out, (bool, np.bool_)) else False
+        out = pd.isna(v) # pyright: ignore[reportUnknownVariableType]
+        return bool(out) if isinstance(out, (bool, np.bool_)) else False # pyright: ignore[reportUnknownArgumentType]
     except Exception:
         return False
 
@@ -369,7 +361,7 @@ def _normalize_discrete_scalar(v: Any) -> DiscreteKey:
 
     # bool first because bool is a subclass of int in Python
     if isinstance(v, (bool, np.bool_)):
-        return ("bool", "true" if bool(v) else "false")
+        return ("bool", "true" if bool(v) else "false") # pyright: ignore[reportUnknownArgumentType]
 
     if isinstance(v, Decimal):
         if v.is_finite():
@@ -377,13 +369,13 @@ def _normalize_discrete_scalar(v: Any) -> DiscreteKey:
         return ("other", repr(v))
 
     if isinstance(v, (numbers.Integral, np.integer)):
-        return ("num", str(int(v)))
+        return ("num", str(int(v))) # pyright: ignore[reportUnknownArgumentType]
 
     if isinstance(v, (numbers.Real, np.floating)):
-        fv = float(v)
+        fv = float(v) # pyright: ignore[reportUnknownArgumentType]
         if math.isfinite(fv):
             return ("num", _decimal_to_canonical_text(Decimal(str(fv))))
-        return ("other", repr(v))
+        return ("other", repr(v)) # pyright: ignore[reportUnknownArgumentType]
 
     if isinstance(v, str):
         # First: textual booleans
@@ -404,51 +396,6 @@ def _normalize_discrete_scalar(v: Any) -> DiscreteKey:
         return ("str", v)
 
     return ("other", repr(v))
-
-
-
-
-def _normalized_value_counts(
-    s: pd.Series,
-) -> Tuple[Dict[DiscreteKey, int], Dict[DiscreteKey, List[Any]]]:
-    """
-    Count observed values by normalized discrete key.
-    Also keep a few raw examples for diagnostics.
-    """
-    counts: Dict[DiscreteKey, int] = {}
-    raw_examples: Dict[DiscreteKey, List[Any]] = {}
-
-    for raw in s.tolist():
-        key = _normalize_discrete_scalar(raw)
-        counts[key] = counts.get(key, 0) + 1
-        raw_examples.setdefault(key, [])
-        if len(raw_examples[key]) < 5:
-            raw_examples[key].append(raw)
-
-    return counts, raw_examples
-
-
-def _build_allowed_literal_meta(
-    allowed_literals: List[Any],
-) -> Tuple[List[Any], List[DiscreteKey], Dict[DiscreteKey, List[Any]]]:
-    """
-    Returns:
-      - stable raw unique literals
-      - normalized keys in same order
-      - collisions after normalization
-
-    Example collision:
-      protocol literals [0, "0"] -> both normalize to ("num", "0")
-    """
-    raw_unique = list(dict.fromkeys(allowed_literals))
-    norm_keys = [_normalize_discrete_scalar(v) for v in raw_unique]
-
-    grouped: Dict[DiscreteKey, List[Any]] = {}
-    for raw, key in zip(raw_unique, norm_keys):
-        grouped.setdefault(key, []).append(raw)
-
-    collisions = {k: vals for k, vals in grouped.items() if len(vals) > 1}
-    return raw_unique, norm_keys, collisions
 
 
 def _missingness_by_normalized_treatment_arm(
@@ -499,7 +446,7 @@ def _missingness_by_normalized_treatment_arm(
 # =============================================================================
 # 3) Treatment validations (pre-transform; whitelist already applied upstream)
 # =============================================================================
-def _treatment_allowed_literals(protocol: ProtocolSpec) -> List[Any]:
+def _treatment_allowed_literals(causal_spec: CausalSpec) -> List[Any]:
     """
     Returns the allowed literal domain for treatment_spec.
     - binary -> [treated, control]
@@ -508,7 +455,7 @@ def _treatment_allowed_literals(protocol: ProtocolSpec) -> List[Any]:
     Protocol values may come from DB as strings; downstream validation
     normalizes them with best-effort typed parsing.
     """
-    ts = protocol.treatment_spec
+    ts = causal_spec.treatment_spec
     if isinstance(ts, BinaryTreatmentSpecModel):  # pyright: ignore[reportUnnecessaryIsInstance]
         return [ts.treated, ts.control]
     raise ValueError(f"Unknown treatment_spec type: {type(ts)}")
@@ -517,7 +464,7 @@ def _treatment_allowed_literals(protocol: ProtocolSpec) -> List[Any]:
 def validate_treatment(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     min_count_per_literal_fail: int = 15,
     min_share_fail: float = 0.05,
     max_ratio_fail: float = 20.0,
@@ -537,7 +484,7 @@ def validate_treatment(
     # -------------------------
     # Step 0: Column presence
     # -------------------------
-    tcol = protocol.treatment_spec.column
+    tcol = causal_spec.treatment_spec.column
     if tcol not in df.columns:
         logging.warning(f"Treatment column '{tcol}' not found in dataframe columns: {df.columns.tolist()}")
         metrics = {"treatment_col": tcol, "present": False}
@@ -558,7 +505,7 @@ def validate_treatment(
     metrics: Dict[str, Any] = {
         "treatment_col": tcol,
         "present": True,
-        "treatment_kind": getattr(protocol.treatment_spec, "kind", None),
+        "treatment_kind": getattr(causal_spec.treatment_spec, "kind", None),
         "dtype": str(s.dtype),
         "n_rows": n_rows,
         "missing_rate": missing_rate,
@@ -596,7 +543,7 @@ def validate_treatment(
     # -------------------------
     # Step 2: Allowed literals (protocol truth, normalized best-effort)
     # -------------------------
-    allowed_literals = _treatment_allowed_literals(protocol)
+    allowed_literals = _treatment_allowed_literals(causal_spec)
     allowed_unique, allowed_norm_keys, allowed_collisions = _build_allowed_literal_meta(allowed_literals)
     allowed_key_set = set(allowed_norm_keys)
 
@@ -683,9 +630,9 @@ def validate_treatment(
         issues.append(
             _issue(
                 severity="FAIL",
-                message="Strict protocol violation: treatment contains values outside protocol literals.",
+                message="Strict protocol violation: treatment contains values outside causal specs literals.",
                 evidence=metrics,
-                fix_hint="Map/filter upstream so treatment values match the protocol literals semantically.",
+                fix_hint="Map/filter upstream so treatment values match the causal specs literals semantically.",
             )
         )
         return issues, metrics
@@ -694,7 +641,7 @@ def validate_treatment(
         issues.append(
             _issue(
                 severity="FAIL",
-                message="Strict protocol violation: not all protocol treatment literals are present after filtering.",
+                message="Strict protocol violation: not all causal specs treatment literals are present after filtering.",
                 evidence=metrics,
                 fix_hint="Relax filtering or fix mapping so every allowed literal appears at least once.",
             )
@@ -822,16 +769,16 @@ def _normalize_discrete_literal(v: Any) -> DiscreteKey:
         pass
 
     if isinstance(v, (bool, np.bool_)):
-        return ("bool", bool(v))
+        return ("bool", bool(v)) # pyright: ignore[reportUnknownArgumentType]
 
     if isinstance(v, (numbers.Integral, np.integer)) and not isinstance(v, (bool, np.bool_)):
-        return ("num", float(v))
+        return ("num", float(v)) # pyright: ignore[reportUnknownArgumentType]
 
     if isinstance(v, (numbers.Real, np.floating)) and not isinstance(v, (bool, np.bool_)):
-        fv = float(v)
+        fv = float(v) # pyright: ignore[reportUnknownArgumentType]
         if math.isfinite(fv):
             return ("num", fv)
-        return ("str", str(v).strip().lower())
+        return ("str", str(v).strip().lower()) # pyright: ignore[reportUnknownArgumentType]
 
     if isinstance(v, str):
         s = v.strip()
@@ -1253,7 +1200,7 @@ def _modifier_binary_support_one_at_a_time(
 def validate_outcome(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     allow_missing_outcome: bool = False,
     missing_rate_warn: float = 0.01,
     missing_rate_fail: float = 0.20,
@@ -1288,8 +1235,8 @@ def validate_outcome(
     """
     issues: List[ValidationIssue] = []
 
-    ys = protocol.outcome_spec
-    ts = protocol.treatment_spec
+    ys = causal_spec.outcome_spec
+    ts = causal_spec.treatment_spec
     ycol = ys.column
     tcol = ts.column
 
@@ -1795,9 +1742,9 @@ def validate_outcome(
         # --------------------------------------------------------------
         # Step 5: optional effect-modifier support diagnostics
         # --------------------------------------------------------------
-        if assess_effect_modifier_support and getattr(protocol, "effect_modifiers", None):
+        if assess_effect_modifier_support and getattr(causal_spec, "effect_modifiers", None):
             modifier_support_reports: List[Dict[str, Any]] = []
-            missing_modifier_cols = [c for c in protocol.effect_modifiers if c not in df.columns]
+            missing_modifier_cols = [c for c in causal_spec.effect_modifiers if c not in df.columns]
 
             if missing_modifier_cols:
                 issues.append(
@@ -1810,7 +1757,7 @@ def validate_outcome(
                 )
                 return issues, metrics
 
-            for mod_col in protocol.effect_modifiers:
+            for mod_col in causal_spec.effect_modifiers:
                 report = _modifier_binary_support_one_at_a_time(
                     df=df,
                     modifier_col=mod_col,
@@ -1868,7 +1815,7 @@ def validate_outcome(
 def validate_covariate_and_effect_modifier_presence(
     *,
     df: pd.DataFrame,
-    protocol: "ProtocolSpec",
+    causal_spec: CausalSpec,
     require_covariates: bool,
 ) -> Tuple[List["ValidationIssue"], Dict[str, Any]]:
     """
@@ -1929,8 +1876,8 @@ def validate_covariate_and_effect_modifier_presence(
                 out.append(x)
         return out
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
 
     # -------------------------
     # 2) Existence checks
@@ -2036,7 +1983,7 @@ def validate_covariate_and_effect_modifier_presence(
 def validate_covariate_and_effect_modifier_missingness(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     missing_rate_warn: float = 0.05,
     missing_rate_fail: float = 0.30,
     ignore_cols: Sequence[str] = (),
@@ -2067,8 +2014,8 @@ def validate_covariate_and_effect_modifier_missingness(
                 out.append(x)
         return out
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
 
     # Combined list (stable): covariates first
     cols_all = _dedup_keep_order([c for c in (covariates + effect_modifiers) if c not in ignore])[: int(max_cols)]
@@ -2148,7 +2095,7 @@ def validate_covariate_and_effect_modifier_missingness(
 def validate_covariate_and_effect_modifier_missingness_by_treatment(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     delta_warn: float = 0.05,
     delta_fail: float = 0.20,
     ignore_cols: Sequence[str] = (),
@@ -2177,7 +2124,7 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
     issues: List["ValidationIssue"] = []
     ignore = {c for c in ignore_cols if c.strip()}
 
-    ts = protocol.treatment_spec
+    ts = causal_spec.treatment_spec
     tcol = ts.column
 
     metrics: Dict[str, Any] = {
@@ -2277,8 +2224,8 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
                 out.append(x)
         return out
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
     cols_all = _dedup_keep_order([c for c in (covariates + effect_modifiers) if c not in ignore])[: int(max_cols)]
 
     missing_cols = [c for c in cols_all if c not in df.columns]
@@ -2350,7 +2297,7 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
 def validate_covariate_and_effect_modifier_constantness(
     *,
     df: pd.DataFrame,
-    protocol: "ProtocolSpec",
+    causal_spec:  CausalSpec,
     # hard-ish thresholds
     max_constant_frac_warn: float = 0.30,
     max_constant_frac_fail: float = 0.70,
@@ -2388,8 +2335,8 @@ def validate_covariate_and_effect_modifier_constantness(
                 out.append(x)
         return out
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
     cols_all = _dedup_keep_order([c for c in (covariates + effect_modifiers) if c not in ignore])[: int(max_cols)]
 
     missing_cols = [c for c in cols_all if c not in df.columns]
@@ -2507,7 +2454,7 @@ def validate_covariate_and_effect_modifier_constantness(
 def validate_covariate_and_effect_modifier_high_cardinality_and_id_like(
     *,
     df: pd.DataFrame,
-    protocol: "ProtocolSpec",
+    causal_spec: CausalSpec,
     # cardinality thresholds for categorical/string-ish
     max_levels_warn: int = 50,
     max_levels_fail: int = 200,
@@ -2547,8 +2494,8 @@ def validate_covariate_and_effect_modifier_high_cardinality_and_id_like(
                 out.append(x)
         return out
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
     cols_all = _dedup_keep_order([c for c in (covariates + effect_modifiers) if c not in ignore])[: int(max_cols)]
 
     missing_cols = [c for c in cols_all if c not in df.columns]
@@ -2688,7 +2635,7 @@ def validate_covariate_and_effect_modifier_high_cardinality_and_id_like(
 def validate_covariate_and_effect_modifier_type_risks(
     *,
     df: pd.DataFrame,
-    protocol: "ProtocolSpec",
+    causal_spec: CausalSpec,
     ignore_cols: Sequence[str] = (),
     max_cols: int = 500,
     # object-type scan is bounded for speed/determinism
@@ -2730,8 +2677,8 @@ def validate_covariate_and_effect_modifier_type_risks(
                 out.append(x)
         return out
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
     cols_all = _dedup_keep_order([c for c in (covariates + effect_modifiers) if c not in ignore])[: int(max_cols)]
 
     missing_cols = [c for c in cols_all if c not in df.columns]
@@ -2969,14 +2916,14 @@ def _dedup_keep_order(xs: List[str]) -> List[str]:
 def compute_arm_masks_from_protocol(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     max_bins_continuous: int = 5,
 ) -> ArmMasks:
-    tcol = protocol.treatment_spec.column
+    tcol = causal_spec.treatment_spec.column
     if tcol not in df.columns:
         raise KeyError(f"treatment_col not found in df: {tcol!r}")
 
-    ts = protocol.treatment_spec
+    ts = causal_spec.treatment_spec
     s = df[tcol]
 
     if isinstance(ts, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
@@ -2996,7 +2943,7 @@ def compute_arm_masks_from_protocol(
 def validate_overlap_positivity_univariate(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     arm_masks: ArmMasks,
     # feature selection scope
     use_effect_modifiers: bool = True,
@@ -3026,8 +2973,8 @@ def validate_overlap_positivity_univariate(
     issues: List["ValidationIssue"] = []
     ignore = {c for c in ignore_cols if c.strip()}
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
 
     feat_cols = covariates + (effect_modifiers if use_effect_modifiers else [])
     feat_cols = _dedup_keep_order([c for c in feat_cols if c not in ignore])[: int(max_cols)]
@@ -3213,7 +3160,7 @@ def validate_overlap_positivity_univariate(
 def validate_overlap_propensity_proxy(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     arm_masks: ArmMasks,
     # use covariates only by default; effect modifiers often include post-treatment-ish features by mistake
     use_effect_modifiers: bool = False,
@@ -3238,7 +3185,7 @@ def validate_overlap_propensity_proxy(
     metrics: Dict[str, Any] = {
         "enabled": False,
         "reason": None,
-        "treatment_col": protocol.treatment_spec.column,
+        "treatment_col": causal_spec.treatment_spec.column,
         "arm_kind": arm_masks.kind,
         "auc": None,
         "extreme_prob_share": None,
@@ -3297,8 +3244,8 @@ def validate_overlap_propensity_proxy(
 
     y = np.concatenate([np.ones(len(idx_t_s), dtype=np.int32), np.zeros(len(idx_c_s), dtype=np.int32)])
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
     feat_cols = covariates + (effect_modifiers if use_effect_modifiers else [])
     feat_cols = _dedup_keep_order([c for c in feat_cols if c in df.columns])
 
@@ -3409,7 +3356,7 @@ def validate_overlap_propensity_proxy(
 def validate_overlap_and_positivity(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     require_covariates: bool = True,
     # univariate knobs
     use_effect_modifiers_univariate: bool = True,
@@ -3430,18 +3377,18 @@ def validate_overlap_and_positivity(
     issues: List["ValidationIssue"] = []
 
     # Build masks (this can raise if T missing; let caller run treatment presence checks earlier)
-    arms = compute_arm_masks_from_protocol(df=df, protocol=protocol)
+    arms = compute_arm_masks_from_protocol(df=df, causal_spec=causal_spec)
 
     # Require covariates for overlap checks (otherwise overlap is not meaningful)
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
     if require_covariates and not covariates:
-        metrics = {"require_covariates": True, "n_covariates": 0, "treatment_col": protocol.treatment_spec.column}
+        metrics = {"require_covariates": True, "n_covariates": 0, "treatment_col": causal_spec.treatment_spec.column}
         issues.append(
             _issue(
                 severity="FAIL",
-                message="Cannot assess overlap/positivity: protocol.covariates is empty (no adjustment set).",
+                message="Cannot assess overlap/positivity: causal_spec.covariates is empty (no adjustment set).",
                 evidence=metrics,
-                fix_hint="Add covariates (confounders) to protocol.covariates before causal estimation.",
+                fix_hint="Add covariates (confounders) to causal_spec.covariates before causal estimation.",
             )
         )
         return issues, {"arm_masks": arms.to_dict(), **metrics}
@@ -3449,7 +3396,7 @@ def validate_overlap_and_positivity(
     # Univariate overlap
     iss_u, met_u = validate_overlap_positivity_univariate(
         df=df,
-        protocol=protocol,
+        causal_spec=causal_spec,
         arm_masks=arms,
         use_effect_modifiers=use_effect_modifiers_univariate,
     )
@@ -3459,7 +3406,7 @@ def validate_overlap_and_positivity(
 
     # Optional propensity proxy
     if enable_propensity_proxy:
-        iss_p, met_p = validate_overlap_propensity_proxy(df=df, protocol=protocol, arm_masks=arms)
+        iss_p, met_p = validate_overlap_propensity_proxy(df=df, causal_spec=causal_spec, arm_masks=arms)
         issues.extend(iss_p)
         metrics["propensity_proxy"] = met_p
 

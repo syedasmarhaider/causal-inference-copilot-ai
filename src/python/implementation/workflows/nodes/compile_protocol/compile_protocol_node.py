@@ -27,12 +27,8 @@ from python.implementation.workflows.nodes.compile_protocol.compile_protocol_sta
     CompileProtocolPayloadModel,
     CompileProtocolState,
 )
-from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
-    BinaryOutcomeSpecModel,
-    BinaryTreatmentSpecModel,
-    ContinuousOutcomeSpecModel,
-    ProtocolSpec,
-)
+
+from python.implementation.workflows.tools.causal.causal_spec import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CausalSpec, ContinuousOutcomeSpecModel
 from python.implementation.workflows.tools.data_processing.data_processing_tool import (
     ExclusionRulesModel,
 )
@@ -146,7 +142,7 @@ class CompileProtocolNode(Node):
                 issues: List[Dict[str, Any]] = []
                 issues.extend(
                     _semantic_validate_protocol_values_against_dataset_summary(
-                        protocol=protocol_model,
+                        causal_spec=protocol_model,
                         dataset_summary=ds_summary,
                     )
                 )
@@ -165,7 +161,7 @@ class CompileProtocolNode(Node):
 
                 return CompileProtocolState(
                     payload=CompileProtocolPayloadModel(
-                        protocol=protocol_model,
+                        causal_specs=protocol_model,
                         exclusion=exclusion_model,
                         compile_error=None,
                         compile_issues=issues or None,
@@ -202,7 +198,7 @@ class CompileProtocolNode(Node):
 
         return CompileProtocolState(
             payload=CompileProtocolPayloadModel(
-                protocol=None,
+                causal_specs=None,
                 exclusion=None,
                 compile_error=err_text,
                 compile_issues=last_issues or None,
@@ -222,10 +218,10 @@ def _get_protocol_model(
     prompt: str,
     history: Optional[Sequence[ChatMessage]],
     json_attempts: int,
-) -> ProtocolSpec:
+) -> CausalSpec:
     cfg = LLMConfig(model=model_name, temperature=0.0)
     return llm.generate_json(
-        schema=ProtocolSpec,
+        schema=CausalSpec,
         system_prompt="Return JSON only. No extra text.",
         user_prompt=prompt,
         config=cfg,
@@ -277,7 +273,7 @@ def _build_protocol_prompt(
         compile_protocol_prompt.compile_protocol_repair_prompt()
         .replace("{{PROTOCOL_TEXT}}", protocol_text)
         .replace("{{DATASET_SUMMARY_JSON}}", dataset_summary_json_str)
-        .replace("{{PREVIOUS_PROTOCOL_JSON}}", previous_protocol_json or "{}")
+        .replace("{{PREVIOUS_CAUSAL_SPEC_JSON}}", previous_protocol_json or "{}")
         .replace("{{PREVIOUS_EXCLUSION_JSON}}", previous_exclusion_json or "{}")
         .replace(
             "{{VALIDATION_ERRORS}}",
@@ -299,14 +295,14 @@ def _build_exclusion_prompt(
         return (
             compile_protocol_prompt.compile_exclusion_prompt()
             .replace("{{PROTOCOL_TEXT}}", protocol_text)
-            .replace("{{PROTOCOL_JSON}}", compiled_protocol_json or "{}")
+            .replace("{{CAUSAL_SPEC_JSON}}", compiled_protocol_json or "{}")
             .replace("{{DATASET_SUMMARY_JSON}}", dataset_summary_json_str)
         )
 
     return (
         compile_protocol_prompt.compile_exclusion_repair_prompt()
         .replace("{{PROTOCOL_TEXT}}", protocol_text)
-        .replace("{{PROTOCOL_JSON}}", compiled_protocol_json or "{}")
+        .replace("{{CAUSAL_SPEC_JSON}}", compiled_protocol_json or "{}")
         .replace("{{DATASET_SUMMARY_JSON}}", dataset_summary_json_str)
         .replace("{{PREVIOUS_EXCLUSION_JSON}}", previous_exclusion_json or "{}")
         .replace(
@@ -322,7 +318,7 @@ def _build_exclusion_prompt(
 
 def _semantic_validate_protocol_values_against_dataset_summary(
     *,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     dataset_summary: DatasetSummaryModel,
 ) -> List[Dict[str, Any]]:
     by_name = _build_profile_index(dataset_summary)
@@ -351,13 +347,13 @@ def _semantic_validate_protocol_values_against_dataset_summary(
     def prof(col: str) -> Optional[Any]:
         return by_name.get(col.strip())
 
-    ts = protocol.treatment_spec
-    ys = protocol.outcome_spec
+    ts = causal_spec.treatment_spec
+    ys = causal_spec.outcome_spec
 
     # simple protocol sanity
     if str(ts.column).strip() == str(ys.column).strip():
         add_issue(
-            path="protocol",
+            path="causal_spec",
             message=(
                 f"Treatment column and outcome column must differ, got "
                 f"{ts.column!r} for both treatment and outcome."
@@ -373,7 +369,7 @@ def _semantic_validate_protocol_values_against_dataset_summary(
         p = prof(tcol)
         if p is None:
             add_issue(
-                path="treatment_spec.column",
+                path="causal_spec.treatment_spec.column",
                 message=f"Treatment column not found in dataset summary: {tcol!r}",
                 typ="column_not_found",
                 val=tcol,
@@ -384,7 +380,7 @@ def _semantic_validate_protocol_values_against_dataset_summary(
 
             if _norm_value(ts.treated) == _norm_value(ts.control):
                 add_issue(
-                    path="treatment_spec",
+                    path="causal_spec.treatment_spec",
                     message=(
                         f"Binary treatment treated and control must differ, got "
                         f"{ts.treated!r} == {ts.control!r}"
@@ -496,7 +492,7 @@ def _semantic_validate_protocol_values_against_dataset_summary(
 
             if _norm_value(ys.event) == _norm_value(ys.non_event):
                 add_issue(
-                    path="outcome_spec",
+                    path="causal_spec.outcome_spec",
                     message=(
                         f"Binary outcome event and non_event must differ, got "
                         f"{ys.event!r} == {ys.non_event!r}"
@@ -509,7 +505,7 @@ def _semantic_validate_protocol_values_against_dataset_summary(
             if k == "BOOLEAN":
                 if not _is_bool_literal(ys.event):
                     add_issue(
-                        path="outcome_spec.event",
+                        path="causal_spec.outcome_spec.event",
                         message=(
                             f"event value not boolean-like for boolean column "
                             f"{ycol!r}: {ys.event!r}"
@@ -521,7 +517,7 @@ def _semantic_validate_protocol_values_against_dataset_summary(
                     )
                 if not _is_bool_literal(ys.non_event):
                     add_issue(
-                        path="outcome_spec.non_event",
+                        path="causal_spec.outcome_spec.non_event",
                         message=(
                             f"non_event value not boolean-like for boolean column "
                             f"{ycol!r}: {ys.non_event!r}"
@@ -535,7 +531,7 @@ def _semantic_validate_protocol_values_against_dataset_summary(
             elif k == "NUMERIC":
                 if _parse_float_like(ys.event) is None:
                     add_issue(
-                        path="outcome_spec.event",
+                        path="causal_spec.outcome_spec.event",
                         message=(
                             f"event value not parseable as float for numeric column "
                             f"{ycol!r}: {ys.event!r}"
@@ -547,7 +543,7 @@ def _semantic_validate_protocol_values_against_dataset_summary(
                     )
                 if _parse_float_like(ys.non_event) is None:
                     add_issue(
-                        path="outcome_spec.non_event",
+                        path="causal_spec.outcome_spec.non_event",
                         message=(
                             f"non_event value not parseable as float for numeric column "
                             f"{ycol!r}: {ys.non_event!r}"

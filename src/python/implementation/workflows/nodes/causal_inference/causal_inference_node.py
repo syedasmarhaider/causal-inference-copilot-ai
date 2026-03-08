@@ -27,12 +27,6 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_pro
 )
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import CausalInferenceState
 
-from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
-    ProtocolSpec,
-    BinaryTreatmentSpecModel as ProtocolBinaryTreatmentSpecModel,
-    BinaryOutcomeSpecModel as ProtocolBinaryOutcomeSpecModel,
-    ContinuousOutcomeSpecModel as ProtocolContinuousOutcomeSpecModel,
-)
 
 from python.implementation.workflows.tools.causal.causal_command import (
     ATECommand,

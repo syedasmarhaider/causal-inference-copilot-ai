@@ -212,66 +212,8 @@ def _protocol_to_causal_spec(
     protocol: ProtocolSpec,
     dataset_summary: DatasetSummaryModel,
 ) -> CausalSpec:
-    # -------- Treatment (T) --------
-    t = protocol.treatment_spec
-    if isinstance(t, ProtocolBinaryTreatmentSpecModel):  # pyright: ignore[reportUnnecessaryIsInstance]
-        treated_value = _coerce_literal_against_summary(
-            column=str(t.column),
-            value=str(t.treated),
-            dataset_summary=dataset_summary,
-        )
-        control_value = _coerce_literal_against_summary(
-            column=str(t.column),
-            value=str(t.control),
-            dataset_summary=dataset_summary,
-        )
+    
 
-        t_specs = CausalBinaryTreatmentSpecModel(
-            kind="binary",
-            column=t.column,
-            treated_values=[treated_value],
-            control_values=[control_value],
-        )
-    else:
-        raise TypeError(f"Unsupported treatment_spec type: {type(t).__name__}")
-
-    # -------- Outcome (Y) --------
-    y = protocol.outcome_spec
-    if isinstance(y, ProtocolBinaryOutcomeSpecModel):
-        event_value = _coerce_literal_against_summary(
-            column=str(y.column),
-            value=str(y.event),
-            dataset_summary=dataset_summary,
-        )
-        non_event_value = _coerce_literal_against_summary(
-            column=str(y.column),
-            value=str(y.non_event),
-            dataset_summary=dataset_summary,
-        )
-
-        y_specs = CausalBinaryOutcomeSpecModel(
-            kind="binary",
-            column=y.column,
-            event_values=[event_value],
-            non_event_values=[non_event_value],
-        )
-    elif isinstance(y, ProtocolContinuousOutcomeSpecModel):  # pyright: ignore[reportUnnecessaryIsInstance]
-        y_specs = CausalContinuousOutcomeSpecModel(
-            kind="continuous",
-            column=y.column,
-            unit=y.unit,
-            clip_min=y.clip_min,
-            clip_max=y.clip_max,
-        )
-    else:
-        raise TypeError(f"Unsupported outcome_spec type: {type(y).__name__}")
-
-    return CausalSpec(
-        Y=y_specs,
-        T=t_specs,
-        W=list(protocol.covariates),
-        X=list(protocol.effect_modifiers),
-        Z=[],
     )
 
 

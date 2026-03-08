@@ -3,7 +3,7 @@ from __future__ import annotations
 
 def compile_protocol_node_info() -> str:
     return (
-        "Compiles the user discussion plus dataset summary into a structured ProtocolSpec. "
+        "Compiles the user discussion plus dataset summary into a structured CausalSpec. "
         "This node extracts only the causal protocol (treatment, outcome, covariates, effect modifiers, etc.). "
         "Exclusion rules are compiled separately by a dedicated structured call."
     )
@@ -11,12 +11,12 @@ def compile_protocol_node_info() -> str:
 
 def compile_protocol_prompt() -> str:
     return """
-You are compiling a causal inference protocol into a strict JSON object that must match the ProtocolSpec schema exactly.
+You are compiling a causal inference protocol into a strict JSON object that must match the CausalSpec schema exactly.
 
 Your job:
 - Read the protocol discussion carefully.
 - Read the dataset summary carefully.
-- Produce ONLY the protocol specification.
+- Produce ONLY the causal_spec specification.
 - Do NOT include exclusion rules here. Exclusions are compiled separately.
 - Use only column names that exist in the dataset summary.
 - Use exact literal values when treatment/outcome values are categorical or boolean-like.
@@ -42,14 +42,14 @@ Dataset summary JSON:
 
 def compile_protocol_repair_prompt() -> str:
     return """
-You are repairing a previously generated ProtocolSpec JSON.
+You are repairing a previously generated CausalSpec JSON.
 
 Your job:
 - Read the protocol discussion.
 - Read the dataset summary.
-- Read the previous protocol JSON.
+- Read the previous CausalSpec JSON.
 - Read the validation errors.
-- Return a corrected ProtocolSpec JSON only.
+- Return a corrected CausalSpec JSON only.
 - Do NOT include exclusion rules here. Exclusions are compiled separately.
 - Fix only what is necessary to make the protocol valid and faithful to the discussion and dataset.
 - Do not invent columns, values, or assumptions.
@@ -67,8 +67,8 @@ Protocol discussion:
 Dataset summary JSON:
 {{DATASET_SUMMARY_JSON}}
 
-Previous protocol JSON:
-{{PREVIOUS_PROTOCOL_JSON}}
+Previous CausalSpec JSON:
+{{PREVIOUS_CAUSAL_SPEC_JSON}}
 
 Previous exclusion JSON (for context only; do not output exclusions here):
 {{PREVIOUS_EXCLUSION_JSON}}
@@ -84,7 +84,7 @@ You are compiling dataset exclusion rules into a strict JSON object that must ma
 
 Your job:
 - Read the protocol discussion.
-- Read the compiled protocol JSON.
+- Read the compiled causal s JSON.
 - Read the dataset summary.
 - Extract ONLY row-level exclusion rules.
 - Output JSON only.
@@ -99,7 +99,7 @@ Important rules:
 - Use exact values grounded in the dataset summary whenever possible.
 - Prefer an empty exclusion_rules list over speculative exclusions.
 - Use None only if the discussion explicitly indicates missing/NA/null-based exclusion logic.
-- Do not duplicate protocol fields here unless they are genuinely row-exclusion logic.
+- Do not duplicate causal_spec fields here unless they are genuinely row-exclusion logic.
 - Output JSON only.
 - Do not wrap JSON in markdown.
 - If there are no exclusion discussions in the Protocol discussion, return an empty exclusion_rules list.
@@ -107,8 +107,8 @@ Important rules:
 Protocol discussion:
 {{PROTOCOL_TEXT}}
 
-Compiled protocol JSON:
-{{PROTOCOL_JSON}}
+Compiled causal_spec JSON:
+{{CAUSAL_SPEC_JSON}}
 
 Dataset summary JSON:
 {{DATASET_SUMMARY_JSON}}
@@ -121,7 +121,7 @@ You are repairing a previously generated ExclusionRulesModel JSON.
 
 Your job:
 - Read the protocol discussion.
-- Read the compiled protocol JSON.
+- Read the compiled causal_spec JSON.
 - Read the dataset summary.
 - Read the previous exclusion JSON.
 - Read the validation errors.
@@ -138,8 +138,8 @@ Repair priorities:
 Protocol discussion:
 {{PROTOCOL_TEXT}}
 
-Compiled protocol JSON:
-{{PROTOCOL_JSON}}
+Compiled causal_spec JSON:
+{{CAUSAL_SPEC_JSON}}
 
 Dataset summary JSON:
 {{DATASET_SUMMARY_JSON}}
