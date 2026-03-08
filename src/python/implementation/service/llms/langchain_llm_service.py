@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -17,6 +18,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 from python.domain.service.llm_service import AvailableModelsKey, ChatMessage, LLMConfig, LLMResponse, LLMService
 
 T = TypeVar("T", bound=BaseModel)
+from langfuse import observe
 
 MAX_TIMEOUT_S: float = 300.0  # 5 minutes
 
@@ -66,7 +68,8 @@ class LangChainLLMService(LLMService):
 
     def close(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
-
+    
+    @observe()
     def generate(
         self,
         *,
@@ -85,7 +88,7 @@ class LangChainLLMService(LLMService):
             ai=ai,
             fallback_model=self._resolve_concrete_model_name(config.model),
         )
-
+    @observe()
     def generate_json(
         self,
         *,
@@ -98,6 +101,8 @@ class LangChainLLMService(LLMService):
     ) -> T:
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
+        
+        logging.warning("user_prompt=%s", user_prompt)
 
         parser = PydanticOutputParser(pydantic_object=schema)
         format_instructions = parser.get_format_instructions()

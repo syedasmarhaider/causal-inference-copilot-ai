@@ -92,7 +92,7 @@ Rules
 {ATE_SUMMARY}
 """.strip()
 
-CATE_INCLUSION_PROMPT = """
+CATE_INCLUSION_PROMPT: str = """
 You are the **CATE Inclusion Planner** in the Causal Inference Copilot.
 
 Your task
@@ -127,8 +127,6 @@ You MUST output the exact column name from PROTOCOL_SPEC.X by doing:
 1) Try case-insensitive exact match to X columns.
 2) Otherwise fuzzy match by name similarity (tokens, underscores, abbreviations).
 3) Otherwise infer by semantics using DATA_SUMMARY:
-   - “age”, “older/younger” → most age-like numeric column in X
-   - “men/women”, “sex”, “gender” → most sex/gender-like categorical column in X
 
 Value normalization (categoricals)
 - If a rule uses a categorical column:
@@ -170,18 +168,6 @@ Output requirements
 - Output JSON ONLY. No prose. No markdown.
 
 Now produce the inclusion plan JSON.
-
-PROTOCOL_SPEC_JSON:
-{{PROTOCOL_SPEC_JSON}}
-
-DATA_SUMMARY_JSON:
-{{DATA_SUMMARY_JSON}}
-
-EFFECT_MODIFIERS_X (only allowed columns; must use exact names from here):
-{{COL_EFFECT_MODIFIERS_LIST}}
-
-EFFECT_MODIFIERS_X_VALUES (helpful examples/ranges/categories for X columns):
-{{COL_EFFECT_MODIFIERS_LIST_VALUES}}
 """.strip()
 
 

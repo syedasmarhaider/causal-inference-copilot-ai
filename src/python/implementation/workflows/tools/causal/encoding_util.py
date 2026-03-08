@@ -369,8 +369,8 @@ def compile_plan_to_transformers(
       - Do NOT fit these transformers globally before cross-fitting. Put them inside the nuisance model pipelines
         so each fold fits its own preprocessing to avoid leakage.
     """
-    _require_non_empty("X_order", X_order)
-    _require_non_empty("W_order", W_order)
+    if len(X_order) == 0 and len(W_order) == 0:
+        raise ValueError("X_order or W_order must be provided (not None).")
 
     X_order_l = list(X_order)
     W_order_l = list(W_order)
@@ -515,12 +515,10 @@ def compile_plan_to_transformers(
             raise ValueError(f"Unknown role {cp.role!r} for column {cp.column!r}")
         xw_trs.append((col, _compile(cp.encoding), [xw_index[col]]))
 
-    # Enforce “X and W always”
-    if not any(cp.role == "X" for cp in plan.columns):
-        raise ValueError("Plan must contain at least one X column (role='X').")
-    if not any(cp.role == "W" for cp in plan.columns):
-        raise ValueError("Plan must contain at least one W column (role='W').")
-
+    # Enforce “X or W always”
+    if not any(cp.role == "X" for cp in plan.columns) and not any(cp.role == "W" for cp in plan.columns):
+        raise ValueError("At least one column must have role 'X' or 'W' in the plan.")
+    
     # Ensure we have at least one non-dropped transformer in each view
     def _has_non_drop(trs: List[Tuple[str, CTTransformer, List[int]]]) -> bool:
         return any(t[1] != "drop" for t in trs)

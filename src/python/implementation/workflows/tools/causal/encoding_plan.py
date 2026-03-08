@@ -185,8 +185,7 @@ class TransformPlan(BaseModel):
 
         has_x = any(c.role == "X" for c in self.columns)
         has_w = any(c.role == "W" for c in self.columns)
-        if not has_x:
-            raise ValueError("TransformPlan: must contain at least one X column.")
-        if not has_w:
-            raise ValueError("TransformPlan: must contain at least one W column.")
+        if not has_x and not has_w:
+            raise ValueError("TransformPlan: must contain at least one X or W column.")
+
         return self

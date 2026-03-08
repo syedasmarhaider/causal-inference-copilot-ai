@@ -46,6 +46,7 @@ from python.implementation.workflows.tools.causal.causal_spec import (
 )
 from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
+from python.implementation.workflows.utils.validation import ValidationIssueModel
 
 
 log = logging.getLogger(__name__)
@@ -149,6 +150,64 @@ def _coerce_literal_against_summary(
     return value
 
 
+# ---------------------------------------------------------------------
+# Role-assignment helpers
+# ---------------------------------------------------------------------
+def _build_role_map_from_protocol(protocol: ProtocolSpec) -> dict[str, str]:
+    """
+    Deterministically assign roles from protocol only.
+    LLM is NOT allowed to decide whether a column is W or X.
+    """
+    treatment_col = str(protocol.treatment_spec.column)
+    outcome_col = str(protocol.outcome_spec.column)
+    forbidden = {treatment_col, outcome_col}
+
+    role_map: dict[str, str] = {}
+
+    for col in (protocol.covariates or []):
+        c = str(col)
+        if c not in forbidden:
+            role_map[c] = "W"
+
+    for col in (protocol.effect_modifiers or []):
+        c = str(col)
+        if c not in forbidden:
+            role_map[c] = "X"
+
+    return role_map
+
+
+def _force_plan_roles_from_protocol(
+    *,
+    plan: TransformPlan,
+    protocol: ProtocolSpec,
+) -> TransformPlan:
+    """
+    Keep the LLM's encoding choices, but overwrite each column role using the
+    deterministic role from the protocol.
+    """
+    role_map = _build_role_map_from_protocol(protocol)
+
+    fixed_columns = []
+    for col_plan in plan.columns:
+        expected_role = role_map.get(str(col_plan.column))
+        if expected_role is None:
+            fixed_columns.append(col_plan) # pyright: ignore[reportUnknownMemberType]
+            continue
+
+        if col_plan.role != expected_role:
+            log.warning(
+                "Overriding LLM-assigned role for column '%s': got=%s expected=%s",
+                col_plan.column,
+                col_plan.role,
+                expected_role,
+            )
+
+        fixed_columns.append(col_plan.model_copy(update={"role": expected_role})) # pyright: ignore[reportUnknownMemberType]
+
+    return plan.model_copy(update={"columns": fixed_columns})
+
+
 def _protocol_to_causal_spec(
     protocol: ProtocolSpec,
     dataset_summary: DatasetSummaryModel,
@@ -224,23 +283,64 @@ def _validate_plan_against_constraints(
     expected_x_cols: set[str],
     treatment_col: Optional[str],
     outcome_col: Optional[str],
-) -> None:
+) -> list[ValidationIssueModel]:
+
+    logging.warning(
+        "Validating encoding plan against constraints. Eligible cols: %s, expected W: %s, expected X: %s, treatment_col: %s, outcome_col: %s. Plan columns: %s",
+        eligible_cols,
+        expected_w_cols,
+        expected_x_cols,
+        treatment_col,
+        outcome_col,
+        [c.column for c in plan.columns],
+    )
+    logging.warning("Plan details: %s", plan.model_dump_json(indent=2))
+
+    validation_issues: list[ValidationIssueModel] = []
     cols = [c.column for c in plan.columns]
     if len(cols) != len(set(cols)):
-        raise ValueError("Encoding plan has duplicate column entries (not allowed).")
+        validation_issues.append(
+            ValidationIssueModel(
+                severity="FAIL",
+                message="Encoding plan contains duplicate columns.",
+                evidence={"duplicate_columns": [c for c in set(cols) if cols.count(c) > 1]},
+                fix_hint="Ensure each column appears at most once in the encoding plan."
+            )
+        )
 
     forbidden = {c for c in (treatment_col, outcome_col) if c}
     illegal = sorted(set(cols) & forbidden)
     if illegal:
-        raise ValueError(f"Encoding plan must not include treatment/outcome columns: {illegal}")
+        validation_issues.append(
+            ValidationIssueModel(
+                severity="FAIL",
+                message="Encoding plan must not include treatment/outcome columns.",
+                evidence={"illegal_columns": illegal},
+                fix_hint="Remove treatment/outcome columns from the encoding plan."
+            )
+        )
 
     plan_set = set(cols)
     missing = sorted(eligible_cols - plan_set)
     extra = sorted(plan_set - eligible_cols)
     if missing:
-        raise ValueError(f"Encoding plan is missing eligible columns: {missing}")
+        validation_issues.append(
+            ValidationIssueModel(
+                severity="FAIL",
+                message="Encoding plan is missing eligible columns.",
+                evidence={"missing_columns": missing},
+                fix_hint="Ensure all eligible columns are included in the encoding plan."
+            )
+        )
     if extra:
-        raise ValueError(f"Encoding plan contains non-eligible columns: {extra}")
+        validation_issues.append(
+            ValidationIssueModel(
+                severity="FAIL",
+                message="Encoding plan contains non-eligible columns.",
+                evidence={"extra_columns": extra},
+                fix_hint="Remove non-eligible columns from the encoding plan."
+            )
+        )
 
     role_by_col = {c.column: c.role for c in plan.columns}
 
@@ -248,15 +348,30 @@ def _validate_plan_against_constraints(
     wrong_x = sorted(c for c in expected_x_cols if role_by_col.get(c) != "X")
 
     if wrong_w:
-        raise ValueError(f"Encoding plan assigned wrong role for W columns: {wrong_w}")
+        validation_issues.append(
+            ValidationIssueModel(
+                severity="FAIL",
+                message="Encoding plan assigned wrong role for W columns.",
+                evidence={"wrong_w_columns": wrong_w},
+                fix_hint="Ensure all W columns are correctly assigned in the encoding plan."
+            )
+        )
     if wrong_x:
-        raise ValueError(f"Encoding plan assigned wrong role for X columns: {wrong_x}")
+        validation_issues.append(
+            ValidationIssueModel(
+                severity="FAIL",
+                message="Encoding plan assigned wrong role for X columns.",
+                evidence={"wrong_x_columns": wrong_x},
+                fix_hint="Ensure all X columns are correctly assigned in the encoding plan."
+            )
+        )
+
+    return validation_issues
 
 
 def _generate_encoding_plan(
     *,
     llm: LLMService,
-    llm_config: LLMConfig,
     protocol: ProtocolSpec,
     selected_model: Any,
     dataset_summary: DatasetSummaryModel,
@@ -264,72 +379,109 @@ def _generate_encoding_plan(
     documentation: Optional[str] = None,
     history: Optional[Sequence[ChatMessage]],
 ) -> tuple[UserPlanInput, Optional[TransformPlan]]:
-    covariate_cols = set(protocol.covariates or [])
-    effect_modifier_cols = set(protocol.effect_modifiers or [])
 
-    treatment_col = str(protocol.treatment_spec.column)
-    outcome_col = str(protocol.outcome_spec.column)
+    for _, _ in enumerate(range(2)):
+        covariate_cols = set(protocol.covariates or [])
+        effect_modifier_cols = set(protocol.effect_modifiers or [])
 
-    eligible = (covariate_cols | effect_modifier_cols) - {treatment_col, outcome_col}
+        treatment_col = str(protocol.treatment_spec.column)
+        outcome_col = str(protocol.outcome_spec.column)
 
-    if not eligible:
-        raise ValueError(
-            "No eligible columns for encoding plan "
-            "(no covariates/effect modifiers besides treatment/outcome)."
+        eligible = (covariate_cols | effect_modifier_cols) - {treatment_col, outcome_col}
+
+        if not eligible:
+            raise ValueError(
+                "No eligible columns for encoding plan "
+                "(no covariates/effect modifiers besides treatment/outcome)."
+            )
+
+        prev_training_error_str = prev_training_error or ""
+        documentation_str = documentation or ""
+
+        user_prompt_discussion = ENCODING_PLAN_TRIAGE_USER_PROMPT_TEMPLATE.format(
+            selected_model_json=_dumps(_safe_model_dump(selected_model)),
+            protocol_json=_dumps(_safe_model_dump(protocol)),
+            dataset_summary_json=_dumps(_safe_model_dump(dataset_summary)),
+            prev_training_errors_string=prev_training_error_str,
+            documentation_string=documentation_str,
         )
 
-    prev_training_error_str = prev_training_error or ""
-    documentation_str = documentation or ""
+        last_4_messages = list(history[-4:]) if history else None
 
-    user_prompt_discussion = ENCODING_PLAN_TRIAGE_USER_PROMPT_TEMPLATE.format(
-        selected_model_json=_dumps(_safe_model_dump(selected_model)),
-        protocol_json=_dumps(_safe_model_dump(protocol)),
-        dataset_summary_json=_dumps(_safe_model_dump(dataset_summary)),
-        prev_training_errors_string=prev_training_error_str,
-        documentation_string=documentation_str,
+        out = llm.generate_json(
+            schema=UserPlanInput,
+            system_prompt=None,
+            user_prompt=user_prompt_discussion,
+            config=LLMConfig(model="basic", temperature=0.5),
+            history=last_4_messages,
+            max_attempts=2,
+        )
+
+        if out.needs_user_input:
+            return out, None
+
+        logging.warning(
+            "protocol and dataset summary for plan generation: protocol=%s dataset_summary=%s",
+            protocol.model_dump_json(),
+            dataset_summary.model_dump_json() if hasattr(dataset_summary, "model_dump_json") else _dumps(_safe_model_dump(dataset_summary)),
+        )
+
+        user_prompt_plan = ENCODING_PLAN_PLAN_USER_PROMPT_TEMPLATE.format(
+            selected_model_json=_dumps(_safe_model_dump(selected_model)),
+            protocol_json=_dumps(_safe_model_dump(protocol)),
+            dataset_summary_json=_dumps(_safe_model_dump(dataset_summary)),
+            prev_training_errors_string=prev_training_error_str,
+            documentation_string=documentation_str,
+        )
+
+        plan = llm.generate_json(
+            schema=TransformPlan,
+            system_prompt=None,
+            user_prompt=user_prompt_plan,
+            config=LLMConfig(model="basic", temperature=0.1),
+            history=last_4_messages,
+            max_attempts=3,
+        )
+
+        # -------------------------------------------------------------
+        # SURGICAL FIX:
+        # Keep LLM-generated encodings, but force roles from protocol.
+        # -------------------------------------------------------------
+        plan = _force_plan_roles_from_protocol(
+            plan=plan,
+            protocol=protocol,
+        )
+
+        validation_issues = _validate_plan_against_constraints(
+            plan=plan,
+            eligible_cols=eligible,
+            expected_w_cols=covariate_cols - {treatment_col, outcome_col},
+            expected_x_cols=effect_modifier_cols - {treatment_col, outcome_col},
+            treatment_col=treatment_col,
+            outcome_col=outcome_col,
+        )
+
+        if validation_issues:
+            log.warning(
+                "Encoding plan validation issues found: %s",
+                [i.model_dump_json() for i in validation_issues],
+            )
+            prev_training_error = (
+                "The encoding plan generated by the model had the following issues:\n"
+                + "\n".join(
+                    f"- {i.severity}: {i.message} (evidence: {i.evidence})"
+                    for i in validation_issues
+                )
+                + "\nPlease review the issues and adjust the encoding plan accordingly."
+            )
+            continue
+
+        return out, plan
+
+    raise ValueError(
+        "Failed to generate encoding plan after multiple attempts. "
+        "LLM output did not meet expected format or constraints."
     )
-
-    last_8_messages = list(history[-8:]) if history else None
-
-    out = llm.generate_json(
-        schema=UserPlanInput,
-        system_prompt=None,
-        user_prompt=user_prompt_discussion,
-        config=llm_config,
-        history=last_8_messages,
-        max_attempts=2,
-    )
-
-    if out.needs_user_input:
-        return out, None
-
-    user_prompt_plan = ENCODING_PLAN_PLAN_USER_PROMPT_TEMPLATE.format(
-        selected_model_json=_dumps(_safe_model_dump(selected_model)),
-        protocol_json=_dumps(_safe_model_dump(protocol)),
-        dataset_summary_json=_dumps(_safe_model_dump(dataset_summary)),
-        prev_training_errors_string=prev_training_error_str,
-        documentation_string=documentation_str,
-    )
-
-    plan = llm.generate_json(
-        schema=TransformPlan,
-        system_prompt=None,
-        user_prompt=user_prompt_plan,
-        config=llm_config,
-        history=last_8_messages,
-        max_attempts=3,
-    )
-
-    _validate_plan_against_constraints(
-        plan=plan,
-        eligible_cols=eligible,
-        expected_w_cols=covariate_cols - {treatment_col, outcome_col},
-        expected_x_cols=effect_modifier_cols - {treatment_col, outcome_col},
-        treatment_col=treatment_col,
-        outcome_col=outcome_col,
-    )
-
-    return out, plan
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,7 +553,6 @@ class ModelTrainNode(Node):
 
             user_discussion, plan = _generate_encoding_plan(
                 llm=self.llm,
-                llm_config=LLMConfig(temperature=0.1, model="basic"),
                 protocol=protocol,
                 selected_model=selected,
                 dataset_summary=dataset_summary,

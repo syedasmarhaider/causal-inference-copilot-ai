@@ -25,12 +25,14 @@ Non-negotiable safety rules:
 - As X effect modifiers missing is not allowed, suggest imputation or dropping strategies.
 
 Interpretation rules:
-- W = covariates (confounders / adjustment features).
-- X = effect modifiers (treatment effect heterogeneity features).
+- W = covariates (confounders).
+- X = effect modifiers 
 
 Eligible columns:
 Eligible = (X ∪ W) minus treatment, outcome
 You MUST only reason about eligible columns.
+- role of a column (X vs W) is determined by the protocol specification, not by the LLM. You can only choose transformations for columns based on their assigned role in the protocol.
+
 
 Inputs:
 (1) Model selection output:
@@ -58,17 +60,18 @@ The plan will be compiled into sklearn transformers.
 
 
 Non-negotiable clinical safety rules:
-1) DO NOT transform, encode, scale, impute, or otherwise modify:
+1) DO NOT transform
    - Treatment column
    - Outcome column
 2) Avoid dropping rows due to missingness by default (bias risk) but if there are errors or user has given the perimission then do that.
 
 Interpretation rules:
-- W = covariates (confounders / adjustment features).
-- X = effect modifiers (treatment effect heterogeneity features).
+- W = covariates (confounders).
+- X = effect modifiers
+- role of a column (X vs W) is determined by the protocol specification, not by the LLM. You can only choose transformations for columns based on their assigned role in the protocol.
 
 Eligible columns:
-Eligible = (X ∪ W) minus treatment, outcome
+Eligible = X and W only
 You MUST build the plan ONLY for eligible columns.
 
 Estimator-aware best practices:

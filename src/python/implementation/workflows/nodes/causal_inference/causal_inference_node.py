@@ -643,7 +643,8 @@ def _process_cate_question(
     # ---------------------------
     intent = llm.generate_json(
         schema=_CateIntentPayload,
-        user_prompt=CATE_GENERAL_PROMPT.format(ATE_SUMMARY=ate_model_output_json_str),
+        user_prompt=CATE_GENERAL_PROMPT+
+            f"\n ATESummary:\n{ate_model_output_json_str}\n",
         system_prompt=None,
         config=LLMConfig(temperature=0.2, model="basic"),
         history=last_8,
@@ -663,21 +664,20 @@ def _process_cate_question(
     plan: Optional[InclusionPlanModel] = None
     
     effect_modifiers_summary = _filter_dataset_summary_to_effect_modifiers(summary=data_summary, effect_modifiers=protocol.effect_modifiers)
+    logging.warning(f"Effect modifiers summary for prompt: {effect_modifiers_summary.model_dump_json()}")
     plot_cohorts: List[CohortCate] = [] 
     for attempt in range(3):
         plan = llm.generate_json(
             schema=InclusionPlanModel,
             system_prompt=None,
             user_prompt=(
-                CATE_INCLUSION_PROMPT.format(
-                    PROTOCOL_SPEC_JSON=protocol.treatment_spec.model_dump(mode="json"),
-                    COL_EFFECT_MODIFIERS=protocol.effect_modifiers,
-                    COL_EFFECT_MODIFIERS_VALUES= effect_modifiers_summary.model_dump(mode="json")
-                )
-                + f"\n\nUSER_QUESTION:\n{user_q}\n"
+                CATE_INCLUSION_PROMPT
+                +f"\n\nEffect modifiers summary (only these columns can be used for cohort definitions):\n{effect_modifiers_summary.model_dump_json()}\n"
+                +f"Effect modifiers columns: {', '.join(protocol.effect_modifiers)}\n"
+                +f"\n\nUSER_QUESTION:\n{user_q}\n"
                 + (f"\nPrevious error message:\n{error_message}\n" if error_message else "")
             ),
-            config=LLMConfig(temperature=0.4, model="basic"),
+            config=LLMConfig(temperature=0.1, model="pro"),
             history=last_4_messages,
             max_attempts=3,
         )
@@ -979,11 +979,10 @@ def _invalid_plan_message(
     cols = [str(c) for c in effect_modifiers]
     return llm.generate(
         system_prompt=None,
-        user_prompt=INVALID_PLAN_MESSAGE_PROMPT.format(
-            EFFECT_MODIFIERS=cols,
-            DATA_SUMMARY= effect_modifiers_summary.model_dump(mode="json"),
-            LAST_USER_MESSAGE=last_user_message,
-        ),
+        user_prompt=INVALID_PLAN_MESSAGE_PROMPT +
+            f"\nEffect modifiers summary (only these columns can be used for cohort definitions):\n{effect_modifiers_summary.model_dump_json()}\n"
+            +f"Effect modifiers columns: {', '.join(cols)}\n"
+            +f"\nUser question that led to invalid plan:\n{last_user_message}\n",
         config=LLMConfig(temperature=0.7, model="basic"),
         history=None,
  

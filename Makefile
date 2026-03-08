@@ -1,7 +1,11 @@
 # ---- Makefile ----
 SHELL := /bin/bash
 
-.PHONY: help venv install dev-tools lint lint-fix format format-fix test test-quick clean run-cli run-api run-api-prod
+SHELL := /bin/bash
+
+ENV_FILE ?= .env
+
+.PHONY: help venv install dev-tools lint lint-fix format format-fix test test-quick clean run-cli run-api run-api-prod run-api-local
 
 VENV ?= .venv
 PYBIN := $(VENV)/bin
@@ -61,6 +65,17 @@ run-cli: venv
 # REST + WebSocket server (FastAPI)
 run-api: venv
 	@$(PYBIN)/uvicorn $(API_APP) --host $(API_HOST) --port $(API_PORT) --reload
+
+run-api-local: venv
+	@test -f $(ENV_FILE) || { echo "Missing $(ENV_FILE)"; exit 1; }
+	@set -a; \
+	source $(ENV_FILE); \
+	set +a; \
+	$(PYBIN)/uvicorn $(API_APP) \
+		--host "$${API_HOST:-0.0.0.0}" \
+		--port "$${API_PORT:-8000}" \
+		--reload
+
 
 run-api-prod: venv
 	@$(PYBIN)/uvicorn $(API_APP) --host $(API_HOST) --port $(API_PORT)
