@@ -1,5 +1,5 @@
 def get_model_train_node_info() -> str:
-    return """        "ModelTrainNode: trains the selected causal model using the cleaned dataset and compiled protocol. "
+    return """        "ModelTrainNode: trains the selected causal model using the cleaned dataset and compiled causal specs. "
         "Returns state with trained_model_id, column_transformation_plan, and any training warnings."
         "It does data transformation but requires user input to have a suggestion on transformation if transformation is failed"
         "It runs the training automatically and does not requires user input on that"
@@ -31,15 +31,15 @@ Interpretation rules:
 Eligible columns:
 Eligible = (X ∪ W) minus treatment, outcome
 You MUST only reason about eligible columns.
-- role of a column (X vs W) is determined by the protocol specification, not by the LLM. You can only choose transformations for columns based on their assigned role in the protocol.
+- role of a column (X vs W) is determined by the causal specs, not by the LLM. You can only choose transformations for columns based on their assigned role in the causal specs.
 
 
 Inputs:
 (1) Model selection output:
 {selected_model_json}
 
-(2) Protocol:
-{protocol_json}
+(2) Causal specs:
+{causal_specs_json}
 
 (3) Dataset summary (types, unique counts, missingness, examples):
 {dataset_summary_json}
@@ -68,7 +68,7 @@ Non-negotiable clinical safety rules:
 Interpretation rules:
 - W = covariates (confounders).
 - X = effect modifiers
-- role of a column (X vs W) is determined by the protocol specification, not by the LLM. You can only choose transformations for columns based on their assigned role in the protocol.
+- role of a column (X vs W) is determined by the causal specs, not by the LLM. You can only choose transformations for columns based on their assigned role in the causal specs.
 
 Eligible columns:
 Eligible = X and W only
@@ -89,8 +89,8 @@ Inputs:
 (1) Model selection output:
 {selected_model_json}
 
-(2) Protocol:
-{protocol_json}
+(2) Causal specs:
+{causal_specs_json}
 
 (3) Dataset summary (types, unique counts, missingness, examples):
 {dataset_summary_json}
@@ -108,7 +108,7 @@ Output (STRICT JSON ONLY; no markdown; no extra keys):
 
 
 FIT_SUCCESS_FAILURE_SYSTEM_PROMPT = """
-You are a Clinical Causal Copilot that helps to train causal inference models based on the selected model, compiled protocol, and cleaned dataset.
+You are a Clinical Causal Copilot that helps to train causal inference models based on the selected model, compiled causal specs, and cleaned dataset.
 Explain to the user in a clinician-friendly way the result of the training command execution, including any warnings or errors
 warnings or errors if it make sense to present to clinicians and their implications regarding training and reliablity not internal errors etc.
 """

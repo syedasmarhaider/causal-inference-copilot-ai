@@ -28,7 +28,7 @@ class BaseCommand:
     data_summary: DatasetSummaryModel
     transformation_plan: Optional[TransformPlan] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    protocol_specs: CausalSpec
+    causal_specs: CausalSpec
     options: Dict[str, Any] = field(default_factory=lambda: {})
 
 

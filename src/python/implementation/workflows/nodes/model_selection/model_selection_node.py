@@ -56,15 +56,15 @@ def _safe_model_dump(x: Any) -> Any:
     return x
 
 def _build_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
-    protocol = deps.compile_protocol.payload.protocol
+    causal_specs = deps.compile_protocol.payload.causal_specs
     cl = deps.clean_protocol.payload
     vc = deps.validate_clean_protocol.payload
 
-    treatment_spec = getattr(protocol, "treatment_spec", None)
-    outcome_spec = getattr(protocol, "outcome_spec", None)
-    covariates = getattr(protocol, "covariates", None)
-    effect_modifiers = getattr(protocol, "effect_modifiers", None)
-    experiment_type = getattr(protocol, "experiment_type", None)
+    treatment_spec = getattr(causal_specs, "treatment_spec", None)
+    outcome_spec = getattr(causal_specs, "outcome_spec", None)
+    covariates = getattr(causal_specs, "covariates", None)
+    effect_modifiers = getattr(causal_specs, "effect_modifiers", None)
+    experiment_type = getattr(causal_specs, "experiment_type", None)
 
     return {
     

@@ -13,12 +13,6 @@ from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 
-from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
-    ProtocolSpec,
-    BinaryTreatmentSpecModel as ProtocolBinaryTreatmentSpecModel,
-    BinaryOutcomeSpecModel as ProtocolBinaryOutcomeSpecModel,
-    ContinuousOutcomeSpecModel as ProtocolContinuousOutcomeSpecModel,
-)
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.nodes.model_train.model_train_prompts import (
     ENCODING_PLAN_PLAN_USER_PROMPT_TEMPLATE,
@@ -38,12 +32,7 @@ from python.implementation.workflows.tools.causal.causal_command import (
     FitSuccess,
 )
 from python.implementation.workflows.tools.causal.causal_model_factory_tool import CausalModelFactoryTool
-from python.implementation.workflows.tools.causal.causal_spec import (
-    CausalSpec,
-    BinaryTreatmentSpecModel as CausalBinaryTreatmentSpecModel,
-    BinaryOutcomeSpecModel as CausalBinaryOutcomeSpecModel,
-    ContinuousOutcomeSpecModel as CausalContinuousOutcomeSpecModel,
-)
+from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
 from python.implementation.workflows.utils.validation import ValidationIssueModel
@@ -73,103 +62,26 @@ def _safe_model_dump(x: Any) -> Any:
         return x.model_dump(mode="json")
     return x
 
-
-# ---------------------------------------------------------------------
-# Dataset-summary helpers
-# ---------------------------------------------------------------------
-def _build_profile_index(dataset_summary: DatasetSummaryModel) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for p in dataset_summary.profiles:
-        n = getattr(p, "name", None)
-        if isinstance(n, str) and n.strip():
-            out[n.strip()] = p
-    return out
-
-
-def _kind_of(profile: Any) -> str:
-    return str(getattr(profile, "inferred_kind", "OTHER"))
-
-
-def _parse_bool_token(v: Any) -> Optional[bool]:
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, int) and v in (0, 1):
-        return bool(v)
-    if isinstance(v, str):
-        s = v.strip().casefold()
-        if s in {"true", "1", "yes", "t"}:
-            return True
-        if s in {"false", "0", "no", "f"}:
-            return False
-    return None
-
-
-def _parse_numeric_token(v: Any) -> Optional[float]:
-    if isinstance(v, bool):
-        return float(int(v))
-    if isinstance(v, (int, float)):
-        return float(v)
-    if isinstance(v, str):
-        s = v.strip()
-        if not s:
-            return None
-        try:
-            return float(s)
-        except Exception:
-            return None
-    return None
-
-
-def _coerce_literal_against_summary(
-    *,
-    column: str,
-    value: str,
-    dataset_summary: DatasetSummaryModel,
-) -> Any:
-    """
-    Convert protocol literals like "1"/"0"/"true" into a type compatible with the
-    cleaned dataset summary when possible. This fixes strict downstream mismatches
-    such as string "1" vs numeric 1.
-    """
-    by_name = _build_profile_index(dataset_summary)
-    profile = by_name.get(column)
-    if profile is None:
-        return value
-
-    kind = _kind_of(profile)
-
-    if kind == "BOOLEAN":
-        parsed_bool = _parse_bool_token(value)
-        return parsed_bool if parsed_bool is not None else value
-
-    if kind == "NUMERIC":
-        parsed_num = _parse_numeric_token(value)
-        return parsed_num if parsed_num is not None else value
-
-    # CATEGORICAL / OTHER: keep string literal as-is
-    return value
-
-
 # ---------------------------------------------------------------------
 # Role-assignment helpers
 # ---------------------------------------------------------------------
-def _build_role_map_from_protocol(protocol: ProtocolSpec) -> dict[str, str]:
+def _build_role_map_from_causal_specs(causal_specs: CausalSpec) -> dict[str, str]:
     """
-    Deterministically assign roles from protocol only.
+    Deterministically assign roles from causal specs only.
     LLM is NOT allowed to decide whether a column is W or X.
     """
-    treatment_col = str(protocol.treatment_spec.column)
-    outcome_col = str(protocol.outcome_spec.column)
+    treatment_col = str(causal_specs.treatment_spec.column)
+    outcome_col = str(causal_specs.outcome_spec.column)
     forbidden = {treatment_col, outcome_col}
 
     role_map: dict[str, str] = {}
 
-    for col in (protocol.covariates or []):
+    for col in (causal_specs.covariates or []):
         c = str(col)
         if c not in forbidden:
             role_map[c] = "W"
 
-    for col in (protocol.effect_modifiers or []):
+    for col in (causal_specs.effect_modifiers or []):
         c = str(col)
         if c not in forbidden:
             role_map[c] = "X"
@@ -177,16 +89,16 @@ def _build_role_map_from_protocol(protocol: ProtocolSpec) -> dict[str, str]:
     return role_map
 
 
-def _force_plan_roles_from_protocol(
+def _force_plan_roles_from_causal_specs (
     *,
     plan: TransformPlan,
-    protocol: ProtocolSpec,
+    causal_specs: CausalSpec,
 ) -> TransformPlan:
     """
     Keep the LLM's encoding choices, but overwrite each column role using the
-    deterministic role from the protocol.
+    deterministic role from the causal specs.
     """
-    role_map = _build_role_map_from_protocol(protocol)
+    role_map = _build_role_map_from_causal_specs(causal_specs)
 
     fixed_columns = []
     for col_plan in plan.columns:
@@ -206,16 +118,6 @@ def _force_plan_roles_from_protocol(
         fixed_columns.append(col_plan.model_copy(update={"role": expected_role})) # pyright: ignore[reportUnknownMemberType]
 
     return plan.model_copy(update={"columns": fixed_columns})
-
-
-def _protocol_to_causal_spec(
-    protocol: ProtocolSpec,
-    dataset_summary: DatasetSummaryModel,
-) -> CausalSpec:
-    
-
-    )
-
 
 def _validate_plan_against_constraints(
     *,
@@ -314,7 +216,7 @@ def _validate_plan_against_constraints(
 def _generate_encoding_plan(
     *,
     llm: LLMService,
-    protocol: ProtocolSpec,
+    causal_specs: CausalSpec,
     selected_model: Any,
     dataset_summary: DatasetSummaryModel,
     prev_training_error: Optional[str] = None,
@@ -323,11 +225,11 @@ def _generate_encoding_plan(
 ) -> tuple[UserPlanInput, Optional[TransformPlan]]:
 
     for _, _ in enumerate(range(2)):
-        covariate_cols = set(protocol.covariates or [])
-        effect_modifier_cols = set(protocol.effect_modifiers or [])
+        covariate_cols = set(causal_specs.covariates or [])
+        effect_modifier_cols = set(causal_specs.effect_modifiers or [])
 
-        treatment_col = str(protocol.treatment_spec.column)
-        outcome_col = str(protocol.outcome_spec.column)
+        treatment_col = str(causal_specs.treatment_spec.column)
+        outcome_col = str(causal_specs.outcome_spec.column)
 
         eligible = (covariate_cols | effect_modifier_cols) - {treatment_col, outcome_col}
 
@@ -342,7 +244,7 @@ def _generate_encoding_plan(
 
         user_prompt_discussion = ENCODING_PLAN_TRIAGE_USER_PROMPT_TEMPLATE.format(
             selected_model_json=_dumps(_safe_model_dump(selected_model)),
-            protocol_json=_dumps(_safe_model_dump(protocol)),
+            causal_specs_json=_dumps(_safe_model_dump(causal_specs)),
             dataset_summary_json=_dumps(_safe_model_dump(dataset_summary)),
             prev_training_errors_string=prev_training_error_str,
             documentation_string=documentation_str,
@@ -363,14 +265,14 @@ def _generate_encoding_plan(
             return out, None
 
         logging.warning(
-            "protocol and dataset summary for plan generation: protocol=%s dataset_summary=%s",
-            protocol.model_dump_json(),
+            "causal specs and dataset summary for plan generation: causal_specs=%s dataset_summary=%s",
+            causal_specs.model_dump_json(),
             dataset_summary.model_dump_json() if hasattr(dataset_summary, "model_dump_json") else _dumps(_safe_model_dump(dataset_summary)),
         )
 
         user_prompt_plan = ENCODING_PLAN_PLAN_USER_PROMPT_TEMPLATE.format(
             selected_model_json=_dumps(_safe_model_dump(selected_model)),
-            protocol_json=_dumps(_safe_model_dump(protocol)),
+            causal_specs_json=_dumps(_safe_model_dump(causal_specs)),
             dataset_summary_json=_dumps(_safe_model_dump(dataset_summary)),
             prev_training_errors_string=prev_training_error_str,
             documentation_string=documentation_str,
@@ -387,11 +289,11 @@ def _generate_encoding_plan(
 
         # -------------------------------------------------------------
         # SURGICAL FIX:
-        # Keep LLM-generated encodings, but force roles from protocol.
+        # Keep LLM-generated encodings, but force roles from causal specs.
         # -------------------------------------------------------------
-        plan = _force_plan_roles_from_protocol(
+        plan = _force_plan_roles_from_causal_specs(
             plan=plan,
-            protocol=protocol,
+            causal_specs=causal_specs,
         )
 
         validation_issues = _validate_plan_against_constraints(
@@ -455,8 +357,8 @@ class ModelTrainNode(Node):
 
         deps = ModelTrainDeps.from_loaded(previous_state_dependencies)
 
-        protocol = deps.compile_protocol.payload.protocol
-        assert protocol is not None, "Compiled protocol must be available for model training."
+        causal_specs = deps.compile_protocol.payload.causal_specs
+        assert causal_specs is not None, "Compiled causal specs must be available for model training."
 
         selected = deps.model_selection.payload.confirmed_model_selection
         assert selected is not None, "Confirmed model selection must be available for model training."
@@ -484,7 +386,7 @@ class ModelTrainNode(Node):
                 f"CausalModelFactoryTool."
             )
 
-        has_any_adjustment_cols = bool(protocol.covariates or []) or bool(protocol.effect_modifiers or [])
+        has_any_adjustment_cols = bool(causal_specs.covariates or []) or bool(causal_specs.effect_modifiers or [])
 
         # -----------------------------------------------------------------
         # Phase 1: prepare encoding plan if needed
@@ -495,7 +397,7 @@ class ModelTrainNode(Node):
 
             user_discussion, plan = _generate_encoding_plan(
                 llm=self.llm,
-                protocol=protocol,
+                causal_specs=causal_specs,
                 selected_model=selected,
                 dataset_summary=dataset_summary,
                 history=messages_history,
@@ -552,13 +454,11 @@ class ModelTrainNode(Node):
             ]
 
         run_id = uuid4()
-        causal_spec = _protocol_to_causal_spec(protocol, dataset_summary)
-
         cmd = FitCommand(
             model_name=estimator_fqcn,
             dataset_id=clean_dataset_id,
             run_id=run_id,
-            protocol_specs=causal_spec,
+            causal_specs=causal_specs,
             data_summary=dataset_summary,
             order_X=order_X,
             order_W=order_W,

@@ -100,15 +100,15 @@ Your task
 - Return **ONLY valid JSON** that matches the InclusionPlanModel schema:
 
 Inputs you will receive
-1) PROTOCOL_SPEC_JSON:
-   - contains PROTOCOL_SPEC.X (the ONLY columns you may use)
+1) CAUSAL SPECS (JSON):
+   - contains CAUSAL_SPECS.X (the ONLY columns you may use)
 2) DATA_SUMMARY_JSON:
    - column dtypes + numeric ranges/quantiles + top categories
 3) Conversation history:
    - the most recent user message is the question
 
 Hard constraints (must follow)
-- Use ONLY columns in **PROTOCOL_SPEC.X** (effect modifiers).
+- Use ONLY columns in **CAUSAL_SPECS.X** (effect modifiers).
 - Allowed operators: ["==", "in", "not_in", ">=", "<=", ">", "<"].
 - Rules in a cohort are ANDed.
 - Do NOT create NA rules. Missing values are implicitly excluded by filtering.
@@ -123,7 +123,7 @@ Hard constraints (must follow)
 
 Column resolution (critical)
 Users may mention informal/incorrect column names (e.g., "AGE").
-You MUST output the exact column name from PROTOCOL_SPEC.X by doing:
+You MUST output the exact column name from CAUSAL_SPECS.X by doing:
 1) Try case-insensitive exact match to X columns.
 2) Otherwise fuzzy match by name similarity (tokens, underscores, abbreviations).
 3) Otherwise infer by semantics using DATA_SUMMARY:

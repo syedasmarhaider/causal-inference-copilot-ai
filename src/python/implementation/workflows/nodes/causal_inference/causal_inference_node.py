@@ -43,10 +43,10 @@ from python.implementation.workflows.tools.causal.causal_command import (
 from python.implementation.workflows.tools.causal.causal_model import CausalModel
 from python.implementation.workflows.tools.causal.causal_model_factory_tool import CausalModelFactoryTool
 from python.implementation.workflows.tools.causal.causal_spec import (
+    BinaryOutcomeSpecModel,
+    BinaryTreatmentSpecModel,
     CausalSpec,
-    BinaryTreatmentSpecModel as CausalBinaryTreatmentSpecModel,
-    BinaryOutcomeSpecModel as CausalBinaryOutcomeSpecModel,
-    ContinuousOutcomeSpecModel as CausalContinuousOutcomeSpecModel,
+    ContinuousOutcomeSpecModel,
 )
 
 from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
@@ -95,8 +95,8 @@ class CausalInferenceNode(Node):
 
         deps = CausalInferenceDeps.from_loaded(previous_state_dependencies)
 
-        protocol = deps.compile_protocol.payload.protocol
-        assert protocol is not None, "ProtocolSpec is required in CompileProtocolState payload"
+        causal_specs = deps.compile_protocol.payload.causal_specs
+        assert causal_specs is not None, "CausalSpecs is required in CompileProtocolState payload"
 
         trained_model_id = getattr(deps.model_train.payload, "trained_model_id", None)
         assert trained_model_id is not None, "trained_model_id is required in ModelTrainState payload"
@@ -135,7 +135,7 @@ class CausalInferenceNode(Node):
         # Context for ATE summarizer prompt
         context: dict[str, Any] = {
             "selected_model": selected_model_fqcn,
-            "protocol": protocol.model_dump(mode="json"),
+            "causal_specs": causal_specs.model_dump(mode="json"),
             "dataset_summary": data_summary.model_dump(mode="json"),
         }
 
@@ -145,7 +145,6 @@ class CausalInferenceNode(Node):
         # ATE: compute once (idempotent)
         # ---------------------------
         if state.payload.ate_result_raw_json_str is None:
-            spec = _protocol_to_causal_spec(protocol)
 
             cmd = ATECommand(
                 model_name=selected_model_fqcn,
@@ -153,7 +152,7 @@ class CausalInferenceNode(Node):
                 run_id=uuid4(),
                 data_summary=data_summary,
                 transformation_plan=deps.model_train.payload.column_transformation_plan,
-                protocol_specs=spec,
+                causal_specs=causal_specs,
                 fitted_model_id=trained_model_id,
                 order_X=order_X,
                 order_W=order_W,
@@ -224,7 +223,7 @@ class CausalInferenceNode(Node):
             ate_model_output_json_str=state.payload.ate_result_raw_json_str,
             messages_history=messages_history,
             current_state= state,
-            protocol=protocol,
+            causal_specs=causal_specs,
             clean_dataset_id=clean_dataset_id,
             data_summary=data_summary,
             transformation_plan=deps.model_train.payload.column_transformation_plan,
@@ -280,50 +279,6 @@ def _extract_cols_data(df: pd.DataFrame, cols: Sequence[str]) -> pd.DataFrame:
             f"Requested columns not found in df: {missing}. Available columns: {list(df.columns)}"
         )
     return df.loc[:, cols_list].copy()
-
-
-# ============================================================
-# Protocol → CausalSpec (binary treatment; binary/continuous outcome only)
-# ============================================================
-
-def _protocol_to_causal_spec(protocol: ProtocolSpec) -> CausalSpec:
-    t = protocol.treatment_spec
-    if not isinstance(t, ProtocolBinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        raise TypeError(f"Unsupported treatment_spec type: {type(t).__name__}")
-
-    t_specs = CausalBinaryTreatmentSpecModel(
-        kind="binary",
-        column=t.column,
-        treated_values=[t.treated],
-        control_values=[t.control],
-    )
-
-    y = protocol.outcome_spec
-    if isinstance(y, ProtocolBinaryOutcomeSpecModel):
-        y_specs = CausalBinaryOutcomeSpecModel(
-            kind="binary",
-            column=y.column,
-            event_values=[y.event],
-            non_event_values=[y.non_event],
-        )
-    elif isinstance(y, ProtocolContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        y_specs = CausalContinuousOutcomeSpecModel(
-            kind="continuous",
-            column=y.column,
-            unit=y.unit,
-            clip_min=y.clip_min,
-            clip_max=y.clip_max,
-        )
-    else:
-        raise TypeError(f"Unsupported outcome_spec type: {type(y).__name__}")
-
-    return CausalSpec(
-        Y=y_specs,
-        T=t_specs,
-        W=list(protocol.covariates),
-        X=list(protocol.effect_modifiers),
-        Z=[],
-    )
 
 
 # ============================================================
@@ -596,9 +551,9 @@ def _apply_rules_with_tool(
         return tool.apply_inclusion_rules(df=df, inclusion_rules=rules)  # type: ignore[call-arg]
 
 
-def _binary_t0_t1(protocol: ProtocolSpec, *, is_counterfactual: bool) -> Tuple[Any, Any]:
-    t = protocol.treatment_spec
-    if not isinstance(t, ProtocolBinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
+def _binary_t0_t1(causal_specs: CausalSpec, *, is_counterfactual: bool) -> Tuple[Any, Any]:
+    t = causal_specs.treatment_spec
+    if not isinstance(t, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         raise TypeError(f"Binary treatment required, got {type(t).__name__}")
     treated = t.treated
     control = t.control
@@ -617,7 +572,7 @@ def _process_cate_question(
     ate_model_output_json_str: str,
     messages_history: Optional[Sequence[ChatMessage]],
     current_state: CausalInferenceState,
-    protocol: ProtocolSpec,
+    causal_specs: CausalSpec,
     clean_dataset_id: UUID,
     data_summary: DatasetSummaryModel,
     transformation_plan: Optional[TransformPlan],
@@ -657,7 +612,7 @@ def _process_cate_question(
     error_message: Optional[str] = None
     plan: Optional[InclusionPlanModel] = None
     
-    effect_modifiers_summary = _filter_dataset_summary_to_effect_modifiers(summary=data_summary, effect_modifiers=protocol.effect_modifiers)
+    effect_modifiers_summary = _filter_dataset_summary_to_effect_modifiers(summary=data_summary, effect_modifiers=causal_specs.effect_modifiers)
     logging.warning(f"Effect modifiers summary for prompt: {effect_modifiers_summary.model_dump_json()}")
     plot_cohorts: List[CohortCate] = [] 
     for attempt in range(3):
@@ -667,7 +622,7 @@ def _process_cate_question(
             user_prompt=(
                 CATE_INCLUSION_PROMPT
                 +f"\n\nEffect modifiers summary (only these columns can be used for cohort definitions):\n{effect_modifiers_summary.model_dump_json()}\n"
-                +f"Effect modifiers columns: {', '.join(protocol.effect_modifiers)}\n"
+                +f"Effect modifiers columns: {', '.join(causal_specs.effect_modifiers)}\n"
                 +f"\n\nUSER_QUESTION:\n{user_q}\n"
                 + (f"\nPrevious error message:\n{error_message}\n" if error_message else "")
             ),
@@ -676,7 +631,7 @@ def _process_cate_question(
             max_attempts=3,
         )
 
-        issues = _validate_inclusion_plan_semantic(plan=plan, effect_modifiers=protocol.effect_modifiers)
+        issues = _validate_inclusion_plan_semantic(plan=plan, effect_modifiers=causal_specs.effect_modifiers)
         if not issues or (len(issues) == 0 and len(plan.rules) > 0):
             break
 
@@ -688,14 +643,14 @@ def _process_cate_question(
         )  
     
     logging.warning(f"Inclusion plan after validation attempts: {plan}")
-    is_valid, log = _validate_inclusion_plan(plan, effect_modifiers=protocol.effect_modifiers)
+    is_valid, log = _validate_inclusion_plan(plan, effect_modifiers=causal_specs.effect_modifiers)
     if not is_valid:
         logging.warning(f"Final inclusion plan is invalid: {log}")
         invalid_plan_message = _invalid_plan_message(
             llm=llm,
             model_name="basic",
             effect_modifiers_summary=effect_modifiers_summary,
-            effect_modifiers=protocol.effect_modifiers
+            effect_modifiers=causal_specs.effect_modifiers
         )
                                                      
         return CausalInferenceState(
@@ -717,9 +672,9 @@ def _process_cate_question(
     df_x = _extract_cols_data(df=df, cols=order_X)
 
     outcome_kind = "unknown"
-    if isinstance(protocol.outcome_spec, ProtocolBinaryOutcomeSpecModel):
+    if isinstance(causal_specs.outcome_spec, BinaryOutcomeSpecModel):
         outcome_kind = "binary"
-    elif isinstance(protocol.outcome_spec, ProtocolContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
+    elif isinstance(causal_specs.outcome_spec, ContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         outcome_kind = "continuous"
 
     group_payloads: List[Dict[str, Any]] = []
@@ -751,7 +706,7 @@ def _process_cate_question(
         non_empty_any = True
 
         # Decide t0/t1 for THIS cohort (binary treatment; swap if counterfactual)
-        t0, t1 = _binary_t0_t1(protocol, is_counterfactual=bool(cohort.is_counterfactual))
+        t0, t1 = _binary_t0_t1(causal_specs, is_counterfactual=bool(cohort.is_counterfactual))
 
         cate_inputs = CATEInputs(x_rows=cohort_df, t0=t0, t1=t1)
 
@@ -761,7 +716,7 @@ def _process_cate_question(
             run_id=uuid4(),
             data_summary=data_summary,
             transformation_plan=transformation_plan,
-            protocol_specs=_protocol_to_causal_spec(protocol),
+            causal_specs=causal_specs,
             fitted_model_id=trained_model_id,
             order_X=order_X,
             order_W=order_W,
@@ -825,7 +780,7 @@ def _process_cate_question(
                     "message": (
                         "After applying your cohort rules, I found **0 rows** for all cohorts.\n"
                         "Please loosen the inclusion rules or choose effect-modifier values that exist in the data.\n"
-                        f"Allowed effect modifiers (X): {', '.join(protocol.effect_modifiers)}"
+                        f"Allowed effect modifiers (X): {', '.join(causal_specs.effect_modifiers)}"
                     )
                 }
             )
@@ -834,11 +789,11 @@ def _process_cate_question(
     graphs: List[GraphImage] = []
     artifacts: Optional[List[UUID]] = []
     if len(plot_cohorts) > 0:
-        graphs.append(data_profiling_tool.plot_cate_distribution(plot_cohorts, protocol))
+        graphs.append(data_profiling_tool.plot_cate_distribution(plot_cohorts, causal_specs))
     if len(plot_cohorts) == 1:
-        graphs.append(data_profiling_tool.plot_cate_sorted_curve(plot_cohorts, protocol))
+        graphs.append(data_profiling_tool.plot_cate_sorted_curve(plot_cohorts, causal_specs))
     else:
-        graphs.append(data_profiling_tool.plot_cate_forest_mean_ci(plot_cohorts, protocol))
+        graphs.append(data_profiling_tool.plot_cate_forest_mean_ci(plot_cohorts, causal_specs))
 
     # Persist artifacts (you said you'll wire return processing)
     for g in graphs:
@@ -859,7 +814,7 @@ def _process_cate_question(
     llm_payload = { # pyright: ignore[reportUnknownVariableType]
         "selected_model": selected_model_fqcn,
         "outcome_kind": outcome_kind,
-        "treatment_column": getattr(protocol.treatment_spec, "column", None),
+        "treatment_column": getattr(causal_specs.treatment_spec, "column", None),
         "cohorts": group_payloads,
         # Optional: useful for context, but not huge
         "ate_summary_raw": ate_model_output_json_str,

@@ -26,12 +26,7 @@ from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state i
     CleanProtocolPayloadModel,
     CleanProtocolState,
 )
-from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
-    BinaryOutcomeSpecModel,
-    BinaryTreatmentSpecModel,
-    ContinuousOutcomeSpecModel,
-    ProtocolSpec,
-)
+from python.implementation.workflows.tools.causal.causal_spec import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CausalSpec, ContinuousOutcomeSpecModel
 from python.implementation.workflows.tools.data_processing.data_processing_tool import (
     DataProcessingTool,
     ExclusionRulesModel,
@@ -115,13 +110,13 @@ class CleanProtocolNode(Node):
                     )
                 )
 
-            compiled_protocol = deps.compile_protocol.payload.protocol
-            if compiled_protocol is None:
+            compiled_causal_specs = deps.compile_protocol.payload.causal_specs
+            if compiled_causal_specs is None:
                 return CleanProtocolState(
                     payload=CleanProtocolPayloadModel(
                         clean_dataset_id=None,
-                        cleaning_error="COMPILE_PROTOCOL produced no protocol.",
-                        user_message="Protocol missing. Re-run COMPILE_PROTOCOL.",
+                        cleaning_error="COMPILE_PROTOCOL produced no causal specs.",
+                        user_message="Causal specs missing. Re-run COMPILE_PROTOCOL.",
                     )
                 )
 
@@ -151,7 +146,7 @@ class CleanProtocolNode(Node):
             # 1) Keep only required columns from protocol + exclusions
             df1, drop_summary = edit_df_drop_cols_expect_required(
                 df=df,
-                compiled_protocol=compiled_protocol,
+                compiled_causal_specs=compiled_causal_specs,
                 exclusions=compiled_exclusion,
                 keep_all_original=False,
                 strict=self.strict_required_cols,
@@ -166,7 +161,7 @@ class CleanProtocolNode(Node):
             # 3) Drop rows missing key modeling columns
             df3, null_summary = apply_key_null_purge(
                 df2,
-                protocol=compiled_protocol,
+                causal_specs=compiled_causal_specs,
             )
 
             # 4) Apply exclusions through shared tool
@@ -179,14 +174,14 @@ class CleanProtocolNode(Node):
             # 5) Treatment/outcome domain keep
             df5, domain_summary = apply_treatment_outcome_domain_keep(
                 df4,
-                compiled_protocol,
+                compiled_causal_specs,
                 keep_treatment_domain=True,
                 keep_outcome_domain=True,
                 dropna_on_domain_cols=False,
             )
 
             # 6) Feasibility checks
-            feas_err = _feasibility_error(df5, compiled_protocol)
+            feas_err = _feasibility_error(df5, compiled_causal_specs)
             if feas_err is not None:
                 msg = _render_failure_message(
                     cleaning_error=feas_err,
@@ -226,23 +221,23 @@ class CleanProtocolNode(Node):
 
             artifact_ids: List[UUID] = []
             if (
-                compiled_protocol.treatment_spec.kind == "binary"
-                and (len(compiled_protocol.covariates) + len(compiled_protocol.effect_modifiers)) > 0
+                compiled_causal_specs.treatment_spec.kind == "binary"
+                and (len(compiled_causal_specs.covariates) + len(compiled_causal_specs.effect_modifiers)) > 0
             ):
                 graphs_list: List[GraphImage] = [
                     causal_data_profiling_tool.generate_causal_missingness_by_group_graph(
                         df=df5,
-                        protocol=compiled_protocol,
+                        protocol=compiled_causal_specs,
                     ),
                     causal_data_profiling_tool.generate_comparability_overlap_histogram(
                         df=df5,
-                        protocol=compiled_protocol,
+                        protocol=compiled_causal_specs,
                     ),
                 ]
                 graphs_list.extend(
                     causal_data_profiling_tool.generate_propensity_vs_top_confounders_graphs(
                         df=df5,
-                        protocol=compiled_protocol,
+                        protocol=compiled_causal_specs,
                     )
                 )
 
@@ -296,22 +291,22 @@ class CleanProtocolNode(Node):
 # Feasibility checks
 # =============================================================================
 
-def _feasibility_error(df: pd.DataFrame, protocol: ProtocolSpec) -> Optional[str]:
+def _feasibility_error(df: pd.DataFrame, causal_specs: CausalSpec) -> Optional[str]:
     if df.empty:
         return "Cleaned dataset has zero rows after preprocessing."
 
     if int(df.shape[1]) == 0:
         return "Cleaned dataset has zero columns after dropping to required columns."
 
-    tcol = str(protocol.treatment_spec.column)
-    ys = protocol.outcome_spec
+    tcol = str(causal_specs.treatment_spec.column)
+    ys = causal_specs.outcome_spec
     needed = {tcol, str(ys.column)}
 
     missing = [c for c in needed if c not in df.columns]
     if missing:
         return f"Cleaned dataset is missing required modeling columns: {missing}"
 
-    ts = protocol.treatment_spec
+    ts = causal_specs.treatment_spec
     if isinstance(ts, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         nunq = int(df[tcol].nunique(dropna=True))
         if nunq < 2:
@@ -453,7 +448,7 @@ class TreatmentOutcomeDomainSummary:
 
 def edit_df_drop_cols_expect_required(
     df: pd.DataFrame,
-    compiled_protocol: ProtocolSpec,
+    compiled_causal_specs: CausalSpec,
     exclusions: ExclusionRulesModel,
     *,
     keep_all_original: bool = False,
@@ -472,19 +467,19 @@ def edit_df_drop_cols_expect_required(
     """
     required: Set[str] = set()
 
-    if compiled_protocol.time_zero_type == "COLUMN":
-        required.add(str(compiled_protocol.time_zero))
+    if compiled_causal_specs.time_zero_type == "COLUMN":
+        required.add(str(compiled_causal_specs.time_zero))
 
-    required.add(str(compiled_protocol.treatment_spec.column))
+    required.add(str(compiled_causal_specs.treatment_spec.column))
 
-    ys = compiled_protocol.outcome_spec
+    ys = compiled_causal_specs.outcome_spec
     if ys.kind in ("binary", "continuous"):
         required.add(str(ys.column))
     else:
         raise ValueError(f"Unsupported outcome_spec kind: {getattr(ys, 'kind', None)!r}")
 
-    required.update(str(c) for c in compiled_protocol.covariates)
-    required.update(str(c) for c in compiled_protocol.effect_modifiers)
+    required.update(str(c) for c in compiled_causal_specs.covariates)
+    required.update(str(c) for c in compiled_causal_specs.effect_modifiers)
 
     for ex in exclusions.exclusion_rules:
         required.add(str(ex.column))
@@ -553,18 +548,18 @@ def _normalize_missing_sentinels(
 
 def apply_key_null_purge(
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_specs: CausalSpec,
 ) -> Tuple[pd.DataFrame, NullPurgeSummary]:
     """
     Drop rows with nulls in key modeling columns only.
     """
     required_nonnull: List[str] = [
-        str(protocol.treatment_spec.column),
-        str(protocol.outcome_spec.column),
+        str(causal_specs.treatment_spec.column),
+        str(causal_specs.outcome_spec.column),
     ]
 
-    if protocol.time_zero_type == "COLUMN":
-        required_nonnull.append(str(protocol.time_zero))
+    if causal_specs.time_zero_type == "COLUMN":
+        required_nonnull.append(str(causal_specs.time_zero))
 
     missing_req = [c for c in required_nonnull if c not in df.columns]
     if missing_req:
@@ -676,7 +671,7 @@ def _mask_keep_in_domain(s: pd.Series, allowed_literals: Sequence[str]) -> pd.Se
 
 def apply_treatment_outcome_domain_keep(
     df: pd.DataFrame,
-    compiled_protocol: ProtocolSpec,
+    compiled_causal_specs: CausalSpec,
     *,
     keep_treatment_domain: bool = True,
     keep_outcome_domain: bool = True,
@@ -689,7 +684,7 @@ def apply_treatment_outcome_domain_keep(
     y_summary: Optional[Dict[str, Any]] = None
 
     if keep_treatment_domain:
-        ts = compiled_protocol.treatment_spec
+        ts = compiled_causal_specs.treatment_spec
         tcol = str(ts.column)
 
         if tcol not in cur.columns:
@@ -717,7 +712,7 @@ def apply_treatment_outcome_domain_keep(
         }
 
     if keep_outcome_domain:
-        ys = compiled_protocol.outcome_spec
+        ys = compiled_causal_specs.outcome_spec
         ycol = str(ys.column)
 
         if ycol not in cur.columns:

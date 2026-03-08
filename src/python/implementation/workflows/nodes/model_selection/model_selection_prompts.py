@@ -6,7 +6,7 @@ from __future__ import annotations
 
 def get_model_selection_node_info() -> str:
     return (
-        "ModelSelectionNode: recommends top-3 causal estimation models based on protocol and data context, "
+        "ModelSelectionNode: recommends top-3 causal estimation models based on causal specs and data context, "
         "using clinician-friendly reasoning. Returns state with model_recommendations and clinician_message."
         "It required user input and discussion to finalize the model selection or ask follow-up question if user is not sure about the selection."
     )
