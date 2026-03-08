@@ -17,11 +17,11 @@ from python.implementation.workflows.tools.causal.encoding_plan import EncodingP
 
 class EncodingUtil:
     NAME: ClassVar[str] = "ENCODING"
-    def compile(self,plan: TransformPlan, *, X_order: Sequence[str], W_order: Sequence[str], dense_output: bool = True) -> CompiledTransformers:
+    def compile(self,plan: TransformPlan, *, effect_modifiers_order: Sequence[str], covariates_order: Sequence[str], dense_output: bool = True) -> CompiledTransformers:
         return compile_plan_to_transformers(
             plan=plan,
-            X_order=X_order,
-            W_order=W_order,
+            effect_modifiers=effect_modifiers_order,
+            covariates=covariates_order,
             dense_output=dense_output,
             require_full_coverage=True,
         )  
@@ -34,8 +34,8 @@ class EncodingUtil:
 @dataclass(frozen=True)
 class CompiledTransformers:
     """
-    pre_X  : transformer that expects X matrix (n, dx) ordered as X_order
-    pre_XW : transformer that expects concatenated [X|W] matrix (n, dx+dw) ordered as (X_order + W_order)
+    pre_X  : transformer that expects X matrix (n, dx) ordered as effect_modifiers_order
+    pre_XW : transformer that expects concatenated [X|W] matrix (n, dx+dw) ordered as (effect_modifiers_order + covariates_order)
     """
     pre_X: ColumnTransformer
     pre_XW: ColumnTransformer
@@ -350,34 +350,34 @@ class DateTimeToEpochSecondsTransformer(BaseEstimator, TransformerMixin):
 def compile_plan_to_transformers(
     plan: TransformPlan,
     *,
-    X_order: Sequence[str],
-    W_order: Sequence[str],
+    effect_modifiers: Sequence[str],
+    covariates: Sequence[str],
     dense_output: bool = True,
     require_full_coverage: bool = True,
 ) -> CompiledTransformers:
     """
-    Requires X_order and W_order (non-empty). No inference. No None.
+    Requires effect_modifiers and covariates (non-empty). No inference. No None.
 
-    - pre_X  expects X array columns ordered exactly as X_order
-    - pre_XW expects concatenated [X|W] array columns ordered exactly as (X_order + W_order)
+    - pre_X  expects X array columns ordered exactly as effect_modifiers
+    - pre_XW expects concatenated [X|W] array columns ordered exactly as (effect_modifiers + covariates)
 
     If require_full_coverage=True:
-      - every col in X_order/W_order must have a plan entry
-      - and every plan entry must belong to X_order/W_order (no surprises)
+      - every col in effect_modifiers/covariates must have a plan entry
+      - and every plan entry must belong to effect_modifiers/covariates (no surprises)
 
     NOTE (DML best practice):
       - Do NOT fit these transformers globally before cross-fitting. Put them inside the nuisance model pipelines
         so each fold fits its own preprocessing to avoid leakage.
     """
-    if len(X_order) == 0 and len(W_order) == 0:
-        raise ValueError("X_order or W_order must be provided (not None).")
+    if len(effect_modifiers) == 0 and len(covariates) == 0:
+        raise ValueError("effect_modifiers or covariates must be provided (not None).")
 
-    X_order_l = list(X_order)
-    W_order_l = list(W_order)
-    xw_cols = X_order_l + W_order_l
+    effect_modifiers_l = list(effect_modifiers)
+    covariates_l = list(covariates)
+    xw_cols = effect_modifiers_l + covariates_l
 
     # Index maps (EconML passes numpy arrays, not DataFrames)
-    x_index = {c: i for i, c in enumerate(X_order_l)}
+    x_index = {c: i for i, c in enumerate(effect_modifiers_l)}
     xw_index = {c: i for i, c in enumerate(xw_cols)}
 
     # Plan sanity

@@ -19,8 +19,8 @@ class ModelTrainPayload(BaseModel):
     
     column_transformation_plan: Optional[TransformPlan] = None
     training_warnings: Optional[str] = None
-    order_X: Optional[List[str]] = None
-    order_W: Optional[List[str]] = None
+    order_effect_modifiers: Optional[List[str]] = None
+    order_covariates: Optional[List[str]] = None
     prev_training_errors: Optional[str] = None
     no_of_times_trained: Optional[int] = None
 

@@ -167,7 +167,7 @@ EncodingPresetSpec = Annotated[
 class ColumnEncodingPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     column: NonEmptyStr
-    role: Literal["X", "W"]  # explicit for DML
+    role: Literal["covariate", "effect_modifier"]  
     encoding: EncodingPresetSpec
 
 
@@ -183,9 +183,9 @@ class TransformPlan(BaseModel):
             dup = sorted({c for c in cols if cols.count(c) > 1})
             raise ValueError(f"TransformPlan: duplicate column entries are not allowed: {dup}")
 
-        has_x = any(c.role == "X" for c in self.columns)
-        has_w = any(c.role == "W" for c in self.columns)
-        if not has_x and not has_w:
-            raise ValueError("TransformPlan: must contain at least one X or W column.")
+        has_covariate = any(c.role == "covariate" for c in self.columns)
+        has_effect_modifier = any(c.role == "effect_modifier" for c in self.columns)
+        if not has_covariate and not has_effect_modifier:
+            raise ValueError("TransformPlan: must contain at least one covariate or effect_modifier column.")
 
         return self

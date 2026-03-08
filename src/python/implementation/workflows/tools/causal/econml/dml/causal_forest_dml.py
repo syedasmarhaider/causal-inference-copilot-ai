@@ -53,7 +53,6 @@ from python.implementation.workflows.tools.causal.econml.models_info import get_
 from python.implementation.workflows.tools.causal.econml.utils import (
     ModelSpecError,
     build_init_fit_options_param_maps,
-    categorical_t0_t1_pairs,
     get_input_params_from_spec,
     has_missing,
     is_missing_handled,
@@ -241,15 +240,15 @@ def _normalize_model_spec_to_wrapped_list(
 
 
 def _get_default_models_for_t_and_y(
-    specs: Any,  # CausalSpec
+    specs: CausalSpec,
     pre_XW: ColumnTransformer,
     *,
     missingness: bool,
     random_state: Optional[int] = None,
     n_jobs: Optional[int] = None,
 ) -> Dict[str, Any]:
-    disc_t = specs.T.kind in ("binary", "categorical")
-    disc_y = specs.Y.kind == "binary"
+    disc_t = specs.treatment_spec.kind in ("binary", "categorical")
+    disc_y = specs.outcome_spec.kind == "binary"
 
     default_model_y: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
     default_model_t: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
@@ -379,31 +378,31 @@ class CausalForestDMLCausalModel(CausalModel):
         started_at: datetime,
     ) -> CausalResult:
         try:
-            specs: CausalSpec = command.protocol_specs
-            order_X: Optional[List[str]] = command.order_X
-            order_W: Optional[List[str]] = command.order_W
+            specs: CausalSpec = command.causal_specs
             data_summary: DatasetSummaryModel = command.data_summary
             transformation_plan: Optional[TransformPlan] = command.transformation_plan
+            covariates_order = specs.covariates or []
+            effect_modifiers_order = specs.effect_modifiers
             plan = self.encoding_util.compile(
                 plan=transformation_plan,
-                X_order=order_X or [],
-                W_order=order_W or [],
+                effect_modifiers_order=effect_modifiers_order,
+                covariates_order=covariates_order,
                 dense_output=True,
             ) if transformation_plan is not None else None
             
             pre_x = plan.pre_X if plan is not None else None
             pre_xw = plan.pre_XW if plan is not None else None
 
-            if pre_x is None and len(specs.X or []) > 0:
+            if pre_x is None and len(specs.effect_modifiers or []) > 0:
                 raise ModelSpecError(
                     "Spec declares effect modifiers (spec.X) but no pre_X transformer provided in inputs."
                 )
-            if pre_xw is None and (len(specs.W or []) + len(specs.X or [])) > 0:
+            if pre_xw is None and (len(specs.covariates or []) + len(specs.effect_modifiers or [])) > 0:
                 raise ModelSpecError(
                     "Spec declares controls (spec.W) and/or effect modifiers (spec.X) but no pre_XW transformer provided in inputs."
                 )
 
-            Y, T, X, W, col_meta = get_input_params_from_spec(df, specs, order_X=order_X, order_W=order_W)
+            Y, T, X, W, col_meta = get_input_params_from_spec(df, specs, order_X=effect_modifiers_order, order_W=covariates_order)
 
             miss = {"Y": has_missing(Y), "T": has_missing(T), "X": has_missing(X), "W": has_missing(W)}
             if miss["Y"] or miss["T"]:
@@ -411,8 +410,8 @@ class CausalForestDMLCausalModel(CausalModel):
 
             # CHANGED (Forest): CausalForestDML does NOT allow missing X via allow_missing;
             # allow_missing only applies to W. If X contains NaNs, force upstream imputation/cleaning.
-            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
-            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
+            missingness_X = len(specs.effect_modifiers or []) > 0 and miss["X"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.effect_modifiers))
+            missingness_W = len(specs.covariates or []) > 0 and miss["W"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.covariates))
             if missingness_X:
                 raise ModelSpecError(
                     "CausalForestDML does not support missing values in X via allow_missing "

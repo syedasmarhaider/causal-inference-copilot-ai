@@ -438,19 +438,19 @@ class ModelTrainNode(Node):
         # -----------------------------------------------------------------
         # Phase 2: training
         # -----------------------------------------------------------------
-        order_X: Optional[list[str]] = None
-        order_W: Optional[list[str]] = None
+        order_effect_modifiers: Optional[list[str]] = None
+        order_covariates: Optional[list[str]] = None
 
         if state.payload.column_transformation_plan is not None:
-            order_X = [
+            order_effect_modifiers = [
                 c.column
                 for c in state.payload.column_transformation_plan.columns
-                if c.role == "X"
+                if c.role == "effect_modifier"
             ]
-            order_W = [
+            order_covariates = [
                 c.column
                 for c in state.payload.column_transformation_plan.columns
-                if c.role == "W"
+                if c.role == "covariate"
             ]
 
         run_id = uuid4()
@@ -460,8 +460,8 @@ class ModelTrainNode(Node):
             run_id=run_id,
             causal_specs=causal_specs,
             data_summary=dataset_summary,
-            order_X=order_X,
-            order_W=order_W,
+            order_effect_modifiers=order_effect_modifiers,
+            order_covariates=order_covariates,
             transformation_plan=(
                 state.payload.column_transformation_plan
                 if state.payload.column_transformation_plan is not None
@@ -496,8 +496,8 @@ class ModelTrainNode(Node):
                     update={
                         "trained_model_id": fitted_model_id,
                         "training_warnings": warnings_str,
-                        "order_X": order_X,
-                        "order_W": order_W,
+                        "order_effect_modifiers": order_effect_modifiers,
+                        "order_covariates": order_covariates,
                         "needs_user_input": False,
                         "no_of_times_trained": (state.payload.no_of_times_trained or 0) + 1,
                         "error": None,
@@ -533,8 +533,8 @@ class ModelTrainNode(Node):
                             update={
                                 "trained_model_id": None,
                                 "training_warnings": None,
-                                "order_X": None,
-                                "order_W": None,
+                                "order_effect_modifiers": None,
+                                "order_covariates": None,
                                 "column_transformation_plan": None,
                                 "col_tranformation_not_needed": None,
                                 "needs_user_input": False,
@@ -549,8 +549,8 @@ class ModelTrainNode(Node):
                     update={
                         "trained_model_id": None,
                         "training_warnings": None,
-                        "order_X": None,
-                        "order_W": None,
+                        "order_effect_modifiers": None,
+                        "order_covariates": None,
                         "needs_user_input": False,
                         "error": None,
                         "column_transformation_plan": None,

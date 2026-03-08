@@ -23,8 +23,8 @@ class BaseCommand:
     model_name: str
     dataset_id: UUID
     run_id: UUID
-    order_X: Optional[List[str]] = None
-    order_W: Optional[List[str]] = None
+    order_effect_modifiers: Optional[List[str]] = None
+    order_covariates: Optional[List[str]] = None
     data_summary: DatasetSummaryModel
     transformation_plan: Optional[TransformPlan] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

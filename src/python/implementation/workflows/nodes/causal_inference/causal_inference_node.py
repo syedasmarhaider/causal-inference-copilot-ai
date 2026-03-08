@@ -113,10 +113,13 @@ class CausalInferenceNode(Node):
         data_summary = deps.clean_protocol.payload.summary
         assert data_summary is not None, "dataset_summary is required in CleanProtocolState"
 
-        order_X = deps.model_train.payload.order_X
-        order_W = deps.model_train.payload.order_W
-        assert order_X is not None, "order_X is required in ModelTrainState payload"
-        assert order_W is not None, "order_W is required in ModelTrainState payload"
+        order_effect_modifiers = deps.model_train.payload.order_effect_modifiers or []
+        order_covariates = deps.model_train.payload.order_covariates or  []
+        
+        if len(order_effect_modifiers) < 1 and len(causal_specs.effect_modifiers) > 0:
+            raise ValueError("ModelTrainState is missing order_effect_modifiers, which are required for CausalInferenceNode.")
+        if len(order_covariates) < 1 and len(causal_specs.covariates) > 0:
+            raise ValueError("ModelTrainState is missing order_covariates, which are required for CausalInferenceNode.")
 
         # Resolve model
         mf_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
@@ -154,8 +157,8 @@ class CausalInferenceNode(Node):
                 transformation_plan=deps.model_train.payload.column_transformation_plan,
                 causal_specs=causal_specs,
                 fitted_model_id=trained_model_id,
-                order_X=order_X,
-                order_W=order_W,
+                order_effect_modifiers=list(order_effect_modifiers),
+                order_covariates=list(order_covariates),
                 inputs=ATEInputsModel(),
                 options={},
             )
@@ -229,8 +232,8 @@ class CausalInferenceNode(Node):
             transformation_plan=deps.model_train.payload.column_transformation_plan,
             selected_model_fqcn=selected_model_fqcn,
             trained_model_id=trained_model_id,
-            order_X=order_X,
-            order_W=order_W,
+            order_effect_modifiers=order_effect_modifiers,
+            order_covariates=order_covariates,
             model=model,
             data_processing_tool=data_processing_tool,
             data_profiling_tool=_data_profiling_tool,
@@ -578,14 +581,23 @@ def _process_cate_question(
     transformation_plan: Optional[TransformPlan],
     selected_model_fqcn: str,
     trained_model_id: UUID,
-    order_X: List[str],
-    order_W: List[str],
+    order_effect_modifiers: Sequence[str],
+    order_covariates: Sequence[str],
     model: CausalModel,
     data_processing_tool: DataProcessingTool,
     data_profiling_tool: CausalDataProfilingTool,
 ) -> CausalInferenceState:
     last_8 = messages_history[-8:] if messages_history else None
     last_4_messages = messages_history[-4:] if messages_history else None
+    
+    if len(order_effect_modifiers) < 1:
+        return CausalInferenceState(
+            payload=current_state.payload.model_copy(
+                update={
+                    "message": "Cannot compute CATE because order_effect_modifiers is empty. Please retrain the model with at least one effect modifier (X) to enable CATE analysis.",
+                }
+            )
+        )
 
     # ---------------------------
     # 1) Context router (answer from history/ATE if possible)
@@ -669,7 +681,7 @@ def _process_cate_question(
         conversation_id=conversation_id,
         dataset_id=clean_dataset_id,
     )
-    df_x = _extract_cols_data(df=df, cols=order_X)
+    df_x = _extract_cols_data(df=df, cols=order_effect_modifiers)
 
     outcome_kind = "unknown"
     if isinstance(causal_specs.outcome_spec, BinaryOutcomeSpecModel):
@@ -718,8 +730,8 @@ def _process_cate_question(
             transformation_plan=transformation_plan,
             causal_specs=causal_specs,
             fitted_model_id=trained_model_id,
-            order_X=order_X,
-            order_W=order_W,
+            order_effect_modifiers=list(order_effect_modifiers),
+            order_covariates=list(order_covariates),
             inputs=cate_inputs,
             options={},
         )
