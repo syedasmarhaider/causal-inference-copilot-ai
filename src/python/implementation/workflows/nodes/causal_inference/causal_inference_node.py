@@ -90,8 +90,8 @@ class CausalInferenceNode(Node):
 
         deps = CausalInferenceDeps.from_loaded(previous_state_dependencies)
 
-        causal_specs = deps.compile_protocol.payload.causal_specs
-        assert causal_specs is not None, "CausalSpecs is required in CompileProtocolState payload"
+        causal_specs = deps.clean_protocol.payload.compiled_causal_spec
+        assert causal_specs is not None, "CausalSpecs is required in CleanProtocolState payload"
 
         trained_model_id = getattr(deps.model_train.payload, "trained_model_id", None)
         assert trained_model_id is not None, "trained_model_id is required in ModelTrainState payload"

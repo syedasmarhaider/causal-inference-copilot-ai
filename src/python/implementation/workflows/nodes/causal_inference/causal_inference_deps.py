@@ -17,7 +17,6 @@ T = TypeVar("T", bound=State)
 
 @dataclass(frozen=True, slots=True)
 class CausalInferenceDeps:
-    compile_protocol: CompileProtocolState
     clean_protocol: CleanProtocolState
     model_selection: ModelSelectionState
     model_train: ModelTrainState
@@ -43,13 +42,11 @@ class CausalInferenceDeps:
                     f"(expected {expected_type.__name__}, got {type(st).__name__})"
                 )
             return st
-        cp = _get(CompileProtocolState.NAME, CompileProtocolState)
         cl = _get(CleanProtocolState.NAME, CleanProtocolState)
         ms = _get(ModelSelectionState.NAME, ModelSelectionState)
         mt = _get(ModelTrainState.NAME, ModelTrainState)
 
         return cls(
-            compile_protocol=cp,
             clean_protocol=cl,
             model_selection=ms,
             model_train=mt,

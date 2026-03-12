@@ -357,7 +357,7 @@ class ModelTrainNode(Node):
 
         deps = ModelTrainDeps.from_loaded(previous_state_dependencies)
 
-        causal_specs = deps.compile_protocol.payload.causal_specs
+        causal_specs = deps.clean_protocol.payload.compiled_causal_spec
         assert causal_specs is not None, "Compiled causal specs must be available for model training."
 
         selected = deps.model_selection.payload.confirmed_model_selection
