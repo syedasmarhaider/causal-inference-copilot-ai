@@ -80,8 +80,10 @@ class ValidateCleanProtocolNode(Node):
             # ----------------------------
             # Guardrails: upstream sanity
             # ----------------------------
-            causal_specs = deps.compile_protocol.payload.causal_specs
-            assert causal_specs is not None, "CompileProtocolState must provide compiled causal specs for validation."
+            causal_specs = deps.clean_protocol.payload.compiled_causal_spec
+            assert causal_specs is not None, (
+                "CleanProtocolState must provide latest compiled_causal_spec for validation."
+            )
 
             clean_id = deps.clean_protocol.payload.clean_dataset_id
             assert clean_id is not None, "CleanProtocolState must provide a clean_dataset_id for validation."
