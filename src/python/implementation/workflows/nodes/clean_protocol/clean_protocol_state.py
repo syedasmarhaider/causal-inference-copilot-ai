@@ -12,6 +12,7 @@ from python.implementation.workflows.nodes.clean_protocol.clean_protocol_deps im
 from python.implementation.workflows.tools.data_processing.data_processing_tool import (
     SQLStatements,
 )
+from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetSummaryModel,
 )
@@ -66,6 +67,13 @@ class CleanIterationRecordModel(BaseModel):
         return out
 
 
+class CausalSpecHistoryItemModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    iteration_index: int
+    causal_spec: CausalSpec
+
+
 class CleanProtocolPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -78,8 +86,10 @@ class CleanProtocolPayloadModel(BaseModel):
 
     iteration_index: int = 0
     latest_diff: Optional[CleanDataDiffModel] = None
+    compiled_causal_spec: Optional[CausalSpec] = None
     sql_history: List[SQLHistoryItemModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
     iteration_history: List[CleanIterationRecordModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
+    causal_spec_history: List[CausalSpecHistoryItemModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
 
     @field_validator("cleaning_error", "user_message", mode="before")
     @classmethod
@@ -115,6 +125,7 @@ class CleanProtocolState(State):
             self.payload.user_acceptance is True
             and self.payload.clean_dataset_id is not None
             and self.payload.summary is not None
+            and self.payload.compiled_causal_spec is not None
         ):
             return "DONE"
         return "PENDING"
