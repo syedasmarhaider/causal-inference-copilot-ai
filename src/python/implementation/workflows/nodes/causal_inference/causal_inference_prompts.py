@@ -38,8 +38,6 @@ Raw ATE result (JSON):
 
 Warnings (JSON):
 {warnings_json}
-
-Now write the JSON output.
 """.strip()
 
 
