@@ -41,8 +41,13 @@ Rules:
 - Ensure the final statement returns the final cleaned table (result set).
 - Keep SQL concise and deterministic.
 - Do not invent columns not present in the current dataset.
+- Use `final_required_columns` as the exact allowed output column set.
+- The final cleaned dataset must keep ONLY `final_required_columns`.
+- Time-zero columns are allowed ONLY to filter rows (WHERE/JOIN logic). Do not keep any time-zero column in final output.
+- If you need intermediate columns for filtering, use CTEs/subqueries but end with final projected output.
 - If no changes are needed, return a valid no-op query:
-  SELECT * FROM "<table_name>"
+  SELECT "col1", "col2", ... FROM "<table_name>"
+  where selected columns are exactly `final_required_columns`.
 
 Output:
 - Return strict JSON matching SQLStatements schema only.
@@ -72,6 +77,7 @@ The user asked to accept the current cleaned dataset, but minimum compatibility 
 Explain:
 - Why acceptance cannot proceed now.
 - What is missing/incompatible.
+- Remind that final dataset must include only treatment/outcome/covariates/effect modifiers.
 - Ask the user to provide the next cleaning change request.
 
 Return strict JSON:

@@ -124,6 +124,7 @@ class CleanProtocolNode(Node):
                     message="Causal specs are missing. Re-run COMPILE_PROTOCOL.",
                     reason="COMPILE_PROTOCOL produced no causal specs.",
                 )
+            required_modeling_columns = _required_modeling_columns(causal_spec)
 
             protocol_discussion = deps.protocol_discussion.payload.discussion.strip()
 
@@ -161,6 +162,7 @@ class CleanProtocolNode(Node):
                     source_df=source_df,
                     protocol_discussion=protocol_discussion,
                     causal_spec=causal_spec,
+                    required_modeling_columns=required_modeling_columns,
                     state=state,
                     data_processing_tool=data_processing_tool,
                     data_profiling_tool=data_profiling_tool,
@@ -238,6 +240,7 @@ class CleanProtocolNode(Node):
                 source_df=source_df,
                 protocol_discussion=protocol_discussion,
                 causal_spec=causal_spec,
+                required_modeling_columns=required_modeling_columns,
                 state=state,
                 data_processing_tool=data_processing_tool,
                 data_profiling_tool=data_profiling_tool,
@@ -263,6 +266,7 @@ class CleanProtocolNode(Node):
         source_df: pd.DataFrame,
         protocol_discussion: str,
         causal_spec: CausalSpec,
+        required_modeling_columns: List[str],
         state: CleanProtocolState,
         data_processing_tool: DuckDBInMemorySQLTool,
         data_profiling_tool: DatasetProfilingTool,
@@ -283,6 +287,7 @@ class CleanProtocolNode(Node):
             user_request=user_request,
             protocol_discussion=protocol_discussion,
             causal_spec=causal_spec,
+            required_modeling_columns=required_modeling_columns,
             source_summary=source_summary,
             state=state.payload,
             history=history,
@@ -329,6 +334,30 @@ class CleanProtocolNode(Node):
             )
 
         cleaned_df = sql_result.dataframe
+        missing_required_columns = [
+            col for col in required_modeling_columns if col not in cleaned_df.columns
+        ]
+        if missing_required_columns:
+            msg = self._render_compatibility_failure_message(
+                history=history,
+                compatibility_error=(
+                    "The SQL result is missing required modeling columns: "
+                    f"{missing_required_columns}. Required columns are: "
+                    f"{required_modeling_columns}."
+                ),
+                payload=state.payload,
+            )
+            return CleanProtocolState(
+                payload=state.payload.model_copy(
+                    update={
+                        "cleaning_error": None,
+                        "user_acceptance": None,
+                        "user_message": msg.message_for_user,
+                    }
+                )
+            )
+        cleaned_df = cleaned_df.loc[:, required_modeling_columns].copy()
+
         clean_dataset_id = uuid4()
         self.data_repo.save_csv_data(
             user_id=user_id,
@@ -425,6 +454,7 @@ class CleanProtocolNode(Node):
         user_request: str,
         protocol_discussion: str,
         causal_spec: CausalSpec,
+        required_modeling_columns: List[str],
         source_summary: Any,
         state: CleanProtocolPayloadModel,
         history: Optional[Sequence[ChatMessage]],
@@ -435,6 +465,8 @@ class CleanProtocolNode(Node):
             "user_request": user_request,
             "protocol_discussion": protocol_discussion,
             "causal_spec": causal_spec.model_dump(mode="json"),
+            "final_required_columns": required_modeling_columns,
+            "time_zero_policy": "Use time-zero only for row filtering; do not keep it in final output.",
             "current_dataset_summary": source_summary.model_dump(mode="json"),
             "iteration_index": state.iteration_index,
             "latest_diff": state.latest_diff.model_dump(mode="json") if state.latest_diff else None,
@@ -654,9 +686,35 @@ def _minimal_compatibility_error(df: pd.DataFrame, causal_spec: CausalSpec) -> O
     if int(df.shape[1]) <= 0:
         return "Cleaned dataset has zero columns."
 
-    tcol = str(causal_spec.treatment_spec.column)
-    ycol = str(causal_spec.outcome_spec.column)
-    missing = [c for c in [tcol, ycol] if c not in df.columns]
+    required_columns = _required_modeling_columns(causal_spec)
+    missing = [c for c in required_columns if c not in df.columns]
     if missing:
         return f"Cleaned dataset is missing required modeling columns: {missing}"
+
+    required_set = set(required_columns)
+    extra_columns = [str(c) for c in df.columns if str(c) not in required_set]
+    if extra_columns:
+        return (
+            "Cleaned dataset contains non-modeling columns: "
+            f"{extra_columns}. Allowed columns are: {required_columns}"
+        )
     return None
+
+
+def _required_modeling_columns(causal_spec: CausalSpec) -> List[str]:
+    columns: List[str] = [
+        str(causal_spec.treatment_spec.column),
+        str(causal_spec.outcome_spec.column),
+    ]
+    columns.extend(str(c) for c in causal_spec.covariates)
+    columns.extend(str(c) for c in causal_spec.effect_modifiers)
+
+    required: List[str] = []
+    seen: set[str] = set()
+    for column in columns:
+        normalized = column.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        required.append(normalized)
+    return required
