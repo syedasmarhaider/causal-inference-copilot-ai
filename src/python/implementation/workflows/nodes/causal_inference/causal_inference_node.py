@@ -312,7 +312,7 @@ class _CohortSQLPlanItem(BaseModel):
 class InclusionPlanModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    rules: List[_CohortSQLPlanItem] = Field(default_factory=list)
+    rules: List[_CohortSQLPlanItem] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
 
 
 def _validate_inclusion_plan_semantic(
