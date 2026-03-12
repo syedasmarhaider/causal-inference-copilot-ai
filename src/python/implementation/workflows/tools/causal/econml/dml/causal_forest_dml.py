@@ -611,7 +611,7 @@ class CausalForestDMLCausalModel(CausalModel):
                 warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                 item["ate_inference"] = None
 
-                effects.append(item)
+            effects.append(item)
 
             if not effects:
                 return CommandFailure(
