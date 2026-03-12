@@ -6,7 +6,9 @@ from python.domain.repo.models_repo import ModelsRepo
 from python.domain.workflows.tool import Tool
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.tools.causal.causal_model_factory_tool import CausalModelFactoryTool
-from python.implementation.workflows.tools.data_processing.data_processing_tool import DataProcessingTool
+from python.implementation.workflows.tools.data_processing.data_processing_tool import (
+    DuckDBInMemorySQLTool,
+)
 from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import CausalDataProfilingTool
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool
 
@@ -16,7 +18,7 @@ class DefaultToolFactory(ToolFactory):
     def __init__(self, data_repo: DataRepo, models_repo: ModelsRepo) -> None:
         self._tools = {
             DatasetProfilingTool.NAME: DatasetProfilingTool(),
-            DataProcessingTool.NAME: DataProcessingTool(),
+            DuckDBInMemorySQLTool.NAME: DuckDBInMemorySQLTool(),
             CausalDataProfilingTool.NAME: CausalDataProfilingTool(),
             CausalModelFactoryTool.NAME: CausalModelFactoryTool.create_default(data_repo=data_repo, models_repo=models_repo),
         }
