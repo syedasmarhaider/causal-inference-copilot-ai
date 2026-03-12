@@ -85,10 +85,6 @@ def validate_protocol_role_columns_invariants(causal_spec: CausalSpec) -> List[V
     covariates: List[str] = list(causal_spec.covariates or [])
     effect_modifiers: List[str] = list(causal_spec.effect_modifiers or [])
 
-    # -------------------------
-    # time_zero is a real column only when time_zero_type == "COLUMN"
-    # -------------------------
-    time_zero_col = causal_spec.time_zero if causal_spec.time_zero_type == "COLUMN" else None
 
     # -------------------------
     # 1) Duplicates within lists (FAIL)
@@ -161,140 +157,8 @@ def validate_protocol_role_columns_invariants(causal_spec: CausalSpec) -> List[V
                 fix_hint="This is allowed is some estimation frameworks, but it's clearer to separate covariates (for adjustment) from effect modifiers (for heterogeneity). Consider assigning each column to one role. So we dont allow it",
             )
         )
-
-    # -------------------------
-    # 4) time_zero overlaps with other role columns (WARN)
-    # -------------------------
-    if isinstance(time_zero_col, str) and time_zero_col.strip():
-        tz_overlap = sorted({time_zero_col}.intersection({treatment_col, *outcome_cols, *covariates, *effect_modifiers}))
-        if tz_overlap:
-            issues.append(
-                _issue(
-                    severity="WARN",
-                    message="time_zero column overlaps with another protocol role column.",
-                    evidence={"time_zero_col": time_zero_col, "overlaps_with": tz_overlap},
-                    fix_hint="If intentional, keep it. Otherwise pick a dedicated baseline/time column.",
-                )
-            )
-
+        
     return issues
-
-
-def validate_time_zero_semantics_protocol(
-    df: pd.DataFrame,
-    causal_spec: CausalSpec,
-    *,
-    sample_n: int = 2000,
-    parse_fail_rate_warn: float = 0.10,
-    parse_fail_rate_fail: float = 0.50,
-) -> Tuple[List[ValidationIssue], Dict[str, Any]]:
-    """
-    Lightweight time_zero validation for CausalSpec.
-
-    Only applies when causal_spec.time_zero_type == "COLUMN".
-    We do NOT enforce strict datetime dtype, but we flag clearly unparseable values.
-    """
-    issues: List[ValidationIssue] = []
-
-    tz_type = causal_spec.time_zero_type
-    if tz_type != "COLUMN":
-        return issues, {"time_zero_type": tz_type}
-
-    tz = causal_spec.time_zero
-    if not tz.strip():
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="time_zero_type is 'COLUMN' but causal_spec.time_zero is missing/empty.",
-                evidence={"time_zero": tz},
-                fix_hint="Set causal_spec.time_zero to a non-empty dataset column name when time_zero_type='COLUMN'.",
-            )
-        )
-        return issues, {"time_zero_col": tz}
-
-    if tz not in df.columns:
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="time_zero column not found in dataframe.",
-                evidence={"time_zero_col": tz, "n_df_cols": int(df.shape[1])},
-                fix_hint="Ensure the time_zero column is retained after filtering and spelled exactly as in the dataset.",
-            )
-        )
-        return issues, {"time_zero_col": tz, "present": False}
-
-    s = df[tz]
-    n = int(s.shape[0])
-    miss_rate = float(s.isna().mean()) if n > 0 else 0.0
-
-    metrics: Dict[str, Any] = {
-        "time_zero_type": tz_type,
-        "time_zero_col": tz,
-        "dtype": str(s.dtype),
-        "n_rows": n,
-        "missing_rate": miss_rate,
-    }
-
-    # If already datetime-like => OK
-    if ptypes.is_datetime64_any_dtype(s.dtype):
-        return issues, metrics
-
-    # Numeric times are possible but ambiguous (timestamp vs offset)
-    if ptypes.is_numeric_dtype(s.dtype):
-        issues.append(
-            _issue(
-                severity="WARN",
-                message="time_zero column is numeric; ensure downstream logic interprets it correctly (timestamp vs offset).",
-                evidence=metrics,
-                fix_hint="If this is a timestamp, consider converting to datetime for clarity.",
-            )
-        )
-        return issues, metrics
-
-    # Try parsing strings/objects/categories to datetime
-    ss = s.dropna()
-    if ss.empty:
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="time_zero column has only missing values after filtering.",
-                evidence=metrics,
-                fix_hint="Fix upstream filtering/null purge or choose a valid time_zero column.",
-            )
-        )
-        return issues, metrics
-
-    # Deterministic sampling for speed
-    if int(ss.shape[0]) > int(sample_n) and int(sample_n) > 0:
-        ss = ss.sample(n=int(sample_n), random_state=0)
-
-    parsed = pd.to_datetime(ss, errors="coerce", utc=False)
-    fail_rate = float(parsed.isna().mean())
-
-    metrics["parse_fail_rate_sample"] = fail_rate
-    metrics["sample_n"] = int(ss.shape[0])
-
-    if fail_rate >= float(parse_fail_rate_fail):
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="time_zero values are largely unparseable as datetimes (sample-based).",
-                evidence=metrics,
-                fix_hint="Ensure causal_spec.time_zero contains ISO-like datetimes or a consistent parseable format.",
-            )
-        )
-    elif fail_rate >= float(parse_fail_rate_warn):
-        issues.append(
-            _issue(
-                severity="WARN",
-                message="Some time_zero values are unparseable as datetimes (sample-based).",
-                evidence=metrics,
-                fix_hint="Standardize causal_spec.time_zero format (e.g., ISO-8601) to avoid downstream windowing issues.",
-            )
-        )
-
-    return issues, metrics
-
 
 # =============================================================================
 # 3) Treatment validations (pre-transform; whitelist already applied upstream)

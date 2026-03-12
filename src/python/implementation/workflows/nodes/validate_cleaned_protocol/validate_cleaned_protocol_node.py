@@ -31,7 +31,6 @@ from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cl
     validate_min_rows,
     validate_outcome,
     validate_protocol_role_columns_invariants,
-    validate_time_zero_semantics_protocol,
 
     # ---- covariates + effect modifiers ----
     validate_covariate_and_effect_modifier_presence,
@@ -122,10 +121,6 @@ class ValidateCleanProtocolNode(Node):
             issues, m = validate_min_rows(df, min_rows_fail=20)
             all_issues.extend(issues)
             metrics["min_rows"] = m
-
-            issues, m = validate_time_zero_semantics_protocol(df, causal_specs)
-            all_issues.extend(issues)
-            metrics["time_zero"] = m
 
             # =========================================================================
             # 2) Treatment validations (ProtocolSpec-native)
