@@ -10,10 +10,7 @@ from python.domain.models.models import NonEmptyStr
 # ----------------------------
 # Core types
 # ----------------------------
-TimeZeroType = Literal["COLUMN", "CONCEPTUAL"]
 ExperimentType = Literal["RCT", "OBSERVATIONAL"]
-WindowUnit = Literal["minutes", "hours", "days", "weeks", "months", "years"]
-
 class BinaryTreatmentSpecModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     kind: Literal["binary"]
@@ -25,7 +22,6 @@ TreatmentSpecModel = Annotated[
     Union[BinaryTreatmentSpecModel],
     Field(discriminator="kind"),
 ]
-
 
 class BinaryOutcomeSpecModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -53,19 +49,8 @@ OutcomeSpecModel = Annotated[
 # TODO: change name later to causal specs
 class CausalSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    time_zero_type: TimeZeroType
-    time_zero: NonEmptyStr
-    time_zero_definition: NonEmptyStr
-
     treatment_spec: TreatmentSpecModel
-    treatment_window_start: NonEmptyStr
-    treatment_window_end: NonEmptyStr
-    treatment_window_unit: WindowUnit
-
     outcome_spec: OutcomeSpecModel
-    outcome_window: NonEmptyStr
-    outcome_window_unit: WindowUnit
-
     covariates: List[NonEmptyStr]
     effect_modifiers: List[NonEmptyStr]
     experiment_type: ExperimentType

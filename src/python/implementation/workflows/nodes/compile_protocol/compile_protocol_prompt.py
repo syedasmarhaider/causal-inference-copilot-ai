@@ -78,43 +78,6 @@ Validation errors:
 """.strip()
 
 
-def compile_exclusion_prompt() -> str:
-    return """
-You are compiling dataset exclusion rules into a strict JSON object that must match the ExclusionRulesModel schema exactly.
-
-Your job:
-- Read the protocol discussion.
-- Read the compiled causal s JSON.
-- Read the dataset summary.
-- Extract ONLY row-level exclusion rules.
-- Output JSON only.
-
-What counts as an exclusion rule:
-- Conditions that remove rows from the analysis cohort.
-- Example patterns: impossible values, ineligible groups, records outside requested cohort, rows with unwanted category values, rows outside requested numeric/date thresholds.
-- But exclusion rules should be grounded in the protocol discussion. Do not come up with your own exclusion rules.
-
-Important rules:
-- Use only real dataset columns.
-- Use exact values grounded in the dataset summary whenever possible.
-- Prefer an empty exclusion_rules list over speculative exclusions.
-- Use None only if the discussion explicitly indicates missing/NA/null-based exclusion logic.
-- Do not duplicate causal_spec fields here unless they are genuinely row-exclusion logic.
-- Output JSON only.
-- Do not wrap JSON in markdown.
-- If there are no exclusion discussions in the Protocol discussion, return an empty exclusion_rules list.
-
-Protocol discussion:
-{{PROTOCOL_TEXT}}
-
-Compiled causal_spec JSON:
-{{CAUSAL_SPEC_JSON}}
-
-Dataset summary JSON:
-{{DATASET_SUMMARY_JSON}}
-""".strip()
-
-
 def compile_exclusion_repair_prompt() -> str:
     return """
 You are repairing a previously generated ExclusionRulesModel JSON.

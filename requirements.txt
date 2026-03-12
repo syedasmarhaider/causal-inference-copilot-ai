@@ -16,3 +16,4 @@ langchain-google-genai
 langchain-openai
 matplotlib
 langfuse
+duckdb
