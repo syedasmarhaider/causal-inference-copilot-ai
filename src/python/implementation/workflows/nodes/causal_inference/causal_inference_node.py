@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
@@ -51,12 +51,8 @@ from python.implementation.workflows.tools.causal.causal_spec import (
 from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.tools.data_processing.data_processing_tool import (
-    ALLOWED_OPS,
-    SCALAR_OPS,
-    SET_OPS,
-    DataProcessingTool,
-    IncExcRuleModel,
-    InclusionPlanModel,
+    DuckDBInMemorySQLTool,
+    SQLStatements,
 )
 from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import CausalDataProfilingTool
 from python.implementation.workflows.tools.data_profiling.plots.model import CohortCate, GraphImage
@@ -127,8 +123,8 @@ class CausalInferenceNode(Node):
         assert model is not None, f"Model factory could not resolve model for fqcn: {selected_model_fqcn}"
 
         # Tools
-        dp_raw = tool_factory.get_tool(DataProcessingTool.NAME)
-        data_processing_tool = cast(DataProcessingTool, dp_raw)
+        dp_raw = tool_factory.get_tool(DuckDBInMemorySQLTool.NAME)
+        data_processing_tool = cast(DuckDBInMemorySQLTool, dp_raw)
 
         # Optional tool (kept for parity with your existing wiring)
         _prof_raw = tool_factory.get_tool(CausalDataProfilingTool.NAME)
@@ -301,8 +297,23 @@ class _CateIntentPayload(BaseModel):
 
 
 # ============================================================
-# Inclusion plan semantic validation (X-only + operator/value shape)
+# Inclusion plan semantic validation (DuckDB SQL plan)
 # ============================================================
+
+
+class _CohortSQLPlanItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    group_key: str
+    is_counterfactual: bool = False
+    sql_request: SQLStatements
+
+
+class InclusionPlanModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    rules: List[_CohortSQLPlanItem] = Field(default_factory=list)
+
 
 def _validate_inclusion_plan_semantic(
     *,
@@ -310,79 +321,38 @@ def _validate_inclusion_plan_semantic(
     effect_modifiers: Sequence[str],
 ) -> List[ValidationIssueModel]:
     issues: List[ValidationIssueModel] = []
-    allowed_x = {str(c) for c in effect_modifiers}
+    _ = effect_modifiers
 
-    for c_idx, cohort in enumerate(plan.rules):
-        gk = str(cohort.group_key)
+    if not plan.rules:
+        issues.append(
+            ValidationIssueModel(
+                severity="FAIL",
+                message="No cohort SQL rules were generated.",
+                evidence={},
+                fix_hint="Provide at least one cohort with sql_request.",
+            )
+        )
+        return issues
 
-        for r_idx, r in enumerate(cohort.inclusion_rules):
-            col = str(r.column)
-
-            if col not in allowed_x:
-                issues.append(
-                    ValidationIssueModel(
-                        severity="FAIL",
-                        message=f"[group {gk}] Inclusion rule column '{col}' is not an effect modifier (X).",
-                        evidence={
-                            "group_index": c_idx,
-                            "rule_index": r_idx,
-                            "column": col,
-                            "op": r.op,
-                            "values": r.values,
-                            "allowed_effect_modifiers": sorted(allowed_x),
-                        },
-                        fix_hint="Use only columns from protocol.effect_modifiers (X).",
-                    )
+    for i, cohort in enumerate(plan.rules):
+        if not str(cohort.group_key).strip():
+            issues.append(
+                ValidationIssueModel(
+                    severity="FAIL",
+                    message=f"Cohort at index {i} has empty group_key.",
+                    evidence={"index": i},
+                    fix_hint="Set a non-empty group_key.",
                 )
-
-            if r.op in ("==", ">=", "<=", ">", "<"):
-                if len(r.values) != 1:
-                    issues.append(
-                        ValidationIssueModel(
-                            severity="FAIL",
-                            message=f"[group {gk}] Rule on '{col}' with op '{r.op}' requires exactly 1 value; got {len(r.values)}.",
-                            evidence={
-                                "group_index": c_idx,
-                                "rule_index": r_idx,
-                                "column": col,
-                                "op": r.op,
-                                "values": r.values,
-                            },
-                            fix_hint="For scalar ops (==, >=, <=, >, <), set values=[single_value].",
-                        )
-                    )
-            elif r.op in ("in", "not_in"):
-                if len(r.values) < 1:
-                    issues.append(
-                        ValidationIssueModel(
-                            severity="FAIL",
-                            message=f"[group {gk}] Rule on '{col}' with op '{r.op}' requires a non-empty values list.",
-                            evidence={
-                                "group_index": c_idx,
-                                "rule_index": r_idx,
-                                "column": col,
-                                "op": r.op,
-                                "values": r.values,
-                            },
-                            fix_hint="For membership ops (in, not_in), set values=[v1, v2, ...].",
-                        )
-                    )
-            else:
-                issues.append(
-                    ValidationIssueModel(
-                        severity="FAIL",
-                        message=f"[group {gk}] Unsupported operator '{r.op}' in rule for '{col}'.",
-                        evidence={
-                            "group_index": c_idx,
-                            "rule_index": r_idx,
-                            "column": col,
-                            "op": r.op,
-                            "values": r.values,
-                        },
-                        fix_hint="Use one of: ==, in, not_in, >=, <=, >, <",
-                    )
+            )
+        if len(cohort.sql_request.statements) < 1:
+            issues.append(
+                ValidationIssueModel(
+                    severity="FAIL",
+                    message=f"Cohort '{cohort.group_key}' has empty SQL statements.",
+                    evidence={"index": i},
+                    fix_hint="Set at least one SQL statement in sql_request.",
                 )
-
+            )
     return issues
 
 
@@ -481,23 +451,18 @@ def _extract_effect_fields(effect_obj: Dict[CATEModelResult, Any]) -> Tuple[Opti
 def _make_llm_cate_payload_for_group(
     *,
     group_key: str,
-    inclusion_rules: Sequence[IncExcRuleModel],
+    sql_request: SQLStatements,
     is_counterfactual: bool,
     outcome_kind: str,
     effect_obj: Dict[CATEModelResult, Any],
 ) -> Dict[str, Any]:
     cate, lo, hi, inf = _extract_effect_fields(effect_obj)
 
-    rules_compact = [ # pyright: ignore[reportUnknownVariableType]
-        {"column": str(r.column), "op": r.op, "values": list(r.values)}
-        for r in inclusion_rules
-    ]
-
     out: Dict[str, Any] = {
         "group_key": group_key,
         "is_counterfactual": bool(is_counterfactual),
         "outcome_kind": outcome_kind,
-        "inclusion_rules": rules_compact,
+        "cohort_sql": sql_request.model_dump(mode="json"),
         "cate": None,
         "cate_interval": None,
         "cate_inference": None,
@@ -530,24 +495,20 @@ def _make_llm_cate_payload_for_group(
 
 
 # ============================================================
-# CATE processing (uses YOUR DataProcessingTool for filtering)
+# CATE processing (DuckDB SQL filtering)
 # ============================================================
 
 def _apply_rules_with_tool(
     *,
-    tool: DataProcessingTool,
+    tool: DuckDBInMemorySQLTool,
     df: pd.DataFrame,
-    rules: Sequence[IncExcRuleModel],
+    sql_request: SQLStatements,
 ) -> pd.DataFrame:
-    """
-    Use your existing DataProcessingTool (do not reimplement filtering logic).
-    Support common parameter names robustly.
-    """
-    try:
-        return tool.apply_inclusion_rules(df=df, rules=rules)  # type: ignore[arg-type]
-    except TypeError:
-        # some implementations prefer inclusion_rules=
-        return tool.apply_inclusion_rules(df=df, inclusion_rules=rules)  # type: ignore[call-arg]
+    req = sql_request.model_copy(update={"table_name": "cohort_df"})
+    result = tool.execute(dataframe=df, sql_request=req)
+    if not result.has_result_set:
+        raise ValueError("Cohort SQL did not return a result set.")
+    return result.dataframe.copy()
 
 def _process_cate_question(
     *,
@@ -567,7 +528,7 @@ def _process_cate_question(
     order_effect_modifiers: Sequence[str],
     order_covariates: Sequence[str],
     model: CausalModel,
-    data_processing_tool: DataProcessingTool,
+    data_processing_tool: DuckDBInMemorySQLTool,
     data_profiling_tool: CausalDataProfilingTool,
 ) -> CausalInferenceState:
     last_8 = messages_history[-8:] if messages_history else None
@@ -677,23 +638,31 @@ def _process_cate_question(
 
     for cohort in plan.rules: # pyright: ignore[reportOptionalMemberAccess]
         gk = str(cohort.group_key)
-        cohort_df = _apply_rules_with_tool(
-            tool=data_processing_tool,
-            df=df_x,
-            rules=cohort.inclusion_rules,
-        )
+        try:
+            cohort_df = _apply_rules_with_tool(
+                tool=data_processing_tool,
+                df=df_x,
+                sql_request=cohort.sql_request,
+            )
+        except Exception as e:
+            group_payloads.append(
+                {
+                    "group_key": gk,
+                    "is_counterfactual": bool(cohort.is_counterfactual),
+                    "cohort_sql": cohort.sql_request.model_dump(mode="json"),
+                    "error": f"Cohort SQL execution failed: {e!r}",
+                }
+            )
+            continue
 
         if cohort_df.empty:
             group_payloads.append(
                 {
                     "group_key": gk,
                     "is_counterfactual": bool(cohort.is_counterfactual),
-                    "inclusion_rules": [
-                        {"column": str(r.column), "op": r.op, "values": list(r.values)}
-                        for r in cohort.inclusion_rules
-                    ],
+                    "cohort_sql": cohort.sql_request.model_dump(mode="json"),
                     "empty": True,
-                    "message": "No rows matched this cohort’s inclusion rules.",
+                    "message": "No rows matched this cohort SQL query.",
                 }
             )
             continue
@@ -731,7 +700,7 @@ def _process_cate_question(
                 group_payloads.append(
                     _make_llm_cate_payload_for_group(
                         group_key=gk,
-                        inclusion_rules=cohort.inclusion_rules,
+                        sql_request=cohort.sql_request,
                         is_counterfactual=bool(cohort.is_counterfactual),
                         outcome_kind=outcome_kind,
                         effect_obj=res.effects,
@@ -753,10 +722,7 @@ def _process_cate_question(
                     {
                         "group_key": gk,
                         "is_counterfactual": bool(cohort.is_counterfactual),
-                        "inclusion_rules": [
-                            {"column": str(r.column), "op": r.op, "values": list(r.values)}
-                            for r in cohort.inclusion_rules
-                        ],
+                        "cohort_sql": cohort.sql_request.model_dump(mode="json"),
                         "error": f"CATE computation failed: {res.error.message}",
                     }
                 )
@@ -769,9 +735,8 @@ def _process_cate_question(
             payload=current_state.payload.model_copy(
                 update={
                     "message": (
-                        "After applying your cohort rules, I found **0 rows** for all cohorts.\n"
-                        "Please loosen the inclusion rules or choose effect-modifier values that exist in the data.\n"
-                        f"Allowed effect modifiers (X): {', '.join(causal_specs.effect_modifiers)}"
+                        "After running your cohort SQL queries, I found **0 rows** for all cohorts.\n"
+                        "Please broaden your cohort SQL conditions and try again."
                     )
                 }
             )
@@ -838,34 +803,16 @@ def _validate_inclusion_plan(
     if not plan.rules:
         return False, "plan.rules is empty"
 
-    allowed_cols = {str(c).strip() for c in effect_modifiers}
-    if not allowed_cols:
-        return False, "effect_modifiers is empty"
+    _ = effect_modifiers
 
     for cohort in plan.rules:
         gk = str(cohort.group_key).strip()
         if not gk:
             return False, "missing/empty group_key"
 
-        rules = cohort.inclusion_rules or []
-        if require_rules_per_cohort and len(rules) == 0:
-            return False, f"group '{gk}': inclusion_rules is empty"
-
-        for rule in rules:
-            col = str(rule.column).strip()
-            op = str(rule.op).strip()
-
-            if col not in allowed_cols:
-                return False, f"group '{gk}': column '{col}' not in effect modifiers (X={sorted(allowed_cols)})"
-
-            if op not in ALLOWED_OPS:
-                return False, f"group '{gk}': unsupported op '{op}'"
-
-            nvals = len(rule.values)
-            if op in SCALAR_OPS and nvals != 1:
-                return False, f"group '{gk}': op '{op}' requires exactly 1 value (got {nvals})"
-            if op in SET_OPS and nvals < 1:
-                return False, f"group '{gk}': op '{op}' requires at least 1 value"
+        statements = cohort.sql_request.statements or []
+        if require_rules_per_cohort and len(statements) == 0:
+            return False, f"group '{gk}': sql_request.statements is empty"
 
     return True, ""
 

@@ -78,8 +78,8 @@ class CleanProtocolPayloadModel(BaseModel):
 
     iteration_index: int = 0
     latest_diff: Optional[CleanDataDiffModel] = None
-    sql_history: List[SQLHistoryItemModel] = Field(default_factory=list)
-    iteration_history: List[CleanIterationRecordModel] = Field(default_factory=list)
+    sql_history: List[SQLHistoryItemModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
+    iteration_history: List[CleanIterationRecordModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
 
     @field_validator("cleaning_error", "user_message", mode="before")
     @classmethod

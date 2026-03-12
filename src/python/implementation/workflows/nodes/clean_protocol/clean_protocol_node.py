@@ -129,7 +129,7 @@ class CleanProtocolNode(Node):
 
             first_run = _is_first_run(state.payload)
             source_dataset_id = (
-                dataset_id if first_run else cast(Optional[UUID], state.payload.clean_dataset_id)
+                dataset_id if first_run else  state.payload.clean_dataset_id
             )
             if source_dataset_id is None:
                 return self._abort_state(

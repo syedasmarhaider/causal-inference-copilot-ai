@@ -37,13 +37,10 @@ class CausalInferenceState(State):
     def error(self) -> Optional[str]:
         return self.payload.error
 
-    # TODO: chnage
     @property
     def status(self) -> Status:
         if self.payload.should_abort:
-            return "PENDING"
-        if self.error is not None:
-            return "PENDING"
+            return "ABORTED"
         return "PENDING"
 
     @property
@@ -58,11 +55,10 @@ class CausalInferenceState(State):
             artifact_ids=[str(aid) for aid in self.current_artifact_ids] if self.current_artifact_ids else None,
         )
 
-    # TODO: change later
     @property
     def needs_action(self) -> ACTION:
-        if self.status in ("DONE", "ABORTED"):
-            return "NEEDS_INPUT"
+        if self.status == "ABORTED":
+            return "NONE"
         return "NEEDS_INPUT"
 
     def pre_required_states_names(self) -> Sequence[str]:
