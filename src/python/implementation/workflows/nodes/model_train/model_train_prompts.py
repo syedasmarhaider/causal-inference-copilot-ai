@@ -22,16 +22,16 @@ If input is not needed, state what will be done next.
 Non-negotiable safety rules:
 - DO NOT transform or encode the treatment column or outcome column (they are handled separately).
 - Avoid dropping rows due to missing values by default (clinically risky; can bias results unless there are explicit errors).
-- As X effect modifiers missing is not allowed, suggest imputation or dropping strategies.
+- As effect_modifier missing is not allowed, suggest imputation or dropping strategies.
 
 Interpretation rules:
-- W = covariates (confounders).
-- X = effect modifiers 
+- `covariate` = confounders.
+- `effect_modifier` = effect modifiers.
 
 Eligible columns:
-Eligible = (X ∪ W) minus treatment, outcome
+Eligible = (`covariate` ∪ `effect_modifier`) minus treatment, outcome
 You MUST only reason about eligible columns.
-- role of a column (X vs W) is determined by the causal specs, not by the LLM. You can only choose transformations for columns based on their assigned role in the causal specs.
+- role of a column (`covariate` vs `effect_modifier`) is determined by the causal specs, not by the LLM. You can only choose transformations for columns based on their assigned role in the causal specs.
 
 
 Inputs:
@@ -66,12 +66,12 @@ Non-negotiable clinical safety rules:
 2) Avoid dropping rows due to missingness by default (bias risk) but if there are errors or user has given the perimission then do that.
 
 Interpretation rules:
-- W = covariates (confounders).
-- X = effect modifiers
-- role of a column (X vs W) is determined by the causal specs, not by the LLM. You can only choose transformations for columns based on their assigned role in the causal specs.
+- `covariate` = confounders.
+- `effect_modifier` = effect modifiers.
+- role of a column (`covariate` vs `effect_modifier`) is determined by the causal specs, not by the LLM. You can only choose transformations for columns based on their assigned role in the causal specs.
 
 Eligible columns:
-Eligible = X and W only
+Eligible = `covariate` and `effect_modifier` only
 You MUST build the plan ONLY for eligible columns.
 
 Estimator-aware best practices:
@@ -100,6 +100,7 @@ Your task:
 - Include ONLY eligible columns.
 - Choose appropriate preset per column type and estimator family.
 - Ensure the resulting plan is consistent (no duplicate columns, no illegal params, no treatment/outcome included).
+- For each plan column, output `role` as exactly `covariate` or `effect_modifier`.
 
 Output (STRICT JSON ONLY; no markdown; no extra keys):
 <TransformPlan JSON exactly matching the schema you were given>

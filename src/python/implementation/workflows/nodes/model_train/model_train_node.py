@@ -40,6 +40,9 @@ from python.implementation.workflows.utils.validation import ValidationIssueMode
 
 log = logging.getLogger(__name__)
 
+_ROLE_COVARIATE = "covariate"
+_ROLE_EFFECT_MODIFIER = "effect_modifier"
+
 
 # ---------------------------------------------------------------------
 # LLM output schema
@@ -68,7 +71,7 @@ def _safe_model_dump(x: Any) -> Any:
 def _build_role_map_from_causal_specs(causal_specs: CausalSpec) -> dict[str, str]:
     """
     Deterministically assign roles from causal specs only.
-    LLM is NOT allowed to decide whether a column is W or X.
+    LLM is NOT allowed to decide whether a column is covariate or effect_modifier.
     """
     treatment_col = str(causal_specs.treatment_spec.column)
     outcome_col = str(causal_specs.outcome_spec.column)
@@ -79,12 +82,12 @@ def _build_role_map_from_causal_specs(causal_specs: CausalSpec) -> dict[str, str
     for col in (causal_specs.covariates or []):
         c = str(col)
         if c not in forbidden:
-            role_map[c] = "W"
+            role_map[c] = _ROLE_COVARIATE
 
     for col in (causal_specs.effect_modifiers or []):
         c = str(col)
         if c not in forbidden:
-            role_map[c] = "X"
+            role_map[c] = _ROLE_EFFECT_MODIFIER
 
     return role_map
 
@@ -123,17 +126,17 @@ def _validate_plan_against_constraints(
     *,
     plan: TransformPlan,
     eligible_cols: set[str],
-    expected_w_cols: set[str],
-    expected_x_cols: set[str],
+    expected_covariate_cols: set[str],
+    expected_effect_modifier_cols: set[str],
     treatment_col: Optional[str],
     outcome_col: Optional[str],
 ) -> list[ValidationIssueModel]:
 
     logging.warning(
-        "Validating encoding plan against constraints. Eligible cols: %s, expected W: %s, expected X: %s, treatment_col: %s, outcome_col: %s. Plan columns: %s",
+        "Validating encoding plan against constraints. Eligible cols: %s, expected covariates: %s, expected effect modifiers: %s, treatment_col: %s, outcome_col: %s. Plan columns: %s",
         eligible_cols,
-        expected_w_cols,
-        expected_x_cols,
+        expected_covariate_cols,
+        expected_effect_modifier_cols,
         treatment_col,
         outcome_col,
         [c.column for c in plan.columns],
@@ -188,25 +191,31 @@ def _validate_plan_against_constraints(
 
     role_by_col = {c.column: c.role for c in plan.columns}
 
-    wrong_w = sorted(c for c in expected_w_cols if role_by_col.get(c) != "W")
-    wrong_x = sorted(c for c in expected_x_cols if role_by_col.get(c) != "X")
+    wrong_covariate = sorted(
+        c for c in expected_covariate_cols if role_by_col.get(c) != _ROLE_COVARIATE
+    )
+    wrong_effect_modifier = sorted(
+        c
+        for c in expected_effect_modifier_cols
+        if role_by_col.get(c) != _ROLE_EFFECT_MODIFIER
+    )
 
-    if wrong_w:
+    if wrong_covariate:
         validation_issues.append(
             ValidationIssueModel(
                 severity="FAIL",
-                message="Encoding plan assigned wrong role for W columns.",
-                evidence={"wrong_w_columns": wrong_w},
-                fix_hint="Ensure all W columns are correctly assigned in the encoding plan."
+                message="Encoding plan assigned wrong role for covariate columns.",
+                evidence={"wrong_covariate_columns": wrong_covariate},
+                fix_hint="Ensure all covariate columns are assigned role 'covariate'."
             )
         )
-    if wrong_x:
+    if wrong_effect_modifier:
         validation_issues.append(
             ValidationIssueModel(
                 severity="FAIL",
-                message="Encoding plan assigned wrong role for X columns.",
-                evidence={"wrong_x_columns": wrong_x},
-                fix_hint="Ensure all X columns are correctly assigned in the encoding plan."
+                message="Encoding plan assigned wrong role for effect_modifier columns.",
+                evidence={"wrong_effect_modifier_columns": wrong_effect_modifier},
+                fix_hint="Ensure all effect_modifier columns are assigned role 'effect_modifier'."
             )
         )
 
@@ -299,8 +308,8 @@ def _generate_encoding_plan(
         validation_issues = _validate_plan_against_constraints(
             plan=plan,
             eligible_cols=eligible,
-            expected_w_cols=covariate_cols - {treatment_col, outcome_col},
-            expected_x_cols=effect_modifier_cols - {treatment_col, outcome_col},
+            expected_covariate_cols=covariate_cols - {treatment_col, outcome_col},
+            expected_effect_modifier_cols=effect_modifier_cols - {treatment_col, outcome_col},
             treatment_col=treatment_col,
             outcome_col=outcome_col,
         )
@@ -415,7 +424,6 @@ class ModelTrainNode(Node):
                         "error": None,
                         "user_message": user_discussion.message,
                         "column_transformation_plan": None,
-                        "col_tranformation_not_needed": None,
                     }
                 )
                 return ModelTrainState(payload=payload)
@@ -427,7 +435,6 @@ class ModelTrainNode(Node):
                 payload=state.payload.model_copy(
                     update={
                         "column_transformation_plan": plan,
-                        "col_tranformation_not_needed": False,
                         "needs_user_input": False,
                         "error": None,
                         "user_message": user_discussion.message + "\n\nProceeding to training.",
@@ -536,7 +543,6 @@ class ModelTrainNode(Node):
                                 "order_effect_modifiers": None,
                                 "order_covariates": None,
                                 "column_transformation_plan": None,
-                                "col_tranformation_not_needed": None,
                                 "needs_user_input": False,
                                 "no_of_times_trained": state.payload.no_of_times_trained,
                                 "error": err_msg,
@@ -554,7 +560,6 @@ class ModelTrainNode(Node):
                         "needs_user_input": False,
                         "error": None,
                         "column_transformation_plan": None,
-                        "col_tranformation_not_needed": None,
                         "prev_training_errors": err_msg,
                         "user_message": message,
                         "no_of_times_trained": (state.payload.no_of_times_trained or 0) + 1,
