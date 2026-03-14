@@ -1,8 +1,8 @@
 def get_clean_protocol_node_info() -> str:
     return (
         "CleanProtocolNode: compiles causal specs from protocol discussion, "
-        "runs iterative SQL cleaning, refreshes specs against the cleaned dataset, "
-        "and either proceeds with graphs or routes back when the user wants protocol changes."
+        "runs iterative SQL cleaning, answers data questions, supports cleaning reverts, "
+        "refreshes specs against the active dataset, and routes back when the user wants protocol changes."
     )
 
 
@@ -10,22 +10,30 @@ CLEAN_PROTOCOL_INTENT_GATE_PROMPT = """
 You are the cleaning loop gate for a causal ML workflow.
 
 You must choose exactly one action:
+- ANSWER_QUESTION: the user is asking about the current active dataset, the applied cleaning, row/column counts, missingness, distributions, current treatment/outcome/covariates/effect modifiers, or other data facts and does not want to change the active dataset in this turn.
 - MODIFY: user requests more cleaning changes, asks to continue refining, or user intent is unclear.
+- REVERT: user wants to undo one or more prior cleaning changes and restore a previous cleaned dataset revision or the original dataset.
 - ACCEPT: when the latest user message clearly indicates they are satisfied and want to proceed with the current cleaned dataset.
 - CHANGE_PROTOCOL_DISCUSSION: user wants to change treatment, outcome, comparator, covariates, effect modifiers, cohort definition, study design, or any other protocol semantics instead of only cleaning the current dataset.
 - ABORT: user clearly refuses to continue cleaning or asks to cancel the workflow.
 
 Hard rules:
-- If uncertain, choose MODIFY.
+- If uncertain, choose ANSWER_QUESTION only when the user is clearly asking for information; otherwise choose MODIFY.
 - Use intent from the full latest user message, not keyword matching only.
 - Requests to rename columns, recode values, filter rows, handle missingness, or transform time-zero logic stay in MODIFY if protocol semantics stay the same.
 - Requests that change the meaning or role of treatment/outcome/covariates/effect modifiers must be CHANGE_PROTOCOL_DISCUSSION.
+- If the user both asks a question and explicitly requests a dataset-changing action in the same turn, choose the dataset-changing action.
+- If action is REVERT, set revert_target to exactly one of:
+  - PREVIOUS_STEP: restore the immediately previous dataset revision.
+  - ORIGINAL_DATASET: restore the original dataset from LOAD_DATASET.
+- If action is not REVERT, revert_target must be null.
 
 Return strict JSON matching schema:
 {
-  "action": "MODIFY" | "ACCEPT" | "CHANGE_PROTOCOL_DISCUSSION" | "ABORT",
+  "action": "ANSWER_QUESTION" | "MODIFY" | "REVERT" | "ACCEPT" | "CHANGE_PROTOCOL_DISCUSSION" | "ABORT",
   "reason": "<short rationale>",
-  "reply_to_user": "<short message for the user in this turn>"
+  "reply_to_user": "<short message for the user in this turn>",
+  "revert_target": "PREVIOUS_STEP" | "ORIGINAL_DATASET" | null
 }
 """.strip()
 
@@ -74,6 +82,27 @@ Output:
 """.strip()
 
 
+CLEAN_PROTOCOL_QUESTION_SQL_PROMPT = """
+You are generating analytic SQL to answer a user's question about the current active dataset in a causal ML cleaning workflow.
+
+Goal:
+- Produce SQL that answers the user's data question without modifying the dataset.
+
+Rules:
+- Query only the provided input table.
+- This is analytic-only SQL. Do not create, replace, insert, update, delete, or alter tables.
+- The final statement must return a result set.
+- Prefer concise answers: aggregate, summarize, or limit rows so the result is easy to explain.
+- Use only columns present in the current dataset summary.
+- Do not invent columns, category values, or unsupported assumptions.
+- If the exact question cannot be answered from the current dataset, return a one-row SELECT with a clear note column explaining the limitation.
+- Set analytic_only to true.
+
+Output:
+- Return strict JSON matching SQLStatements schema only.
+""".strip()
+
+
 CLEAN_PROTOCOL_REFRESH_SPEC_PROMPT = """
 You are refreshing a CausalSpec after SQL-based dataset cleaning.
 
@@ -93,6 +122,23 @@ Rules:
 """.strip()
 
 
+CLEAN_PROTOCOL_DATA_QUESTION_MESSAGE_PROMPT = """
+You are a clinician-facing assistant answering a user's question about the current active dataset during the cleaning workflow.
+
+Grounding rules:
+- Use only the provided question, dataset summary, causal spec, SQL result, and cleaning history context.
+- Do not invent facts or statistics.
+- If the SQL result contains a limitation note, explain that clearly.
+- Answer the question directly first.
+- Then briefly remind the user they can ask another data question, request more cleaning, revert cleaning, proceed, or change the protocol discussion.
+
+Return strict JSON:
+{
+  "message_for_user": "<message>"
+}
+""".strip()
+
+
 CLEAN_PROTOCOL_ITERATION_MESSAGE_PROMPT = """
 You are a clinician-facing assistant explaining one cleaning iteration.
 
@@ -100,8 +146,36 @@ Given iteration stats, SQL applied, before/after diff, and updated causal spec:
 - Explain what changed in plain clinical language.
 - Mention key row/column changes.
 - Mention when modeling column definitions (treatment/outcome/covariates/effect modifiers) changed.
-- Ask whether the user wants another cleaning revision or wants to proceed.
-- Tell the user that if the protocol itself must change, they should say that they want to change the protocol discussion.
+- Tell the user they can now ask a data question, request another cleaning revision, revert cleaning, proceed, or change the protocol discussion.
+
+Return strict JSON:
+{
+  "message_for_user": "<message>"
+}
+""".strip()
+
+
+CLEAN_PROTOCOL_REVERT_MESSAGE_PROMPT = """
+You are a clinician-facing assistant explaining a revert in the cleaning workflow.
+
+Explain:
+- What dataset revision was restored.
+- Whether this restored the original dataset or a previous cleaned revision.
+- The main row/column state after the revert.
+- Remind the user they can ask data questions, request another cleaning change, proceed, or change the protocol discussion.
+
+Return strict JSON:
+{
+  "message_for_user": "<message>"
+}
+""".strip()
+
+
+CLEAN_PROTOCOL_REVERT_UNAVAILABLE_PROMPT = """
+You are a clinician-facing assistant.
+
+The user asked to revert cleaning, but there is no earlier revision available to restore.
+Explain that no earlier cleaning revision is available right now and remind the user they can ask a data question, request a new cleaning change, proceed, or change the protocol discussion.
 
 Return strict JSON:
 {
@@ -118,8 +192,7 @@ Explain:
 - Why acceptance cannot proceed now.
 - What is missing/incompatible.
 - Mention that the causal spec was refreshed from the cleaned dataset and must match available columns.
-- Ask the user to provide the next cleaning change request.
-- Tell the user they should explicitly ask to change the protocol discussion if treatment/outcome/covariates/effect modifiers must change semantically.
+- Tell the user they can ask a data question, request the next cleaning change, revert cleaning, or explicitly ask to change the protocol discussion if treatment/outcome/covariates/effect modifiers must change semantically.
 
 Return strict JSON:
 {

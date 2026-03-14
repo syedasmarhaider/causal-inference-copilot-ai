@@ -8,7 +8,7 @@ from typing import Any, ClassVar, List, Literal, Optional, Sequence, cast
 from uuid import UUID, uuid4
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
@@ -20,11 +20,15 @@ from python.implementation.workflows.nodes.clean_protocol.clean_protocol_deps im
 )
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_prompts import (
     CLEAN_PROTOCOL_COMPATIBILITY_FAILURE_PROMPT,
+    CLEAN_PROTOCOL_DATA_QUESTION_MESSAGE_PROMPT,
     CLEAN_PROTOCOL_FINAL_ACCEPTANCE_PROMPT,
     CLEAN_PROTOCOL_INITIAL_COMPILE_SPEC_PROMPT,
     CLEAN_PROTOCOL_INTENT_GATE_PROMPT,
     CLEAN_PROTOCOL_ITERATION_MESSAGE_PROMPT,
+    CLEAN_PROTOCOL_QUESTION_SQL_PROMPT,
     CLEAN_PROTOCOL_REFRESH_SPEC_PROMPT,
+    CLEAN_PROTOCOL_REVERT_MESSAGE_PROMPT,
+    CLEAN_PROTOCOL_REVERT_UNAVAILABLE_PROMPT,
     CLEAN_PROTOCOL_SQL_PLAN_PROMPT,
     get_clean_protocol_node_info,
 )
@@ -56,9 +60,25 @@ log = logging.getLogger(__name__)
 class _IntentGateModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    action: Literal["MODIFY", "ACCEPT", "CHANGE_PROTOCOL_DISCUSSION", "ABORT"]
+    action: Literal[
+        "ANSWER_QUESTION",
+        "MODIFY",
+        "REVERT",
+        "ACCEPT",
+        "CHANGE_PROTOCOL_DISCUSSION",
+        "ABORT",
+    ]
     reason: str
     reply_to_user: str
+    revert_target: Optional[Literal["PREVIOUS_STEP", "ORIGINAL_DATASET"]] = None
+
+    @model_validator(mode="after")
+    def _validate_revert_target(self) -> "_IntentGateModel":
+        if self.action == "REVERT" and self.revert_target is None:
+            raise ValueError("revert_target is required when action is REVERT")
+        if self.action != "REVERT" and self.revert_target is not None:
+            raise ValueError("revert_target must be null when action is not REVERT")
+        return self
 
 
 class _UserMessageModel(BaseModel):
@@ -245,6 +265,34 @@ class CleanProtocolNode(Node):
                     payload=state.payload,
                     message=intent.reply_to_user,
                     reason=protocol_change_reason,
+                )
+
+            if intent.action == "ANSWER_QUESTION":
+                user_question = _last_user_text(history=messages_history)
+                return self._answer_data_question(
+                    state=state,
+                    source_df=source_df,
+                    protocol_discussion=protocol_discussion,
+                    causal_spec=active_causal_spec,
+                    data_profiling_tool=data_profiling_tool,
+                    data_processing_tool=data_processing_tool,
+                    history=recent_history,
+                    user_question=user_question or intent.reply_to_user,
+                )
+
+            if intent.action == "REVERT":
+                return self._revert_cleaning_iteration(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    state=state,
+                    load_dataset_id=dataset_id,
+                    protocol_discussion=protocol_discussion,
+                    data_profiling_tool=data_profiling_tool,
+                    history=recent_history,
+                    revert_target=cast(
+                        Literal["PREVIOUS_STEP", "ORIGINAL_DATASET"],
+                        intent.revert_target,
+                    ),
                 )
 
             if intent.action == "ABORT":
@@ -534,6 +582,11 @@ class CleanProtocolNode(Node):
         payload = {
             "iteration_index": state.payload.iteration_index,
             "latest_user_message": _last_user_text(history=history),
+            "current_dataset_summary": (
+                state.payload.summary.model_dump(mode="json")
+                if state.payload.summary is not None
+                else None
+            ),
             "latest_sql_request": (
                 latest_sql.model_dump(mode="json") if latest_sql is not None else None
             ),
@@ -545,6 +598,10 @@ class CleanProtocolNode(Node):
                 if state.payload.compiled_causal_spec is not None
                 else None
             ),
+            "available_revert_targets": {
+                "can_revert_previous_step": bool(state.payload.iteration_index >= 1),
+                "can_revert_original_dataset": True,
+            },
         }
 
         return self.llm.generate_json(
@@ -574,6 +631,199 @@ class CleanProtocolNode(Node):
             config=LLMConfig(model="pro", temperature=0.0),
             history=history,
             max_attempts=3,
+        )
+
+    def _answer_data_question(
+        self,
+        *,
+        state: CleanProtocolState,
+        source_df: pd.DataFrame,
+        protocol_discussion: str,
+        causal_spec: CausalSpec,
+        data_profiling_tool: DatasetProfilingTool,
+        data_processing_tool: DuckDBInMemorySQLTool,
+        history: Optional[Sequence[ChatMessage]],
+        user_question: str,
+    ) -> CleanProtocolState:
+        source_summary = self._extract_summary(
+            tool=data_profiling_tool,
+            df=source_df,
+        )
+        question_sql = self._generate_question_sql(
+            history=history,
+            user_question=user_question,
+            protocol_discussion=protocol_discussion,
+            causal_spec=causal_spec,
+            source_summary=source_summary,
+            state=state.payload,
+        )
+
+        question_error: Optional[str] = None
+        result_preview: dict[str, Any]
+        try:
+            question_result = data_processing_tool.execute(
+                dataframe=source_df,
+                sql_request=question_sql,
+            )
+            if not question_result.has_result_set:
+                question_error = "The analytic SQL did not return a result set."
+                result_preview = {
+                    "row_count": 0,
+                    "columns": [],
+                    "rows": [],
+                }
+            else:
+                result_preview = _result_preview(question_result.dataframe)
+        except Exception as e:
+            question_error = f"Failed to run analytic SQL for the question: {e!r}"
+            result_preview = {
+                "row_count": 0,
+                "columns": [],
+                "rows": [],
+            }
+
+        message = self._render_data_question_message(
+            history=history,
+            payload=state.payload,
+            user_question=user_question,
+            source_summary=source_summary,
+            causal_spec=causal_spec,
+            sql_request=question_sql,
+            result_preview=result_preview,
+            question_error=question_error,
+        )
+        return self._pending_state(
+            payload=state.payload,
+            message=message.message_for_user,
+        )
+
+    def _revert_cleaning_iteration(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        state: CleanProtocolState,
+        load_dataset_id: UUID,
+        protocol_discussion: str,
+        data_profiling_tool: DatasetProfilingTool,
+        history: Optional[Sequence[ChatMessage]],
+        revert_target: Literal["PREVIOUS_STEP", "ORIGINAL_DATASET"],
+    ) -> CleanProtocolState:
+        if (
+            revert_target == "ORIGINAL_DATASET"
+            or int(state.payload.iteration_index) <= 1
+            or len(state.payload.iteration_history) <= 1
+        ):
+            raw_df = self.data_repo.get_csv_data(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                dataset_id=load_dataset_id,
+                limit=None,
+            )
+            raw_summary = self._extract_summary(
+                tool=data_profiling_tool,
+                df=raw_df,
+            )
+            try:
+                raw_spec = self._compile_initial_causal_spec(
+                    history=history,
+                    protocol_discussion=protocol_discussion,
+                    dataset_summary=raw_summary,
+                )
+            except Exception as e:
+                return self._abort_state(
+                    payload=state.payload,
+                    message=(
+                        "I could not restore the original dataset because rebuilding "
+                        "the causal spec failed. Please return to protocol discussion."
+                    ),
+                    reason=(
+                        "Failed to recompile causal spec while reverting to original "
+                        f"dataset: {e!r}"
+                    ),
+                )
+
+            message = self._render_revert_message(
+                history=history,
+                payload=state.payload,
+                revert_target="ORIGINAL_DATASET",
+                restored_iteration_index=0,
+                restored_summary=raw_summary,
+                restored_causal_spec=raw_spec,
+                restored_latest_diff=None,
+            )
+            return CleanProtocolState(
+                payload=state.payload.model_copy(
+                    update={
+                        "clean_dataset_id": load_dataset_id,
+                        "cleaning_error": None,
+                        "user_message": message.message_for_user,
+                        "summary": raw_summary,
+                        "user_acceptance": None,
+                        "graph_picture_ids": None,
+                        "iteration_index": 0,
+                        "latest_diff": None,
+                        "compiled_causal_spec": raw_spec,
+                        "sql_history": [],
+                        "iteration_history": [],
+                        "causal_spec_history": [],
+                    }
+                )
+            )
+
+        if not state.payload.iteration_history or not state.payload.causal_spec_history:
+            message = self._render_revert_unavailable_message(
+                history=history,
+                payload=state.payload,
+            )
+            return self._pending_state(
+                payload=state.payload,
+                message=message.message_for_user,
+            )
+
+        restored_iteration_history = state.payload.iteration_history[:-1]
+        restored_sql_history = state.payload.sql_history[:-1]
+        restored_spec_history = state.payload.causal_spec_history[:-1]
+
+        if not restored_iteration_history or not restored_spec_history:
+            message = self._render_revert_unavailable_message(
+                history=history,
+                payload=state.payload,
+            )
+            return self._pending_state(
+                payload=state.payload,
+                message=message.message_for_user,
+            )
+
+        restored_iteration = restored_iteration_history[-1]
+        restored_spec = restored_spec_history[-1].causal_spec
+        message = self._render_revert_message(
+            history=history,
+            payload=state.payload,
+            revert_target="PREVIOUS_STEP",
+            restored_iteration_index=int(restored_iteration.iteration_index),
+            restored_summary=restored_iteration.summary,
+            restored_causal_spec=restored_spec,
+            restored_latest_diff=restored_iteration.diff,
+        )
+
+        return CleanProtocolState(
+            payload=state.payload.model_copy(
+                update={
+                    "clean_dataset_id": restored_iteration.output_dataset_id,
+                    "cleaning_error": None,
+                    "user_message": message.message_for_user,
+                    "summary": restored_iteration.summary,
+                    "user_acceptance": None,
+                    "graph_picture_ids": None,
+                    "iteration_index": int(restored_iteration.iteration_index),
+                    "latest_diff": restored_iteration.diff,
+                    "compiled_causal_spec": restored_spec,
+                    "sql_history": restored_sql_history,
+                    "iteration_history": restored_iteration_history,
+                    "causal_spec_history": restored_spec_history,
+                }
+            )
         )
 
     def _generate_sql_request(
@@ -624,6 +874,42 @@ class CleanProtocolNode(Node):
             max_attempts=3,
         )
 
+    def _generate_question_sql(
+        self,
+        *,
+        history: Optional[Sequence[ChatMessage]],
+        user_question: str,
+        protocol_discussion: str,
+        causal_spec: CausalSpec,
+        source_summary: Any,
+        state: CleanProtocolPayloadModel,
+    ) -> SQLStatements:
+        payload = {
+            "table_name": "cohort_df",
+            "user_question": user_question,
+            "protocol_discussion": protocol_discussion,
+            "current_causal_spec": causal_spec.model_dump(mode="json"),
+            "current_dataset_summary": source_summary.model_dump(mode="json"),
+            "iteration_index": state.iteration_index,
+            "latest_diff": (
+                state.latest_diff.model_dump(mode="json")
+                if state.latest_diff is not None
+                else None
+            ),
+            "previous_sql_history": [
+                item.sql_request.model_dump(mode="json")
+                for item in state.sql_history[-5:]
+            ],
+        }
+        return self.llm.generate_json(
+            schema=SQLStatements,
+            system_prompt=CLEAN_PROTOCOL_QUESTION_SQL_PROMPT,
+            user_prompt=json.dumps(payload, ensure_ascii=False),
+            config=LLMConfig(model="pro", temperature=0.0),
+            history=history,
+            max_attempts=3,
+        )
+
     def _refresh_causal_spec(
         self,
         *,
@@ -646,6 +932,41 @@ class CleanProtocolNode(Node):
             system_prompt=CLEAN_PROTOCOL_REFRESH_SPEC_PROMPT,
             user_prompt=json.dumps(payload, ensure_ascii=False),
             config=LLMConfig(model="basic", temperature=0.0),
+            history=history,
+            max_attempts=2,
+        )
+
+    def _render_data_question_message(
+        self,
+        *,
+        history: Optional[Sequence[ChatMessage]],
+        payload: CleanProtocolPayloadModel,
+        user_question: str,
+        source_summary: Any,
+        causal_spec: CausalSpec,
+        sql_request: SQLStatements,
+        result_preview: dict[str, Any],
+        question_error: Optional[str],
+    ) -> _UserMessageModel:
+        prompt_payload = {
+            "iteration_index": payload.iteration_index,
+            "user_question": user_question,
+            "question_error": question_error,
+            "current_dataset_summary": source_summary.model_dump(mode="json"),
+            "current_causal_spec": causal_spec.model_dump(mode="json"),
+            "analytic_sql_request": sql_request.model_dump(mode="json"),
+            "analytic_result_preview": result_preview,
+            "latest_diff": (
+                payload.latest_diff.model_dump(mode="json")
+                if payload.latest_diff is not None
+                else None
+            ),
+        }
+        return self.llm.generate_json(
+            schema=_UserMessageModel,
+            system_prompt=CLEAN_PROTOCOL_DATA_QUESTION_MESSAGE_PROMPT,
+            user_prompt=json.dumps(prompt_payload, ensure_ascii=False),
+            config=LLMConfig(model="basic", temperature=0.3),
             history=history,
             max_attempts=2,
         )
@@ -678,6 +999,58 @@ class CleanProtocolNode(Node):
             system_prompt=CLEAN_PROTOCOL_ITERATION_MESSAGE_PROMPT,
             user_prompt=json.dumps(payload, ensure_ascii=False),
             config=LLMConfig(model="basic", temperature=0.6),
+            history=history,
+            max_attempts=2,
+        )
+
+    def _render_revert_message(
+        self,
+        *,
+        history: Optional[Sequence[ChatMessage]],
+        payload: CleanProtocolPayloadModel,
+        revert_target: Literal["PREVIOUS_STEP", "ORIGINAL_DATASET"],
+        restored_iteration_index: int,
+        restored_summary: Any,
+        restored_causal_spec: CausalSpec,
+        restored_latest_diff: Optional[CleanDataDiffModel],
+    ) -> _UserMessageModel:
+        prompt_payload = {
+            "current_iteration_index": payload.iteration_index,
+            "revert_target": revert_target,
+            "restored_iteration_index": restored_iteration_index,
+            "restored_summary": restored_summary.model_dump(mode="json"),
+            "restored_causal_spec": restored_causal_spec.model_dump(mode="json"),
+            "restored_latest_diff": (
+                restored_latest_diff.model_dump(mode="json")
+                if restored_latest_diff is not None
+                else None
+            ),
+        }
+        return self.llm.generate_json(
+            schema=_UserMessageModel,
+            system_prompt=CLEAN_PROTOCOL_REVERT_MESSAGE_PROMPT,
+            user_prompt=json.dumps(prompt_payload, ensure_ascii=False),
+            config=LLMConfig(model="basic", temperature=0.3),
+            history=history,
+            max_attempts=2,
+        )
+
+    def _render_revert_unavailable_message(
+        self,
+        *,
+        history: Optional[Sequence[ChatMessage]],
+        payload: CleanProtocolPayloadModel,
+    ) -> _UserMessageModel:
+        prompt_payload = {
+            "current_iteration_index": payload.iteration_index,
+            "has_clean_dataset_id": payload.clean_dataset_id is not None,
+            "has_history": bool(payload.iteration_history),
+        }
+        return self.llm.generate_json(
+            schema=_UserMessageModel,
+            system_prompt=CLEAN_PROTOCOL_REVERT_UNAVAILABLE_PROMPT,
+            user_prompt=json.dumps(prompt_payload, ensure_ascii=False),
+            config=LLMConfig(model="basic", temperature=0.3),
             history=history,
             max_attempts=2,
         )
@@ -866,13 +1239,25 @@ def _build_diff(*, before_df: pd.DataFrame, after_df: pd.DataFrame) -> CleanData
 
 
 def _is_first_run(payload: CleanProtocolPayloadModel) -> bool:
-    if payload.iteration_index <= 0:
-        return True
     if payload.clean_dataset_id is None:
         return True
     if payload.summary is None:
         return True
+    if payload.compiled_causal_spec is None:
+        return True
     return False
+
+
+def _result_preview(df: pd.DataFrame, *, max_rows: int = 25, max_cols: int = 12) -> dict[str, Any]:
+    preview_df = df.iloc[:max_rows, :max_cols].copy()
+    return {
+        "row_count": int(df.shape[0]),
+        "column_count": int(df.shape[1]),
+        "columns": [str(col) for col in preview_df.columns],
+        "rows": json.loads(preview_df.to_json(orient="records", date_format="iso")),
+        "truncated_rows": bool(df.shape[0] > max_rows),
+        "truncated_columns": bool(df.shape[1] > max_cols),
+    }
 
 
 def _last_user_text(history: Optional[Sequence[ChatMessage]]) -> str:
