@@ -56,7 +56,7 @@ def _safe_model_dump(x: Any) -> Any:
     return x
 
 def _build_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
-    causal_specs = deps.compile_protocol.payload.causal_specs
+    causal_specs = deps.clean_protocol.payload.compiled_causal_spec
     cl = deps.clean_protocol.payload
     vc = deps.validate_clean_protocol.payload
 

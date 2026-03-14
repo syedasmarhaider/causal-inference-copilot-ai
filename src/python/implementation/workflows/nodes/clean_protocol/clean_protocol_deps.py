@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from typing import Sequence
 
 from python.domain.workflows.state import State
-from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionState,
@@ -15,7 +14,6 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
 @dataclass(frozen=True)
 class CleanProtocolDeps:
     load_dataset: LoadDatasetState
-    compile_protocol: CompileProtocolState
     protocol_discussion: ProtocolDiscussionState
 
     @classmethod
@@ -23,7 +21,6 @@ class CleanProtocolDeps:
         return (
             LoadDatasetState.NAME,
             ProtocolDiscussionState.NAME,
-            CompileProtocolState.NAME,
         )
 
     @classmethod
@@ -38,16 +35,6 @@ class CleanProtocolDeps:
                 f"(expected LoadDatasetState, got {type(ld).__name__})"
             )
         
-        # ---- CompileProtocolState ----
-        cp = loaded.get(CompileProtocolState.NAME)
-        if cp is None:
-            raise ValueError(f"CleanProtocolDeps: missing {CompileProtocolState.NAME}")
-        if not isinstance(cp, CompileProtocolState):
-            raise ValueError(
-                f"CleanProtocolDeps: invalid {CompileProtocolState.NAME} "
-                f"(expected CompileProtocolState, got {type(cp).__name__})"
-            )
-
         # ---- ProtocolDiscussionState ----
         pd = loaded.get(ProtocolDiscussionState.NAME)
         if pd is None:
@@ -58,4 +45,4 @@ class CleanProtocolDeps:
                 f"(expected ProtocolDiscussionState, got {type(pd).__name__})"
             )
 
-        return cls(load_dataset=ld, compile_protocol=cp, protocol_discussion=pd)
+        return cls(load_dataset=ld, protocol_discussion=pd)

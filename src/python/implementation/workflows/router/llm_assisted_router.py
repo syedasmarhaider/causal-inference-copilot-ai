@@ -15,8 +15,6 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_nod
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import CausalInferenceState
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_node import CleanProtocolNode
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
-from python.implementation.workflows.nodes.compile_protocol.compile_protocol_node import CompileProtocolNode
-from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
 from python.implementation.workflows.nodes.load_dataset.load_dataset_node import LoadDatasetNode
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import ModelSelectionState
@@ -199,7 +197,6 @@ def build_state_classes_by_name() -> Mapping[str, Type[State]]:
     return {
         LoadDatasetState.NAME: LoadDatasetState,
         ProtocolDiscussionState.NAME: ProtocolDiscussionState,
-        CompileProtocolState.NAME: CompileProtocolState,
         CleanProtocolState.NAME: CleanProtocolState,
         ValidateCleanProtocolState.NAME: ValidateCleanProtocolState,
         ModelSelectionState.NAME: ModelSelectionState,
@@ -212,8 +209,7 @@ def build_state_classes_by_name() -> Mapping[str, Type[State]]:
 def init_next_state_names() -> Mapping[str, Optional[str]]:
     return {
         LoadDatasetState.NAME: ProtocolDiscussionState.NAME,
-        ProtocolDiscussionState.NAME: CompileProtocolState.NAME,
-        CompileProtocolState.NAME: CleanProtocolState.NAME,
+        ProtocolDiscussionState.NAME: CleanProtocolState.NAME,
         CleanProtocolState.NAME: ValidateCleanProtocolState.NAME,
         ValidateCleanProtocolState.NAME: ModelSelectionState.NAME,
         ModelSelectionState.NAME: ModelTrainState.NAME,
@@ -226,7 +222,6 @@ def get_node_name_with_description() -> Mapping[str, str]:
     return{
         LoadDatasetNode.NAME: LoadDatasetNode.get_info(),
         ProtocolDiscussionNode.NAME: ProtocolDiscussionNode.get_info(),
-        CompileProtocolNode.NAME: CompileProtocolNode.get_info(),
         CleanProtocolNode.NAME: CleanProtocolNode.get_info(),
         ValidateCleanProtocolNode.NAME: ValidateCleanProtocolNode.get_info(),
         ModelSelectionState.NAME: ModelSelectionNode.get_info(),
@@ -239,9 +234,6 @@ def get_node_name_with_description() -> Mapping[str, str]:
 def init_all_nodoes_with_name_as_key(llm: LLMService, data_repo: DataRepo, models_repo: ModelsRepo) -> dict[str, Node]:
     load_dataset_node = LoadDatasetNode(data_repo=data_repo, llm=llm)
     protocol_discussion_node = ProtocolDiscussionNode(
-        llm=llm,
-     )
-    compiled_protocol_node = CompileProtocolNode(
         llm=llm,
      )
     clean_protocol_node = CleanProtocolNode(
@@ -274,7 +266,6 @@ def init_all_nodoes_with_name_as_key(llm: LLMService, data_repo: DataRepo, model
     return {
         load_dataset_node.name: load_dataset_node,
         protocol_discussion_node.name: protocol_discussion_node,
-        compiled_protocol_node.name: compiled_protocol_node,
         clean_protocol_node.name: clean_protocol_node,
         validate_cleaned_protocol_node.name: validate_cleaned_protocol_node,
         model_selection_node.name: model_selection_node,
