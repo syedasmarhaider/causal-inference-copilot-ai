@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping, Optional, Sequence, Type
 from uuid import UUID
+from firebase_admin import db
 
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import ChatMessage
@@ -19,9 +20,6 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     ) -> None:
         if not root_path.strip():
             raise ValueError("root_path must be a non-empty string")
-
-        from firebase_admin import db
-
         self._root_ref = db.reference(root_path, app=app)
         self._state_classes_by_name = dict(state_classes_by_name)
 
