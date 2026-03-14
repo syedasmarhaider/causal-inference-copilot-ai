@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import Literal, Mapping, Optional, Type
 
@@ -122,15 +123,18 @@ def _make_firebase_workflow_state_repo(
     settings: FirebaseRealtimeRepoSettings,
     state_classes_by_name: Mapping[str, Type[State]],
 ) -> WorkflowStateRepo:
-    if not settings.database_url:
-        raise ValueError("firebase_repo.database_url must be configured")
+    database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
+    if not database_url:
+        raise ValueError(
+            "FIREBASE_DATABASE_URL must be configured when workflow_repo_backend='firebase_rtdb'"
+        )
 
     try:
         app = firebase_admin.get_app()
     except ValueError:
         app = firebase_admin.initialize_app(
             credentials.ApplicationDefault(),
-            {"databaseURL": settings.database_url},
+            {"databaseURL": database_url},
         )
 
     from python.implementation.repo.firebase_realtime_workflow_state_repo import (
