@@ -145,8 +145,39 @@ class JsonFileWorkflowStateRepo(WorkflowStateRepo):
         self._base_dir.mkdir(parents=True, exist_ok=True)
 
     # -----------------------
+    # Conversation persistence
+    # -----------------------
+
+    def save_conversation_id(self, *, user_id: UUID, conversation_id: UUID) -> None:
+        with self._lock(user_id=user_id, conversation_id=conversation_id):
+            path = self._conv_file(user_id=user_id, conversation_id=conversation_id)
+            if path.exists():
+                return
+            self._write_unlocked(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                data=self._empty_doc(),
+            )
+
+    # -----------------------
     # Active stage pointer
     # -----------------------
+
+    def get_conversation_ids_for_user(self, *, user_id: UUID) -> Sequence[UUID]:
+        user_dir = self._user_dir(user_id=user_id, create=False)
+        if not user_dir.exists():
+            return []
+
+        conversation_ids: list[UUID] = []
+        pattern = f"*{self._cfg.file_name_suffix}"
+        for path in sorted(user_dir.glob(pattern)):
+            if not path.is_file():
+                continue
+            try:
+                conversation_ids.append(UUID(path.stem))
+            except ValueError:
+                continue
+        return conversation_ids
 
     def load_active_state_name(self, *, user_id: UUID, conversation_id: UUID) -> Optional[str]:
         with self._lock(user_id=user_id, conversation_id=conversation_id):
@@ -217,9 +248,6 @@ class JsonFileWorkflowStateRepo(WorkflowStateRepo):
                 "class": state.__class__.__name__,
                 "payload": state.to_json_dict(),
             }
-
-            # convenience: keep pointer aligned to last stored state
-            data["active_state_name"] = state.name
             data["updated_at"] = time.time()
 
             self._write_unlocked(user_id=user_id, conversation_id=conversation_id, data=data)
@@ -310,9 +338,14 @@ class JsonFileWorkflowStateRepo(WorkflowStateRepo):
     # Internals
     # -----------------------
 
-    def _conv_file(self, *, user_id: UUID, conversation_id: UUID) -> Path:
+    def _user_dir(self, *, user_id: UUID, create: bool = True) -> Path:
         user_dir = self._base_dir / str(user_id)
-        user_dir.mkdir(parents=True, exist_ok=True)
+        if create:
+            user_dir.mkdir(parents=True, exist_ok=True)
+        return user_dir
+
+    def _conv_file(self, *, user_id: UUID, conversation_id: UUID) -> Path:
+        user_dir = self._user_dir(user_id=user_id)
         return user_dir / f"{conversation_id}{self._cfg.file_name_suffix}"
 
     def _lock_file(self, *, user_id: UUID, conversation_id: UUID) -> Path:

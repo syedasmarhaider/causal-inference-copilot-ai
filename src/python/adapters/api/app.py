@@ -73,6 +73,7 @@ def create_conversation(req: CreateConversationRequest):
     user_id = req.user_id or uuid4()
     conversation_id = uuid4()
     logging.warning(f"Creating conversation: user_id={user_id}, conversation_id={conversation_id}")
+    _workflow.create_conversation(user_id=user_id, conversation_id=conversation_id)
     _workflow.create_init_files(user_id=user_id, conversation_id=conversation_id)
     return CreateConversationResponse(user_id=user_id, conversation_id=conversation_id)
 

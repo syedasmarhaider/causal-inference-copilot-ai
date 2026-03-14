@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal, Mapping, Optional, Type
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
@@ -9,6 +10,7 @@ from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.route import Router
+from python.domain.workflows.state import State
 
 from python.implementation.repo.file_data_repo import FileDataRepo
 from python.implementation.repo.models_repo import FileSystemModelsRepo
@@ -29,19 +31,27 @@ from python.implementation.workflows.tools.tools_factory import DefaultToolFacto
 from python.implementation.workflows.workflow_app import WorkflowApp
 
 @dataclass(frozen=True)
+class FirebaseRealtimeRepoSettings:
+    database_url: Optional[str] = None
+    credentials_path: Optional[Path] = None
+
+
+@dataclass(frozen=True)
 class WorkflowSettings:
     """
     Composition-root settings for initializing the workflow runtime.
     """
     workflow_state_dir: Path = Path("./data/workflow_state")
     models_root_dir: Path = Path("./models")
+    workflow_repo_backend: Literal["json", "firebase_rtdb"] = "json"
 
-    llm: LLMServiceSettings = LLMServiceSettings()
-    
+    llm: LLMServiceSettings = field(default_factory=LLMServiceSettings)
+
     history_limit: int = 30
-    
+
     # JSON repo robustness knobs (optional)
-    json_repo: JsonFileRepoConfig = JsonFileRepoConfig()
+    json_repo: JsonFileRepoConfig = field(default_factory=JsonFileRepoConfig)
+    firebase_repo: FirebaseRealtimeRepoSettings = field(default_factory=FirebaseRealtimeRepoSettings)
 
 
 def make_workflow_app(settings: WorkflowSettings) -> WorkflowApp:
@@ -54,10 +64,9 @@ def make_workflow_app(settings: WorkflowSettings) -> WorkflowApp:
 
     state_classes_by_name = build_state_classes_by_name()
 
-    workflow_repo: WorkflowStateRepo = JsonFileWorkflowStateRepo(
-        base_dir=settings.workflow_state_dir,
+    workflow_repo = _make_workflow_state_repo(
+        settings=settings,
         state_classes_by_name=state_classes_by_name,
-        config=settings.json_repo,
     )
 
     # 3) Router (LLM-assisted)
@@ -82,4 +91,65 @@ def make_workflow_app(settings: WorkflowSettings) -> WorkflowApp:
         state_classes_by_name=state_classes_by_name,
         tool_factory=DefaultToolFactory(data_repo=data_repo, models_repo=models_repo),
         history_limit=settings.history_limit,
+    )
+
+
+def _make_workflow_state_repo(
+    *,
+    settings: WorkflowSettings,
+    state_classes_by_name: Mapping[str, Type[State]],
+) -> WorkflowStateRepo:
+    if settings.workflow_repo_backend == "json":
+        return JsonFileWorkflowStateRepo(
+            base_dir=settings.workflow_state_dir,
+            state_classes_by_name=state_classes_by_name,
+            config=settings.json_repo,
+        )
+
+    if settings.workflow_repo_backend == "firebase_rtdb":
+        return _make_firebase_workflow_state_repo(
+            settings=settings.firebase_repo,
+            state_classes_by_name=state_classes_by_name,
+        )
+
+    raise ValueError(f"Unsupported workflow repo backend: {settings.workflow_repo_backend}")
+
+
+def _make_firebase_workflow_state_repo(
+    *,
+    settings: FirebaseRealtimeRepoSettings,
+    state_classes_by_name: Mapping[str, Type[State]],
+) -> WorkflowStateRepo:
+    if not settings.database_url:
+        raise ValueError(
+            "firebase_repo.database_url must be configured when workflow_repo_backend='firebase_rtdb'"
+        )
+
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, db
+    except ImportError as exc:
+        raise RuntimeError(
+            "firebase-admin is required when workflow_repo_backend='firebase_rtdb'"
+        ) from exc
+
+    try:
+        app = firebase_admin.get_app()
+    except ValueError:
+        if settings.credentials_path is not None:
+            credential = credentials.Certificate(str(settings.credentials_path))
+        else:
+            credential = credentials.ApplicationDefault()
+        app = firebase_admin.initialize_app(
+            credential=credential,
+            options={"databaseURL": settings.database_url},
+        )
+
+    from python.implementation.repo.firebase_realtime_workflow_state_repo import (
+        FirebaseRealtimeWorkflowStateRepo,
+    )
+
+    return FirebaseRealtimeWorkflowStateRepo(
+        root_ref=db.reference("/workflows", app=app),
+        state_classes_by_name=state_classes_by_name,
     )

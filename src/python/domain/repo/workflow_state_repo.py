@@ -10,13 +10,21 @@ from python.domain.workflows.state import State
 
 class WorkflowStateRepo(ABC):
     # -----------------------
+    # Conversation persistence
+    # -----------------------
+
+    @abstractmethod
+    def save_conversation_id(self, *, user_id: UUID, conversation_id: UUID) -> None:
+        raise NotImplementedError
+
+    # -----------------------
     # Active stage pointer
     # -----------------------
-    
+
     @abstractmethod
     def get_conversation_ids_for_user(self, *, user_id: UUID) -> Sequence[UUID]:
         raise NotImplementedError
-    
+
     @abstractmethod
     def load_active_state_name(self, *, user_id: UUID, conversation_id: UUID) -> Optional[str]:
         raise NotImplementedError

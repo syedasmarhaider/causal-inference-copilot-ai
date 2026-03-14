@@ -62,7 +62,10 @@ class WorkflowApp:
             conversation_id=conversation_id,
             artifact_id=artifact_id,
         ) 
-    
+
+    def create_conversation(self, user_id: UUID, conversation_id: UUID) -> None:
+        self._repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
+
     # TODO: this will be removed just now for init data
     def create_init_files(self, user_id: UUID, conversation_id: UUID) -> None: 
         df= self._data_repo.get_csv_data(
