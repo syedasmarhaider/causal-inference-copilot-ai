@@ -17,11 +17,11 @@ from python.implementation.workflows.tools.causal.encoding_plan import EncodingP
 
 class EncodingUtil:
     NAME: ClassVar[str] = "ENCODING"
-    def compile(self,plan: TransformPlan, *, X_order: Sequence[str], W_order: Sequence[str], dense_output: bool = True) -> CompiledTransformers:
+    def compile(self,plan: TransformPlan, *, effect_modifiers_order: Sequence[str], covariates_order: Sequence[str], dense_output: bool = True) -> CompiledTransformers:
         return compile_plan_to_transformers(
             plan=plan,
-            X_order=X_order,
-            W_order=W_order,
+            effect_modifiers=effect_modifiers_order,
+            covariates=covariates_order,
             dense_output=dense_output,
             require_full_coverage=True,
         )  
@@ -34,8 +34,11 @@ class EncodingUtil:
 @dataclass(frozen=True)
 class CompiledTransformers:
     """
-    pre_X  : transformer that expects X matrix (n, dx) ordered as X_order
-    pre_XW : transformer that expects concatenated [X|W] matrix (n, dx+dw) ordered as (X_order + W_order)
+    pre_X  : transformer that expects effect-modifier matrix (n, dx)
+             ordered as effect_modifiers_order
+    pre_XW : transformer that expects concatenated
+             [effect_modifiers|covariates] matrix (n, dx+dw)
+             ordered as (effect_modifiers_order + covariates_order)
     """
     pre_X: ColumnTransformer
     pre_XW: ColumnTransformer
@@ -345,39 +348,39 @@ class DateTimeToEpochSecondsTransformer(BaseEstimator, TransformerMixin):
 
 
 # =============================================================================
-# SRP: compile plan -> (pre_X, pre_XW). X/W must be provided and non-empty.
+# SRP: compile plan -> (pre_X, pre_XW). effect_modifiers/covariates must be provided and non-empty.
 # =============================================================================
 def compile_plan_to_transformers(
     plan: TransformPlan,
     *,
-    X_order: Sequence[str],
-    W_order: Sequence[str],
+    effect_modifiers: Sequence[str],
+    covariates: Sequence[str],
     dense_output: bool = True,
     require_full_coverage: bool = True,
 ) -> CompiledTransformers:
     """
-    Requires X_order and W_order (non-empty). No inference. No None.
+    Requires effect_modifiers and covariates (non-empty). No inference. No None.
 
-    - pre_X  expects X array columns ordered exactly as X_order
-    - pre_XW expects concatenated [X|W] array columns ordered exactly as (X_order + W_order)
+    - pre_X  expects effect_modifier array columns ordered exactly as effect_modifiers
+    - pre_XW expects concatenated [effect_modifiers|covariates] array columns ordered exactly as (effect_modifiers + covariates)
 
     If require_full_coverage=True:
-      - every col in X_order/W_order must have a plan entry
-      - and every plan entry must belong to X_order/W_order (no surprises)
+      - every col in effect_modifiers/covariates must have a plan entry
+      - and every plan entry must belong to effect_modifiers/covariates (no surprises)
 
     NOTE (DML best practice):
       - Do NOT fit these transformers globally before cross-fitting. Put them inside the nuisance model pipelines
         so each fold fits its own preprocessing to avoid leakage.
     """
-    _require_non_empty("X_order", X_order)
-    _require_non_empty("W_order", W_order)
+    if len(effect_modifiers) == 0 and len(covariates) == 0:
+        raise ValueError("effect_modifiers or covariates must be provided (not None).")
 
-    X_order_l = list(X_order)
-    W_order_l = list(W_order)
-    xw_cols = X_order_l + W_order_l
+    effect_modifiers_l = list(effect_modifiers)
+    covariates_l = list(covariates)
+    xw_cols = effect_modifiers_l + covariates_l
 
     # Index maps (EconML passes numpy arrays, not DataFrames)
-    x_index = {c: i for i, c in enumerate(X_order_l)}
+    x_index = {c: i for i, c in enumerate(effect_modifiers_l)}
     xw_index = {c: i for i, c in enumerate(xw_cols)}
 
     # Plan sanity
@@ -395,7 +398,10 @@ def compile_plan_to_transformers(
 
         extra_plans = [c for c in plan_by_col.keys() if c not in set(xw_cols)]
         if extra_plans:
-            raise ValueError(f"Plan contains columns not present in X_order/W_order: {extra_plans}")
+            raise ValueError(
+                "Plan contains columns not present in effect_modifiers_order/covariates_order: "
+                f"{extra_plans}"
+            )
 
     def _compile(enc: EncodingPresetSpec) -> CTTransformer:
         preset = enc.preset
@@ -488,51 +494,54 @@ def compile_plan_to_transformers(
         raise ValueError(f"Unsupported preset: {preset!r}")
 
     # -------------------------------------------------------------------------
-    # Compile with deterministic ordering: iterate by X_order / (X_order + W_order)
+    # Compile with deterministic ordering: iterate by effect_modifiers / (effect_modifiers + covariates)
     # -------------------------------------------------------------------------
     x_trs: List[Tuple[str, CTTransformer, List[int]]] = []
     xw_trs: List[Tuple[str, CTTransformer, List[int]]] = []
 
-    # pre_X: only X columns, in X_order
-    for col in X_order_l:
+    # pre_X: only effect_modifier columns, in effect_modifiers order
+    for col in effect_modifiers_l:
         cp = plan_by_col.get(col)
         if cp is None:
             if require_full_coverage:
-                raise ValueError(f"Missing encoding plan for X column: {col!r}")
+                raise ValueError(f"Missing encoding plan for effect_modifier column: {col!r}")
             continue
-        if cp.role != "X":
-            raise ValueError(f"Column {col!r} is in X_order but plan role is {cp.role!r} (expected 'X').")
+        if cp.role != "effect_modifier":
+            raise ValueError(
+                f"Column {col!r} is in effect_modifiers order but plan role is "
+                f"{cp.role!r} (expected 'effect_modifier')."
+            )
         x_trs.append((col, _compile(cp.encoding), [x_index[col]]))
 
-    # pre_XW: X then W, in (X_order + W_order)
+    # pre_XW: effect_modifier then covariate, in (effect_modifiers + covariates)
     for col in xw_cols:
         cp = plan_by_col.get(col)
         if cp is None:
             if require_full_coverage:
                 raise ValueError(f"Missing encoding plan for column: {col!r}")
             continue
-        if cp.role not in ("X", "W"):
+        if cp.role not in ("effect_modifier", "covariate"):
             raise ValueError(f"Unknown role {cp.role!r} for column {cp.column!r}")
         xw_trs.append((col, _compile(cp.encoding), [xw_index[col]]))
 
-    # Enforce “X and W always”
-    if not any(cp.role == "X" for cp in plan.columns):
-        raise ValueError("Plan must contain at least one X column (role='X').")
-    if not any(cp.role == "W" for cp in plan.columns):
-        raise ValueError("Plan must contain at least one W column (role='W').")
-
+    # Enforce “effect_modifier or covariate always”
+    if not any(cp.role == "effect_modifier" for cp in plan.columns) and not any(cp.role == "covariate" for cp in plan.columns):
+        raise ValueError(
+            "At least one column must have role 'effect_modifier' or 'covariate' in the plan."
+        )
+    
     # Ensure we have at least one non-dropped transformer in each view
     def _has_non_drop(trs: List[Tuple[str, CTTransformer, List[int]]]) -> bool:
         return any(t[1] != "drop" for t in trs)
 
     if not x_trs:
-        raise ValueError("No X transformers compiled (empty X_order?).")
+        raise ValueError("No effect_modifier transformers compiled (empty effect_modifiers_order?).")
     if not xw_trs:
-        raise ValueError("No X/W transformers compiled (empty X_order+W_order?).")
+        raise ValueError("No effect_modifier/covariate transformers compiled (empty effect_modifiers+covariates?).")
     if not _has_non_drop(x_trs):
-        raise ValueError("All X columns are dropped. At least one X column must be kept.")
+        raise ValueError("All effect_modifier columns are dropped. At least one effect_modifier column must be kept.")
     if not _has_non_drop(xw_trs):
-        raise ValueError("All X/W columns are dropped. At least one column must be kept.")
+        raise ValueError("All effect_modifier/covariate columns are dropped. At least one column must be kept.")
 
     # If you requested dense output, force dense aggregation.
     # If not, allow sparse when beneficial (especially for one-hot).

@@ -1,34 +1,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, Optional, Sequence
+from typing import Any, ClassVar, List, Optional, Sequence
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
 from python.domain.workflows.state import ACTION, State, StateMessage, Status
 from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import CausalInferenceDeps
 
-
 class CausalInferencePayload(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     ate_result_raw_json_str: Optional[str] = None
-    ate_result_summary: Optional[str] = None
-
-    ate_inference_error: Optional[str] = None
-
+    error: Optional[str] = None
+    
     # workflow control
     should_abort: Optional[bool] = None
-    abort_error_message: Optional[str] = None
 
     # UI / node-local
-    user_message: Optional[str] = None
+    message: Optional[str] = None
+    artifacts: Optional[List[UUID]] = None
 
 
 @dataclass(frozen=True, slots=True)
 class CausalInferenceState(State):
     NAME: ClassVar[str] = "CAUSAL_INFERENCE"
     payload: CausalInferencePayload
+    current_artifact_ids: Optional[List[UUID]] = None
 
     @property
     def name(self) -> str:
@@ -36,33 +35,30 @@ class CausalInferenceState(State):
 
     @property
     def error(self) -> Optional[str]:
-        if self.payload.should_abort:
-            return self.payload.abort_error_message or self.payload.ate_inference_error
-        return self.payload.ate_inference_error
+        return self.payload.error
 
-    # TODO: chnage
     @property
     def status(self) -> Status:
         if self.payload.should_abort:
-            return "PENDING"
-        if self.error is not None:
-            return "PENDING"
+            return "ABORTED"
         return "PENDING"
 
     @property
     def message(self) -> StateMessage:
-        if self.payload.user_message is None:
+        if self.payload.message is None:
             raise ValueError(
                 "CausalInferenceState.message is required but missing. "
                 "Don't access .message outside the node/UI context where user_message is guaranteed."
             )
-        return StateMessage(txt_message=self.payload.user_message)
+        return StateMessage(
+            txt_message=self.payload.message,
+            artifact_ids=[str(aid) for aid in self.current_artifact_ids] if self.current_artifact_ids else None,
+        )
 
-    # change later
     @property
     def needs_action(self) -> ACTION:
-        if self.status in ("DONE", "ABORTED"):
-            return "NEEDS_INPUT"
+        if self.status == "ABORTED":
+            return "NONE"
         return "NEEDS_INPUT"
 
     def pre_required_states_names(self) -> Sequence[str]:

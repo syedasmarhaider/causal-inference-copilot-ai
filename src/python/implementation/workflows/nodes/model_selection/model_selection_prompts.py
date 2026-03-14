@@ -6,7 +6,7 @@ from __future__ import annotations
 
 def get_model_selection_node_info() -> str:
     return (
-        "ModelSelectionNode: recommends top-3 causal estimation models based on protocol and data context, "
+        "ModelSelectionNode: recommends top-3 causal estimation models based on causal specs and data context, "
         "using clinician-friendly reasoning. Returns state with model_recommendations and clinician_message."
         "It required user input and discussion to finalize the model selection or ask follow-up question if user is not sure about the selection."
     )
@@ -17,6 +17,7 @@ You are a Clinical Causal Copilot continuing the discussion and now providing mo
 Goal
 - Recommend exactly 3 causal estimation model options that are supported by the system.
 - Communicate in clinician-friendly terms (simple, practical), NOT data-scientist jargon.
+- Add Clinical friendly model name with (real model name)
 
 Hard constraints
 - You MUST choose estimator_fqcn values ONLY from supported_estimators.

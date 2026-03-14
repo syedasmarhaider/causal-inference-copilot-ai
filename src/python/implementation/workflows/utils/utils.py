@@ -3,9 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, TypeAlias, Union
 from uuid import UUID
 
-DEFAULT_MODEL_GEMNI: str = "gemini-2.5-flash"
-DEFAULT_MODEL_GEMNI_FOR_THINKING_COMPLEX_TASKS: str = "gemini-3.0-flash"
-
 JSONValue: TypeAlias = Any
 JSONDict: TypeAlias = Dict[str, JSONValue]
 

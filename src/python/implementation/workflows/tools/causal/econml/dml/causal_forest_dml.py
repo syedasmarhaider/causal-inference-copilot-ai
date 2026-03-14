@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import issparse  # type: ignore[import]
 
-from econml.dml import CausalForestDML
+from econml.dml import CausalForestDML # pyright: ignore[reportMissingTypeStubs]
 import inspect
 
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -53,8 +53,8 @@ from python.implementation.workflows.tools.causal.econml.models_info import get_
 from python.implementation.workflows.tools.causal.econml.utils import (
     ModelSpecError,
     build_init_fit_options_param_maps,
-    categorical_t0_t1_pairs,
     get_input_params_from_spec,
+    get_treatment_t0_t1_from_spec,
     has_missing,
     is_missing_handled,
     now_utc,
@@ -241,15 +241,15 @@ def _normalize_model_spec_to_wrapped_list(
 
 
 def _get_default_models_for_t_and_y(
-    specs: Any,  # CausalSpec
+    specs: CausalSpec,
     pre_XW: ColumnTransformer,
     *,
     missingness: bool,
     random_state: Optional[int] = None,
     n_jobs: Optional[int] = None,
 ) -> Dict[str, Any]:
-    disc_t = specs.T.kind in ("binary", "categorical")
-    disc_y = specs.Y.kind == "binary"
+    disc_t = specs.treatment_spec.kind in ("binary", "categorical")
+    disc_y = specs.outcome_spec.kind == "binary"
 
     default_model_y: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
     default_model_t: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
@@ -379,31 +379,31 @@ class CausalForestDMLCausalModel(CausalModel):
         started_at: datetime,
     ) -> CausalResult:
         try:
-            specs: CausalSpec = command.protocol_specs
-            order_X: Optional[List[str]] = command.order_X
-            order_W: Optional[List[str]] = command.order_W
+            specs: CausalSpec = command.causal_specs
             data_summary: DatasetSummaryModel = command.data_summary
             transformation_plan: Optional[TransformPlan] = command.transformation_plan
+            covariates_order = specs.covariates or []
+            effect_modifiers_order = specs.effect_modifiers
             plan = self.encoding_util.compile(
                 plan=transformation_plan,
-                X_order=order_X or [],
-                W_order=order_W or [],
+                effect_modifiers_order=effect_modifiers_order,
+                covariates_order=covariates_order,
                 dense_output=True,
             ) if transformation_plan is not None else None
             
             pre_x = plan.pre_X if plan is not None else None
             pre_xw = plan.pre_XW if plan is not None else None
 
-            if pre_x is None and len(specs.X or []) > 0:
+            if pre_x is None and len(specs.effect_modifiers or []) > 0:
                 raise ModelSpecError(
                     "Spec declares effect modifiers (spec.X) but no pre_X transformer provided in inputs."
                 )
-            if pre_xw is None and (len(specs.W or []) + len(specs.X or [])) > 0:
+            if pre_xw is None and (len(specs.covariates or []) + len(specs.effect_modifiers or [])) > 0:
                 raise ModelSpecError(
                     "Spec declares controls (spec.W) and/or effect modifiers (spec.X) but no pre_XW transformer provided in inputs."
                 )
 
-            Y, T, X, W, col_meta = get_input_params_from_spec(df, specs, order_X=order_X, order_W=order_W)
+            Y, T, X, W, col_meta = get_input_params_from_spec(df, specs, effect_modifiers_order=effect_modifiers_order, covariates_order=covariates_order)
 
             miss = {"Y": has_missing(Y), "T": has_missing(T), "X": has_missing(X), "W": has_missing(W)}
             if miss["Y"] or miss["T"]:
@@ -411,8 +411,8 @@ class CausalForestDMLCausalModel(CausalModel):
 
             # CHANGED (Forest): CausalForestDML does NOT allow missing X via allow_missing;
             # allow_missing only applies to W. If X contains NaNs, force upstream imputation/cleaning.
-            missingness_X = len(specs.X or []) > 0 and miss["X"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.X))
-            missingness_W = len(specs.W or []) > 0 and miss["W"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.W))
+            missingness_X = len(specs.effect_modifiers or []) > 0 and miss["X"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.effect_modifiers))
+            missingness_W = len(specs.covariates or []) > 0 and miss["W"] and (transformation_plan is  None or not is_missing_handled(plan=transformation_plan,summary=data_summary, col_name_list=specs.covariates))
             if missingness_X:
                 raise ModelSpecError(
                     "CausalForestDML does not support missing values in X via allow_missing "
@@ -427,8 +427,8 @@ class CausalForestDMLCausalModel(CausalModel):
 
             defaults: Dict[str, Any] = {}
 
-            disc_t = specs.T.kind in ("binary", "categorical")
-            disc_y = specs.Y.kind == "binary"
+            disc_t = specs.treatment_spec.kind in ("binary", "categorical")
+            disc_y = specs.outcome_spec.kind == "binary"
             if disc_t:
                 defaults["discrete_treatment"] = True
             if disc_y:
@@ -562,10 +562,10 @@ class CausalForestDMLCausalModel(CausalModel):
     ) -> CausalResult:
         try:
             warnings_list: List[str] = []
-            spec: CausalSpec = command.protocol_specs
-            order_X: Optional[List[str]] = command.order_X
-            order_W: Optional[List[str]] = command.order_W
-
+            spec: CausalSpec = command.causal_specs
+            order_effect_modifiers: Optional[List[str]] = command.order_effect_modifiers or []
+            order_covariates: Optional[List[str]] = command.order_covariates or []
+    
             model_record: ModelRecord | None = self.models_repo.load_model(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -577,49 +577,41 @@ class CausalForestDMLCausalModel(CausalModel):
             # CHANGED (Forest): estimator type
             est: CausalForestDML = model_record.model
 
-            if spec.T.kind == "binary":
-                if len(spec.T.control_values) != 1 or len(spec.T.treated_values) != 1:
-                    raise ModelSpecError("Binary ATE requires exactly one control_value and one treated_value (or pre-normalize T).")
-                t0 = spec.T.control_values[0]
-                t1s = [spec.T.treated_values[0]]
-            elif spec.T.kind == "categorical":
-                t0, t1s = categorical_t0_t1_pairs(spec)
-            else:
-                raise ModelSpecError(f"Unsupported treatment kind {spec.T.kind!r} for ATE.")
-
+            t0, t1 = get_treatment_t0_t1_from_spec(spec, is_global_counter_factual=False)  
             effects: List[Dict[ATEModelResult, Any]] = []
-            _, _, X, _, _ = get_input_params_from_spec(df, spec, order_X=order_X, order_W=order_W)
+            
+            _, _, X, _, _ = get_input_params_from_spec(df, spec, effect_modifiers_order=order_effect_modifiers, covariates_order=order_covariates)
 
-            for t1_val in t1s:
-                if t1_val == t0:
-                    raise ModelSpecError(f"Invalid contrast: t1 value {t1_val} is the same as t0 baseline {t0}.")
 
-                item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1_val}}
-                item["ate"] = est.ate(X=X, T0=t0, T1=t1_val)
-                logging_info = f"Computed ATE for contrast t0={t0} vs t1={t1_val}: {item['ate']}"
-                logging.info(logging_info)
+            if t1 == t0:
+                raise ModelSpecError(f"Invalid contrast: t1 value {t1} is the same as t0 baseline {t0}.")
+
+            item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
+            item["ate"] = est.ate(X=X, T0=t0, T1=t1)
+            logging_info = f"Computed ATE for contrast t0={t0} vs t1={t1}: {item['ate']}"
+            logging.info(logging_info)
                 
-                try:
-                    ate_interval = est.ate_interval(X=X, T0=t0, T1=t1_val, alpha=command.inputs.alpha) 
-                    if ate_interval is not None:
-                        item["ate_interval"] = ate_interval
-                    else:
-                        item["ate_interval"] = None
-                        warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")
-                except Exception as e:
-                    warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+            try:
+                ate_interval = est.ate_interval(X=X, T0=t0, T1=t1, alpha=command.inputs.alpha)  
+                if ate_interval is not None:
+                    item["ate_interval"] = ate_interval
+                else:
                     item["ate_interval"] = None
+                    warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_interval returned None")
+            except Exception as e:
+                warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+                item["ate_interval"] = None
 
-                try:
-                    inference = est.ate_inference(X=X, T0=t0, T1=t1_val)  # pyright: ignore
-                    item["ate_inference"] = serialize_inference_obj(inference) if inference is not None else None
-                    if inference is None:
-                        warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
-                except Exception as e:
-                    warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
-                    item["ate_inference"] = None
+            try:
+                inference = est.ate_inference(X=X, T0=t0, T1=t1) 
+                item["ate_inference"] = serialize_inference_obj(inference) if inference is not None else None
+                if inference is None:
+                    warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
+            except Exception as e:
+                warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
+                item["ate_inference"] = None
 
-                effects.append(item)
+            effects.append(item)
 
             if not effects:
                 return CommandFailure(
@@ -640,7 +632,7 @@ class CausalForestDMLCausalModel(CausalModel):
                 meta={
                     "backend": "econml.dml.CausalForestDML",  # CHANGED (Forest)
                     "n": int(df.shape[0]),
-                    "x_cols": spec.X if spec.X else None,
+                    "x_cols": spec.effect_modifiers if spec.effect_modifiers else None,
                     "contrast_kind": "baseline_vs_all",
                     "t0": t0,
                 },
@@ -695,56 +687,29 @@ class CausalForestDMLCausalModel(CausalModel):
 
             # CHANGED (Forest): estimator type
             est: CausalForestDML = model_record.model
-            spec: CausalSpec = command.protocol_specs
+            spec: CausalSpec = command.causal_specs
+            effect_modifiers_order: Optional[List[str]] = command.order_effect_modifiers
 
-            X_query = command.inputs.x_rows
-            x_cols = spec.X
-            raise_if_x_rows_not_exactly_match_fit_x_cols(x_rows=X_query, x_cols=x_cols)
-
-            effects: List[Dict[CATEModelResult, Any]] = []
-
-            if spec.T.kind == "binary":
-                if len(spec.T.control_values) != 1 or len(spec.T.treated_values) != 1:
-                    return CommandFailure(
-                        run_id=command.run_id,
-                        started_at=started_at,
-                        finished_at=now_utc(),
-                        error=ErrorInfo(
-                            code="OPTIONS_INVALID",
-                            message="Binary treatment for CATE requires exactly one control_value and one treated_value (or pre-normalize T upstream).",
-                            details={
-                                "control_values": list(spec.T.control_values),
-                                "treated_values": list(spec.T.treated_values),
-                            },
-                        ),
-                        warnings=[],
-                        meta={},
-                    )
-                t0 = spec.T.control_values[0]
-                t1s = [spec.T.treated_values[0]]
-
-            elif spec.T.kind == "categorical":
-                t0, t1s = categorical_t0_t1_pairs(spec)
-
-            else:
+            X_df = command.inputs.x_rows
+            x_cols = spec.effect_modifiers
+            raise_if_x_rows_not_exactly_match_fit_x_cols(x_rows=X_df, x_cols=x_cols)
+            X_query = X_df[effect_modifiers_order].to_numpy() if effect_modifiers_order else None
+            
+            if X_query is None or X_query.shape[1] == 0:
                 return CommandFailure(
                     run_id=command.run_id,
                     started_at=started_at,
                     finished_at=now_utc(),
-                    error=ErrorInfo(code="UNSUPPORTED_QUERY", message=f"Unsupported treatment kind {spec.T.kind!r} for CATE.", details={}),
+                    error=ErrorInfo(code="OPTIONS_INVALID", message="CATE requires non-empty X for effect modification; none provided.", details={}),
                     warnings=[],
                     meta={},
                 )
 
-            for t1_val in t1s:
-                if t1_val == t0:
-                    continue
-
-                item: Dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1_val}}
-
-                try:
-                    item["cate"] = est.effect(X_query, T0=t0, T1=t1_val)  # pyright: ignore
-                except Exception as e:
+            t0, t1 = get_treatment_t0_t1_from_spec(spec, is_global_counter_factual=command.inputs.counterfactual)
+            effects: Dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
+            try:
+                effects["cate"] = est.effect(X_query, T0=t0, T1=t1) 
+            except Exception as e:
                     return CommandFailure(
                         run_id=command.run_id,
                         started_at=started_at,
@@ -752,33 +717,32 @@ class CausalForestDMLCausalModel(CausalModel):
                         error=ErrorInfo(code="ESTIMATOR_ERROR", message="CATE computation failed (effect).", details={"exception": repr(e)}),
                         warnings=[],
                         meta={},
-                    )
+                )
 
-                try:
-                    lo, hi = est.effect_interval(X_query, T0=t0, T1=t1_val, alpha=command.inputs.alpha)  # pyright: ignore
-                    if lo is None or hi is None:
-                        warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
-                        item["cate_interval"] = None
-                    else:
-                        item["cate_interval"] = (list(lo), list(hi))  # pyright: ignore
-                except Exception as e:
+            try:
+                interval = est.effect_interval(X_query, T0=t0, T1=t1, alpha=command.inputs.alpha)
+                if interval is None:
+                    warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_interval returned None")
+                    effects["cate_interval"] = None
+                else:
+                        effects["cate_interval"] = interval
+            except Exception as e:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
-                    item["cate_interval"] = None
+                    effects["cate_interval"] = None
 
-                try:
-                    inf = est.effect_inference(X_query, T0=t0, T1=t1_val)  # pyright: ignore
+            try:
+                    inf = est.effect_inference(X_query, T0=t0, T1=t1)  
                     if inf is None:
                         warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_inference returned None")
-                        item["cate_inference"] = None
+                        effects["cate_inference"] = None
                     else:
-                        item["cate_inference"] = serialize_inference_obj(inf)
-                except Exception as e:
+                        effects["cate_inference"] = serialize_inference_obj(inf)
+            except Exception as e:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
-                    item["cate_inference"] = None
+                    effects["cate_inference"] = None
 
-                effects.append(item)
 
-            if not effects:
+            if effects.get("cate", None) is None:
                 return CommandFailure(
                     run_id=command.run_id,
                     started_at=started_at,

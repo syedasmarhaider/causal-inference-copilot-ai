@@ -15,8 +15,6 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_nod
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import CausalInferenceState
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_node import CleanProtocolNode
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
-from python.implementation.workflows.nodes.compile_protocol.compile_protocol_node import CompileProtocolNode
-from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
 from python.implementation.workflows.nodes.load_dataset.load_dataset_node import LoadDatasetNode
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import ModelSelectionState
@@ -29,7 +27,6 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_node import ValidateCleanProtocolNode
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import ValidateCleanProtocolState
-from python.implementation.workflows.utils.utils import DEFAULT_MODEL_GEMNI
 
 class LLMAssistedRouterRouter(Router):
     def __init__(
@@ -39,7 +36,6 @@ class LLMAssistedRouterRouter(Router):
         model_name: Optional[str] = None,
     ) -> None:
         self._llm = llm
-        self._model_name = model_name or DEFAULT_MODEL_GEMNI
         self._next_state_names_map: Mapping[str, Optional[str]] = init_next_state_names()
         self._node_name_to_description_map: Mapping[str, str] = get_node_name_with_description()
     
@@ -79,7 +75,7 @@ class LLMAssistedRouterRouter(Router):
         if status == "ABORTED":
             return _decision_on_aborted_state(
                 llm=self._llm,
-                model_name=self._model_name,
+                model_name="basic",
                 current_state=current_state,
                 get_next_state_names_map=self._next_state_names_map,
                 get_node_name_to_description_map=self._node_name_to_description_map,
@@ -126,7 +122,7 @@ def _decision_on_aborted_state(
     )
 
     decision = llm.generate_json(
-        config=LLMConfig(model=model_name, temperature=0.3),
+        config=LLMConfig(model="basic", temperature=0.3),
         system_prompt="Decide fallback state (must be previous). Output STRICT JSON matching schema.",
         user_prompt=prompt_filled,
         history=last_10_messages,
@@ -201,7 +197,6 @@ def build_state_classes_by_name() -> Mapping[str, Type[State]]:
     return {
         LoadDatasetState.NAME: LoadDatasetState,
         ProtocolDiscussionState.NAME: ProtocolDiscussionState,
-        CompileProtocolState.NAME: CompileProtocolState,
         CleanProtocolState.NAME: CleanProtocolState,
         ValidateCleanProtocolState.NAME: ValidateCleanProtocolState,
         ModelSelectionState.NAME: ModelSelectionState,
@@ -214,8 +209,7 @@ def build_state_classes_by_name() -> Mapping[str, Type[State]]:
 def init_next_state_names() -> Mapping[str, Optional[str]]:
     return {
         LoadDatasetState.NAME: ProtocolDiscussionState.NAME,
-        ProtocolDiscussionState.NAME: CompileProtocolState.NAME,
-        CompileProtocolState.NAME: CleanProtocolState.NAME,
+        ProtocolDiscussionState.NAME: CleanProtocolState.NAME,
         CleanProtocolState.NAME: ValidateCleanProtocolState.NAME,
         ValidateCleanProtocolState.NAME: ModelSelectionState.NAME,
         ModelSelectionState.NAME: ModelTrainState.NAME,
@@ -228,7 +222,6 @@ def get_node_name_with_description() -> Mapping[str, str]:
     return{
         LoadDatasetNode.NAME: LoadDatasetNode.get_info(),
         ProtocolDiscussionNode.NAME: ProtocolDiscussionNode.get_info(),
-        CompileProtocolNode.NAME: CompileProtocolNode.get_info(),
         CleanProtocolNode.NAME: CleanProtocolNode.get_info(),
         ValidateCleanProtocolNode.NAME: ValidateCleanProtocolNode.get_info(),
         ModelSelectionState.NAME: ModelSelectionNode.get_info(),
@@ -242,38 +235,28 @@ def init_all_nodoes_with_name_as_key(llm: LLMService, data_repo: DataRepo, model
     load_dataset_node = LoadDatasetNode(data_repo=data_repo, llm=llm)
     protocol_discussion_node = ProtocolDiscussionNode(
         llm=llm,
-        model_name=DEFAULT_MODEL_GEMNI,
-     )
-    compiled_protocol_node = CompileProtocolNode(
-        llm=llm,
-        model_name=DEFAULT_MODEL_GEMNI,
      )
     clean_protocol_node = CleanProtocolNode(
          data_repo=data_repo,
         llm=llm,
-        model_name=DEFAULT_MODEL_GEMNI,
      )
      
     validate_cleaned_protocol_node = ValidateCleanProtocolNode(
         data_repo=data_repo,
         llm=llm,
-        model_name=DEFAULT_MODEL_GEMNI,
         )
     
     model_selection_node = ModelSelectionNode(
         llm=llm,
-        model_name=DEFAULT_MODEL_GEMNI,
      )
     
     model_train_node = ModelTrainNode(
         llm=llm,
-        model_name=DEFAULT_MODEL_GEMNI,
      )
     
     inference_node = CausalInferenceNode(
         llm=llm,
         data_repo=data_repo,
-        model_name=DEFAULT_MODEL_GEMNI,
      )
     
     
@@ -283,7 +266,6 @@ def init_all_nodoes_with_name_as_key(llm: LLMService, data_repo: DataRepo, model
     return {
         load_dataset_node.name: load_dataset_node,
         protocol_discussion_node.name: protocol_discussion_node,
-        compiled_protocol_node.name: compiled_protocol_node,
         clean_protocol_node.name: clean_protocol_node,
         validate_cleaned_protocol_node.name: validate_cleaned_protocol_node,
         model_selection_node.name: model_selection_node,

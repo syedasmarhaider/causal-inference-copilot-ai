@@ -1,5 +1,5 @@
 def get_model_train_node_info() -> str:
-    return """        "ModelTrainNode: trains the selected causal model using the cleaned dataset and compiled protocol. "
+    return """        "ModelTrainNode: trains the selected causal model using the cleaned dataset and compiled causal specs. "
         "Returns state with trained_model_id, column_transformation_plan, and any training warnings."
         "It does data transformation but requires user input to have a suggestion on transformation if transformation is failed"
         "It runs the training automatically and does not requires user input on that"
@@ -22,22 +22,24 @@ If input is not needed, state what will be done next.
 Non-negotiable safety rules:
 - DO NOT transform or encode the treatment column or outcome column (they are handled separately).
 - Avoid dropping rows due to missing values by default (clinically risky; can bias results unless there are explicit errors).
-- As X effect modifiers missing is not allowed, suggest imputation or dropping strategies.
+- As effect_modifier missing is not allowed, suggest imputation or dropping strategies.
 
 Interpretation rules:
-- W = covariates (confounders / adjustment features).
-- X = effect modifiers (treatment effect heterogeneity features).
+- `covariate` = confounders.
+- `effect_modifier` = effect modifiers.
 
 Eligible columns:
-Eligible = (X ∪ W) minus treatment, outcome
+Eligible = (`covariate` ∪ `effect_modifier`) minus treatment, outcome
 You MUST only reason about eligible columns.
+- role of a column (`covariate` vs `effect_modifier`) is determined by the causal specs, not by the LLM. You can only choose transformations for columns based on their assigned role in the causal specs.
+
 
 Inputs:
 (1) Model selection output:
 {selected_model_json}
 
-(2) Protocol:
-{protocol_json}
+(2) Causal specs:
+{causal_specs_json}
 
 (3) Dataset summary (types, unique counts, missingness, examples):
 {dataset_summary_json}
@@ -58,17 +60,18 @@ The plan will be compiled into sklearn transformers.
 
 
 Non-negotiable clinical safety rules:
-1) DO NOT transform, encode, scale, impute, or otherwise modify:
+1) DO NOT transform
    - Treatment column
    - Outcome column
 2) Avoid dropping rows due to missingness by default (bias risk) but if there are errors or user has given the perimission then do that.
 
 Interpretation rules:
-- W = covariates (confounders / adjustment features).
-- X = effect modifiers (treatment effect heterogeneity features).
+- `covariate` = confounders.
+- `effect_modifier` = effect modifiers.
+- role of a column (`covariate` vs `effect_modifier`) is determined by the causal specs, not by the LLM. You can only choose transformations for columns based on their assigned role in the causal specs.
 
 Eligible columns:
-Eligible = (X ∪ W) minus treatment, outcome
+Eligible = `covariate` and `effect_modifier` only
 You MUST build the plan ONLY for eligible columns.
 
 Estimator-aware best practices:
@@ -86,8 +89,8 @@ Inputs:
 (1) Model selection output:
 {selected_model_json}
 
-(2) Protocol:
-{protocol_json}
+(2) Causal specs:
+{causal_specs_json}
 
 (3) Dataset summary (types, unique counts, missingness, examples):
 {dataset_summary_json}
@@ -97,6 +100,7 @@ Your task:
 - Include ONLY eligible columns.
 - Choose appropriate preset per column type and estimator family.
 - Ensure the resulting plan is consistent (no duplicate columns, no illegal params, no treatment/outcome included).
+- For each plan column, output `role` as exactly `covariate` or `effect_modifier`.
 
 Output (STRICT JSON ONLY; no markdown; no extra keys):
 <TransformPlan JSON exactly matching the schema you were given>
@@ -105,7 +109,7 @@ Output (STRICT JSON ONLY; no markdown; no extra keys):
 
 
 FIT_SUCCESS_FAILURE_SYSTEM_PROMPT = """
-You are a Clinical Causal Copilot that helps to train causal inference models based on the selected model, compiled protocol, and cleaned dataset.
+You are a Clinical Causal Copilot that helps to train causal inference models based on the selected model, compiled causal specs, and cleaned dataset.
 Explain to the user in a clinician-friendly way the result of the training command execution, including any warnings or errors
 warnings or errors if it make sense to present to clinicians and their implications regarding training and reliablity not internal errors etc.
 """

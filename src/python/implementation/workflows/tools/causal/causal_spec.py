@@ -1,40 +1,34 @@
 from __future__ import annotations
 
-import logging
-from typing import Annotated, List, Literal, Optional, Union
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from collections.abc import Mapping
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from python.domain.models.models import NonEmptyStr
-from python.implementation.workflows.utils.utils import ScalarValue
 
+# ----------------------------
+# Core types
+# ----------------------------
+ExperimentType = Literal["RCT", "OBSERVATIONAL"]
 class BinaryTreatmentSpecModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     kind: Literal["binary"]
     column: NonEmptyStr
-    treated_values: List[ScalarValue] = Field(..., min_length=1)
-    control_values: List[ScalarValue] = Field(..., min_length=1)
-
-
-class CategoricalTreatmentSpecModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    kind: Literal["categorical"]
-    column: NonEmptyStr
-    levels: List[ScalarValue] = Field(..., min_length=2)
-    baseline: Optional[ScalarValue] = None  # optional default
-
+    treated: NonEmptyStr
+    control: NonEmptyStr
 
 TreatmentSpecModel = Annotated[
-    Union[BinaryTreatmentSpecModel, CategoricalTreatmentSpecModel],
+    Union[BinaryTreatmentSpecModel],
     Field(discriminator="kind"),
 ]
-
 
 class BinaryOutcomeSpecModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     kind: Literal["binary"]
     column: NonEmptyStr
-    event_values: List[ScalarValue] = Field(..., min_length=1)
-    non_event_values: List[ScalarValue] = Field(..., min_length=1)
+    event: NonEmptyStr
+    non_event: NonEmptyStr
 
 
 class ContinuousOutcomeSpecModel(BaseModel):
@@ -52,34 +46,50 @@ OutcomeSpecModel = Annotated[
 ]
 
 
+# TODO: change name later to causal specs
 class CausalSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    treatment_spec: TreatmentSpecModel
+    outcome_spec: OutcomeSpecModel
+    covariates: List[NonEmptyStr]
+    effect_modifiers: List[NonEmptyStr]
+    experiment_type: ExperimentType
 
-    Y: OutcomeSpecModel
-    T: TreatmentSpecModel
+# ----------------------------
+# Validation helpers
+# ----------------------------
+def _fmt_loc(loc: Any) -> str:
+    if isinstance(loc, (tuple, list)):
+        return ".".join(str(x) for x in loc) # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+    return str(loc)
 
-    W: List[NonEmptyStr] = Field(default_factory=list) 
-    X: List[NonEmptyStr] = Field(default_factory=list)
-    Z: List[NonEmptyStr] = Field(default_factory=list)
 
-    @model_validator(mode="after")
-    def _validate_roles(self) -> "CausalSpec":
-        y = self.Y.column
-        t = self.T.column
-        w = set(self.W)
-        x = set(self.X)
-        z = set(self.Z)
+def validate_protocol_payload_structured(
+    payload: Mapping[str, Any],
+) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    try:
+        model = CausalSpec.model_validate(payload)
+    except ValidationError as e:
+        issues: List[Dict[str, Any]] = []
+        for err in e.errors():
+            issues.append(
+                {
+                    "path": _fmt_loc(err.get("loc")),
+                    "message": str(err.get("msg", "Invalid value")),
+                    "type": str(err.get("type", "unknown")),
+                    "input": err.get("input"),
+                }
+            )
+        return None, issues
 
-        # hard invariants
-        if y == t:
-            raise ValueError("Outcome column and treatment column must be different.")
-        if y in w or y in x or y in z:
-            raise ValueError("Outcome column must not appear in W/X/Z.")
-        if t in w or t in x or t in z:
-            raise ValueError("Treatment column must not appear in W/X/Z.")
-        if w & x:
-            logging.warning("Columns %s appear in both W and X. This is not recommended but we will keep them in W.", w & x)
-        if (w | x | z) and (len(w | x | z) != len(list(w | x | z))):
-            # defensive; sets already unique. keep if you later change representation.
-            pass
-        return self
+    return model.model_dump(mode="json"), []
+
+
+def validate_protocol_payload(
+    payload: Mapping[str, Any],
+) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    model_dict, issues = validate_protocol_payload_structured(payload)
+    if model_dict is None:
+        msgs = [f"{i.get('path')}: {i.get('message')}" for i in issues]
+        return None, msgs
+    return model_dict, []

@@ -3,26 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import math
+import numbers
 from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, TypedDict
 
 import pandas as pd
 import pandas.api.types as ptypes
 from typing import cast
-from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
-    BinaryOutcomeSpecModel,
-    BinaryTreatmentSpecModel,
-    CategoricalTreatmentSpecModel,
-    ContinuousOutcomeSpecModel,
-)
-
-from python.implementation.workflows.nodes.compile_protocol.protocol_specs import (
-    ProtocolSpec,
-)
+from python.implementation.workflows.tools.causal.causal_spec import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CausalSpec, ContinuousOutcomeSpecModel
 from python.implementation.workflows.utils.utils import BOOL_FALSE, BOOL_TRUE
-# =============================================================================
-# 5) Covariates / Effect Modifiers validations (pre-transform, raw df)
-# =============================================================================
-
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, TypedDict, cast
 
 import numpy as np
@@ -65,7 +53,7 @@ def validate_min_rows(
     return [], metrics
 
 
-def validate_protocol_role_columns_invariants(protocol: ProtocolSpec) -> List[ValidationIssue]:
+def validate_protocol_role_columns_invariants(causal_spec: CausalSpec) -> List[ValidationIssue]:
     """
     Pure protocol invariants about referenced column names (no DataFrame needed).
 
@@ -83,24 +71,20 @@ def validate_protocol_role_columns_invariants(protocol: ProtocolSpec) -> List[Va
     # -------------------------
     # Treatment column
     # -------------------------
-    treatment_col: str = protocol.treatment_spec.column
+    treatment_col: str = causal_spec.treatment_spec.column
 
     # -------------------------
     # Outcome columns (duration has two)
     # -------------------------
 
-    outcome_cols = [protocol.outcome_spec.column]
+    outcome_cols = [causal_spec.outcome_spec.column]
 
     # -------------------------
     # Covariates / effect modifiers
     # -------------------------
-    covariates: List[str] = list(protocol.covariates or [])
-    effect_modifiers: List[str] = list(protocol.effect_modifiers or [])
+    covariates: List[str] = list(causal_spec.covariates or [])
+    effect_modifiers: List[str] = list(causal_spec.effect_modifiers or [])
 
-    # -------------------------
-    # time_zero is a real column only when time_zero_type == "COLUMN"
-    # -------------------------
-    time_zero_col = protocol.time_zero if protocol.time_zero_type == "COLUMN" else None
 
     # -------------------------
     # 1) Duplicates within lists (FAIL)
@@ -173,193 +157,53 @@ def validate_protocol_role_columns_invariants(protocol: ProtocolSpec) -> List[Va
                 fix_hint="This is allowed is some estimation frameworks, but it's clearer to separate covariates (for adjustment) from effect modifiers (for heterogeneity). Consider assigning each column to one role. So we dont allow it",
             )
         )
-
-    # -------------------------
-    # 4) time_zero overlaps with other role columns (WARN)
-    # -------------------------
-    if isinstance(time_zero_col, str) and time_zero_col.strip():
-        tz_overlap = sorted({time_zero_col}.intersection({treatment_col, *outcome_cols, *covariates, *effect_modifiers}))
-        if tz_overlap:
-            issues.append(
-                _issue(
-                    severity="WARN",
-                    message="time_zero column overlaps with another protocol role column.",
-                    evidence={"time_zero_col": time_zero_col, "overlaps_with": tz_overlap},
-                    fix_hint="If intentional, keep it. Otherwise pick a dedicated baseline/time column.",
-                )
-            )
-
+        
     return issues
-
-
-def validate_time_zero_semantics_protocol(
-    df: pd.DataFrame,
-    protocol: ProtocolSpec,
-    *,
-    sample_n: int = 2000,
-    parse_fail_rate_warn: float = 0.10,
-    parse_fail_rate_fail: float = 0.50,
-) -> Tuple[List[ValidationIssue], Dict[str, Any]]:
-    """
-    Lightweight time_zero validation for ProtocolSpec.
-
-    Only applies when protocol.time_zero_type == "COLUMN".
-    We do NOT enforce strict datetime dtype, but we flag clearly unparseable values.
-    """
-    issues: List[ValidationIssue] = []
-
-    tz_type = protocol.time_zero_type
-    if tz_type != "COLUMN":
-        return issues, {"time_zero_type": tz_type}
-
-    tz = protocol.time_zero
-    if not tz.strip():
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="time_zero_type is 'COLUMN' but protocol.time_zero is missing/empty.",
-                evidence={"time_zero": tz},
-                fix_hint="Set protocol.time_zero to a non-empty dataset column name when time_zero_type='COLUMN'.",
-            )
-        )
-        return issues, {"time_zero_col": tz}
-
-    if tz not in df.columns:
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="time_zero column not found in dataframe.",
-                evidence={"time_zero_col": tz, "n_df_cols": int(df.shape[1])},
-                fix_hint="Ensure the time_zero column is retained after filtering and spelled exactly as in the dataset.",
-            )
-        )
-        return issues, {"time_zero_col": tz, "present": False}
-
-    s = df[tz]
-    n = int(s.shape[0])
-    miss_rate = float(s.isna().mean()) if n > 0 else 0.0
-
-    metrics: Dict[str, Any] = {
-        "time_zero_type": tz_type,
-        "time_zero_col": tz,
-        "dtype": str(s.dtype),
-        "n_rows": n,
-        "missing_rate": miss_rate,
-    }
-
-    # If already datetime-like => OK
-    if ptypes.is_datetime64_any_dtype(s.dtype):
-        return issues, metrics
-
-    # Numeric times are possible but ambiguous (timestamp vs offset)
-    if ptypes.is_numeric_dtype(s.dtype):
-        issues.append(
-            _issue(
-                severity="WARN",
-                message="time_zero column is numeric; ensure downstream logic interprets it correctly (timestamp vs offset).",
-                evidence=metrics,
-                fix_hint="If this is a timestamp, consider converting to datetime for clarity.",
-            )
-        )
-        return issues, metrics
-
-    # Try parsing strings/objects/categories to datetime
-    ss = s.dropna()
-    if ss.empty:
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="time_zero column has only missing values after filtering.",
-                evidence=metrics,
-                fix_hint="Fix upstream filtering/null purge or choose a valid time_zero column.",
-            )
-        )
-        return issues, metrics
-
-    # Deterministic sampling for speed
-    if int(ss.shape[0]) > int(sample_n) and int(sample_n) > 0:
-        ss = ss.sample(n=int(sample_n), random_state=0)
-
-    parsed = pd.to_datetime(ss, errors="coerce", utc=False)
-    fail_rate = float(parsed.isna().mean())
-
-    metrics["parse_fail_rate_sample"] = fail_rate
-    metrics["sample_n"] = int(ss.shape[0])
-
-    if fail_rate >= float(parse_fail_rate_fail):
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="time_zero values are largely unparseable as datetimes (sample-based).",
-                evidence=metrics,
-                fix_hint="Ensure time_zero contains ISO-like datetimes or a consistent parseable format.",
-            )
-        )
-    elif fail_rate >= float(parse_fail_rate_warn):
-        issues.append(
-            _issue(
-                severity="WARN",
-                message="Some time_zero values are unparseable as datetimes (sample-based).",
-                evidence=metrics,
-                fix_hint="Standardize time_zero format (e.g., ISO-8601) to avoid downstream windowing issues.",
-            )
-        )
-
-    return issues, metrics
 
 # =============================================================================
 # 3) Treatment validations (pre-transform; whitelist already applied upstream)
 # =============================================================================
-def _treatment_allowed_literals(protocol: ProtocolSpec) -> List[str]:
+def _treatment_allowed_literals(causal_spec: CausalSpec) -> List[Any]:
     """
     Returns the allowed literal domain for treatment_spec.
     - binary -> [treated, control]
-    - categorical -> levels
-    - continuous -> None (no finite domain)
+
+    Note:
+    Protocol values may come from DB as strings; downstream validation
+    normalizes them with best-effort typed parsing.
     """
-    ts = protocol.treatment_spec
-    if isinstance(ts, BinaryTreatmentSpecModel):
+    ts = causal_spec.treatment_spec
+    if isinstance(ts, BinaryTreatmentSpecModel):  # pyright: ignore[reportUnnecessaryIsInstance]
         return [ts.treated, ts.control]
-    if isinstance(ts, CategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        return list(ts.levels)
-    # Should not happen if schema is enforced
     raise ValueError(f"Unknown treatment_spec type: {type(ts)}")
+
 
 def validate_treatment(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     min_count_per_literal_fail: int = 15,
-    # imbalance gates (counts-only)
     min_share_fail: float = 0.05,
     max_ratio_fail: float = 20.0,
-    min_neff_fail: float = 100.0,  # binary only; set 0 to disable
+    min_neff_fail: float = 100.0,
 ) -> Tuple[List[ValidationIssue], Dict[str, Any]]:
     """
-    STRICT (FAIL-only) treatment validation, step-by-step.
+    STRICT (FAIL-only) treatment validation.
 
-    Step 0: Column presence.
-    Step 1: Hard missingness gate (missing_rate must be 0).
-    Step 2: If continuous treatment => stop after missingness (no finite domain).
-    Step 3: Allowed literals from protocol (source of truth).
-    Step 4: Observed tokens from df (exact, no normalization).
-    Step 5: Domain equality gates:
-              - FAIL if unexpected values exist (observed \\ allowed)
-              - FAIL if allowed values are missing (allowed \\ observed)
-    Step 6: Minimum count per literal gate.
-    Step 7: Imbalance gates (counts-only):
-              - FAIL if min_share < min_share_fail
-              - FAIL if max/min ratio > max_ratio_fail
-              - binary only: FAIL if harmonic-mean effective sample size < min_neff_fail
+    Discrete comparison semantics:
+      - "0", 0, 0.0 -> same numeric literal
+      - "true", True -> same boolean literal
+      - booleans are NOT collapsed into 0/1
+      - non-numeric / non-boolean strings remain strings
     """
     issues: List[ValidationIssue] = []
 
     # -------------------------
     # Step 0: Column presence
     # -------------------------
-    tcol = protocol.treatment_spec.column
+    tcol = causal_spec.treatment_spec.column
     if tcol not in df.columns:
-        logging.warning(f"FUCK Treatment column '{tcol}' not found in dataframe columns: {df.columns.tolist()}")
+        logging.warning(f"Treatment column '{tcol}' not found in dataframe columns: {df.columns.tolist()}")
         metrics = {"treatment_col": tcol, "present": False}
         issues.append(
             _issue(
@@ -378,7 +222,7 @@ def validate_treatment(
     metrics: Dict[str, Any] = {
         "treatment_col": tcol,
         "present": True,
-        "treatment_kind": getattr(protocol.treatment_spec, "kind", None),
+        "treatment_kind": getattr(causal_spec.treatment_spec, "kind", None),
         "dtype": str(s.dtype),
         "n_rows": n_rows,
         "missing_rate": missing_rate,
@@ -414,19 +258,40 @@ def validate_treatment(
         return issues, metrics
 
     # -------------------------
-    # Step 3: Allowed literals (protocol truth)
+    # Step 2: Allowed literals (protocol truth, normalized best-effort)
     # -------------------------
-    allowed_literals = _treatment_allowed_literals(protocol)
-    allowed_unique: List[str] = list(dict.fromkeys(allowed_literals))  # stable unique
-    allowed_set = set(allowed_unique)
+    allowed_literals = _treatment_allowed_literals(causal_spec)
+    allowed_unique, allowed_norm_keys, allowed_collisions = _build_allowed_literal_meta(allowed_literals)
+    allowed_key_set = set(allowed_norm_keys)
 
     metrics["allowed_literals"] = list(allowed_literals)
     metrics["allowed_unique"] = list(allowed_unique)
+    metrics["allowed_normalized"] = [
+        {"literal": _safe_display(raw), "normalized_key": _discrete_key_text(key)}
+        for raw, key in zip(allowed_unique, allowed_norm_keys)
+    ]
+
+    if allowed_collisions:
+        metrics["allowed_normalized_collisions"] = [
+            {
+                "normalized_key": _discrete_key_text(k),
+                "raw_literals": [_safe_display(v) for v in vals],
+            }
+            for k, vals in allowed_collisions.items()
+        ]
+        issues.append(
+            _issue(
+                severity="FAIL",
+                message='Protocol treatment literals collapse to the same semantic value (e.g. 0 and "0").',
+                evidence=metrics,
+                fix_hint="Keep only one semantic literal per treatment arm in the protocol.",
+            )
+        )
+        return issues, metrics
 
     # -------------------------
-    # Step 4: Observed tokens (exact, no normalization)
+    # Step 3: Observed tokens
     # -------------------------
-    # missing_rate==0, but keep it explicit
     s_nonnull = s.dropna()
     if s_nonnull.empty:
         issues.append(
@@ -439,42 +304,52 @@ def validate_treatment(
         )
         return issues, metrics
 
-    obs_values = s_nonnull.unique().tolist()
-    obs_set = set(obs_values)
+    obs_counts, obs_examples = _normalized_value_counts(s_nonnull)
+    obs_key_set = set(obs_counts.keys())
 
-    # counts keyed by allowed literals
-    vc = s_nonnull.value_counts(dropna=True)
-    counts_by_allowed: Dict[str, int] = {a: int(vc.get(a, 0)) for a in allowed_unique}
+    counts_by_allowed: Dict[str, int] = {
+        str(_safe_display(raw)): int(obs_counts.get(key, 0))
+        for raw, key in zip(allowed_unique, allowed_norm_keys)
+    }
 
     metrics.update(
         {
-            "n_unique_observed": int(len(obs_set)),
+            "n_unique_observed": int(len(obs_key_set)),
             "counts_by_allowed": counts_by_allowed,
         }
     )
 
     # -------------------------
-    # Step 5: Strict domain equality gates
+    # Step 4: Strict domain equality gates
     # -------------------------
-    unexpected = sorted(list(obs_set - allowed_set), key=lambda x: str(x))
-    missing_allowed = sorted(list(allowed_set - obs_set), key=lambda x: str(x))
+    unexpected_keys = sorted(list(obs_key_set - allowed_key_set), key=_discrete_key_text)
+    missing_allowed = [
+        raw for raw, key in zip(allowed_unique, allowed_norm_keys) if key not in obs_key_set
+    ]
 
     metrics.update(
         {
-            "n_unexpected": int(len(unexpected)),
-            "unexpected": [{"value": _safe_display(v), "count": int(vc.get(v, 0))} for v in unexpected[:50]],
+            "n_unexpected": int(len(unexpected_keys)),
+            "unexpected": [
+                {
+                    "normalized_key": _discrete_key_text(k),
+                    "count": int(obs_counts.get(k, 0)),
+                    "raw_examples": [_safe_display(v) for v in obs_examples.get(k, [])[:5]],
+                }
+                for k in unexpected_keys[:50]
+            ],
             "n_missing_allowed": int(len(missing_allowed)),
             "missing_allowed": [_safe_display(v) for v in missing_allowed[:50]],
         }
     )
 
-    if unexpected:
+    if unexpected_keys:
         issues.append(
             _issue(
                 severity="FAIL",
-                message="Strict protocol violation: treatment contains values outside protocol literals (data not normalized).",
+                message="Strict protocol violation: treatment contains values outside causal specs literals.",
                 evidence=metrics,
-                fix_hint="Map/filter upstream so treatment values are exactly the protocol literals (treated/control or levels).",
+                fix_hint="Map/filter upstream so treatment values match the causal specs literals semantically.",
             )
         )
         return issues, metrics
@@ -483,20 +358,20 @@ def validate_treatment(
         issues.append(
             _issue(
                 severity="FAIL",
-                message="Strict protocol violation: not all protocol treatment literals are present after filtering.",
+                message="Strict protocol violation: not all causal specs treatment literals are present after filtering.",
                 evidence=metrics,
-                fix_hint="Relax filtering or fix mapping so every allowed literal appears at least once (or update the protocol literals).",
+                fix_hint="Relax filtering or fix mapping so every allowed literal appears at least once.",
             )
         )
         return issues, metrics
 
     # -------------------------
-    # Step 6: Minimum count per literal gate
+    # Step 5: Minimum count per literal gate
     # -------------------------
-    low_counts: List[Dict[str, Any]] = [ 
-        {"literal": _safe_display(a), "count": counts_by_allowed[a]}
-        for a in allowed_unique
-        if counts_by_allowed[a] < int(min_count_per_literal_fail)
+    low_counts: List[Dict[str, Any]] = [
+        {"literal": _safe_display(raw), "count": int(obs_counts.get(key, 0))}
+        for raw, key in zip(allowed_unique, allowed_norm_keys)
+        if int(obs_counts.get(key, 0)) < int(min_count_per_literal_fail)
     ]
     metrics["n_low_count"] = int(len(low_counts))
     metrics["low_count_literals"] = low_counts[:50]
@@ -513,9 +388,11 @@ def validate_treatment(
         return issues, metrics
 
     # -------------------------
-    # Step 7: Imbalance gates (counts-only)
+    # Step 6: Imbalance gates
     # -------------------------
-    total = sum(counts_by_allowed.values())
+    ordered_counts = [int(obs_counts.get(key, 0)) for key in allowed_norm_keys]
+    total = int(sum(ordered_counts))
+
     if total <= 0:
         issues.append(
             _issue(
@@ -527,28 +404,30 @@ def validate_treatment(
         )
         return issues, metrics
 
-    shares_by_allowed = {a: counts_by_allowed[a] / total for a in allowed_unique}
-    min_share = min(shares_by_allowed.values())
-    min_count = min(counts_by_allowed.values())
-    max_count = max(counts_by_allowed.values())
-    ratio = (max_count / min_count) if min_count > 0 else float("inf")
+    shares_by_allowed = {
+        str(_safe_display(raw)): float(obs_counts.get(key, 0) / total)
+        for raw, key in zip(allowed_unique, allowed_norm_keys)
+    }
+    min_share = float(min(shares_by_allowed.values()))
+    min_count = int(min(ordered_counts))
+    max_count = int(max(ordered_counts))
+    ratio = float((max_count / min_count) if min_count > 0 else float("inf"))
 
-    # concentration diagnostics (mostly useful for multi-arm)
-    hhi = sum(p * p for p in shares_by_allowed.values())
-    entropy = -sum(p * math.log(p) for p in shares_by_allowed.values() if p > 0.0)
+    hhi = float(sum(p * p for p in shares_by_allowed.values()))
+    entropy = float(-sum(p * math.log(p) for p in shares_by_allowed.values() if p > 0.0))
 
     metrics.update(
         {
-            "total_in_allowed": int(total),
+            "total_in_allowed": total,
             "shares_by_allowed": shares_by_allowed,
-            "min_share": float(min_share),
-            "imbalance_ratio_max_over_min": float(ratio),
-            "hhi": float(hhi),
-            "entropy": float(entropy),
+            "min_share": min_share,
+            "imbalance_ratio_max_over_min": ratio,
+            "hhi": hhi,
+            "entropy": entropy,
         }
     )
 
-    if float(min_share) < float(min_share_fail):
+    if min_share < float(min_share_fail):
         issues.append(
             _issue(
                 severity="FAIL",
@@ -559,7 +438,7 @@ def validate_treatment(
         )
         return issues, metrics
 
-    if float(ratio) > float(max_ratio_fail):
+    if ratio > float(max_ratio_fail):
         issues.append(
             _issue(
                 severity="FAIL",
@@ -570,14 +449,12 @@ def validate_treatment(
         )
         return issues, metrics
 
-    # Binary-only effective sample size gate (harmonic mean)
-    if len(allowed_unique) == 2 and float(min_neff_fail) > 0.0:
-        a0, a1 = allowed_unique[0], allowed_unique[1]
-        n0, n1 = counts_by_allowed[a0], counts_by_allowed[a1]
-        neff = (2.0 * n0 * n1) / (n0 + n1) if (n0 + n1) > 0 else 0.0
-        metrics["n_eff_harmonic_mean"] = float(neff)
+    if len(allowed_norm_keys) == 2 and float(min_neff_fail) > 0.0:
+        n0, n1 = ordered_counts[0], ordered_counts[1]
+        neff = float((2.0 * n0 * n1) / (n0 + n1) if (n0 + n1) > 0 else 0.0)
+        metrics["n_eff_harmonic_mean"] = neff
 
-        if float(neff) < float(min_neff_fail):
+        if neff < float(min_neff_fail):
             issues.append(
                 _issue(
                     severity="FAIL",
@@ -591,95 +468,528 @@ def validate_treatment(
     return issues, metrics
 
 
-
 # =============================================================================
 # 4) Outcome validations (pre-transform; whitelist already applied upstream)
 # =============================================================================
-def _outcome_allowed_literals(protocol: ProtocolSpec) -> List[str] | None:
-    """
-    Protocol is source of truth for DISCRETE outcome domains.
+DiscreteKey = Tuple[str, Any]
 
-    Returns allowed literals:
-      - binary      -> [event, non_event]
-      - categorical -> levels
-      - continuous  -> None (no finite literal domain)
+
+def _discrete_key_text(k: DiscreteKey) -> str:
+    return f"{k[0]}:{k[1]!r}"
+
+
+def _normalize_discrete_literal(v: Any) -> DiscreteKey:
+    try:
+        if pd.isna(v):
+            return ("na", None)
+    except Exception:
+        pass
+
+    if isinstance(v, (bool, np.bool_)):
+        return ("bool", bool(v)) # pyright: ignore[reportUnknownArgumentType]
+
+    if isinstance(v, (numbers.Integral, np.integer)) and not isinstance(v, (bool, np.bool_)):
+        return ("num", float(v)) # pyright: ignore[reportUnknownArgumentType]
+
+    if isinstance(v, (numbers.Real, np.floating)) and not isinstance(v, (bool, np.bool_)):
+        fv = float(v) # pyright: ignore[reportUnknownArgumentType]
+        if math.isfinite(fv):
+            return ("num", fv)
+        return ("str", str(v).strip().lower()) # pyright: ignore[reportUnknownArgumentType]
+
+    if isinstance(v, str):
+        s = v.strip()
+        if s == "":
+            return ("str", "")
+
+        s_lower = s.lower()
+
+        if s_lower == "true":
+            return ("bool", True)
+        if s_lower == "false":
+            return ("bool", False)
+
+        try:
+            fv = float(s_lower)
+            if math.isfinite(fv):
+                return ("num", fv)
+        except Exception:
+            pass
+
+        return ("str", s_lower)
+
+    return ("str", str(v).strip().lower())
+
+
+def _build_allowed_literal_meta(
+    allowed_literals: List[Any],
+) -> Tuple[List[Any], List[DiscreteKey], Dict[DiscreteKey, List[Any]]]:
+    allowed_unique: List[Any] = []
+    allowed_norm_keys: List[DiscreteKey] = []
+    collisions: Dict[DiscreteKey, List[Any]] = {}
+
+    seen: Dict[DiscreteKey, Any] = {}
+    for raw in allowed_literals:
+        k = _normalize_discrete_literal(raw)
+        if k not in seen:
+            seen[k] = raw
+            allowed_unique.append(raw)
+            allowed_norm_keys.append(k)
+        else:
+            collisions.setdefault(k, [seen[k]])
+            collisions[k].append(raw)
+
+    return allowed_unique, allowed_norm_keys, collisions
+
+
+def _normalized_value_counts(s: pd.Series) -> Tuple[Dict[DiscreteKey, int], Dict[DiscreteKey, List[Any]]]:
+    counts: Dict[DiscreteKey, int] = {}
+    examples: Dict[DiscreteKey, List[Any]] = {}
+
+    for v in s.tolist():
+        k = _normalize_discrete_literal(v)
+        counts[k] = counts.get(k, 0) + 1
+        ex = examples.setdefault(k, [])
+        if len(ex) < 5:
+            ex.append(v)
+
+    return counts, examples
+
+
+def _strict_binary_outcome_literal_meta(
+    outcome_spec: BinaryOutcomeSpecModel,
+) -> Tuple[List[Any], List[DiscreteKey], Dict[DiscreteKey, List[Any]], DiscreteKey, DiscreteKey]:
     """
-    ys = protocol.outcome_spec
-    if isinstance(ys, BinaryOutcomeSpecModel):
-        return [ys.event, ys.non_event]
-    if isinstance(ys, ContinuousOutcomeSpecModel):  # pyright: ignore[reportUnnecessaryIsInstance]
-        return None
-    raise ValueError(f"Unknown outcome_spec type: {type(ys)}")
+    STRICT:
+      - requires explicit event / non_event
+      - no heuristic inference
+      - fails if they collapse semantically
+    """
+    allowed_literals = [outcome_spec.non_event, outcome_spec.event]
+    allowed_unique, allowed_norm_keys, collisions = _build_allowed_literal_meta(allowed_literals)
+
+    if len(allowed_unique) != 2:
+        raise ValueError("Binary outcome must define exactly two distinct literals: event and non_event.")
+
+    non_event_key = _normalize_discrete_literal(outcome_spec.non_event)
+    event_key = _normalize_discrete_literal(outcome_spec.event)
+
+    if non_event_key == event_key:
+        raise ValueError("Binary outcome event and non_event collapse to the same semantic value.")
+
+    return allowed_unique, allowed_norm_keys, collisions, non_event_key, event_key
+
+
+def _strict_binary_treatment_literal_meta(
+    treatment_spec: BinaryTreatmentSpecModel,
+) -> Tuple[List[Any], List[DiscreteKey], Dict[DiscreteKey, List[Any]], DiscreteKey, DiscreteKey]:
+    """
+    STRICT:
+      - requires explicit treated / control
+      - no heuristic inference
+      - fails if they collapse semantically
+    """
+    allowed_literals = [treatment_spec.control, treatment_spec.treated]
+    allowed_unique, allowed_norm_keys, collisions = _build_allowed_literal_meta(allowed_literals)
+
+    if len(allowed_unique) != 2:
+        raise ValueError("Binary treatment must define exactly two distinct literals: treated and control.")
+
+    control_key = _normalize_discrete_literal(treatment_spec.control)
+    treated_key = _normalize_discrete_literal(treatment_spec.treated)
+
+    if control_key == treated_key:
+        raise ValueError("Binary treatment treated and control collapse to the same semantic value.")
+
+    return allowed_unique, allowed_norm_keys, collisions, control_key, treated_key
+
+
+def _missingness_by_expected_treatment_arm(
+    t: pd.Series,
+    y: pd.Series,
+    control_key: DiscreteKey,
+    treated_key: DiscreteKey,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Returns:
+      - per-expected-arm stats for control/treated
+      - unexpected treatment value stats
+    """
+    expected_rows: Dict[DiscreteKey, Dict[str, Any]] = {
+        control_key: {
+            "treatment_key": _discrete_key_text(control_key),
+            "arm_role": "control",
+            "n": 0,
+            "n_y_missing": 0,
+            "n_y_nonmissing": 0,
+            "treatment_examples": [],
+        },
+        treated_key: {
+            "treatment_key": _discrete_key_text(treated_key),
+            "arm_role": "treated",
+            "n": 0,
+            "n_y_missing": 0,
+            "n_y_nonmissing": 0,
+            "treatment_examples": [],
+        },
+    }
+    unexpected_rows: Dict[DiscreteKey, Dict[str, Any]] = {}
+
+    for tv, yv in zip(t.tolist(), y.tolist()):
+        tkey = _normalize_discrete_literal(tv)
+
+        if tkey in expected_rows:
+            bucket = expected_rows[tkey]
+        else:
+            bucket = unexpected_rows.setdefault(
+                tkey,
+                {
+                    "treatment_key": _discrete_key_text(tkey),
+                    "n": 0,
+                    "n_y_missing": 0,
+                    "n_y_nonmissing": 0,
+                    "treatment_examples": [],
+                },
+            )
+
+        bucket["n"] += 1
+        if len(bucket["treatment_examples"]) < 5:
+            bucket["treatment_examples"].append(_safe_display(tv))
+
+        try:
+            if pd.isna(yv):
+                bucket["n_y_missing"] += 1
+            else:
+                bucket["n_y_nonmissing"] += 1
+        except Exception:
+            bucket["n_y_nonmissing"] += 1
+
+    expected_out: List[Dict[str, Any]] = []
+    for key in [control_key, treated_key]:
+        d = expected_rows[key]
+        n = int(d["n"])
+        expected_out.append(
+            {
+                **d,
+                "missing_rate_y": float(d["n_y_missing"] / max(1, n)),
+            }
+        )
+
+    unexpected_out: List[Dict[str, Any]] = []
+    for _, d in sorted(unexpected_rows.items(), key=lambda kv: kv[1]["treatment_key"]):
+        n = int(d["n"])
+        unexpected_out.append(
+            {
+                **d,
+                "missing_rate_y": float(d["n_y_missing"] / max(1, n)),
+            }
+        )
+
+    return expected_out, unexpected_out
+
+
+def _binary_event_stats_by_expected_treatment_arm(
+    t: pd.Series,
+    y: pd.Series,
+    control_key: DiscreteKey,
+    treated_key: DiscreteKey,
+    event_key: DiscreteKey,
+    non_event_key: DiscreteKey,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    expected_rows: Dict[DiscreteKey, Dict[str, Any]] = {
+        control_key: {
+            "treatment_key": _discrete_key_text(control_key),
+            "arm_role": "control",
+            "n": 0,
+            "n_y_missing": 0,
+            "n_y_nonmissing": 0,
+            "event_count": 0,
+            "non_event_count": 0,
+        },
+        treated_key: {
+            "treatment_key": _discrete_key_text(treated_key),
+            "arm_role": "treated",
+            "n": 0,
+            "n_y_missing": 0,
+            "n_y_nonmissing": 0,
+            "event_count": 0,
+            "non_event_count": 0,
+        },
+    }
+    unexpected_rows: Dict[DiscreteKey, Dict[str, Any]] = {}
+
+    for tv, yv in zip(t.tolist(), y.tolist()):
+        tkey = _normalize_discrete_literal(tv)
+
+        if tkey in expected_rows:
+            bucket = expected_rows[tkey]
+        else:
+            bucket = unexpected_rows.setdefault(
+                tkey,
+                {
+                    "treatment_key": _discrete_key_text(tkey),
+                    "n": 0,
+                    "n_y_missing": 0,
+                    "n_y_nonmissing": 0,
+                    "event_count": 0,
+                    "non_event_count": 0,
+                },
+            )
+
+        bucket["n"] += 1
+
+        try:
+            if pd.isna(yv):
+                bucket["n_y_missing"] += 1
+                continue
+        except Exception:
+            pass
+
+        bucket["n_y_nonmissing"] += 1
+        ykey = _normalize_discrete_literal(yv)
+
+        if ykey == event_key:
+            bucket["event_count"] += 1
+        elif ykey == non_event_key:
+            bucket["non_event_count"] += 1
+
+    expected_out: List[Dict[str, Any]] = []
+    for key in [control_key, treated_key]:
+        d = expected_rows[key]
+        n_nonmissing = int(d["n_y_nonmissing"])
+        expected_out.append(
+            {
+                **d,
+                "event_rate": float(d["event_count"] / max(1, n_nonmissing)),
+            }
+        )
+
+    unexpected_out: List[Dict[str, Any]] = []
+    for _, d in sorted(unexpected_rows.items(), key=lambda kv: kv[1]["treatment_key"]):
+        n_nonmissing = int(d["n_y_nonmissing"])
+        unexpected_out.append(
+            {
+                **d,
+                "event_rate": float(d["event_count"] / max(1, n_nonmissing)),
+            }
+        )
+
+    return expected_out, unexpected_out
+
+
+def _modifier_binary_support_one_at_a_time(
+    *,
+    df: pd.DataFrame,
+    modifier_col: str,
+    treatment_col: str,
+    outcome_col: str,
+    control_key: DiscreteKey,
+    treated_key: DiscreteKey,
+    event_key: DiscreteKey,
+    min_rows_per_arm_per_level_warn: int,
+    min_events_per_level_warn: int,
+    max_levels_report: int = 50,
+) -> Dict[str, Any]:
+    """
+    Strict heterogeneity-support diagnostics for ONE modifier at a time.
+
+    - Numeric modifiers: not assessed here (no auto-binning).
+    - Non-numeric modifiers: levels are treated exactly as observed.
+    """
+    s_mod = df[modifier_col]
+    s_t = df[treatment_col]
+    s_y = df[outcome_col]
+
+    n_missing_modifier = int(s_mod.isna().sum())
+
+    if ptypes.is_numeric_dtype(s_mod):
+        return {
+            "modifier_col": modifier_col,
+            "modifier_kind": "numeric",
+            "n_missing_modifier": n_missing_modifier,
+            "can_assess_support": False,
+            "message": "Numeric effect modifier support not assessed in outcome validation without explicit discretization spec.",
+        }
+
+    level_rows: Dict[DiscreteKey, Dict[str, Any]] = {}
+
+    for mv, tv, yv in zip(s_mod.tolist(), s_t.tolist(), s_y.tolist()):
+        try:
+            if pd.isna(mv):
+                continue
+        except Exception:
+            pass
+
+        mkey = _normalize_discrete_literal(mv)
+        tkey = _normalize_discrete_literal(tv)
+
+        if tkey not in {control_key, treated_key}:
+            continue
+
+        bucket = level_rows.setdefault(
+            mkey,
+            {
+                "modifier_level_key": _discrete_key_text(mkey),
+                "modifier_level_examples": [],
+                "n": 0,
+                "n_y_nonmissing": 0,
+                "event_count_total": 0,
+                "arm_rows_nonmissing_y": {
+                    _discrete_key_text(control_key): 0,
+                    _discrete_key_text(treated_key): 0,
+                },
+                "arm_event_counts": {
+                    _discrete_key_text(control_key): 0,
+                    _discrete_key_text(treated_key): 0,
+                },
+            },
+        )
+
+        bucket["n"] += 1
+        if len(bucket["modifier_level_examples"]) < 5:
+            bucket["modifier_level_examples"].append(_safe_display(mv))
+
+        try:
+            if pd.isna(yv):
+                continue
+        except Exception:
+            pass
+
+        bucket["n_y_nonmissing"] += 1
+        tkey_text = _discrete_key_text(tkey)
+        bucket["arm_rows_nonmissing_y"][tkey_text] += 1
+
+        ykey = _normalize_discrete_literal(yv)
+        if ykey == event_key:
+            bucket["event_count_total"] += 1
+            bucket["arm_event_counts"][tkey_text] += 1
+
+    levels_report: List[Dict[str, Any]] = []
+    unsupported_levels: List[Dict[str, Any]] = []
+    n_levels_supported = 0
+
+    control_key_text = _discrete_key_text(control_key)
+    treated_key_text = _discrete_key_text(treated_key)
+
+    for _, level in sorted(level_rows.items(), key=lambda kv: kv[1]["modifier_level_key"])[:max_levels_report]:
+        arm_rows = dict(level["arm_rows_nonmissing_y"])
+        min_rows_any_arm = min(
+            int(arm_rows.get(control_key_text, 0)),
+            int(arm_rows.get(treated_key_text, 0)),
+        )
+        event_count_total = int(level["event_count_total"])
+        has_both_expected_arms = (
+            int(arm_rows.get(control_key_text, 0)) > 0
+            and int(arm_rows.get(treated_key_text, 0)) > 0
+        )
+
+        supported = (
+            has_both_expected_arms
+            and min_rows_any_arm >= int(min_rows_per_arm_per_level_warn)
+            and event_count_total >= int(min_events_per_level_warn)
+        )
+
+        level_out: Dict[str, Any] = {
+            **level,
+            "has_both_expected_arms": has_both_expected_arms,
+            "min_rows_any_expected_arm_nonmissing_y": int(min_rows_any_arm),
+            "supported_for_simple_modifier_level_comparison": bool(supported),
+        }
+        levels_report.append(level_out)
+
+        if supported:
+            n_levels_supported += 1
+        else:
+            unsupported_levels.append(level_out)
+
+    return {
+        "modifier_col": modifier_col,
+        "modifier_kind": "categorical",
+        "n_missing_modifier": n_missing_modifier,
+        "can_assess_support": True,
+        "n_levels_observed": int(len(level_rows)),
+        "n_levels_supported": int(n_levels_supported),
+        "levels_report": levels_report,
+        "unsupported_levels_sample": unsupported_levels[:20],
+    }
 
 
 def validate_outcome(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
-    # outcome missingness policy (NEW)
-    allow_missing_outcome: bool = True,
+    causal_spec: CausalSpec,
+    allow_missing_outcome: bool = False,
     missing_rate_warn: float = 0.01,
     missing_rate_fail: float = 0.20,
-    # if outcome missingness differs a lot by treatment arm, that's a red flag (selection)
     arm_missing_rate_diff_warn: float = 0.05,
     arm_missing_rate_diff_fail: float = 0.15,
     min_arm_n_for_missingness_gates: int = 50,
-    # count gates (discrete outcomes; applied on NON-MISSING outcomes only)
-    min_count_per_literal_fail: int = 15,
-    # continuous outcome gates
     min_unique_numeric_fail: int = 2,
-    require_strict_numeric: bool = True,  # FAIL if any non-numeric token among NON-MISSING entries
-    # imbalance gates (discrete outcomes; computed on NON-MISSING outcomes only)
-    min_share_fail: float = 0.05,
-    max_ratio_fail: float = 20.0,
-    min_neff_fail: float = 100.0,  # only used when there are exactly 2 observed literals
+    require_strict_numeric: bool = True,
+    low_event_count_warn: int = 30,
+    low_event_count_fail: int = 1,
+    low_arm_event_count_warn: int = 10,
+    require_both_expected_treatment_arms_with_nonmissing_y: bool = True,
+    assess_effect_modifier_support: bool = True,
+    min_rows_per_arm_per_modifier_level_warn: int = 10,
+    min_events_per_modifier_level_warn: int = 5,
 ) -> Tuple[List[ValidationIssue], Dict[str, Any]]:
     """
-    Outcome validation that DOES NOT require outcome missingness == 0.
+    Outcome validation ONLY.
 
-    Key behavior:
-      - If allow_missing_outcome=True, missing outcomes do NOT automatically fail.
-      - We still validate domain + counts + imbalance on the NON-MISSING subset.
-      - We additionally diagnose outcome missingness overall and by treatment arm (important in medical/EHR).
+    Responsibilities:
+      - outcome column presence / parseability / literal-domain integrity
+      - outcome missingness overall and by expected treatment arm
+      - observed support for continuous or binary outcomes
+      - binary event support overall and by expected treatment arm
+      - optional one-modifier-at-a-time heterogeneity-support diagnostics
 
-    Notes:
-      - If missingness is high or very different by treatment arm, we FAIL (or WARN) because naive
-        complete-case analysis can be biased (selection on being observed).
+    Explicitly NOT responsible for:
+      - overlap / positivity
+      - confounding / no-adjustment warnings
+      - propensity logic
+      - broad treatment-design validation beyond minimum arm visibility needed here
     """
-    import math
-
     issues: List[ValidationIssue] = []
-    ys = protocol.outcome_spec
-    ycol = ys.column
-    tcol = protocol.treatment_spec.column
 
-    # -------------------------
+    ys = causal_spec.outcome_spec
+    ts = causal_spec.treatment_spec
+    ycol = ys.column
+    tcol = ts.column
+
+    # ------------------------------------------------------------------
     # Step 1: presence + empty df
-    # -------------------------
+    # ------------------------------------------------------------------
     n_rows = int(df.shape[0])
     missing_cols = [c for c in [ycol, tcol] if c not in df.columns]
     if missing_cols:
         metrics = {
             "present": False,
-            "outcome_kind": getattr(ys, "kind", None),
             "required_cols": [ycol, tcol],
             "missing_cols": missing_cols[:50],
             "n_missing": int(len(missing_cols)),
             "n_rows": n_rows,
             "n_df_cols": int(df.shape[1]),
+            "outcome_kind": getattr(ys, "kind", None),
         }
         issues.append(
             _issue(
                 severity="FAIL",
                 message="Outcome/treatment column referenced by protocol is missing from dataframe.",
                 evidence=metrics,
-                fix_hint="Ensure treatment/outcome columns are retained and match exactly.",
+                fix_hint="Ensure treatment/outcome columns are retained and names match the protocol exactly.",
             )
         )
         return issues, metrics
 
     if n_rows == 0:
-        metrics = {"present": True, "outcome_kind": getattr(ys, "kind", None), "n_rows": 0}
+        metrics = {
+            "present": True,
+            "n_rows": 0,
+            "outcome_kind": getattr(ys, "kind", None),
+            "outcome_col": ycol,
+            "treatment_col": tcol,
+        }
         issues.append(
             _issue(
                 severity="FAIL",
@@ -690,27 +1000,90 @@ def validate_outcome(
         )
         return issues, metrics
 
-    # -------------------------
-    # Step 2: outcome missingness (overall + by treatment arm)
-    # -------------------------
     y = df[ycol]
     t = df[tcol]
 
+    # ------------------------------------------------------------------
+    # Step 2: strict treatment literal meta
+    # ------------------------------------------------------------------
+    if not isinstance(ts, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
+        metrics = {
+            "present": True,
+            "treatment_col": tcol,
+            "treatment_kind": getattr(ts, "kind", None),
+        }
+        issues.append(
+            _issue(
+                severity="FAIL",
+                message="validate_outcome currently requires BinaryTreatmentSpecModel.",
+                evidence=metrics,
+                fix_hint="Use a binary treatment spec for this validator path.",
+            )
+        )
+        return issues, metrics
+
+    try:
+        _, _, treatment_collisions, control_key, treated_key = _strict_binary_treatment_literal_meta(ts)
+    except ValueError as e:
+        metrics = {
+            "present": True,
+            "treatment_col": tcol,
+            "treatment_kind": getattr(ts, "kind", None),
+            "treated": _safe_display(getattr(ts, "treated", None)),
+            "control": _safe_display(getattr(ts, "control", None)),
+        }
+        issues.append(
+            _issue(
+                severity="FAIL",
+                message=str(e),
+                evidence=metrics,
+                fix_hint="Ensure treated/control are explicitly defined and semantically distinct.",
+            )
+        )
+        return issues, metrics
+
+    if treatment_collisions:
+        metrics = {
+            "present": True,
+            "treatment_col": tcol,
+            "treated": _safe_display(ts.treated),
+            "control": _safe_display(ts.control),
+            "treatment_normalized_collisions": [
+                {
+                    "normalized_key": _discrete_key_text(k),
+                    "raw_literals": [_safe_display(v) for v in vals],
+                }
+                for k, vals in treatment_collisions.items()
+            ],
+        }
+        issues.append(
+            _issue(
+                severity="FAIL",
+                message="Treatment literals collapse to the same semantic value.",
+                evidence=metrics,
+                fix_hint="Use exactly two semantically distinct treatment literals.",
+            )
+        )
+        return issues, metrics
+
+    # ------------------------------------------------------------------
+    # Step 3: outcome missingness overall and by expected treatment arm
+    # ------------------------------------------------------------------
     n_y_missing = int(y.isna().sum())
     miss_rate = float(n_y_missing / max(1, n_rows))
     n_y_nonmissing = int(n_rows - n_y_missing)
 
-    # compute missingness by treatment arm (only for arms with enough rows)
-    # (works for binary or categorical treatments)
-    arm_stats: List[Dict[str, Any]] = []
-    # include NA treatment rows as their own "arm" for diagnostics
-    for arm_val, g in df.groupby(t, dropna=False): # pyright: ignore[reportUnknownMemberType]
-        n_arm = int(g.shape[0])
-        mr_arm = float(g[ycol].isna().mean())
-        arm_stats.append({"arm": _safe_display(arm_val), "n": n_arm, "missing_rate_y": mr_arm})
-
-    # treatment-arm missingness dispersion
-    eligible_arm_rates = [a["missing_rate_y"] for a in arm_stats if int(a["n"]) >= int(min_arm_n_for_missingness_gates)]
+    arm_stats, unexpected_treatment_stats = _missingness_by_expected_treatment_arm(
+        t=t,
+        y=y,
+        control_key=control_key,
+        treated_key=treated_key,
+    )
+    eligible_arm_rates = [
+        a["missing_rate_y"]
+        for a in arm_stats
+        if int(a["n"]) >= int(min_arm_n_for_missingness_gates)
+    ]
     arm_diff = float(max(eligible_arm_rates) - min(eligible_arm_rates)) if len(eligible_arm_rates) >= 2 else 0.0
 
     metrics: Dict[str, Any] = {
@@ -728,15 +1101,34 @@ def validate_outcome(
         "arm_missing_rate_diff_warn": float(arm_missing_rate_diff_warn),
         "arm_missing_rate_diff_fail": float(arm_missing_rate_diff_fail),
         "min_arm_n_for_missingness_gates": int(min_arm_n_for_missingness_gates),
-        "missingness_by_treatment_arm": arm_stats[:50],
+        "expected_treatment_arms": [
+            {
+                "role": "control",
+                "literal": _safe_display(ts.control),
+                "normalized_key": _discrete_key_text(control_key),
+            },
+            {
+                "role": "treated",
+                "literal": _safe_display(ts.treated),
+                "normalized_key": _discrete_key_text(treated_key),
+            },
+        ],
+        "missingness_by_expected_treatment_arm": arm_stats,
+        "unexpected_treatment_value_stats": unexpected_treatment_stats[:50],
+        "n_unexpected_treatment_values": int(len(unexpected_treatment_stats)),
         "arm_missing_rate_diff": arm_diff,
-        "min_count_per_literal_fail": int(min_count_per_literal_fail),
-        "min_unique_numeric_fail": int(min_unique_numeric_fail),
-        "require_strict_numeric": bool(require_strict_numeric),
-        "min_share_fail": float(min_share_fail),
-        "max_ratio_fail": float(max_ratio_fail),
-        "min_neff_fail": float(min_neff_fail),
     }
+
+    if unexpected_treatment_stats:
+        issues.append(
+            _issue(
+                severity="FAIL",
+                message="Treatment column contains values outside the explicit treated/control protocol literals.",
+                evidence=metrics,
+                fix_hint="Map or filter treatment values so they match the binary treatment protocol exactly.",
+            )
+        )
+        return issues, metrics
 
     if not allow_missing_outcome and n_y_missing > 0:
         issues.append(
@@ -749,67 +1141,65 @@ def validate_outcome(
         )
         return issues, metrics
 
-    # If missingness exists, add gates (WARN/FAIL) but do not necessarily stop.
     if n_y_missing > 0:
         if miss_rate >= float(missing_rate_fail):
             issues.append(
                 _issue(
                     severity="FAIL",
-                    message="Outcome missingness is too high; complete-case estimation is likely biased/unreliable.",
+                    message="Outcome missingness is too high; observed-only analysis is unreliable.",
                     evidence=metrics,
-                    fix_hint="Consider IPW/MI for missing outcomes, redefine outcome window, or improve outcome capture.",
+                    fix_hint="Improve outcome capture, redefine the outcome window, or handle missing outcomes explicitly.",
                 )
             )
             return issues, metrics
+
         if miss_rate >= float(missing_rate_warn):
             issues.append(
                 _issue(
                     severity="WARN",
-                    message="Outcome has non-trivial missingness; complete-case estimation may introduce selection bias.",
+                    message="Outcome has non-trivial missingness.",
                     evidence=metrics,
-                    fix_hint="Check missingness by treatment arm; consider IPW/MI if missingness is differential.",
+                    fix_hint="Report missingness clearly and inspect differences by expected treatment arm.",
                 )
             )
 
-        # differential missingness by treatment arm is a stronger red flag
         if arm_diff >= float(arm_missing_rate_diff_fail) and len(eligible_arm_rates) >= 2:
             issues.append(
                 _issue(
                     severity="FAIL",
-                    message="Outcome missingness differs substantially by treatment arm (high selection-bias risk).",
+                    message="Outcome missingness differs substantially by expected treatment arm.",
                     evidence=metrics,
-                    fix_hint="Do not naively drop missing outcomes; use IPW/MI or redesign outcome capture/window.",
+                    fix_hint="Do not rely on naive observed-only analysis; investigate differential outcome capture by arm.",
                 )
             )
             return issues, metrics
+
         if arm_diff >= float(arm_missing_rate_diff_warn) and len(eligible_arm_rates) >= 2:
             issues.append(
                 _issue(
                     severity="WARN",
-                    message="Outcome missingness differs by treatment arm (selection-bias risk).",
+                    message="Outcome missingness differs by expected treatment arm.",
                     evidence=metrics,
-                    fix_hint="Prefer IPW/MI for missing outcomes; at minimum report arm-specific missingness.",
+                    fix_hint="At minimum, report arm-specific missingness and assess whether observed-only analysis is acceptable.",
                 )
             )
 
-    # If everything is missing, we cannot validate domain/counts.
     if n_y_nonmissing == 0:
         issues.append(
             _issue(
                 severity="FAIL",
                 message="Outcome is missing for all rows; cannot validate or estimate effects.",
                 evidence=metrics,
-                fix_hint="Fix outcome extraction/mapping; ensure outcome is recorded for at least some rows.",
+                fix_hint="Fix outcome extraction or mapping.",
             )
         )
         return issues, metrics
 
-    # Work on NON-MISSING outcomes only from here on
     y_nm = y.dropna()
 
-    # -------------------------
-    # Step 3A: Continuous outcome (validate on NON-MISSING only)
-    # -------------------------
+    # ------------------------------------------------------------------
+    # Step 4A: continuous outcome
+    # ------------------------------------------------------------------
     if isinstance(ys, ContinuousOutcomeSpecModel):
         v = pd.to_numeric(y_nm, errors="coerce")
 
@@ -833,15 +1223,19 @@ def validate_outcome(
             issues.append(
                 _issue(
                     severity="FAIL",
-                    message="Continuous outcome contains non-numeric tokens among non-missing entries (data not clean).",
+                    message="Continuous outcome contains non-numeric tokens among non-missing entries.",
                     evidence={**metrics, "bad_value_sample": [_safe_display(x) for x in bad_sample]},
-                    fix_hint="Clean/mapping step required: make the outcome column strictly numeric.",
+                    fix_hint="Clean the outcome column so all observed values are numeric.",
                 )
             )
             return issues, metrics
 
         n_unique = int(v.nunique(dropna=True))
         metrics["n_unique_numeric_used"] = n_unique
+        metrics["continuous_outcome_support"] = {
+            "has_variation": bool(n_unique >= int(min_unique_numeric_fail)),
+            "min_unique_numeric_fail": int(min_unique_numeric_fail),
+        }
 
         if n_unique < int(min_unique_numeric_fail):
             issues.append(
@@ -849,145 +1243,286 @@ def validate_outcome(
                     severity="FAIL",
                     message="Continuous outcome is degenerate (too few unique numeric values among observed outcomes).",
                     evidence=metrics,
-                    fix_hint="Use an outcome with variability or adjust cohort/filters that collapsed variation.",
+                    fix_hint="Use an outcome with variability or adjust filters that collapsed variation.",
                 )
             )
             return issues, metrics
 
         return issues, metrics
 
-    # -------------------------
-    # Step 3B: Binary/Categorical outcome (strict domain on NON-MISSING only)
-    # -------------------------
-    allowed_literals = _outcome_allowed_literals(protocol)
-    if allowed_literals is None:
-        raise ValueError("Non-continuous outcome must have finite literal domain; got None.")
-
-    allowed_unique = list(dict.fromkeys(allowed_literals))
-    allowed_set = set(allowed_unique)
-
-    obs_values = y_nm.unique().tolist()
-    obs_set = set(obs_values)
-
-    unexpected = sorted(list(obs_set - allowed_set), key=lambda x: str(x))
-
-    vc = y_nm.value_counts(dropna=True)
-    counts_by_observed = {v: int(vc.get(v, 0)) for v in sorted(list(obs_set), key=lambda x: str(x))}
-
-    metrics.update(
-        {
-            "dtype": str(y.dtype),
-            "allowed_literals": list(allowed_literals),
-            "allowed_unique": allowed_unique,
-            "n_unique_observed_nonmissing": int(len(obs_set)),
-            "unexpected": [{"value": _safe_display(v), "count": int(vc.get(v, 0))} for v in unexpected[:50]],
-            "n_unexpected": int(len(unexpected)),
-            "counts_by_observed": {str(_safe_display(k)): int(v) for k, v in counts_by_observed.items()},
-        }
-    )
-
-    if unexpected:
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="Outcome contains values outside protocol literals among non-missing entries (data not normalized).",
-                evidence=metrics,
-                fix_hint="Map/filter upstream so non-missing outcome values are exactly the protocol literals.",
-            )
-        )
-        return issues, metrics
-    else:
-        # categorical: require at least 2 observed levels among NON-MISSING
-        if len(obs_set) < 2:
+    # ------------------------------------------------------------------
+    # Step 4B: binary outcome
+    # ------------------------------------------------------------------
+    if isinstance(ys, BinaryOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
+        try:
+            allowed_unique, allowed_norm_keys, allowed_collisions, non_event_key, event_key = _strict_binary_outcome_literal_meta(ys)
+        except ValueError as e:
             issues.append(
                 _issue(
                     severity="FAIL",
-                    message="Categorical outcome has <2 observed levels among non-missing entries; cannot estimate contrasts.",
-                    evidence=metrics,
-                    fix_hint="Relax filters, increase cohort, or redefine outcome so multiple levels appear.",
+                    message=str(e),
+                    evidence={
+                        **metrics,
+                        "dtype": str(y.dtype),
+                        "event": _safe_display(getattr(ys, "event", None)),
+                        "non_event": _safe_display(getattr(ys, "non_event", None)),
+                    },
+                    fix_hint="Define explicit event and non_event literals in the protocol and ensure they are semantically distinct.",
                 )
             )
             return issues, metrics
 
-    # min count per observed literal (do NOT penalize allowed-but-absent levels)
-    low_counts: List[Dict[str, Any]] = [
-        {"literal": _safe_display(v), "count": int(vc.get(v, 0))}
-        for v in obs_set
-        if int(vc.get(v, 0)) < int(min_count_per_literal_fail)
-    ]
-    if low_counts:
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="Some observed outcome literals do not meet the minimum count threshold (among non-missing).",
-                evidence={**metrics, "low_count_literals": low_counts[:50], "n_low_count": int(len(low_counts))},
-                fix_hint="Increase cohort size, relax filters, or redefine mapping so each observed class has enough rows.",
-            )
-        )
-        return issues, metrics
-
-    # imbalance gates on observed non-missing outcomes
-    total = int(vc.sum())
-    shares = {v: float(vc.get(v, 0) / max(1, total)) for v in obs_set}
-    min_share = float(min(shares.values()))
-    min_count = int(min(int(vc.get(v, 0)) for v in obs_set))
-    max_count = int(max(int(vc.get(v, 0)) for v in obs_set))
-    ratio = float((max_count / min_count) if min_count > 0 else float("inf"))
-
-    hhi = float(sum(p * p for p in shares.values()))
-    entropy = float(-sum(p * math.log(p) for p in shares.values() if p > 0.0))
-
-    metrics.update(
-        {
-            "total_nonmissing_in_domain": total,
-            "shares_by_observed": {str(_safe_display(k)): float(v) for k, v in shares.items()},
-            "min_share": min_share,
-            "imbalance_ratio_max_over_min": ratio,
-            "hhi": hhi,
-            "entropy": entropy,
-        }
-    )
-
-    if min_share < float(min_share_fail):
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="Outcome imbalance (non-missing): minimum class share is below threshold.",
-                evidence=metrics,
-                fix_hint="Adjust cohort/definition so outcome classes have adequate representation.",
-            )
-        )
-        return issues, metrics
-
-    if ratio > float(max_ratio_fail):
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message="Outcome imbalance (non-missing): max/min count ratio exceeds threshold.",
-                evidence=metrics,
-                fix_hint="Adjust cohort/definition so classes are not extremely imbalanced.",
-            )
-        )
-        return issues, metrics
-
-    # neff gate only when exactly 2 observed classes (binary or 2-level subset of categorical)
-    if len(obs_set) == 2 and float(min_neff_fail) > 0.0:
-        vals2 = list(sorted(list(obs_set), key=lambda x: str(x)))
-        v0, v1 = vals2[0], vals2[1]
-        n0, n1 = int(vc.get(v0, 0)), int(vc.get(v1, 0))
-        neff = float((2.0 * n0 * n1) / (n0 + n1) if (n0 + n1) > 0 else 0.0)
-        metrics["n_eff_harmonic_mean"] = neff
-        if neff < float(min_neff_fail):
+        if allowed_collisions:
+            metrics["outcome_normalized_collisions"] = [
+                {
+                    "normalized_key": _discrete_key_text(k),
+                    "raw_literals": [_safe_display(v) for v in vals],
+                }
+                for k, vals in allowed_collisions.items()
+            ]
             issues.append(
                 _issue(
                     severity="FAIL",
-                    message="Outcome imbalance (non-missing): effective sample size is too small.",
+                    message="Binary outcome literals collapse to the same semantic value.",
                     evidence=metrics,
-                    fix_hint="Increase cohort size or redefine outcome to raise effective information.",
+                    fix_hint="Use exactly two semantically distinct outcome literals: event and non_event.",
                 )
             )
             return issues, metrics
 
+        metrics.update(
+            {
+                "dtype": str(y.dtype),
+                "allowed_outcome_literals": [_safe_display(x) for x in allowed_unique],
+                "allowed_outcome_normalized": [
+                    {"literal": _safe_display(raw), "normalized_key": _discrete_key_text(key)}
+                    for raw, key in zip(allowed_unique, allowed_norm_keys)
+                ],
+                "event_literal": _safe_display(ys.event),
+                "non_event_literal": _safe_display(ys.non_event),
+                "event_key": _discrete_key_text(event_key),
+                "non_event_key": _discrete_key_text(non_event_key),
+            }
+        )
+
+        obs_counts, obs_examples = _normalized_value_counts(y_nm)
+        obs_key_set = set(obs_counts.keys())
+        allowed_key_set = set(allowed_norm_keys)
+        unexpected_keys = sorted(list(obs_key_set - allowed_key_set), key=_discrete_key_text)
+
+        metrics.update(
+            {
+                "n_unique_observed_nonmissing": int(len(obs_key_set)),
+                "unexpected_outcome_values": [
+                    {
+                        "normalized_key": _discrete_key_text(k),
+                        "count": int(obs_counts.get(k, 0)),
+                        "raw_examples": [_safe_display(v) for v in obs_examples.get(k, [])[:5]],
+                    }
+                    for k in unexpected_keys[:50]
+                ],
+                "n_unexpected_outcome_values": int(len(unexpected_keys)),
+                "counts_by_observed_outcome": {
+                    _discrete_key_text(k): int(obs_counts.get(k, 0))
+                    for k in sorted(obs_key_set, key=_discrete_key_text)
+                },
+            }
+        )
+
+        if unexpected_keys:
+            issues.append(
+                _issue(
+                    severity="FAIL",
+                    message="Binary outcome contains values outside the explicit event/non_event protocol literals among non-missing entries.",
+                    evidence=metrics,
+                    fix_hint="Map or filter outcome values so observed non-missing entries match event/non_event exactly.",
+                )
+            )
+            return issues, metrics
+
+        if len(obs_key_set) < 2:
+            issues.append(
+                _issue(
+                    severity="FAIL",
+                    message="Binary outcome has fewer than 2 observed levels among non-missing entries.",
+                    evidence=metrics,
+                    fix_hint="Relax filters, increase cohort size, or redefine outcome so both event states appear.",
+                )
+            )
+            return issues, metrics
+
+        total_nonmissing = int(sum(obs_counts.values()))
+        event_count_total = int(obs_counts.get(event_key, 0))
+        non_event_count_total = int(obs_counts.get(non_event_key, 0))
+        event_rate_total = float(event_count_total / max(1, total_nonmissing))
+
+        arm_event_stats, unexpected_arm_event_stats = _binary_event_stats_by_expected_treatment_arm(
+            t=t,
+            y=y,
+            control_key=control_key,
+            treated_key=treated_key,
+            event_key=event_key,
+            non_event_key=non_event_key,
+        )
+
+        if unexpected_arm_event_stats:
+            issues.append(
+                _issue(
+                    severity="FAIL",
+                    message="Unexpected treatment values were encountered while computing binary outcome support.",
+                    evidence={**metrics, "unexpected_arm_event_stats": unexpected_arm_event_stats[:50]},
+                    fix_hint="Normalize or filter treatment values before outcome validation.",
+                )
+            )
+            return issues, metrics
+
+        arms_with_nonmissing_y = [a for a in arm_event_stats if int(a["n_y_nonmissing"]) > 0]
+
+        metrics.update(
+            {
+                "total_nonmissing_in_domain": total_nonmissing,
+                "event_count_total": event_count_total,
+                "non_event_count_total": non_event_count_total,
+                "event_rate_total": event_rate_total,
+                "event_stats_by_expected_treatment_arm": arm_event_stats,
+                "n_expected_treatment_arms_with_nonmissing_y": int(len(arms_with_nonmissing_y)),
+                "low_event_count_warn": int(low_event_count_warn),
+                "low_event_count_fail": int(low_event_count_fail),
+                "low_arm_event_count_warn": int(low_arm_event_count_warn),
+                "require_both_expected_treatment_arms_with_nonmissing_y": bool(require_both_expected_treatment_arms_with_nonmissing_y),
+            }
+        )
+
+        if event_count_total < int(low_event_count_fail):
+            issues.append(
+                _issue(
+                    severity="FAIL",
+                    message="Binary outcome has too few observed events overall.",
+                    evidence=metrics,
+                    fix_hint="Use a more common outcome, expand the cohort, or revise filtering.",
+                )
+            )
+            return issues, metrics
+
+        if non_event_count_total == 0:
+            issues.append(
+                _issue(
+                    severity="FAIL",
+                    message="Binary outcome has no observed non-events.",
+                    evidence=metrics,
+                    fix_hint="Use a cohort/outcome definition where both event states are observed.",
+                )
+            )
+            return issues, metrics
+
+        if require_both_expected_treatment_arms_with_nonmissing_y and len(arms_with_nonmissing_y) < 2:
+            issues.append(
+                _issue(
+                    severity="FAIL",
+                    message="Observed binary outcome data remain in fewer than both expected treatment arms.",
+                    evidence=metrics,
+                    fix_hint="Check filtering and missingness; outcome support must remain visible in both treated and control arms.",
+                )
+            )
+            return issues, metrics
+
+        if event_count_total < int(low_event_count_warn):
+            issues.append(
+                _issue(
+                    severity="WARN",
+                    message="Binary outcome has low event count overall; effect estimates may be imprecise.",
+                    evidence=metrics,
+                    fix_hint="Interpret overall effect estimates cautiously and avoid over-claiming precision.",
+                )
+            )
+
+        low_event_arms: List[Dict[str, Any]] = [
+            {
+                "arm_role": a["arm_role"],
+                "treatment_key": a["treatment_key"],
+                "event_count": int(a["event_count"]),
+                "n_y_nonmissing": int(a["n_y_nonmissing"]),
+            }
+            for a in arms_with_nonmissing_y
+            if int(a["event_count"]) < int(low_arm_event_count_warn)
+        ]
+        if low_event_arms:
+            issues.append(
+                _issue(
+                    severity="WARN",
+                    message="Some expected treatment arms have low event support for the binary outcome.",
+                    evidence={**metrics, "low_event_arms": low_event_arms[:20]},
+                    fix_hint="Arm-specific estimates may be unstable; interpret contrasts carefully.",
+                )
+            )
+
+        # --------------------------------------------------------------
+        # Step 5: optional effect-modifier support diagnostics
+        # --------------------------------------------------------------
+        if assess_effect_modifier_support and getattr(causal_spec, "effect_modifiers", None):
+            modifier_support_reports: List[Dict[str, Any]] = []
+            missing_modifier_cols = [c for c in causal_spec.effect_modifiers if c not in df.columns]
+
+            if missing_modifier_cols:
+                issues.append(
+                    _issue(
+                        severity="FAIL",
+                        message="Some effect modifier columns referenced by protocol are missing from dataframe.",
+                        evidence={**metrics, "missing_effect_modifier_cols": missing_modifier_cols[:50]},
+                        fix_hint="Retain these columns or remove them from the protocol.",
+                    )
+                )
+                return issues, metrics
+
+            for mod_col in causal_spec.effect_modifiers:
+                report = _modifier_binary_support_one_at_a_time(
+                    df=df,
+                    modifier_col=mod_col,
+                    treatment_col=tcol,
+                    outcome_col=ycol,
+                    control_key=control_key,
+                    treated_key=treated_key,
+                    event_key=event_key,
+                    min_rows_per_arm_per_level_warn=min_rows_per_arm_per_modifier_level_warn,
+                    min_events_per_level_warn=min_events_per_modifier_level_warn,
+                )
+                modifier_support_reports.append(report)
+
+                if not report["can_assess_support"]:
+                    issues.append(
+                        _issue(
+                            severity="WARN",
+                            message=f'Outcome support for numeric effect modifier "{mod_col}" was not assessed in outcome validation.',
+                            evidence={**metrics, "modifier_support_report": report},
+                            fix_hint="Provide an explicit discretization rule elsewhere if heterogeneity support must be checked numerically.",
+                        )
+                    )
+                    continue
+
+                unsupported_levels = report.get("unsupported_levels_sample", [])
+                if unsupported_levels:
+                    issues.append(
+                        _issue(
+                            severity="WARN",
+                            message=f'Binary outcome support is sparse in some levels of effect modifier "{mod_col}".',
+                            evidence={**metrics, "modifier_support_report": report},
+                            fix_hint="Treat heterogeneity claims for this modifier cautiously or simplify the modifier structure.",
+                        )
+                    )
+
+            metrics["effect_modifier_support_reports"] = modifier_support_reports
+
+        return issues, metrics
+
+    # Defensive fallback
+    issues.append(
+        _issue(
+            severity="FAIL",
+            message="Unsupported outcome spec type encountered in validate_outcome.",
+            evidence={**metrics, "outcome_spec_type": type(ys).__name__},
+            fix_hint="Use BinaryOutcomeSpecModel or ContinuousOutcomeSpecModel.",
+        )
+    )
     return issues, metrics
 
 
@@ -997,7 +1532,7 @@ def validate_outcome(
 def validate_covariate_and_effect_modifier_presence(
     *,
     df: pd.DataFrame,
-    protocol: "ProtocolSpec",
+    causal_spec: CausalSpec,
     require_covariates: bool,
 ) -> Tuple[List["ValidationIssue"], Dict[str, Any]]:
     """
@@ -1058,8 +1593,8 @@ def validate_covariate_and_effect_modifier_presence(
                 out.append(x)
         return out
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
 
     # -------------------------
     # 2) Existence checks
@@ -1165,7 +1700,7 @@ def validate_covariate_and_effect_modifier_presence(
 def validate_covariate_and_effect_modifier_missingness(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     missing_rate_warn: float = 0.05,
     missing_rate_fail: float = 0.30,
     ignore_cols: Sequence[str] = (),
@@ -1196,8 +1731,8 @@ def validate_covariate_and_effect_modifier_missingness(
                 out.append(x)
         return out
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
 
     # Combined list (stable): covariates first
     cols_all = _dedup_keep_order([c for c in (covariates + effect_modifiers) if c not in ignore])[: int(max_cols)]
@@ -1277,7 +1812,7 @@ def validate_covariate_and_effect_modifier_missingness(
 def validate_covariate_and_effect_modifier_missingness_by_treatment(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     delta_warn: float = 0.05,
     delta_fail: float = 0.20,
     ignore_cols: Sequence[str] = (),
@@ -1306,7 +1841,7 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
     issues: List["ValidationIssue"] = []
     ignore = {c for c in ignore_cols if c.strip()}
 
-    ts = protocol.treatment_spec
+    ts = causal_spec.treatment_spec
     tcol = ts.column
 
     metrics: Dict[str, Any] = {
@@ -1365,13 +1900,9 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
 
     arm_masks: Dict[str, pd.Series] = {}
 
-    if isinstance(ts, BinaryTreatmentSpecModel):
+    if isinstance(ts, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         arm_masks["treated"] = _mask_equals_literal(sT, ts.treated)
         arm_masks["control"] = _mask_equals_literal(sT, ts.control)
-
-    elif isinstance(ts, CategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        for lvl in list(ts.levels):
-            arm_masks[str(lvl)] = _mask_equals_literal(sT, str(lvl))
             
     else:
         issues.append(
@@ -1410,8 +1941,8 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
                 out.append(x)
         return out
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
     cols_all = _dedup_keep_order([c for c in (covariates + effect_modifiers) if c not in ignore])[: int(max_cols)]
 
     missing_cols = [c for c in cols_all if c not in df.columns]
@@ -1483,7 +2014,7 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
 def validate_covariate_and_effect_modifier_constantness(
     *,
     df: pd.DataFrame,
-    protocol: "ProtocolSpec",
+    causal_spec:  CausalSpec,
     # hard-ish thresholds
     max_constant_frac_warn: float = 0.30,
     max_constant_frac_fail: float = 0.70,
@@ -1521,8 +2052,8 @@ def validate_covariate_and_effect_modifier_constantness(
                 out.append(x)
         return out
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
     cols_all = _dedup_keep_order([c for c in (covariates + effect_modifiers) if c not in ignore])[: int(max_cols)]
 
     missing_cols = [c for c in cols_all if c not in df.columns]
@@ -1640,7 +2171,7 @@ def validate_covariate_and_effect_modifier_constantness(
 def validate_covariate_and_effect_modifier_high_cardinality_and_id_like(
     *,
     df: pd.DataFrame,
-    protocol: "ProtocolSpec",
+    causal_spec: CausalSpec,
     # cardinality thresholds for categorical/string-ish
     max_levels_warn: int = 50,
     max_levels_fail: int = 200,
@@ -1680,8 +2211,8 @@ def validate_covariate_and_effect_modifier_high_cardinality_and_id_like(
                 out.append(x)
         return out
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
     cols_all = _dedup_keep_order([c for c in (covariates + effect_modifiers) if c not in ignore])[: int(max_cols)]
 
     missing_cols = [c for c in cols_all if c not in df.columns]
@@ -1821,7 +2352,7 @@ def validate_covariate_and_effect_modifier_high_cardinality_and_id_like(
 def validate_covariate_and_effect_modifier_type_risks(
     *,
     df: pd.DataFrame,
-    protocol: "ProtocolSpec",
+    causal_spec: CausalSpec,
     ignore_cols: Sequence[str] = (),
     max_cols: int = 500,
     # object-type scan is bounded for speed/determinism
@@ -1863,8 +2394,8 @@ def validate_covariate_and_effect_modifier_type_risks(
                 out.append(x)
         return out
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
     cols_all = _dedup_keep_order([c for c in (covariates + effect_modifiers) if c not in ignore])[: int(max_cols)]
 
     missing_cols = [c for c in cols_all if c not in df.columns]
@@ -2015,7 +2546,7 @@ def validate_covariate_and_effect_modifier_type_risks(
 # 6) Overlap / positivity diagnostics (pre-transform, df-backed)
 # =============================================================================
 
-ArmKind = Literal["binary", "categorical", "continuous"]
+ArmKind = Literal["binary", "continuous"]
 
 
 @dataclass(frozen=True)
@@ -2102,29 +2633,22 @@ def _dedup_keep_order(xs: List[str]) -> List[str]:
 def compute_arm_masks_from_protocol(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     max_bins_continuous: int = 5,
 ) -> ArmMasks:
-    tcol = protocol.treatment_spec.column
+    tcol = causal_spec.treatment_spec.column
     if tcol not in df.columns:
         raise KeyError(f"treatment_col not found in df: {tcol!r}")
 
-    ts = protocol.treatment_spec
+    ts = causal_spec.treatment_spec
     s = df[tcol]
 
-    if isinstance(ts, BinaryTreatmentSpecModel):
+    if isinstance(ts, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         m_t = _mask_equals_literal(s, ts.treated)
         m_c = _mask_equals_literal(s, ts.control)
         masks = {"treated": m_t, "control": m_c}
         counts = {k: int(v.sum()) for k, v in masks.items()}
         return ArmMasks(kind="binary", treatment_col=tcol, masks=masks, counts=counts)
-
-    if isinstance(ts, CategoricalTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        masks: Dict[str, pd.Series] = {}
-        for lvl in list(ts.levels):
-            masks[str(lvl)] = _mask_equals_literal(s, str(lvl))
-        counts = {k: int(v.sum()) for k, v in masks.items()}
-        return ArmMasks(kind="categorical", treatment_col=tcol, masks=masks, counts=counts)
 
     raise ValueError(f"Unknown treatment_spec kind={getattr(ts, 'kind', None)!r}")
 
@@ -2136,7 +2660,7 @@ def compute_arm_masks_from_protocol(
 def validate_overlap_positivity_univariate(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     arm_masks: ArmMasks,
     # feature selection scope
     use_effect_modifiers: bool = True,
@@ -2166,8 +2690,8 @@ def validate_overlap_positivity_univariate(
     issues: List["ValidationIssue"] = []
     ignore = {c for c in ignore_cols if c.strip()}
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
 
     feat_cols = covariates + (effect_modifiers if use_effect_modifiers else [])
     feat_cols = _dedup_keep_order([c for c in feat_cols if c not in ignore])[: int(max_cols)]
@@ -2353,7 +2877,7 @@ def validate_overlap_positivity_univariate(
 def validate_overlap_propensity_proxy(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     arm_masks: ArmMasks,
     # use covariates only by default; effect modifiers often include post-treatment-ish features by mistake
     use_effect_modifiers: bool = False,
@@ -2378,7 +2902,7 @@ def validate_overlap_propensity_proxy(
     metrics: Dict[str, Any] = {
         "enabled": False,
         "reason": None,
-        "treatment_col": protocol.treatment_spec.column,
+        "treatment_col": causal_spec.treatment_spec.column,
         "arm_kind": arm_masks.kind,
         "auc": None,
         "extreme_prob_share": None,
@@ -2437,8 +2961,8 @@ def validate_overlap_propensity_proxy(
 
     y = np.concatenate([np.ones(len(idx_t_s), dtype=np.int32), np.zeros(len(idx_c_s), dtype=np.int32)])
 
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
-    effect_modifiers = _dedup_keep_order(list(getattr(protocol, "effect_modifiers", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
+    effect_modifiers = _dedup_keep_order(list(getattr(causal_spec, "effect_modifiers", []) or []))
     feat_cols = covariates + (effect_modifiers if use_effect_modifiers else [])
     feat_cols = _dedup_keep_order([c for c in feat_cols if c in df.columns])
 
@@ -2549,7 +3073,7 @@ def validate_overlap_propensity_proxy(
 def validate_overlap_and_positivity(
     *,
     df: pd.DataFrame,
-    protocol: ProtocolSpec,
+    causal_spec: CausalSpec,
     require_covariates: bool = True,
     # univariate knobs
     use_effect_modifiers_univariate: bool = True,
@@ -2570,18 +3094,18 @@ def validate_overlap_and_positivity(
     issues: List["ValidationIssue"] = []
 
     # Build masks (this can raise if T missing; let caller run treatment presence checks earlier)
-    arms = compute_arm_masks_from_protocol(df=df, protocol=protocol)
+    arms = compute_arm_masks_from_protocol(df=df, causal_spec=causal_spec)
 
     # Require covariates for overlap checks (otherwise overlap is not meaningful)
-    covariates = _dedup_keep_order(list(getattr(protocol, "covariates", []) or []))
+    covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
     if require_covariates and not covariates:
-        metrics = {"require_covariates": True, "n_covariates": 0, "treatment_col": protocol.treatment_spec.column}
+        metrics = {"require_covariates": True, "n_covariates": 0, "treatment_col": causal_spec.treatment_spec.column}
         issues.append(
             _issue(
                 severity="FAIL",
-                message="Cannot assess overlap/positivity: protocol.covariates is empty (no adjustment set).",
+                message="Cannot assess overlap/positivity: causal_spec.covariates is empty (no adjustment set).",
                 evidence=metrics,
-                fix_hint="Add covariates (confounders) to protocol.covariates before causal estimation.",
+                fix_hint="Add covariates (confounders) to causal_spec.covariates before causal estimation.",
             )
         )
         return issues, {"arm_masks": arms.to_dict(), **metrics}
@@ -2589,7 +3113,7 @@ def validate_overlap_and_positivity(
     # Univariate overlap
     iss_u, met_u = validate_overlap_positivity_univariate(
         df=df,
-        protocol=protocol,
+        causal_spec=causal_spec,
         arm_masks=arms,
         use_effect_modifiers=use_effect_modifiers_univariate,
     )
@@ -2599,7 +3123,7 @@ def validate_overlap_and_positivity(
 
     # Optional propensity proxy
     if enable_propensity_proxy:
-        iss_p, met_p = validate_overlap_propensity_proxy(df=df, protocol=protocol, arm_masks=arms)
+        iss_p, met_p = validate_overlap_propensity_proxy(df=df, causal_spec=causal_spec, arm_masks=arms)
         issues.extend(iss_p)
         metrics["propensity_proxy"] = met_p
 

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 T = TypeVar("T", bound=BaseModel)
 
 Role = Literal["user", "assistant","system"]
+AvailableModelsKey = Literal["mini","basic", "pro","thinking"]
 
 
 @dataclass(frozen=True)
@@ -21,7 +22,7 @@ ProviderExtra = Dict[str, Any]
 
 @dataclass(frozen=True)
 class LLMConfig:
-    model: Optional[str] = None
+    model: AvailableModelsKey = "basic"
     temperature: Optional[float] = 0.2
     top_p: Optional[float] = 0.95
     max_tokens: Optional[int] = 60000
@@ -37,7 +38,6 @@ class ToolCall(TypedDict, total=False):
 @dataclass(frozen=True)
 class LLMResponse:
     content: str
-    model: str
     finish_reason: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = None
     raw: Any = None

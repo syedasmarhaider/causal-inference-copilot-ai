@@ -343,3 +343,72 @@ def fit_treatment_likelihood_scores(
     scores = pipe.predict_proba(X)[:, 1].astype(float) # pyright: ignore[reportUnknownMemberType]
     scores = np.clip(scores, clip_eps, 1.0 - clip_eps)
     return scores
+
+
+def finite_1d(x: Optional[np.ndarray]) -> np.ndarray:
+    if x is None:
+        return np.array([], dtype=float)
+    a = np.asarray(x, dtype=float).ravel()
+    return a[np.isfinite(a)]
+
+
+def align_finite_triplet(
+    cate: np.ndarray,
+    lower: Optional[np.ndarray],
+    upper: Optional[np.ndarray],
+) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Filters to rows where cate is finite. If lower/upper exist and are aligned,
+    also filters them to the same finite mask; otherwise returns them as None.
+
+    Returns: (cate_f, lo_f_or_none, hi_f_or_none)
+    """
+    c = np.asarray(cate, dtype=float).ravel()
+    mask = np.isfinite(c)
+    c_f = c[mask]
+
+    if lower is None or upper is None:
+        return c_f, None, None
+
+    lo = np.asarray(lower, dtype=float).ravel()
+    hi = np.asarray(upper, dtype=float).ravel()
+    if lo.shape != c.shape or hi.shape != c.shape:
+        return c_f, None, None
+
+    lo_f = lo[mask]
+    hi_f = hi[mask]
+    # if intervals contain non-finite, drop them too (but keep cate)
+    good = np.isfinite(lo_f) & np.isfinite(hi_f)
+    if not np.any(good):
+        return c_f, None, None
+
+    # Keep strict alignment only where intervals are finite:
+    return c_f[good], lo_f[good], hi_f[good]
+
+
+def bootstrap_ci_mean(
+    x: np.ndarray,
+    *,
+    n_boot: int = 500,
+    alpha: float = 0.05,
+    seed: int = 0,
+) -> Tuple[float, float, float]:
+    """
+    Percentile bootstrap CI for mean(x). Deterministic given seed.
+    Returns (mean, lo, hi).
+    """
+    a = np.asarray(x, dtype=float).ravel()
+    a = a[np.isfinite(a)]
+    if a.size == 0:
+        return (float("nan"), float("nan"), float("nan"))
+
+    mu = float(np.mean(a))
+    if a.size < 2:
+        return (mu, mu, mu)
+
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, a.size, size=(n_boot, a.size))
+    boots = np.mean(a[idx], axis=1)
+    lo = float(np.quantile(boots, alpha / 2))
+    hi = float(np.quantile(boots, 1 - alpha / 2))
+    return (mu, lo, hi)

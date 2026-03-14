@@ -14,11 +14,11 @@ from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.load_dataset.load_dataset_prompts import load_dataset_node_info, load_dataset_system_prompt
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetPayloadModel, LoadDatasetState
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingError, DatasetProfilingTool
-from python.implementation.workflows.utils.utils import DEFAULT_MODEL_GEMNI, JSONDict
+from python.implementation.workflows.utils.utils import JSONDict
 
 
 def _llm_message_strict(llm: LLMService, *, model_name: str, snapshot: JSONDict) -> str:
-    cfg = LLMConfig(model=model_name, temperature=0.5)
+    cfg = LLMConfig(model="basic", temperature=0.5)
     msg = llm.generate(
         config=cfg,
         system_prompt=load_dataset_system_prompt(),
@@ -44,7 +44,7 @@ class LoadDatasetNode(Node):
         *,
         data_repo: DataRepo,
         llm: LLMService,
-        model_name: str = DEFAULT_MODEL_GEMNI,
+        model_name: str = "basic",
     ) -> None:
         self._data_repo = data_repo
         self._llm = llm

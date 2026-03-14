@@ -1,6 +1,6 @@
 def validate_cleaned_protocol_get_info() -> str:
         return (
-            "Validate cleaned protocol inputs (clean dataset + compiled protocol) prior to transform/encoding. "
+            "Validate cleaned protocol inputs (clean dataset + compiled causal specs) prior to transform/encoding. "
             "Produces FAIL/WARN issues and a user-facing summary."
             "It required only user acceptance to proceed with the cleaned dataset and protocol"
         )

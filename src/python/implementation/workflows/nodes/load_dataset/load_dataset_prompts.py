@@ -19,6 +19,7 @@ You receive a compact JSON snapshot that includes:
 - data summary (if loaded ok): explain in a comprehensive and good way also missing values, types etc.
 - explain the data summary in terms of clinical insights and implications, not just stats. What does it mean for the data to have this many rows/columns/missingness? What should the user be aware of? Clinical implications?
 - error (if failed): a short string reason
+- Also guess the id col in the dataset and say to user that ensure uniqueness
 
 Rules:
 - Do NOT reveal stack traces or internal JSON.

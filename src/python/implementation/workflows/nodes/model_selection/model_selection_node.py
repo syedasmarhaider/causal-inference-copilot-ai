@@ -56,15 +56,15 @@ def _safe_model_dump(x: Any) -> Any:
     return x
 
 def _build_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
-    protocol = deps.compile_protocol.payload.protocol
+    causal_specs = deps.clean_protocol.payload.compiled_causal_spec
     cl = deps.clean_protocol.payload
     vc = deps.validate_clean_protocol.payload
 
-    treatment_spec = getattr(protocol, "treatment_spec", None)
-    outcome_spec = getattr(protocol, "outcome_spec", None)
-    covariates = getattr(protocol, "covariates", None)
-    effect_modifiers = getattr(protocol, "effect_modifiers", None)
-    experiment_type = getattr(protocol, "experiment_type", None)
+    treatment_spec = getattr(causal_specs, "treatment_spec", None)
+    outcome_spec = getattr(causal_specs, "outcome_spec", None)
+    covariates = getattr(causal_specs, "covariates", None)
+    effect_modifiers = getattr(causal_specs, "effect_modifiers", None)
+    experiment_type = getattr(causal_specs, "experiment_type", None)
 
     return {
     
@@ -98,7 +98,6 @@ def _format_shortlist_message(shortlist: _ModelShortlist) -> str:
 @dataclass(frozen=True, slots=True)
 class ModelSelectionNode(Node):
     llm: LLMService
-    model_name: str
 
 
     @property
@@ -145,7 +144,7 @@ class ModelSelectionNode(Node):
                     schema=_ModelShortlist,
                     system_prompt=MODEL_SELECTION_RECOMMENDER_SYSTEM_PROMPT,
                     user_prompt=user_prompt,
-                    config= LLMConfig(temperature=0.2, model=self.model_name),
+                    config= LLMConfig(temperature=1.0, model="pro"),
                     history=messages_history,
                     max_attempts=3,
                 )
@@ -197,7 +196,7 @@ class ModelSelectionNode(Node):
                 schema=ConfirmedModelSelectionPayload,
                 system_prompt=MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
                 user_prompt=negotiator_user_prompt,
-                config= LLMConfig(temperature=0.2, model=self.model_name),
+                config= LLMConfig(temperature=0.2, model="basic"),
                 history=last_12_messages,
                 max_attempts=3,
             )

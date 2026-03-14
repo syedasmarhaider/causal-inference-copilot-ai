@@ -9,7 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import Literal
 
-from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
+from python.domain.service.llm_service import AvailableModelsKey, ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
@@ -30,14 +30,14 @@ log = logging.getLogger(__name__)
 def _llm_call_text(
     *,
     llm: LLMService,
-    model_name: str,
+    model_name: AvailableModelsKey,
     temperature: float,
     system_prompt: str,
     user_payload: dict[str, Any],
     empty_err: str,
     history: Optional[Sequence[ChatMessage]] = None,
 ) -> str:
-    cfg = LLMConfig(model=model_name, temperature=temperature)
+    cfg = LLMConfig(model="basic", temperature=temperature)
     resp = llm.generate(
         config=cfg,
         system_prompt=system_prompt,
@@ -56,9 +56,8 @@ class _MessageAndGateModel(BaseModel):
 class ProtocolDiscussionNode(Node):
     NAME: ClassVar[str] = "PROTOCOL_DISCUSSION"
 
-    def __init__(self, *, llm: LLMService, model_name: str) -> None:
+    def __init__(self, *, llm: LLMService) -> None:
         self._llm = llm
-        self._model_name = model_name
 
     @property
     def name(self) -> str:
@@ -102,7 +101,7 @@ class ProtocolDiscussionNode(Node):
         try:
             updated_discussion = _llm_call_text(
                 llm=self._llm,
-                model_name=self._model_name,
+                model_name="basic",
                 temperature=0.7,
                 system_prompt=get_protocol_discussion_system_prompt(),
                 user_payload=payload,
@@ -141,7 +140,7 @@ class ProtocolDiscussionNode(Node):
                 schema=_MessageAndGateModel,
                 system_prompt=system_prompt,
                 user_prompt=json.dumps(user_payload, ensure_ascii=False),
-                config=LLMConfig(model=self._model_name, temperature=0.2),
+                config=LLMConfig(model="pro", temperature=0.8),
                 history=latest_12_messages,
                 max_attempts=2,
             )

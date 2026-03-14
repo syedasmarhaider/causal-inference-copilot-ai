@@ -1,126 +1,150 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, List, Sequence
+import re
+import time
+from typing import ClassVar, List
 
+import duckdb
 import pandas as pd
-
-from pydantic import BaseModel, ConfigDict, Field
-from typing_extensions import Literal
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from python.domain.models.models import NonEmptyStr
 from python.domain.workflows.tool import Tool
 
-InclusionOperator = Literal["==", "in", "not_in", ">=", "<=", ">", "<"]
 
-
-class InclusionRuleModel(BaseModel):
+class SQLStatements(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    column: NonEmptyStr
-    op: InclusionOperator
-    values: List[NonEmptyStr] = Field(default_factory=list)
+
+    statements: List[NonEmptyStr] = Field(min_length=1)
+    table_name: NonEmptyStr
+    analytic_only: bool
+
+    @model_validator(mode="after")
+    def _validate_statements(self) -> "SQLStatements":
+        if not self.statements:
+            raise ValueError("statements must contain at least one SQL statement")
+        return self
 
 
 @dataclass(frozen=True)
-class DataProcessingTool(Tool):
-    NAME: ClassVar[str] = "DATA_PROCESSING"
-    """
-    Strict semantics:
-      - No value coercion/parsing. Values are applied as provided.
-      - If the operation cannot be applied (dtype mismatch, invalid compare), raise.
-      - Rows with NA in the target column are excluded for all ops.
-      - Rules are ANDed together.
-    """
-    
+class DuckDBSQLExecutionResult:
+    table_name: str
+    executed_statements: List[str]
+    columns: List[str]
+    row_count: int
+    has_result_set: bool
+    elapsed_ms: float
+    dataframe: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class DuckDBInMemorySQLTool(Tool):
+    NAME: ClassVar[str] = "DUCKDB_IN_MEMORY_SQL"
+    _REGISTERED_DF_NAME: ClassVar[str] = "__input_dataframe"
+    _IDENT_RE: ClassVar[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
     def get_tool_name(self) -> str:
-        return "DATA_PROCESSING_TOOL"
-    
+        return self.NAME
+
     def get_tool_info(self) -> str:
-            return "Tool for processing datasets, including applying inclusion rules to filter rows based on column values."
+        return (
+            "Runs SQL statements against an in-memory DuckDB database. "
+            "The provided pandas DataFrame is automatically materialized as a temp table "
+            "using the requested table_name. Statements are executed in order, and the "
+            "final statement result is returned as a pandas DataFrame."
+        )
 
-    def apply_inclusion_rules(
+    def execute(
         self,
-        df: pd.DataFrame,
-        rules: Sequence[InclusionRuleModel],
         *,
-        copy: bool = True,
-        deep_copy: bool = True,
-    ) -> pd.DataFrame:
+        dataframe: pd.DataFrame,
+        sql_request: SQLStatements,
+    ) -> DuckDBSQLExecutionResult:
+        self._validate_dataframe(dataframe)
+        self._validate_identifier(str(sql_request.table_name))
 
-        if not rules:
-            return df.copy(deep=deep_copy) if copy else df
+        statements = [str(statement).strip() for statement in sql_request.statements]
+        table_name = str(sql_request.table_name)
 
-        missing = [str(r.column) for r in rules if str(r.column) not in df.columns]
-        if missing:
-            raise KeyError(
-                f"InclusionRuleModel.column not found in df: {missing}. "
-                f"Available columns: {list(df.columns)}"
+        con = duckdb.connect(":memory:")
+        try:
+            self._register_dataframe_as_table(
+                con=con,
+                dataframe=dataframe,
+                table_name=table_name,
             )
 
-        mask = pd.Series(True, index=df.index)
+            started = time.perf_counter()
 
-        for r in rules:
-            col = str(r.column)
-            s = df[col]
-            non_na = s.notna()
+            last_has_result_set = False
+            last_dataframe = pd.DataFrame()
+            last_columns: List[str] = []
 
-            # Validate values cardinality by op
-            if r.op in ("==", ">=", "<=", ">", "<"):
-                if len(r.values) != 1:
-                    raise ValueError(
-                        f"Rule on '{col}' with op '{r.op}' requires exactly 1 value; got {len(r.values)}."
-                    )
-            elif r.op in ("in", "not_in"):
-                if len(r.values) < 1:
-                    raise ValueError(f"Rule on '{col}' with op '{r.op}' requires a non-empty values list.")
+            for statement in statements:
+                con.execute(statement)
 
-            try:
-                rule_mask = self._apply_op(series=s, non_na=non_na, op=r.op, values=r.values, column=col)
-            except Exception as e:
-                # Wrap with context, preserve original exception as cause
-                raise TypeError(
-                    f"Failed applying inclusion rule: column='{col}', op='{r.op}', "
-                    f"values={r.values}, series_dtype='{s.dtype}'. Reason: {e}"
-                ) from e
+                description = con.description
+                has_result_set = bool(description)
 
-            mask &= rule_mask
-            if not mask.any():
-                out = df.iloc[0:0]
-                return out.copy(deep=deep_copy) if copy else out
+                if has_result_set:
+                    result_df = con.fetchdf()
+                    result_columns = [str(col) for col in result_df.columns]
+                else:
+                    result_df = pd.DataFrame()
+                    result_columns = []
 
-        out = df.loc[mask]
-        return out.copy(deep=deep_copy) if copy else out
+                last_has_result_set = has_result_set
+                last_dataframe = result_df
+                last_columns = result_columns
+
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+            return DuckDBSQLExecutionResult(
+                table_name=table_name,
+                executed_statements=statements,
+                columns=last_columns,
+                row_count=int(len(last_dataframe)),
+                has_result_set=last_has_result_set,
+                elapsed_ms=elapsed_ms,
+                dataframe=last_dataframe,
+            )
+        finally:
+            con.close()
 
     @staticmethod
-    def _apply_op(
+    def _validate_dataframe(dataframe: pd.DataFrame) -> None:
+        if len(dataframe.columns) == 0:
+            raise ValueError("dataframe must have at least one column")
+
+        duplicate_columns = dataframe.columns[dataframe.columns.duplicated()].tolist()
+        if duplicate_columns:
+            duplicate_columns = [str(col) for col in duplicate_columns]
+            raise ValueError(
+                f"dataframe has duplicate column names: {duplicate_columns}"
+            )
+
+    @classmethod
+    def _validate_identifier(cls, value: str) -> None:
+        if not cls._IDENT_RE.fullmatch(value):
+            raise ValueError(
+                f"Invalid table_name '{value}'. "
+                "Allowed pattern: [A-Za-z_][A-Za-z0-9_]*"
+            )
+
+    def _register_dataframe_as_table(
+        self,
         *,
-        series: pd.Series,
-        non_na: pd.Series,
-        op: InclusionOperator,
-        values: List[str],
-        column: str,
-    ) -> pd.Series:
-        if op == "==":
-            v = values[0]
-            return non_na & (series == v)
+        con: duckdb.DuckDBPyConnection,
+        dataframe: pd.DataFrame,
+        table_name: str,
+    ) -> None:
+        con.register(self._REGISTERED_DF_NAME, dataframe)
+        con.execute(
+            f"CREATE OR REPLACE TEMP TABLE {self._quote_ident(table_name)} AS "
+            f"SELECT * FROM {self._quote_ident(self._REGISTERED_DF_NAME)}"
+        )
 
-        if op == "in":
-            # pandas will compare as-is; if dtype mismatch causes odd behavior, that's on the data/spec
-            return non_na & series.isin(values)
-
-        if op == "not_in":
-            return non_na & ~series.isin(values)
-
-        # Comparisons: will raise if invalid (e.g., numeric column vs string threshold, etc.)
-        v = values[0]
-        if op == ">=":
-            return non_na & (series >= v)
-        if op == "<=":
-            return non_na & (series <= v)
-        if op == ">":
-            return non_na & (series > v)
-        if op == "<":
-            return non_na & (series < v)
-
-        # should be unreachable due to Literal typing
-        raise ValueError(f"Unsupported op '{op}' for column '{column}'.")
+    @staticmethod
+    def _quote_ident(value: str) -> str:
+        return '"' + value.replace('"', '""') + '"'

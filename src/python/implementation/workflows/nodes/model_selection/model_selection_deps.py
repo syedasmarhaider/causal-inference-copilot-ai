@@ -7,7 +7,6 @@ from typing import Sequence, TypeVar
 from python.domain.workflows.state import State
 
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
-from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import ValidateCleanProtocolState
 
@@ -18,7 +17,6 @@ T = TypeVar("T", bound=State)
 
 @dataclass(frozen=True, slots=True)
 class ModelSelectionDeps:
-    compile_protocol: CompileProtocolState
     clean_protocol: CleanProtocolState
     validate_clean_protocol: ValidateCleanProtocolState
 
@@ -26,7 +24,6 @@ class ModelSelectionDeps:
     def pre_required_states_names(cls) -> Sequence[str]:
         return (
             LoadDatasetState.NAME,
-            CompileProtocolState.NAME,
             CleanProtocolState.NAME,
             ValidateCleanProtocolState.NAME,
         )
@@ -44,12 +41,10 @@ class ModelSelectionDeps:
                 )
             return st
 
-        cp = _get(CompileProtocolState.NAME, CompileProtocolState)
         cl = _get(CleanProtocolState.NAME, CleanProtocolState)
         vc = _get(ValidateCleanProtocolState.NAME, ValidateCleanProtocolState)
 
         return cls(
-            compile_protocol=cp,
             clean_protocol=cl,
             validate_clean_protocol=vc,
         )

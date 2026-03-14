@@ -6,8 +6,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence
 from uuid import UUID
 
-from openai import BaseModel
-from pydantic import ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
@@ -31,7 +30,6 @@ from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cl
     validate_min_rows,
     validate_outcome,
     validate_protocol_role_columns_invariants,
-    validate_time_zero_semantics_protocol,
 
     # ---- covariates + effect modifiers ----
     validate_covariate_and_effect_modifier_presence,
@@ -44,6 +42,7 @@ from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cl
     validate_overlap_and_positivity,
     validate_treatment,
 )
+from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
 log = logging.getLogger(__name__)
@@ -53,7 +52,6 @@ log = logging.getLogger(__name__)
 class ValidateCleanProtocolNode(Node):
     data_repo: DataRepo
     llm: LLMService
-    model_name: str
 
     NAME: ClassVar[str] = ValidateCleanProtocolState.NAME
 
@@ -81,8 +79,10 @@ class ValidateCleanProtocolNode(Node):
             # ----------------------------
             # Guardrails: upstream sanity
             # ----------------------------
-            proto = deps.compile_protocol.payload.protocol
-            assert proto is not None, "CompileProtocolState must provide a compiled protocol for validation."
+            causal_specs = deps.clean_protocol.payload.compiled_causal_spec
+            assert causal_specs is not None, (
+                "CleanProtocolState must provide latest compiled_causal_spec for validation."
+            )
 
             clean_id = deps.clean_protocol.payload.clean_dataset_id
             assert clean_id is not None, "CleanProtocolState must provide a clean_dataset_id for validation."
@@ -108,7 +108,7 @@ class ValidateCleanProtocolNode(Node):
             # =========================================================================
             # 0) Protocol-only invariants (no df required)
             # =========================================================================
-            issues = validate_protocol_role_columns_invariants(proto)
+            issues = validate_protocol_role_columns_invariants(causal_specs)
             all_issues.extend(issues)
             metrics["protocol_role_invariants"] = {
                 "n_issues": int(len(issues)),
@@ -123,21 +123,17 @@ class ValidateCleanProtocolNode(Node):
             all_issues.extend(issues)
             metrics["min_rows"] = m
 
-            issues, m = validate_time_zero_semantics_protocol(df, proto)
-            all_issues.extend(issues)
-            metrics["time_zero"] = m
-
             # =========================================================================
             # 2) Treatment validations (ProtocolSpec-native)
             # =========================================================================
-            issues, m = validate_treatment(df=df, protocol=proto)
+            issues, m = validate_treatment(df=df, causal_spec=causal_specs)
             all_issues.extend(issues)
             metrics["treatment"] = m
 
             # =========================================================================
             # 3) Outcome validations (ProtocolSpec-native)
             # =========================================================================
-            issues, m = validate_outcome(df=df, protocol=proto)
+            issues, m = validate_outcome(df=df, causal_spec=causal_specs)
             all_issues.extend(issues)
             metrics["outcome"] = m
 
@@ -149,29 +145,29 @@ class ValidateCleanProtocolNode(Node):
             # =========================================================================
             issues, m = validate_covariate_and_effect_modifier_presence(
                 df=df,
-                protocol=proto,
+                causal_spec=causal_specs,
                 require_covariates=False,
             )
             all_issues.extend(issues)
             metrics["covariate_effect_modifier_presence"] = m
 
-            issues, m = validate_covariate_and_effect_modifier_missingness(df=df, protocol=proto)
+            issues, m = validate_covariate_and_effect_modifier_missingness(df=df, causal_spec=causal_specs)
             all_issues.extend(issues)
             metrics["covariate_effect_modifier_missingness"] = m
 
-            issues, m = validate_covariate_and_effect_modifier_missingness_by_treatment(df=df, protocol=proto)
+            issues, m = validate_covariate_and_effect_modifier_missingness_by_treatment(df=df, causal_spec=causal_specs)
             all_issues.extend(issues)
             metrics["covariate_effect_modifier_missingness_by_treatment"] = m
 
-            issues, m = validate_covariate_and_effect_modifier_constantness(df=df, protocol=proto)
+            issues, m = validate_covariate_and_effect_modifier_constantness(df=df, causal_spec=causal_specs)
             all_issues.extend(issues)
             metrics["covariate_effect_modifier_constantness"] = m
 
-            issues, m = validate_covariate_and_effect_modifier_high_cardinality_and_id_like(df=df, protocol=proto)
+            issues, m = validate_covariate_and_effect_modifier_high_cardinality_and_id_like(df=df, causal_spec=causal_specs)
             all_issues.extend(issues)
             metrics["covariate_effect_modifier_cardinality_idlike"] = m
 
-            issues, m = validate_covariate_and_effect_modifier_type_risks(df=df, protocol=proto)
+            issues, m = validate_covariate_and_effect_modifier_type_risks(df=df, causal_spec=causal_specs)
             all_issues.extend(issues)
             metrics["covariate_effect_modifier_type_risks"] = m
 
@@ -184,7 +180,7 @@ class ValidateCleanProtocolNode(Node):
             try:
                 issues, m = validate_overlap_and_positivity(
                     df=df,
-                    protocol=proto,
+                    causal_spec=causal_specs,
                     require_covariates=False,
                     use_effect_modifiers_univariate=True,
                     enable_propensity_proxy=True,
@@ -211,7 +207,7 @@ class ValidateCleanProtocolNode(Node):
 
             msg = self._make_user_message(
                 messages_history=messages_history,
-                protocol_summary=self._protocol_summary(proto),
+                protocol_summary=self._protocol_summary(causal_specs),
                 metrics=metrics,
                 issues=[i.model_dump(mode="json") for i in issue_models],
                 has_fail=has_fail,
@@ -288,9 +284,9 @@ class ValidateCleanProtocolNode(Node):
         )
         return ValidateCleanProtocolState(payload=payload)
 
-    def _protocol_summary(self, proto: Any) -> Dict[str, Any]:
+    def _protocol_summary(self, causal_spec: CausalSpec) -> Dict[str, Any]:
         # outcome cols summary
-        ospec = getattr(proto, "outcome_spec", None)
+        ospec = getattr(causal_spec, "outcome_spec", None)
         out_cols: List[str] = []
         if ospec is not None:
             if getattr(ospec, "kind", None) == "duration":
@@ -305,14 +301,14 @@ class ValidateCleanProtocolNode(Node):
                     out_cols = [y]
 
         return {
-            "treatment_col": getattr(getattr(proto, "treatment_spec", None), "column", None),
-            "treatment_kind": getattr(getattr(proto, "treatment_spec", None), "kind", None),
+            "treatment_col": getattr(getattr(causal_spec, "treatment_spec", None), "column", None),
+            "treatment_kind": getattr(getattr(causal_spec, "treatment_spec", None), "kind", None),
             "outcome_kind": getattr(ospec, "kind", None) if ospec is not None else None,
             "outcome_cols": out_cols,
-            "time_zero_type": getattr(proto, "time_zero_type", None),
-            "time_zero": getattr(proto, "time_zero", None),
-            "n_covariates": int(len(list(getattr(proto, "covariates", []) or []))),
-            "n_effect_modifiers": int(len(list(getattr(proto, "effect_modifiers", []) or []))),
+            "time_zero_type": getattr(causal_spec, "time_zero_type", None),
+            "time_zero": getattr(causal_spec, "time_zero", None),
+            "n_covariates": int(len(list(getattr(causal_spec, "covariates", []) or []))),
+            "n_effect_modifiers": int(len(list(getattr(causal_spec, "effect_modifiers", []) or []))),
         }
        
 
@@ -333,7 +329,7 @@ class ValidateCleanProtocolNode(Node):
             }
             msg = self.llm.generate_json(
                 schema=_UserAcceptanceModel,
-                config=LLMConfig(model=self.model_name, temperature=0.6),
+                config=LLMConfig(model="basic", temperature=0.6),
                 system_prompt=VALIDATE_CLEAN_PROTOCOL_PROMPT,
                 user_prompt=json.dumps(user_payload, ensure_ascii=False),
                 history=messages_history,

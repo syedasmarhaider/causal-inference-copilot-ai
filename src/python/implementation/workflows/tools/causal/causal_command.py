@@ -23,12 +23,12 @@ class BaseCommand:
     model_name: str
     dataset_id: UUID
     run_id: UUID
-    order_X: Optional[List[str]] = None
-    order_W: Optional[List[str]] = None
+    order_effect_modifiers: Optional[List[str]] = None
+    order_covariates: Optional[List[str]] = None
     data_summary: DatasetSummaryModel
     transformation_plan: Optional[TransformPlan] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    protocol_specs: CausalSpec
+    causal_specs: CausalSpec
     options: Dict[str, Any] = field(default_factory=lambda: {})
 
 
@@ -138,6 +138,7 @@ FilterOp = Literal["==", "!=","in", "not_in", ">=", "<=", ">", "<"]
 @dataclass(frozen=True, slots=True)
 class CATEInputs:
     x_rows: pd.DataFrame   # already-transformed X in exact training columns/order
+    counterfactual: bool = False
     alpha: float = 0.05
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -157,7 +158,7 @@ class CATESuccess(BaseResult):
     fitted_model_id: UUID
     x_cols: List[str]
     # one item per contrast (binary -> 1 item, categorical -> many items)
-    effects: List[Dict[CATEModelResult, Any]] = field(default_factory=lambda: [])
+    effects: Dict[CATEModelResult, Any] = field(default_factory=lambda: {})
     status: Literal["SUCCEEDED"] = field(init=False, default="SUCCEEDED")
 
 

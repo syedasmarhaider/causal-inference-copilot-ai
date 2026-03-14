@@ -2,11 +2,13 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 import inspect
+import math
+import numbers
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Type
 import numpy as np
 import pandas as pd
 
-from python.implementation.workflows.tools.causal.causal_spec import BinaryOutcomeSpecModel, CausalSpec
+from python.implementation.workflows.tools.causal.causal_spec import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.tools.causal.encoding_plan import CatOneHotParams, DateTimeEpochParams, DropParams, EncodingPresetSpec, MapBinaryParams, MapOrdinalParams, NumLog1pParams, NumMinMaxParams, NumStandardParams, PassthroughParams, TransformPlan
 
@@ -160,22 +162,115 @@ def has_missing(arr: Any) -> bool:
         return bool(pd.isna(a).any())
 
 
+DiscreteKey = Tuple[str, Any]
+
+
+def _normalize_discrete_literal(v: Any) -> DiscreteKey:
+    try:
+        if pd.isna(v):
+            return ("na", None)
+    except Exception:
+        pass
+
+    if isinstance(v, (bool, np.bool_)):
+        return ("bool", bool(v))
+
+    if isinstance(v, (numbers.Integral, np.integer)) and not isinstance(
+        v, (bool, np.bool_)
+    ):
+        return ("num", float(v))
+
+    if isinstance(v, (numbers.Real, np.floating)) and not isinstance(
+        v, (bool, np.bool_)
+    ):
+        fv = float(v)
+        if math.isfinite(fv):
+            return ("num", fv)
+        return ("str", str(v).strip().casefold())
+
+    if isinstance(v, str):
+        s = v.strip()
+        if s == "":
+            return ("str", "")
+
+        s_fold = s.casefold()
+        if s_fold == "true":
+            return ("bool", True)
+        if s_fold == "false":
+            return ("bool", False)
+
+        try:
+            fv = float(s_fold)
+            if math.isfinite(fv):
+                return ("num", fv)
+        except Exception:
+            pass
+
+        return ("str", s_fold)
+
+    return ("str", str(v).strip().casefold())
+
+
 def get_input_params_from_spec(
     df: pd.DataFrame,
     specs: CausalSpec,
     *,
-    order_X: Optional[List[str]] = None,
-    order_W: Optional[List[str]] = None,
+    effect_modifiers_order: Optional[List[str]] = None,
+    covariates_order: Optional[List[str]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, Any]]:
 
-    y_col = str(specs.Y.column)
-    t_col = str(specs.T.column)
+    def _map_binary_series(
+        ser: pd.Series,
+        *,
+        positive_value: Any,
+        negative_value: Any,
+        kind_label: str,
+        col_name: str,
+    ) -> np.ndarray:
+        if ser.isna().any():
+            raise ValueError(f"Binary {kind_label} {col_name!r} contains missing values.")
 
-    x_cols = [str(c) for c in (specs.X or [])]
-    w_cols = [str(c) for c in (specs.W or [])]
+        pos = _normalize_discrete_literal(positive_value)
+        neg = _normalize_discrete_literal(negative_value)
 
-    X_order = [str(c) for c in (order_X if order_X is not None else x_cols)]
-    W_order = [str(c) for c in (order_W if order_W is not None else w_cols)]
+        if pos == neg:
+            raise ValueError(
+                f"Binary {kind_label} spec for {col_name!r} is invalid: "
+                f"positive and negative labels collapse after semantic normalization."
+            )
+
+        vals = ser.to_numpy()
+        out = np.empty(len(vals), dtype=float)
+
+        for i, v in enumerate(vals):
+            vv = _normalize_discrete_literal(v)
+            if vv == pos:
+                out[i] = 1.0
+            elif vv == neg:
+                out[i] = 0.0
+            else:
+                raise ValueError(
+                    f"Unmapped binary {kind_label} value {v!r} for column {col_name!r}. "
+                    f"Expected values equivalent to {positive_value!r} or {negative_value!r} "
+                    f"after semantic normalization."
+                )
+
+        return out
+
+    y_spec = specs.outcome_spec
+    t_spec = specs.treatment_spec
+
+    y_col = str(y_spec.column)
+    t_col = str(t_spec.column)
+
+    # EconML convention:
+    # X = effect modifiers / heterogeneity features
+    # W = covariates / controls
+    x_cols = [str(c) for c in specs.effect_modifiers]
+    w_cols = [str(c) for c in specs.covariates]
+
+    X_order = [str(c) for c in (effect_modifiers_order if effect_modifiers_order is not None else x_cols)]
+    W_order = [str(c) for c in (covariates_order if covariates_order is not None else w_cols)]
 
     validate_columns_exist(df, [y_col, t_col] + X_order + W_order)
 
@@ -184,53 +279,43 @@ def get_input_params_from_spec(
     t_ser = df[t_col]
 
     # ---- Outcome Y ----
-    if isinstance(specs.Y, BinaryOutcomeSpecModel):
-        if y_ser.isna().any():
-            raise ValueError(f"Binary outcome {y_col!r} contains missing values.")
-
-        if pd.api.types.is_bool_dtype(y_ser.dtype):
-            Y = y_ser.astype(int).to_numpy(dtype=float)  # 0.0/1.0
-        elif pd.api.types.is_numeric_dtype(y_ser.dtype):
-            uniq = set(pd.unique(y_ser))
-            if not uniq.issubset({0, 1, 0.0, 1.0, True, False}):
-                raise ValueError(f"Binary numeric outcome {y_col!r} must be 0/1; got {list(uniq)[:10]!r}")
-            Y = (y_ser.astype(float) == 1.0).to_numpy(dtype=float)
-        else:
-            # map strings via event_values/non_event_values
-            pos = set(getattr(specs.Y, "event_values", []) or [])
-            neg = set(getattr(specs.Y, "non_event_values", []) or [])
-            if not pos or not neg:
-                raise ValueError(
-                    f"Binary outcome {y_col!r} is non-numeric but event_values/non_event_values are missing."
-                )
-            vals = y_ser.to_numpy()
-            out = np.empty(len(vals), dtype=float)
-            for i, v in enumerate(vals):
-                if v in pos:
-                    out[i] = 1.0
-                elif v in neg:
-                    out[i] = 0.0
-                else:
-                    raise ValueError(f"Unmapped binary outcome value {v!r} for column {y_col!r}.")
-            Y = out
+    if isinstance(y_spec, BinaryOutcomeSpecModel):
+        y = _map_binary_series(
+            y_ser,
+            positive_value=y_spec.event,
+            negative_value=y_spec.non_event,
+            kind_label="outcome",
+            col_name=y_col,
+        )
     else:
-        # continuous/other: must be numeric for EconML
         if y_ser.isna().any():
             raise ValueError(f"Outcome {y_col!r} contains missing values.")
-        Y = pd.to_numeric(y_ser, errors="raise").to_numpy(dtype=float)
+        y = pd.to_numeric(y_ser, errors="raise").to_numpy(dtype=float)
 
-    # ---- Treatment T (at minimum: make it 1D numeric) ----
-    if t_ser.isna().any():
-        raise ValueError(f"Treatment {t_col!r} contains missing values.")
-    T = t_ser.to_numpy()
+    # ---- Treatment T ----
+    if isinstance(t_spec, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
+        T = _map_binary_series(
+            t_ser,
+            positive_value=t_spec.treated,
+            negative_value=t_spec.control,
+            kind_label="treatment",
+            col_name=t_col,
+        )
+    else:
+        # unreachable with current schema, but kept defensive
+        if t_ser.isna().any():
+            raise ValueError(f"Treatment {t_col!r} contains missing values.")
+        T = pd.to_numeric(t_ser, errors="raise").to_numpy(dtype=float)
 
     # ---- X/W ----
     X = df[X_order].to_numpy() if X_order else None
     W = df[W_order].to_numpy() if W_order else None
 
-    # Hard guard: never let object arrays reach EconML
-    if np.asarray(Y).dtype == object:
-        raise ValueError(f"Outcome {y_col!r} resolved to dtype=object. Example={Y[:5]!r}")
+    # Hard guard: never let object arrays for Y/T reach EconML
+    if np.asarray(y).dtype == object:
+        raise ValueError(f"Outcome {y_col!r} resolved to dtype=object. Example={y[:5]!r}")
+    if np.asarray(T).dtype == object:
+        raise ValueError(f"Treatment {t_col!r} resolved to dtype=object. Example={T[:5]!r}")
 
     overlap_XW = sorted(set(X_order).intersection(W_order))
 
@@ -243,33 +328,37 @@ def get_input_params_from_spec(
         "W_order": W_order,
         "overlap_XW": overlap_XW,
     }
-    return Y, T, X, W, meta
+    return y, T, X, W, meta
 
 
+def get_treatment_t0_t1_from_spec(spec: CausalSpec, is_global_counter_factual: bool) -> tuple[float, float]:
+    if spec.treatment_spec.kind == "binary":
+        return (1.0, 0.0) if is_global_counter_factual else (0.0, 1.0)
+    raise ModelSpecError(
+        f"Unsupported treatment kind {spec.treatment_spec.kind!r} for encoded treatment contrast."
+    )
 
 def validate_semantic_consistency(spec: CausalSpec, init_kwargs: Mapping[str, Any]) -> None:
     """
     If the user provided options contradict the declared CausalSpec, fail fast.
     Keep it minimal.
     """
-    t_kind = getattr(spec.T, "kind", None)
-    y_kind = getattr(spec.Y, "kind", None)
+    t_kind = getattr(spec.treatment_spec, "kind", None)
+    y_kind = getattr(spec.outcome_spec, "kind", None)
 
-    if y_kind == "binary" and "discrete_outcome" in init_kwargs and not bool(init_kwargs["discrete_outcome"]):
-        raise ModelSpecError("Spec declares binary outcome but options.discrete_outcome is False.")
+    if y_kind == "binary":
+        discrete_outcome = init_kwargs.get("discrete_outcome")
+        if discrete_outcome is not None and not bool(discrete_outcome):
+            raise ModelSpecError(
+                "Spec declares binary outcome but options.discrete_outcome is False."
+            )
 
-    if t_kind in ("binary", "categorical") and "discrete_treatment" in init_kwargs and not bool(init_kwargs["discrete_treatment"]):
-        raise ModelSpecError("Spec declares discrete treatment but options.discrete_treatment is False.")
-
-    if t_kind == "categorical":
-        baseline = getattr(spec.T, "baseline", None)
-        if baseline is not None and "categories" in init_kwargs:
-            cats = init_kwargs["categories"]
-            if isinstance(cats, list) and cats:
-                if cats[0] != baseline:
-                    raise ModelSpecError(
-                        f"Spec baseline={baseline!r} must be the FIRST category (control). Got categories[0]={cats[0]!r}."
-                    )
+    if t_kind == "binary":
+        discrete_treatment = init_kwargs.get("discrete_treatment")
+        if discrete_treatment is not None and not bool(discrete_treatment):
+            raise ModelSpecError(
+                "Spec declares binary treatment but options.discrete_treatment is False."
+            )
 
 
 
@@ -289,44 +378,6 @@ def serialize_inference_obj(obj: Any) -> Dict[str, Any]:
             pass
     return {"type": "repr", "data": repr(obj)}
 
-def categorical_t0_t1_pairs(spec: CausalSpec) -> Tuple[Any, List[Any]]:
-    """
-    For categorical treatments:
-      - t0 = baseline if provided else levels[0]
-      - t1s = all other levels in order
-
-    Returns:
-      (t0, t1_list)
-
-    Raises:
-      ValueError if spec.T is not categorical or levels invalid.
-    """
-    t = spec.T
-    if getattr(t, "kind", None) != "categorical":
-        raise ValueError("categorical_t0_t1_pairs requires spec.T.kind == 'categorical'.")
-
-    levels: List[Any] = list(getattr(t, "levels", None) or [])
-    if len(levels) < 2:
-        raise ValueError("Categorical treatment requires at least 2 levels.")
-
-    t0 = getattr(t, "baseline", None) if getattr(t, "baseline", None) is not None else levels[0]
-    if t0 not in levels:
-        raise ValueError(f"baseline {t0!r} must be one of levels={levels!r}.")
-
-    t1s = [lv for lv in levels if lv != t0]
-    if not t1s:
-        raise ValueError("No target levels found after removing baseline from levels.")
-
-    return t0, t1s
-
-
-def expand_categorical_contrasts(spec: CausalSpec) -> List[Dict[str, Any]]:
-    """
-    Returns a list of contrasts suitable for computing ATE per target:
-      [{"t0": t0, "t1": t1}, ...]
-    """
-    t0, t1s = categorical_t0_t1_pairs(spec)
-    return [{"t0": t0, "t1": t1} for t1 in t1s]
 
 def materialize_x_query(
     *,
