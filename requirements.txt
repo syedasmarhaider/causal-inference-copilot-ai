@@ -18,3 +18,4 @@ langchain-openai
 matplotlib
 langfuse
 duckdb
+firebase-admin

@@ -13,10 +13,16 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     def __init__(
         self,
         *,
-        root_ref: Any,
+        app: Any,
+        root_path: str = "/workflows",
         state_classes_by_name: Mapping[str, Type[State]],
     ) -> None:
-        self._root_ref = root_ref
+        if not root_path.strip():
+            raise ValueError("root_path must be a non-empty string")
+
+        from firebase_admin import db
+
+        self._root_ref = db.reference(root_path, app=app)
         self._state_classes_by_name = dict(state_classes_by_name)
 
     # -----------------------

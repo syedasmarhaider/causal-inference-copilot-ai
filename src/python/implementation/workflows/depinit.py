@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Mapping, Optional, Type
 
+import firebase_admin
+from firebase_admin import credentials
+
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
@@ -33,7 +36,6 @@ from python.implementation.workflows.workflow_app import WorkflowApp
 @dataclass(frozen=True)
 class FirebaseRealtimeRepoSettings:
     database_url: Optional[str] = None
-    credentials_path: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -121,28 +123,14 @@ def _make_firebase_workflow_state_repo(
     state_classes_by_name: Mapping[str, Type[State]],
 ) -> WorkflowStateRepo:
     if not settings.database_url:
-        raise ValueError(
-            "firebase_repo.database_url must be configured when workflow_repo_backend='firebase_rtdb'"
-        )
-
-    try:
-        import firebase_admin
-        from firebase_admin import credentials, db
-    except ImportError as exc:
-        raise RuntimeError(
-            "firebase-admin is required when workflow_repo_backend='firebase_rtdb'"
-        ) from exc
+        raise ValueError("firebase_repo.database_url must be configured")
 
     try:
         app = firebase_admin.get_app()
     except ValueError:
-        if settings.credentials_path is not None:
-            credential = credentials.Certificate(str(settings.credentials_path))
-        else:
-            credential = credentials.ApplicationDefault()
         app = firebase_admin.initialize_app(
-            credential=credential,
-            options={"databaseURL": settings.database_url},
+            credentials.ApplicationDefault(),
+            {"databaseURL": settings.database_url},
         )
 
     from python.implementation.repo.firebase_realtime_workflow_state_repo import (
@@ -150,6 +138,7 @@ def _make_firebase_workflow_state_repo(
     )
 
     return FirebaseRealtimeWorkflowStateRepo(
-        root_ref=db.reference("/workflows", app=app),
+        app=app,
+        root_path="/workflows",
         state_classes_by_name=state_classes_by_name,
     )
