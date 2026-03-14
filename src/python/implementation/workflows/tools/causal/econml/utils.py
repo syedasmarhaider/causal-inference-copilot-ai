@@ -2,6 +2,8 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 import inspect
+import math
+import numbers
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Type
 import numpy as np
 import pandas as pd
@@ -160,6 +162,55 @@ def has_missing(arr: Any) -> bool:
         return bool(pd.isna(a).any())
 
 
+DiscreteKey = Tuple[str, Any]
+
+
+def _normalize_discrete_literal(v: Any) -> DiscreteKey:
+    try:
+        if pd.isna(v):
+            return ("na", None)
+    except Exception:
+        pass
+
+    if isinstance(v, (bool, np.bool_)):
+        return ("bool", bool(v))
+
+    if isinstance(v, (numbers.Integral, np.integer)) and not isinstance(
+        v, (bool, np.bool_)
+    ):
+        return ("num", float(v))
+
+    if isinstance(v, (numbers.Real, np.floating)) and not isinstance(
+        v, (bool, np.bool_)
+    ):
+        fv = float(v)
+        if math.isfinite(fv):
+            return ("num", fv)
+        return ("str", str(v).strip().casefold())
+
+    if isinstance(v, str):
+        s = v.strip()
+        if s == "":
+            return ("str", "")
+
+        s_fold = s.casefold()
+        if s_fold == "true":
+            return ("bool", True)
+        if s_fold == "false":
+            return ("bool", False)
+
+        try:
+            fv = float(s_fold)
+            if math.isfinite(fv):
+                return ("num", fv)
+        except Exception:
+            pass
+
+        return ("str", s_fold)
+
+    return ("str", str(v).strip().casefold())
+
+
 def get_input_params_from_spec(
     df: pd.DataFrame,
     specs: CausalSpec,
@@ -167,11 +218,6 @@ def get_input_params_from_spec(
     effect_modifiers_order: Optional[List[str]] = None,
     covariates_order: Optional[List[str]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, Any]]:
-
-    def _norm_label(v: Any) -> Any:
-        if isinstance(v, str):
-            return v.strip().casefold()
-        return v
 
     def _map_binary_series(
         ser: pd.Series,
@@ -184,20 +230,20 @@ def get_input_params_from_spec(
         if ser.isna().any():
             raise ValueError(f"Binary {kind_label} {col_name!r} contains missing values.")
 
-        pos = _norm_label(positive_value)
-        neg = _norm_label(negative_value)
+        pos = _normalize_discrete_literal(positive_value)
+        neg = _normalize_discrete_literal(negative_value)
 
         if pos == neg:
             raise ValueError(
                 f"Binary {kind_label} spec for {col_name!r} is invalid: "
-                f"positive and negative labels collapse after normalization."
+                f"positive and negative labels collapse after semantic normalization."
             )
 
         vals = ser.to_numpy()
         out = np.empty(len(vals), dtype=float)
 
         for i, v in enumerate(vals):
-            vv = _norm_label(v)
+            vv = _normalize_discrete_literal(v)
             if vv == pos:
                 out[i] = 1.0
             elif vv == neg:
@@ -206,7 +252,7 @@ def get_input_params_from_spec(
                 raise ValueError(
                     f"Unmapped binary {kind_label} value {v!r} for column {col_name!r}. "
                     f"Expected values equivalent to {positive_value!r} or {negative_value!r} "
-                    f"after strip/casefold normalization."
+                    f"after semantic normalization."
                 )
 
         return out
