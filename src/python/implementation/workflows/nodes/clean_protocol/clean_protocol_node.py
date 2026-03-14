@@ -21,9 +21,10 @@ from python.implementation.workflows.nodes.clean_protocol.clean_protocol_deps im
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_prompts import (
     CLEAN_PROTOCOL_COMPATIBILITY_FAILURE_PROMPT,
     CLEAN_PROTOCOL_FINAL_ACCEPTANCE_PROMPT,
+    CLEAN_PROTOCOL_INITIAL_COMPILE_SPEC_PROMPT,
     CLEAN_PROTOCOL_INTENT_GATE_PROMPT,
     CLEAN_PROTOCOL_ITERATION_MESSAGE_PROMPT,
-    CLEAN_PROTOCOL_RECOMPILE_SPEC_PROMPT,
+    CLEAN_PROTOCOL_REFRESH_SPEC_PROMPT,
     CLEAN_PROTOCOL_SQL_PLAN_PROMPT,
     get_clean_protocol_node_info,
 )
@@ -55,7 +56,7 @@ log = logging.getLogger(__name__)
 class _IntentGateModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    action: Literal["MODIFY", "ACCEPT", "ABORT"]
+    action: Literal["MODIFY", "ACCEPT", "CHANGE_PROTOCOL_DISCUSSION", "ABORT"]
     reason: str
     reply_to_user: str
 
@@ -119,23 +120,19 @@ class CleanProtocolNode(Node):
                     reason="LOAD_DATASET.id is missing; cannot load data.",
                 )
 
-            initial_causal_spec = deps.compile_protocol.payload.causal_specs
-            if initial_causal_spec is None:
+            protocol_discussion = deps.protocol_discussion.payload.discussion.strip()
+            if not protocol_discussion:
                 return self._abort_state(
                     payload=state.payload,
-                    message="Causal specs are missing. Re-run COMPILE_PROTOCOL.",
-                    reason="COMPILE_PROTOCOL produced no causal specs.",
+                    message=(
+                        "Protocol discussion is missing, so I cannot build the causal "
+                        "specs for cleaning. Please return to protocol discussion."
+                    ),
+                    reason="PROTOCOL_DISCUSSION discussion is empty.",
                 )
-            active_causal_spec = (
-                state.payload.compiled_causal_spec or initial_causal_spec
-            )
-
-            protocol_discussion = deps.protocol_discussion.payload.discussion.strip()
 
             first_run = _is_first_run(state.payload)
-            source_dataset_id = (
-                dataset_id if first_run else  state.payload.clean_dataset_id
-            )
+            source_dataset_id = dataset_id if first_run else state.payload.clean_dataset_id
             if source_dataset_id is None:
                 return self._abort_state(
                     payload=state.payload,
@@ -152,35 +149,103 @@ class CleanProtocolNode(Node):
             if source_df.empty and int(source_df.shape[1]) == 0:
                 return self._abort_state(
                     payload=state.payload,
-                    message="Current dataset has zero rows and zero columns; cleaning cannot continue.",
-                    reason=f"Dataset is empty and has no columns (dataset_id={source_dataset_id}).",
+                    message=(
+                        "Current dataset has zero rows and zero columns; cleaning "
+                        "cannot continue."
+                    ),
+                    reason=(
+                        "Dataset is empty and has no columns "
+                        f"(dataset_id={source_dataset_id})."
+                    ),
                 )
 
             recent_history = messages_history[-12:] if messages_history else None
 
             if first_run:
+                source_summary = self._extract_summary(
+                    tool=data_profiling_tool,
+                    df=source_df,
+                )
+                try:
+                    initial_causal_spec = self._compile_initial_causal_spec(
+                        history=recent_history,
+                        protocol_discussion=protocol_discussion,
+                        dataset_summary=source_summary,
+                    )
+                except Exception as e:
+                    return self._abort_state(
+                        payload=state.payload,
+                        message=(
+                            "I could not translate the current protocol discussion into "
+                            "causal specs for cleaning. Please revise the protocol "
+                            "discussion and try again."
+                        ),
+                        reason=(
+                            "Failed to compile causal specs from PROTOCOL_DISCUSSION: "
+                            f"{e!r}"
+                        ),
+                    )
+
                 return self._run_modify_iteration(
                     user_id=user_id,
                     conversation_id=conversation_id,
                     source_dataset_id=source_dataset_id,
                     source_df=source_df,
                     protocol_discussion=protocol_discussion,
-                    causal_spec=active_causal_spec,
+                    causal_spec=initial_causal_spec,
                     state=state,
                     data_processing_tool=data_processing_tool,
                     data_profiling_tool=data_profiling_tool,
                     history=recent_history,
                     user_request=(
-                        "Initial cleaning pass from protocol discussion. "
-                        "Create the first cleaned dataset revision."
+                        "Initial cleaning pass from protocol discussion. Create the "
+                        "first cleaned dataset revision."
                     ),
                     mode="INITIAL",
                 )
+
+            active_causal_spec = state.payload.compiled_causal_spec
+            if active_causal_spec is None:
+                source_summary = self._extract_summary(
+                    tool=data_profiling_tool,
+                    df=source_df,
+                )
+                try:
+                    active_causal_spec = self._compile_initial_causal_spec(
+                        history=recent_history,
+                        protocol_discussion=protocol_discussion,
+                        dataset_summary=source_summary,
+                    )
+                except Exception as e:
+                    return self._abort_state(
+                        payload=state.payload,
+                        message=(
+                            "The current cleaning state is missing causal specs. Please "
+                            "return to protocol discussion and try again."
+                        ),
+                        reason=(
+                            "Missing compiled_causal_spec and recompilation failed: "
+                            f"{e!r}"
+                        ),
+                    )
 
             intent = self._decide_intent(
                 state=state,
                 history=recent_history,
             )
+
+            if intent.action == "CHANGE_PROTOCOL_DISCUSSION":
+                normalized_reason = intent.reason.strip()
+                protocol_change_reason = (
+                    f"User wants to change protocol discussion: {normalized_reason}"
+                    if normalized_reason
+                    else "User wants to change protocol discussion."
+                )
+                return self._abort_state(
+                    payload=state.payload,
+                    message=intent.reply_to_user,
+                    reason=protocol_change_reason,
+                )
 
             if intent.action == "ABORT":
                 return self._abort_state(
@@ -197,14 +262,9 @@ class CleanProtocolNode(Node):
                         compatibility_error=compat_err,
                         payload=state.payload,
                     )
-                    return CleanProtocolState(
-                        payload=state.payload.model_copy(
-                            update={
-                                "cleaning_error": None,
-                                "user_acceptance": None,
-                                "user_message": msg.message_for_user,
-                            }
-                        )
+                    return self._pending_state(
+                        payload=state.payload,
+                        message=msg.message_for_user,
                     )
 
                 artifacts = self._generate_final_graphs(
@@ -218,6 +278,7 @@ class CleanProtocolNode(Node):
                 final_message = self._render_final_acceptance_message(
                     history=recent_history,
                     payload=state.payload,
+                    graph_count=len(artifacts or []),
                 )
                 return CleanProtocolState(
                     payload=state.payload.model_copy(
@@ -275,12 +336,9 @@ class CleanProtocolNode(Node):
         user_request: str,
         mode: Literal["INITIAL", "MODIFY"],
     ) -> CleanProtocolState:
-        source_summary = data_profiling_tool.extract_dataset_summary(
-            source_df,
-            max_categories=1000,
-            sample_distinct=1000,
-            compute_quantiles=True,
-            strict=False,
+        source_summary = self._extract_summary(
+            tool=data_profiling_tool,
+            df=source_df,
         )
 
         sql_request = self._generate_sql_request(
@@ -304,46 +362,33 @@ class CleanProtocolNode(Node):
                 compatibility_error=f"SQL execution failed: {e!r}",
                 payload=state.payload,
             )
-            return CleanProtocolState(
-                payload=state.payload.model_copy(
-                    update={
-                        "cleaning_error": None,
-                        "user_acceptance": None,
-                        "user_message": msg.message_for_user,
-                    }
-                )
+            return self._pending_state(
+                payload=state.payload,
+                message=msg.message_for_user,
             )
 
         if not sql_result.has_result_set:
             msg = self._render_compatibility_failure_message(
                 history=history,
                 compatibility_error=(
-                    "The generated SQL did not return a final result set. "
-                    "Please request another cleaning modification."
+                    "The generated SQL did not return a final result set. Please "
+                    "request another cleaning modification."
                 ),
                 payload=state.payload,
             )
-            return CleanProtocolState(
-                payload=state.payload.model_copy(
-                    update={
-                        "cleaning_error": None,
-                        "user_acceptance": None,
-                        "user_message": msg.message_for_user,
-                    }
-                )
+            return self._pending_state(
+                payload=state.payload,
+                message=msg.message_for_user,
             )
 
         cleaned_df_candidate = sql_result.dataframe
-        cleaned_summary_candidate = data_profiling_tool.extract_dataset_summary(
-            cleaned_df_candidate,
-            max_categories=1000,
-            sample_distinct=1000,
-            compute_quantiles=True,
-            strict=False,
+        cleaned_summary_candidate = self._extract_summary(
+            tool=data_profiling_tool,
+            df=cleaned_df_candidate,
         )
 
         try:
-            refreshed_causal_spec = self._recompile_causal_spec(
+            refreshed_causal_spec = self._refresh_causal_spec(
                 history=history,
                 protocol_discussion=protocol_discussion,
                 cleaned_summary=cleaned_summary_candidate,
@@ -355,19 +400,14 @@ class CleanProtocolNode(Node):
             msg = self._render_compatibility_failure_message(
                 history=history,
                 compatibility_error=(
-                    "Failed to recompile causal spec from cleaned dataset: "
+                    "Failed to refresh the causal spec from the cleaned dataset: "
                     f"{e!r}. Please request another cleaning revision."
                 ),
                 payload=state.payload,
             )
-            return CleanProtocolState(
-                payload=state.payload.model_copy(
-                    update={
-                        "cleaning_error": None,
-                        "user_acceptance": None,
-                        "user_message": msg.message_for_user,
-                    }
-                )
+            return self._pending_state(
+                payload=state.payload,
+                message=msg.message_for_user,
             )
 
         required_modeling_columns = _required_modeling_columns(refreshed_causal_spec)
@@ -375,42 +415,35 @@ class CleanProtocolNode(Node):
             msg = self._render_compatibility_failure_message(
                 history=history,
                 compatibility_error=(
-                    "Recompiled causal spec did not contain modeling columns."
+                    "Refreshed causal spec did not contain modeling columns."
                 ),
                 payload=state.payload,
             )
-            return CleanProtocolState(
-                payload=state.payload.model_copy(
-                    update={
-                        "cleaning_error": None,
-                        "user_acceptance": None,
-                        "user_message": msg.message_for_user,
-                    }
-                )
+            return self._pending_state(
+                payload=state.payload,
+                message=msg.message_for_user,
             )
 
         missing_required_columns = [
-            col for col in required_modeling_columns if col not in cleaned_df_candidate.columns
+            col
+            for col in required_modeling_columns
+            if col not in cleaned_df_candidate.columns
         ]
         if missing_required_columns:
             msg = self._render_compatibility_failure_message(
                 history=history,
                 compatibility_error=(
-                    "The SQL result is missing columns required by the recompiled causal spec: "
-                    f"{missing_required_columns}. Required columns are: "
+                    "The SQL result is missing columns required by the refreshed "
+                    f"causal spec: {missing_required_columns}. Required columns are: "
                     f"{required_modeling_columns}."
                 ),
                 payload=state.payload,
             )
-            return CleanProtocolState(
-                payload=state.payload.model_copy(
-                    update={
-                        "cleaning_error": None,
-                        "user_acceptance": None,
-                        "user_message": msg.message_for_user,
-                    }
-                )
+            return self._pending_state(
+                payload=state.payload,
+                message=msg.message_for_user,
             )
+
         cleaned_df = cleaned_df_candidate.loc[:, required_modeling_columns].copy()
 
         clean_dataset_id = uuid4()
@@ -423,12 +456,9 @@ class CleanProtocolNode(Node):
             include_index=False,
         )
 
-        cleaned_summary = data_profiling_tool.extract_dataset_summary(
-            cleaned_df,
-            max_categories=1000,
-            sample_distinct=1000,
-            compute_quantiles=True,
-            strict=False,
+        cleaned_summary = self._extract_summary(
+            tool=data_profiling_tool,
+            df=cleaned_df,
         )
 
         next_iteration = int(state.payload.iteration_index) + 1
@@ -477,7 +507,10 @@ class CleanProtocolNode(Node):
                     "latest_diff": diff,
                     "compiled_causal_spec": refreshed_causal_spec,
                     "sql_history": [*state.payload.sql_history, sql_history_item],
-                    "iteration_history": [*state.payload.iteration_history, iteration_record],
+                    "iteration_history": [
+                        *state.payload.iteration_history,
+                        iteration_record,
+                    ],
                     "causal_spec_history": [
                         *state.payload.causal_spec_history,
                         spec_history_item,
@@ -492,7 +525,11 @@ class CleanProtocolNode(Node):
         state: CleanProtocolState,
         history: Optional[Sequence[ChatMessage]],
     ) -> _IntentGateModel:
-        latest_sql = state.payload.sql_history[-1].sql_request if state.payload.sql_history else None
+        latest_sql = (
+            state.payload.sql_history[-1].sql_request
+            if state.payload.sql_history
+            else None
+        )
         latest_diff = state.payload.latest_diff
         payload = {
             "iteration_index": state.payload.iteration_index,
@@ -500,7 +537,14 @@ class CleanProtocolNode(Node):
             "latest_sql_request": (
                 latest_sql.model_dump(mode="json") if latest_sql is not None else None
             ),
-            "latest_diff": latest_diff.model_dump(mode="json") if latest_diff else None,
+            "latest_diff": (
+                latest_diff.model_dump(mode="json") if latest_diff is not None else None
+            ),
+            "current_causal_spec": (
+                state.payload.compiled_causal_spec.model_dump(mode="json")
+                if state.payload.compiled_causal_spec is not None
+                else None
+            ),
         }
 
         return self.llm.generate_json(
@@ -510,6 +554,26 @@ class CleanProtocolNode(Node):
             config=LLMConfig(model="basic", temperature=0.2),
             history=history,
             max_attempts=2,
+        )
+
+    def _compile_initial_causal_spec(
+        self,
+        *,
+        history: Optional[Sequence[ChatMessage]],
+        protocol_discussion: str,
+        dataset_summary: Any,
+    ) -> CausalSpec:
+        payload = {
+            "protocol_discussion": protocol_discussion,
+            "current_dataset_summary": dataset_summary.model_dump(mode="json"),
+        }
+        return self.llm.generate_json(
+            schema=CausalSpec,
+            system_prompt=CLEAN_PROTOCOL_INITIAL_COMPILE_SPEC_PROMPT,
+            user_prompt=json.dumps(payload, ensure_ascii=False),
+            config=LLMConfig(model="pro", temperature=0.0),
+            history=history,
+            max_attempts=3,
         )
 
     def _generate_sql_request(
@@ -529,12 +593,25 @@ class CleanProtocolNode(Node):
             "user_request": user_request,
             "protocol_discussion": protocol_discussion,
             "current_causal_spec": causal_spec.model_dump(mode="json"),
-            "time_zero_policy": "Use time-zero only for row filtering; do not keep it in final modeling output.",
+            "time_zero_policy": (
+                "Use time-zero columns only for filtering or derived transformations. "
+                "Do not keep raw time-zero helper columns in the final modeling output "
+                "unless they are themselves modeling columns."
+            ),
+            "final_output_contract": (
+                "The final result set must contain only treatment, outcome, "
+                "covariates, and effect modifiers."
+            ),
             "current_dataset_summary": source_summary.model_dump(mode="json"),
             "iteration_index": state.iteration_index,
-            "latest_diff": state.latest_diff.model_dump(mode="json") if state.latest_diff else None,
+            "latest_diff": (
+                state.latest_diff.model_dump(mode="json")
+                if state.latest_diff is not None
+                else None
+            ),
             "previous_sql_history": [
-                item.sql_request.model_dump(mode="json") for item in state.sql_history[-5:]
+                item.sql_request.model_dump(mode="json")
+                for item in state.sql_history[-5:]
             ],
         }
 
@@ -545,6 +622,32 @@ class CleanProtocolNode(Node):
             config=LLMConfig(model="pro", temperature=0.1),
             history=history,
             max_attempts=3,
+        )
+
+    def _refresh_causal_spec(
+        self,
+        *,
+        history: Optional[Sequence[ChatMessage]],
+        protocol_discussion: str,
+        cleaned_summary: Any,
+        previous_causal_spec: CausalSpec,
+        user_request: str,
+        sql_request: SQLStatements,
+    ) -> CausalSpec:
+        payload = {
+            "protocol_discussion": protocol_discussion,
+            "latest_user_request": user_request,
+            "latest_sql_request": sql_request.model_dump(mode="json"),
+            "previous_causal_spec": previous_causal_spec.model_dump(mode="json"),
+            "current_dataset_summary": cleaned_summary.model_dump(mode="json"),
+        }
+        return self.llm.generate_json(
+            schema=CausalSpec,
+            system_prompt=CLEAN_PROTOCOL_REFRESH_SPEC_PROMPT,
+            user_prompt=json.dumps(payload, ensure_ascii=False),
+            config=LLMConfig(model="basic", temperature=0.0),
+            history=history,
+            max_attempts=2,
         )
 
     def _render_iteration_user_message(
@@ -575,32 +678,6 @@ class CleanProtocolNode(Node):
             system_prompt=CLEAN_PROTOCOL_ITERATION_MESSAGE_PROMPT,
             user_prompt=json.dumps(payload, ensure_ascii=False),
             config=LLMConfig(model="basic", temperature=0.6),
-            history=history,
-            max_attempts=2,
-        )
-
-    def _recompile_causal_spec(
-        self,
-        *,
-        history: Optional[Sequence[ChatMessage]],
-        protocol_discussion: str,
-        cleaned_summary: Any,
-        previous_causal_spec: CausalSpec,
-        user_request: str,
-        sql_request: SQLStatements,
-    ) -> CausalSpec:
-        payload = {
-            "protocol_discussion": protocol_discussion,
-            "latest_user_request": user_request,
-            "latest_sql_request": sql_request.model_dump(mode="json"),
-            "previous_causal_spec": previous_causal_spec.model_dump(mode="json"),
-            "current_dataset_summary": cleaned_summary.model_dump(mode="json"),
-        }
-        return self.llm.generate_json(
-            schema=CausalSpec,
-            system_prompt=CLEAN_PROTOCOL_RECOMPILE_SPEC_PROMPT,
-            user_prompt=json.dumps(payload, ensure_ascii=False),
-            config=LLMConfig(model="basic", temperature=0.0),
             history=history,
             max_attempts=2,
         )
@@ -640,17 +717,21 @@ class CleanProtocolNode(Node):
         *,
         history: Optional[Sequence[ChatMessage]],
         payload: CleanProtocolPayloadModel,
+        graph_count: int,
     ) -> _UserMessageModel:
         prompt_payload = {
             "iteration_index": payload.iteration_index,
             "clean_dataset_id": (
-                str(payload.clean_dataset_id) if payload.clean_dataset_id is not None else None
+                str(payload.clean_dataset_id)
+                if payload.clean_dataset_id is not None
+                else None
             ),
             "latest_diff": (
                 payload.latest_diff.model_dump(mode="json")
                 if payload.latest_diff is not None
                 else None
             ),
+            "graph_count": int(graph_count),
         }
         return self.llm.generate_json(
             schema=_UserMessageModel,
@@ -712,6 +793,37 @@ class CleanProtocolNode(Node):
             return None
 
     @staticmethod
+    def _extract_summary(
+        *,
+        tool: DatasetProfilingTool,
+        df: pd.DataFrame,
+    ) -> Any:
+        return tool.extract_dataset_summary(
+            df,
+            max_categories=1000,
+            sample_distinct=1000,
+            compute_quantiles=True,
+            strict=False,
+        )
+
+    @staticmethod
+    def _pending_state(
+        *,
+        payload: CleanProtocolPayloadModel,
+        message: str,
+    ) -> CleanProtocolState:
+        return CleanProtocolState(
+            payload=payload.model_copy(
+                update={
+                    "cleaning_error": None,
+                    "user_acceptance": None,
+                    "graph_picture_ids": None,
+                    "user_message": message,
+                }
+            )
+        )
+
+    @staticmethod
     def _abort_state(
         *,
         payload: CleanProtocolPayloadModel,
@@ -723,6 +835,7 @@ class CleanProtocolNode(Node):
                 update={
                     "cleaning_error": reason,
                     "user_acceptance": False,
+                    "graph_picture_ids": None,
                     "user_message": message,
                 }
             )

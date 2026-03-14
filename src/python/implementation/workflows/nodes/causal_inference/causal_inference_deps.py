@@ -6,7 +6,6 @@ from typing import Sequence, TypeVar
 
 from python.domain.workflows.state import State
 
-from python.implementation.workflows.nodes.compile_protocol.compile_protocol_state import CompileProtocolState
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import ModelSelectionState
 from python.implementation.workflows.nodes.model_train.model_train_state import ModelTrainState
@@ -24,7 +23,6 @@ class CausalInferenceDeps:
     @classmethod
     def pre_required_states_names(cls) -> Sequence[str]:
         return (
-            CompileProtocolState.NAME,
             CleanProtocolState.NAME,
             ModelSelectionState.NAME,
             ModelTrainState.NAME,
