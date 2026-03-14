@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping, Optional, Sequence, Type
 from uuid import UUID
+
 from firebase_admin import db
 
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
@@ -18,8 +20,9 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         root_path: str = "/workflows",
         state_classes_by_name: Mapping[str, Type[State]],
     ) -> None:
-        if not root_path.strip():
+        if not isinstance(root_path, str) or not root_path.strip():
             raise ValueError("root_path must be a non-empty string")
+
         self._root_ref = db.reference(root_path, app=app)
         self._state_classes_by_name = dict(state_classes_by_name)
 
@@ -50,39 +53,62 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         return conversation_ids
 
     def load_active_state_name(self, *, user_id: UUID, conversation_id: UUID) -> Optional[str]:
-        value = self._conversation_ref(user_id=user_id, conversation_id=conversation_id).child(
-            "active_state_name"
-        ).get()
+        value = (
+            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
+            .child("active_state_name")
+            .get()
+        )
         return value if isinstance(value, str) and value.strip() else None
 
     def store_active_state_name(self, *, user_id: UUID, conversation_id: UUID, state_name: str) -> None:
-        if not state_name.strip():
+        if not isinstance(state_name, str) or not state_name.strip():
             raise ValueError("state_name must be a non-empty string")
 
-        self._conversation_ref(user_id=user_id, conversation_id=conversation_id).child(
-            "active_state_name"
-        ).set(state_name)
+        (
+            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
+            .child("active_state_name")
+            .set(state_name)
+        )
 
     # -----------------------
     # Per-state persistence
     # -----------------------
 
     def load_state(self, *, user_id: UUID, conversation_id: UUID, state_name: str) -> Optional[State]:
-        if not state_name.strip():
+        if not isinstance(state_name, str) or not state_name.strip():
             raise ValueError("state_name must be a non-empty string")
 
-        payload = self._conversation_ref(user_id=user_id, conversation_id=conversation_id).child("states").child(
-            state_name
-        ).get()
-        if not isinstance(payload, dict):
+        payload = (
+            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
+            .child("states")
+            .child(state_name)
+            .get()
+        )
+        if payload is None:
             return None
+        if not isinstance(payload, str):
+            raise ValueError(
+                f"Stored state payload for state_name={state_name!r} must be a JSON string blob, "
+                f"got {type(payload).__name__}"
+            )
 
         cls = self._state_classes_by_name.get(state_name)
         if cls is None:
             raise KeyError(f"No State class registered for state_name={state_name!r}")
 
         try:
-            state = cls.from_json_dict(payload)
+            state_dict = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Stored state blob for state_name={state_name!r} is not valid JSON: {exc}") from exc
+
+        if not isinstance(state_dict, dict):
+            raise ValueError(
+                f"Decoded state payload for state_name={state_name!r} must be a dict, "
+                f"got {type(state_dict).__name__}"
+            )
+
+        try:
+            state = cls.from_json_dict(state_dict)
         except Exception as exc:
             raise ValueError(f"Error deserializing state '{state_name}': {exc}") from exc
 
@@ -92,20 +118,33 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         return state
 
     def store_state(self, *, user_id: UUID, conversation_id: UUID, state: State) -> None:
-        if not state.name.strip():
+        if not isinstance(state.name, str) or not state.name.strip():
             raise ValueError("state.name must be a non-empty string")
 
-        self._conversation_ref(user_id=user_id, conversation_id=conversation_id).child("states").child(
-            state.name
-        ).set(state.to_json_dict())
+        try:
+            payload_json = json.dumps(
+                state.to_json_dict(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"State '{state.name}' is not JSON-serializable: {exc}") from exc
+
+        (
+            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
+            .child("states")
+            .child(state.name)
+            .set(payload_json)
+        )
 
     def delete_state(self, *, user_id: UUID, conversation_id: UUID, state_name: str) -> None:
-        if not state_name.strip():
+        if not isinstance(state_name, str) or not state_name.strip():
             raise ValueError("state_name must be a non-empty string")
 
         conversation_ref = self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
         active_state_name = conversation_ref.child("active_state_name").get()
         conversation_ref.child("states").child(state_name).delete()
+
         if active_state_name == state_name:
             conversation_ref.child("active_state_name").delete()
 

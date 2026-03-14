@@ -102,20 +102,11 @@ def _make_workflow_state_repo(
     settings: WorkflowSettings,
     state_classes_by_name: Mapping[str, Type[State]],
 ) -> WorkflowStateRepo:
-    if settings.workflow_repo_backend == "json":
-        return JsonFileWorkflowStateRepo(
-            base_dir=settings.workflow_state_dir,
-            state_classes_by_name=state_classes_by_name,
-            config=settings.json_repo,
-        )
-
-    if settings.workflow_repo_backend == "firebase_rtdb":
-        return _make_firebase_workflow_state_repo(
+    return _make_firebase_workflow_state_repo(
             settings=settings.firebase_repo,
             state_classes_by_name=state_classes_by_name,
         )
 
-    raise ValueError(f"Unsupported workflow repo backend: {settings.workflow_repo_backend}")
 
 
 def _make_firebase_workflow_state_repo(
