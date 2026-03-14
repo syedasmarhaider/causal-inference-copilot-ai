@@ -213,3 +213,8 @@ __marimo__/
 
 # local typings
 typings/**/*.pyi
+
+# emulator of firebase
+*.firebaserc
+*firebase.json
+
