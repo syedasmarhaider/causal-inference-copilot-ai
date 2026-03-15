@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import io
 import json
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass
 from typing import Final, Optional
 from uuid import UUID
 
@@ -11,6 +12,9 @@ from google.api_core.exceptions import NotFound, PreconditionFailed
 from google.cloud import storage
 
 from python.domain.repo.data_repo import DataRepo, ImageMime
+
+DEFAULT_GCS_DATA_PREFIX: Final[str] = "data"
+DEFAULT_GCS_TIMEOUT_SECONDS: Final[float] = 60.0
 
 CSV_FILENAME: Final[str] = "data.csv"
 DATASETS_DIRNAME: Final[str] = "datasets"
@@ -23,10 +27,6 @@ _MIME_TO_EXT: Final[dict[ImageMime, str]] = {
     "image/jpeg": ".jpg",
     "image/webp": ".webp",
 }
-
-
-def _normalize_prefix(prefix: str) -> str:
-    return prefix.strip().strip("/")
 
 
 def _validate_image_bytes(mime: ImageMime, content: bytes) -> None:
@@ -53,36 +53,28 @@ def _validate_image_bytes(mime: ImageMime, content: bytes) -> None:
 
 @dataclass(frozen=True)
 class GoogleCloudStorageDataRepo(DataRepo):
-    bucket_name: str
-    root_prefix: str = "data"
-    project_id: str | None = None
-    timeout_seconds: float = 60.0
-    client: storage.Client = field(init=False, repr=False)
-    bucket: storage.Bucket = field(init=False, repr=False)
+    bucket: storage.Bucket
+
+    @staticmethod
+    def get_default_bucket() -> storage.Bucket:
+        project_name = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip() or None
+        client = storage.Client(project=project_name)
+        bucket_name = os.getenv("GCS_DATA_BUCKET_NAME", "").strip()
+        if not bucket_name:
+            raise ValueError("GCS_DATA_BUCKET_NAME must be configured for GoogleCloudStorageDataRepo")
+        return client.bucket(bucket_name)
 
     def __post_init__(self) -> None:
-        bucket_name = self.bucket_name.strip()
+        bucket_name = getattr(self.bucket, "name", "").strip()
         if not bucket_name:
-            raise ValueError("bucket_name must be a non-empty string")
-
-        client = storage.Client(project=self.project_id)
-        bucket = client.bucket(bucket_name)
-
-        object.__setattr__(self, "bucket_name", bucket_name)
-        object.__setattr__(self, "root_prefix", _normalize_prefix(self.root_prefix))
-        object.__setattr__(self, "client", client)
-        object.__setattr__(self, "bucket", bucket)
-
-    # ------------------------------------------------------------------
-    # Object naming
-    # ------------------------------------------------------------------
+            raise ValueError("bucket must have a non-empty name")
 
     def _join(self, *parts: str) -> str:
         return "/".join(part.strip("/") for part in parts if part and part.strip("/"))
 
     def _dataset_blob_name(self, user_id: UUID, conversation_id: UUID, dataset_id: UUID) -> str:
         return self._join(
-            self.root_prefix,
+            DEFAULT_GCS_DATA_PREFIX,
             "users",
             str(user_id),
             "conversations",
@@ -94,7 +86,7 @@ class GoogleCloudStorageDataRepo(DataRepo):
 
     def _artifact_dir_prefix(self, user_id: UUID, conversation_id: UUID, artifact_id: UUID) -> str:
         return self._join(
-            self.root_prefix,
+            DEFAULT_GCS_DATA_PREFIX,
             "users",
             str(user_id),
             "conversations",
@@ -111,10 +103,9 @@ class GoogleCloudStorageDataRepo(DataRepo):
         *,
         mime: ImageMime,
     ) -> str:
-        ext = _MIME_TO_EXT[mime]
         return self._join(
             self._artifact_dir_prefix(user_id, conversation_id, artifact_id),
-            f"{ARTIFACT_BASENAME}{ext}",
+            f"{ARTIFACT_BASENAME}{_MIME_TO_EXT[mime]}",
         )
 
     def _artifact_meta_blob_name(self, user_id: UUID, conversation_id: UUID, artifact_id: UUID) -> str:
@@ -142,10 +133,6 @@ class GoogleCloudStorageDataRepo(DataRepo):
     def _blob(self, blob_name: str) -> storage.Blob:
         return self.bucket.blob(blob_name)
 
-    # ------------------------------------------------------------------
-    # CSV
-    # ------------------------------------------------------------------
-
     def get_csv_data(
         self,
         user_id: UUID,
@@ -156,23 +143,17 @@ class GoogleCloudStorageDataRepo(DataRepo):
         if limit is not None and limit <= 0:
             raise ValueError(f"limit must be a positive int or None, got: {limit!r}")
 
-        blob_name = self._dataset_blob_name(user_id, conversation_id, dataset_id)
-        blob = self._blob(blob_name)
-
-        if not blob.exists(client=self.client, timeout=self.timeout_seconds):
+        blob = self._blob(self._dataset_blob_name(user_id, conversation_id, dataset_id))
+        if not blob.exists(timeout=DEFAULT_GCS_TIMEOUT_SECONDS):
             raise FileNotFoundError(f"CSV not found for dataset_id={dataset_id}")
 
         try:
-            csv_bytes = blob.download_as_bytes(timeout=self.timeout_seconds)
-            return pd.read_csv(
-                io.BytesIO(csv_bytes),
-                nrows=limit,
-                low_memory=False,
-            )
+            csv_bytes = blob.download_as_bytes(timeout=DEFAULT_GCS_TIMEOUT_SECONDS)
+            return pd.read_csv(io.BytesIO(csv_bytes), nrows=limit, low_memory=False)
         except FileNotFoundError:
             raise
-        except Exception as e:
-            raise ValueError(f"Failed to read CSV for dataset_id={dataset_id}: {e}") from e
+        except Exception as exc:
+            raise ValueError(f"Failed to read CSV for dataset_id={dataset_id}: {exc}") from exc
 
     def save_csv_data(
         self,
@@ -184,32 +165,27 @@ class GoogleCloudStorageDataRepo(DataRepo):
         overwrite: bool = True,
         include_index: bool = False,
     ) -> None:
-        blob_name = self._dataset_blob_name(user_id, conversation_id, dataset_id)
-        blob = self._blob(blob_name)
+        blob = self._blob(self._dataset_blob_name(user_id, conversation_id, dataset_id))
 
         try:
             csv_text = df.to_csv(index=include_index)  # pyright: ignore[reportUnknownMemberType]
-        except Exception as e:
-            raise ValueError(f"Failed to serialize CSV for dataset_id={dataset_id}: {e}") from e
+        except Exception as exc:
+            raise ValueError(f"Failed to serialize CSV for dataset_id={dataset_id}: {exc}") from exc
 
         upload_kwargs: dict[str, object] = {
             "data": csv_text,
             "content_type": "text/csv; charset=utf-8",
-            "timeout": self.timeout_seconds,
+            "timeout": DEFAULT_GCS_TIMEOUT_SECONDS,
         }
         if not overwrite:
             upload_kwargs["if_generation_match"] = 0
 
         try:
             blob.upload_from_string(**upload_kwargs)
-        except PreconditionFailed as e:
-            raise FileExistsError(f"Refusing to overwrite existing CSV for dataset_id={dataset_id}") from e
-        except Exception as e:
-            raise ValueError(f"Failed to write CSV for dataset_id={dataset_id}: {e}") from e
-
-    # ------------------------------------------------------------------
-    # Artifacts
-    # ------------------------------------------------------------------
+        except PreconditionFailed as exc:
+            raise FileExistsError(f"Refusing to overwrite existing CSV for dataset_id={dataset_id}") from exc
+        except Exception as exc:
+            raise ValueError(f"Failed to write CSV for dataset_id={dataset_id}: {exc}") from exc
 
     def save_artifact(
         self,
@@ -223,30 +199,31 @@ class GoogleCloudStorageDataRepo(DataRepo):
     ) -> None:
         _validate_image_bytes(mime, content)
 
-        artifact_blob_name = self._artifact_blob_name(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            artifact_id=artifact_id,
-            mime=mime,
+        artifact_blob = self._blob(
+            self._artifact_blob_name(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                artifact_id=artifact_id,
+                mime=mime,
+            )
         )
-        meta_blob_name = self._artifact_meta_blob_name(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            artifact_id=artifact_id,
+        meta_blob = self._blob(
+            self._artifact_meta_blob_name(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                artifact_id=artifact_id,
+            )
         )
-
-        artifact_blob = self._blob(artifact_blob_name)
-        meta_blob = self._blob(meta_blob_name)
 
         artifact_upload_kwargs: dict[str, object] = {
             "data": content,
             "content_type": mime,
-            "timeout": self.timeout_seconds,
+            "timeout": DEFAULT_GCS_TIMEOUT_SECONDS,
         }
         meta_upload_kwargs: dict[str, object] = {
             "data": json.dumps({"mime": mime}, sort_keys=True),
             "content_type": "application/json",
-            "timeout": self.timeout_seconds,
+            "timeout": DEFAULT_GCS_TIMEOUT_SECONDS,
         }
 
         if not overwrite:
@@ -261,7 +238,7 @@ class GoogleCloudStorageDataRepo(DataRepo):
             except Exception:
                 if not overwrite:
                     try:
-                        artifact_blob.delete(timeout=self.timeout_seconds)
+                        artifact_blob.delete(timeout=DEFAULT_GCS_TIMEOUT_SECONDS)
                     except Exception:
                         pass
                 raise
@@ -275,21 +252,20 @@ class GoogleCloudStorageDataRepo(DataRepo):
                     if other_mime == mime:
                         continue
                     try:
-                        self._blob(other_blob_name).delete(timeout=self.timeout_seconds)
+                        self._blob(other_blob_name).delete(timeout=DEFAULT_GCS_TIMEOUT_SECONDS)
                     except NotFound:
                         pass
                     except Exception:
-                        # best-effort cleanup; metadata already points to the new mime
                         pass
 
-        except PreconditionFailed as e:
+        except PreconditionFailed as exc:
             raise FileExistsError(
                 f"Refusing to overwrite existing artifact for artifact_id={artifact_id}"
-            ) from e
+            ) from exc
         except FileExistsError:
             raise
-        except Exception as e:
-            raise ValueError(f"Failed to save artifact {artifact_id}: {e}") from e
+        except Exception as exc:
+            raise ValueError(f"Failed to save artifact {artifact_id}: {exc}") from exc
 
     def _probe_artifact_mime(
         self,
@@ -304,17 +280,15 @@ class GoogleCloudStorageDataRepo(DataRepo):
             conversation_id=conversation_id,
             artifact_id=artifact_id,
         ).items():
-            if self._blob(blob_name).exists(client=self.client, timeout=self.timeout_seconds):
+            if self._blob(blob_name).exists(timeout=DEFAULT_GCS_TIMEOUT_SECONDS):
                 found.append(mime)
 
         if not found:
             raise FileNotFoundError("artifact not found")
-
         if len(found) > 1:
             raise ValueError(
                 f"artifact state is ambiguous for artifact_id={artifact_id}: multiple image blobs exist"
             )
-
         return found[0]
 
     def get_artifact_mime(
@@ -323,58 +297,42 @@ class GoogleCloudStorageDataRepo(DataRepo):
         conversation_id: UUID,
         artifact_id: UUID,
     ) -> ImageMime:
-        meta_blob_name = self._artifact_meta_blob_name(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            artifact_id=artifact_id,
+        meta_blob = self._blob(
+            self._artifact_meta_blob_name(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                artifact_id=artifact_id,
+            )
         )
-        meta_blob = self._blob(meta_blob_name)
 
         try:
-            raw = meta_blob.download_as_bytes(timeout=self.timeout_seconds)
+            raw = meta_blob.download_as_bytes(timeout=DEFAULT_GCS_TIMEOUT_SECONDS)
             parsed = json.loads(raw.decode("utf-8"))
             mime = parsed.get("mime")
-
             if mime not in _MIME_TO_EXT:
-                return self._probe_artifact_mime(
+                return self._probe_artifact_mime(user_id, conversation_id, artifact_id)
+
+            mime_typed: ImageMime = mime
+            artifact_blob = self._blob(
+                self._artifact_blob_name(
                     user_id=user_id,
                     conversation_id=conversation_id,
                     artifact_id=artifact_id,
+                    mime=mime_typed,
                 )
-
-            mime_typed: ImageMime = mime
-            artifact_blob_name = self._artifact_blob_name(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                artifact_id=artifact_id,
-                mime=mime_typed,
             )
-
-            if self._blob(artifact_blob_name).exists(client=self.client, timeout=self.timeout_seconds):
+            if artifact_blob.exists(timeout=DEFAULT_GCS_TIMEOUT_SECONDS):
                 return mime_typed
 
-            return self._probe_artifact_mime(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                artifact_id=artifact_id,
-            )
-
+            return self._probe_artifact_mime(user_id, conversation_id, artifact_id)
         except NotFound:
-            return self._probe_artifact_mime(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                artifact_id=artifact_id,
-            )
+            return self._probe_artifact_mime(user_id, conversation_id, artifact_id)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            return self._probe_artifact_mime(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                artifact_id=artifact_id,
-            )
+            return self._probe_artifact_mime(user_id, conversation_id, artifact_id)
         except ValueError:
             raise
-        except Exception as e:
-            raise ValueError(f"Failed to resolve artifact mime for artifact_id={artifact_id}: {e}") from e
+        except Exception as exc:
+            raise ValueError(f"Failed to resolve artifact mime for artifact_id={artifact_id}: {exc}") from exc
 
     def get_artifact_bytes(
         self,
@@ -389,21 +347,21 @@ class GoogleCloudStorageDataRepo(DataRepo):
             conversation_id=conversation_id,
             artifact_id=artifact_id,
         )
-
         if expected_mime is not None and actual_mime != expected_mime:
             raise ValueError(f"mime mismatch: expected {expected_mime}, got {actual_mime}")
 
-        artifact_blob_name = self._artifact_blob_name(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            artifact_id=artifact_id,
-            mime=actual_mime,
+        artifact_blob = self._blob(
+            self._artifact_blob_name(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                artifact_id=artifact_id,
+                mime=actual_mime,
+            )
         )
-        artifact_blob = self._blob(artifact_blob_name)
 
         try:
-            return artifact_blob.download_as_bytes(timeout=self.timeout_seconds)
-        except NotFound as e:
-            raise FileNotFoundError("artifact not found") from e
-        except Exception as e:
-            raise ValueError(f"Failed to read artifact {artifact_id}: {e}") from e
+            return artifact_blob.download_as_bytes(timeout=DEFAULT_GCS_TIMEOUT_SECONDS)
+        except NotFound as exc:
+            raise FileNotFoundError("artifact not found") from exc
+        except Exception as exc:
+            raise ValueError(f"Failed to read artifact {artifact_id}: {exc}") from exc

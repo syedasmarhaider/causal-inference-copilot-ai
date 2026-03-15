@@ -32,9 +32,8 @@ app.add_middleware(
 
 logging.basicConfig(level=logging.INFO)
 
-# composition root (new workflow wiring)
-_settings = WorkflowSettings()
-_workflow = make_workflow_app(_settings)
+
+_workflow = make_workflow_app()
 
 
 @app.get("/healthz")

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import  Mapping, Type
 
 
@@ -25,18 +24,9 @@ from python.implementation.workflows.router.llm_assisted_router import (
 from python.implementation.workflows.tools.tools_factory import DefaultToolFactory
 from python.implementation.workflows.workflow_app import WorkflowApp
 
-@dataclass(frozen=True)
-class WorkflowSettings:
-    llm: LLMServiceSettings = field(default_factory=LLMServiceSettings)
-    history_limit: int = 30
-
-
-def make_workflow_app(settings: WorkflowSettings) -> WorkflowApp:
-    # 1) LLM
-    llm: LLMService = make_llm_service(settings.llm)
-
-    # 2) Repos
-    data_repo: DataRepo = GoogleCloudStorageDataRepo(bucket_name="your-bucket-name")
+def make_workflow_app() -> WorkflowApp:
+    llm: LLMService = make_llm_service(settings=LLMServiceSettings())
+    data_repo: DataRepo = _make_data_repo()
     models_repo: ModelsRepo = _make_models_repo()
 
     state_classes_by_name = build_state_classes_by_name()
@@ -44,21 +34,17 @@ def make_workflow_app(settings: WorkflowSettings) -> WorkflowApp:
     workflow_repo = _make_workflow_state_repo(
         state_classes_by_name=state_classes_by_name,
     )
-
-    # 3) Router (LLM-assisted)
+    
     router: Router = LLMAssistedRouterRouter(
         llm=llm,
     )
-
-    # 4) Nodes registry (keyed by node.name == State.NAME)
+    
     nodes_by_state_name: dict[str, Node] = init_all_nodoes_with_name_as_key(
         llm=llm,
         data_repo=data_repo,
         models_repo=models_repo,
     )
 
-
-    # 6) Workflow app
     return WorkflowApp(
         repo=workflow_repo,
         data_repo=data_repo,
@@ -66,7 +52,6 @@ def make_workflow_app(settings: WorkflowSettings) -> WorkflowApp:
         nodes_by_state_name=nodes_by_state_name,
         state_classes_by_name=state_classes_by_name,
         tool_factory=DefaultToolFactory(data_repo=data_repo, models_repo=models_repo),
-        history_limit=settings.history_limit,
     )
 
 
@@ -82,7 +67,10 @@ def _make_workflow_state_repo(
 
 
 def _make_models_repo() -> ModelsRepo:
-    return GoogleCloudStorageModelsRepo(GoogleCloudStorageModelsRepo.get_default_bucket())    
+    return GoogleCloudStorageModelsRepo(GoogleCloudStorageModelsRepo.get_default_bucket())   
+
+def _make_data_repo() -> DataRepo:
+    return GoogleCloudStorageDataRepo(GoogleCloudStorageDataRepo.get_default_bucket())   
    
 
 

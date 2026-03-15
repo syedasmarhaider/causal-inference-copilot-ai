@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence, Type
 from uuid import UUID
 
-from python.domain.repo.data_repo import ArtifactRef, DataRepo
+from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import ChatMessage
 from python.domain.workflows.node import Node
@@ -14,6 +14,7 @@ from python.domain.workflows.tool_factory import ToolFactory
 
 Stage = str
 
+_MESSAGES_HISTORY_LIMIT = 30
 
 @dataclass(frozen=True)
 class WorkflowRequest:
@@ -41,7 +42,7 @@ class WorkflowApp:
         nodes_by_state_name: Mapping[str, Node],
         state_classes_by_name: Mapping[str, Type[State]],
         tool_factory: ToolFactory,
-        history_limit: int = 30,
+        history_limit: int = _MESSAGES_HISTORY_LIMIT,
         max_steps_per_call: int = 1,
     ) -> None:
         if max_steps_per_call <= 0:
@@ -56,13 +57,6 @@ class WorkflowApp:
         self._history_limit = history_limit
         self._max_steps_per_call = max_steps_per_call
     
-    def get_artifact(self, user_id: UUID, conversation_id: UUID, artifact_id: UUID) -> ArtifactRef:
-        return self._data_repo.get_artifact_ref(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            artifact_id=artifact_id,
-        ) 
-
     def create_conversation(self, user_id: UUID, conversation_id: UUID) -> None:
         self._repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
 
