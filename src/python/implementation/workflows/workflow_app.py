@@ -14,6 +14,9 @@ from python.domain.workflows.node import Node
 from python.domain.workflows.route import Router
 from python.domain.workflows.state import State, Status
 from python.domain.workflows.tool_factory import ToolFactory
+from python.implementation.workflows.nodes.load_dataset.load_dataset_state import (
+    LoadDatasetState,
+)
 
 Stage = str
 
@@ -80,13 +83,6 @@ class WorkflowApp:
         except Exception as exc:
             raise ValueError(f"Uploaded file is not a valid CSV: {exc}") from exc
 
-        active_name = self._repo.load_active_state_name(
-            user_id=user_id,
-            conversation_id=conversation_id,
-        )
-        if not active_name:
-            raise ValueError(f"No active conversation found for user_id={user_id} and conversation_id={conversation_id}")
-        
         dataset_id = uuid4()
         self._data_repo.save_csv_data(
             user_id=user_id,
@@ -95,7 +91,27 @@ class WorkflowApp:
             df=df,
             overwrite=False,
         )
-         
+
+        self._repo.store_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state=LoadDatasetState(
+                LoadDatasetPayloadModel(
+                    id=dataset_id,
+                    summary=None,
+                    load_error=None,
+                    graph_picture_ids=None,
+                    user_message="Dataset uploaded successfully. I will summarize it next.",
+                    action="NONE",
+                )
+            ),
+        )
+        self._repo.store_active_state_name(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=LoadDatasetState.NAME,
+        )
+
         return dataset_id
 
     def get_artifact(
@@ -239,6 +255,7 @@ class WorkflowApp:
         return WorkflowResponse(
             node_message=new_state.message.txt_message,
             needs_input=(new_state.message.action == "NEEDS_INPUT"),
+            needs_data=(new_state.message.action == "NEEDS_DATA"),
             current_stage=new_state.name,
             current_stage_status=new_state.status,
             artifact_ids=new_state.message.artifact_ids,
