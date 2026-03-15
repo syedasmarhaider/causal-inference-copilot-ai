@@ -32,6 +32,7 @@ class WorkflowResponse:
     needs_input: bool
     current_stage: Stage
     current_stage_status: Status
+    needs_data: bool = False
     artifact_ids: Optional[Sequence[str]] = None
 
 
@@ -237,7 +238,7 @@ class WorkflowApp:
             
         return WorkflowResponse(
             node_message=new_state.message.txt_message,
-            needs_input=(new_state.needs_action == "NEEDS_INPUT"),
+            needs_input=(new_state.message.action == "NEEDS_INPUT"),
             current_stage=new_state.name,
             current_stage_status=new_state.status,
             artifact_ids=new_state.message.artifact_ids,

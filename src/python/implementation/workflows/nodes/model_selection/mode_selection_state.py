@@ -5,7 +5,7 @@ from typing import Any, ClassVar, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict
 
-from python.domain.workflows.state import ACTION, State, StateMessage, Status
+from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.model_selection.model_selection_deps import ModelSelectionDeps
 
 
@@ -55,13 +55,8 @@ class ModelSelectionState(State):
                 "ModelSelectionState.message is required but missing. "
                 "Don't access .message outside a node context where message is guaranteed."
             )
-        return StateMessage(txt_message=self.payload.message)
-
-    @property
-    def needs_action(self) -> ACTION:
-        if self.status in ("ABORTED", "DONE"):
-            return "NONE"
-        return "NEEDS_INPUT"
+        action = "NONE" if self.status in ("ABORTED", "DONE") else "NEEDS_INPUT"    
+        return StateMessage(txt_message=self.payload.message, action=action)
 
     def pre_required_states_names(self) -> Sequence[str]:
         return ModelSelectionDeps.pre_required_states_names()

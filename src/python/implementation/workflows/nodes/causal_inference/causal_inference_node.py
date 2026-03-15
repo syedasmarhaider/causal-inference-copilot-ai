@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 import logging
@@ -85,7 +84,6 @@ class CausalInferenceNode(Node):
         tool_factory: ToolFactory,
         previous_state_dependencies: Any,
         messages_history: Optional[Sequence[ChatMessage]],
-        input_extras: Optional[Mapping[str, Any]] = None,
     ) -> State:
         if not isinstance(state, CausalInferenceState):
             raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")

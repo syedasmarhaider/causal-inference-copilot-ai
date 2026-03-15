@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from python.domain.workflows.state import ACTION, State, StateMessage, Status
+from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_deps import (
     CleanProtocolDeps,
 )
@@ -142,18 +142,13 @@ class CleanProtocolState(State):
             if self.payload.graph_picture_ids
             else []
         )
-        return StateMessage(txt_message=self.payload.user_message, artifact_ids=artifacts)
+        action = "NONE" if self.status in ("ABORTED", "DONE") else "NEEDS_INPUT"
+        return StateMessage(txt_message=self.payload.user_message, artifact_ids=artifacts, action=action)
 
     @property
     def error(self) -> Optional[str]:
         return self.payload.cleaning_error
-
-    @property
-    def needs_action(self) -> ACTION:
-        if self.status in ("ABORTED", "DONE"):
-            return "NONE"
-        return "NEEDS_INPUT"
-
+    
     def pre_required_states_names(self) -> Sequence[str]:
         return CleanProtocolDeps.pre_required_states_names()
 

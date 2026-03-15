@@ -56,15 +56,11 @@ class ProtocolDiscussionState(State):
     def message(self) -> StateMessage:
         if self.payload.node_message is None:
             raise ValueError("ProtocolDiscussionState message is required but missing. State must have node message. Dont call this property if this is not runned in the node context where node_message is guaranteed to be set.")
-        return StateMessage(txt_message=self.payload.node_message)
+        return StateMessage(txt_message=self.payload.node_message, action=self.payload.action)
 
     @property
     def error(self) -> Optional[str]:
         return self.payload.error_message
-
-    @property
-    def needs_action(self) -> ACTION:
-        return self.payload.action
 
     def pre_required_states_names(self) -> Sequence[str]:
         return  ProtocolDiscussionDeps.pre_required_states_names()

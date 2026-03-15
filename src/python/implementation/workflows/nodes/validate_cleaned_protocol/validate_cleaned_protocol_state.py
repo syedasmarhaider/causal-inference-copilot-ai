@@ -4,7 +4,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from python.domain.workflows.state import ACTION, State, StateMessage, Status
+from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_deps import ValidateCleanProtocolDeps
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
@@ -51,17 +51,15 @@ class ValidateCleanProtocolState(State):
     def message(self) -> StateMessage:
         if self.payload.user_message is None:
             raise ValueError("ValidateCleanProtocolState message is required but missing. State must have user message. Dont call this property if this is not runned in the node context where user_message is guaranteed to be set.")
-        return StateMessage(txt_message=self.payload.user_message)
+        if self.status in ("ABORTED", "DONE"):
+            action = "NONE"
+        else:
+            action = "NEEDS_INPUT"
+        return StateMessage(txt_message=self.payload.user_message,action=action)
 
     @property
     def error(self) -> Optional[str]:
         return self.payload.validation_error
-
-    @property
-    def needs_action(self) -> ACTION:
-        if self.status in ("ABORTED", "DONE"):
-            return "NONE"
-        return "NEEDS_INPUT"
 
     def pre_required_states_names(self) -> Sequence[str]:
         return ValidateCleanProtocolDeps.pre_required_states_names()

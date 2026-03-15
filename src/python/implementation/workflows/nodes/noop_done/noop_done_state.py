@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import ClassVar, Optional, Sequence, Any
-from python.domain.workflows.state import ACTION, State, StateMessage, Status
+from python.domain.workflows.state import State, StateMessage, Status
 
 
 @dataclass(frozen=True)
@@ -23,15 +23,11 @@ class NoopDoneState(State):
 
     @property
     def message(self) -> StateMessage:
-        return StateMessage(txt_message="done")
+        return StateMessage(txt_message="done",action="NONE")
 
     @property
     def error(self) -> Optional[str]:
         return None
-
-    @property
-    def needs_action(self) -> ACTION:
-        return "NONE"
 
     def pre_required_states_names(self) -> Sequence[str]:
         return []

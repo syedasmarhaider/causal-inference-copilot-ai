@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 import json
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence, cast
@@ -117,8 +116,7 @@ class ModelSelectionNode(Node):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Any,  # Mapping[str, State] (kept Any to match your ABC signature)
-        messages_history: Optional[Sequence[ChatMessage]],
-        input_extras: Optional[Mapping[str, Any]] = None,
+        messages_history: Optional[Sequence[ChatMessage]]
     ) -> State:
         if not isinstance(state, ModelSelectionState):
             raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")

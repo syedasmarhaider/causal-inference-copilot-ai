@@ -111,7 +111,6 @@ class CleanProtocolNode(Node):
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
-        input_extras: Optional[Mapping[str, Any]] = None,
     ) -> State:
         if not isinstance(state, CleanProtocolState):
             raise TypeError(

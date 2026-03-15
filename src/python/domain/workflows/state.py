@@ -5,12 +5,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional, Sequence
 
 Status = Literal["PENDING", "DONE", "ABORTED"]
-ACTION = Literal["NONE", "NEEDS_INPUT"]
+ACTION = Literal["NONE", "NEEDS_INPUT","NEEDS_DATA"]
 
 
 @dataclass(frozen=True, slots=True)
 class StateMessage:
     txt_message: str
+    action: ACTION 
     artifact_ids: Optional[Sequence[str]] = None
 
 class State(ABC):
@@ -32,11 +33,6 @@ class State(ABC):
     @property
     @abstractmethod
     def error(self) -> Optional[str]:
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def needs_action(self) -> ACTION:
         raise NotImplementedError
 
     @abstractmethod

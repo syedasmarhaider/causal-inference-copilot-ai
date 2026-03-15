@@ -75,7 +75,6 @@ class ProtocolDiscussionNode(Node):
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, Any],
         messages_history: Optional[Sequence[ChatMessage]],
-        input_extras: Optional[Mapping[str, Any]] = None,
         state: State,
     ) -> State:
         data_set_profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))
