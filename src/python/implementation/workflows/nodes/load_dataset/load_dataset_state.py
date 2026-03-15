@@ -68,10 +68,6 @@ class LoadDatasetState(State):
     def error(self) -> Optional[str]:
         return self.payload.load_error
 
-    @property
-    def needs_action(self) -> ACTION:
-        return "NEEDS_INPUT" if self.error is not None else "NONE"
-
     def pre_required_states_names(self) -> Sequence[str]:
         return ()
 

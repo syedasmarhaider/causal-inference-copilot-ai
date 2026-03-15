@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
-from typing import Any, ClassVar, Optional, Sequence, cast
+from typing import ClassVar, Optional, Sequence, cast
 from uuid import UUID
 import uuid
 
@@ -88,7 +88,6 @@ class LoadDatasetNode(Node):
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
-        input_extras: Optional[Mapping[str, Any]] = None,
         state: State,
     ) -> State:
         if not isinstance(state, LoadDatasetState):
