@@ -1,0 +1,19 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class AuthenticatedUser:
+    uid: str
+    email: str | None
+    email_verified: bool
+    claims: Mapping[str, Any]
+
+
+class AuthService(ABC):
+    @abstractmethod
+    def verify_token_and_get_user(self, token: str) -> AuthenticatedUser:
+        raise NotImplementedError
