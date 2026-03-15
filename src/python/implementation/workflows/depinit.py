@@ -37,12 +37,11 @@ def make_workflow_app(settings: WorkflowSettings) -> WorkflowApp:
 
     # 2) Repos
     data_repo: DataRepo = GoogleCloudStorageDataRepo(bucket_name="your-bucket-name")
-    models_repo: ModelsRepo = GoogleCloudStorageModelsRepo(bucket_name="your-bucket-name")  
+    models_repo: ModelsRepo = _make_models_repo()
 
     state_classes_by_name = build_state_classes_by_name()
 
     workflow_repo = _make_workflow_state_repo(
-        settings=settings,
         state_classes_by_name=state_classes_by_name,
     )
 
@@ -73,7 +72,6 @@ def make_workflow_app(settings: WorkflowSettings) -> WorkflowApp:
 
 def _make_workflow_state_repo(
     *,
-    settings: WorkflowSettings,
     state_classes_by_name: Mapping[str, Type[State]],
 ) -> WorkflowStateRepo:
     app =  FirebaseRealtimeWorkflowStateRepo.get_default_firebase_database_app()
@@ -81,6 +79,10 @@ def _make_workflow_state_repo(
         app=app,
         state_classes_by_name=state_classes_by_name,
     )
+
+
+def _make_models_repo() -> ModelsRepo:
+    return GoogleCloudStorageModelsRepo(GoogleCloudStorageModelsRepo.get_default_bucket())    
    
 
 

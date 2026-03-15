@@ -65,7 +65,10 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
     
     @staticmethod
     def get_default_bucket() -> storage.Bucket:
-        client = storage.Client()
+        project_name = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip() or None
+        if not project_name:
+            raise ValueError("GOOGLE_CLOUD_PROJECT environment variable must be set for GoogleCloudStorageModelsRepo")
+        client = storage.Client(project=project_name)
         bucket_name = os.getenv("GCS_MODELS_BUCKET_NAME", "").strip()
         if not bucket_name:
             raise ValueError("GCS_MODELS_BUCKET_NAME must be configured for GoogleCloudStorageModelsRepo")
