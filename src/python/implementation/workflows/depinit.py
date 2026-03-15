@@ -1,12 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import os
-from pathlib import Path
-from typing import Literal, Mapping, Optional, Type
+from typing import  Mapping, Type
 
-import firebase_admin
-from firebase_admin import credentials
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
@@ -15,7 +11,7 @@ from python.domain.service.llm_service import LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.route import Router
 from python.domain.workflows.state import State
-
+from python.implementation.repo.firebase_realtime_workflow_state_repo import FirebaseRealtimeWorkflowStateRepo
 from python.implementation.repo.google_cloud_storage_data_repo import GoogleCloudStorageDataRepo
 from python.implementation.repo.google_cloud_storage_model_repo import GoogleCloudStorageModelsRepo
 from python.implementation.service.llms.llm_service_factory import LLMServiceSettings, make_llm_service
@@ -30,24 +26,9 @@ from python.implementation.workflows.tools.tools_factory import DefaultToolFacto
 from python.implementation.workflows.workflow_app import WorkflowApp
 
 @dataclass(frozen=True)
-class FirebaseRealtimeRepoSettings:
-    database_url: Optional[str] = None
-
-
-@dataclass(frozen=True)
 class WorkflowSettings:
-    """
-    Composition-root settings for initializing the workflow runtime.
-    """
-    workflow_state_dir: Path = Path("./data/workflow_state")
-    models_root_dir: Path = Path("./models")
-    workflow_repo_backend: Literal["json", "firebase_rtdb"] = "json"
-
     llm: LLMServiceSettings = field(default_factory=LLMServiceSettings)
-
     history_limit: int = 30
-
-    firebase_repo: FirebaseRealtimeRepoSettings = field(default_factory=FirebaseRealtimeRepoSettings)
 
 
 def make_workflow_app(settings: WorkflowSettings) -> WorkflowApp:
@@ -95,38 +76,13 @@ def _make_workflow_state_repo(
     settings: WorkflowSettings,
     state_classes_by_name: Mapping[str, Type[State]],
 ) -> WorkflowStateRepo:
-    return _make_firebase_workflow_state_repo(
-            settings=settings.firebase_repo,
-            state_classes_by_name=state_classes_by_name,
-        )
-
-
-
-def _make_firebase_workflow_state_repo(
-    *,
-    settings: FirebaseRealtimeRepoSettings,
-    state_classes_by_name: Mapping[str, Type[State]],
-) -> WorkflowStateRepo:
-    database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
-    if not database_url:
-        raise ValueError(
-            "FIREBASE_DATABASE_URL must be configured when workflow_repo_backend='firebase_rtdb'"
-        )
-
-    try:
-        app = firebase_admin.get_app()
-    except ValueError:
-        app = firebase_admin.initialize_app(
-            credentials.ApplicationDefault(),
-            {"databaseURL": database_url},
-        )
-
-    from python.implementation.repo.firebase_realtime_workflow_state_repo import (
-        FirebaseRealtimeWorkflowStateRepo,
-    )
-
+    app =  FirebaseRealtimeWorkflowStateRepo.get_default_firebase_database_app()
     return FirebaseRealtimeWorkflowStateRepo(
         app=app,
-        root_path="/workflows",
         state_classes_by_name=state_classes_by_name,
     )
+   
+
+
+
+

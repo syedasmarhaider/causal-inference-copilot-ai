@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, is_dataclass
+import os
 from typing import Any, Mapping, Optional, Sequence, Type
 from uuid import UUID
 
-from firebase_admin import db
+from firebase_admin import credentials, db
+import firebase_admin
 
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import ChatMessage
@@ -13,16 +15,32 @@ from python.domain.workflows.state import State
 
 
 class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
+    
+    @staticmethod
+    def get_default_firebase_database_app() -> FirebaseRealtimeWorkflowStateRepo:
+        database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
+        if not database_url:
+            raise ValueError(
+                "FIREBASE_DATABASE_URL must be configured when workflow_repo_backend='firebase_rtdb'"
+            ) 
+        try:
+            app = firebase_admin.get_app()
+            return app
+        except ValueError:
+            app = firebase_admin.initialize_app(
+                credentials.ApplicationDefault(),
+                {"databaseURL": database_url},
+            )
+            return app
+        
+        
     def __init__(
         self,
         *,
         app: Any,
-        root_path: str = "/workflows",
         state_classes_by_name: Mapping[str, Type[State]],
     ) -> None:
-        if not isinstance(root_path, str) or not root_path.strip():
-            raise ValueError("root_path must be a non-empty string")
-
+        root_path: str = "/workflows"
         self._root_ref = db.reference(root_path, app=app)
         self._state_classes_by_name = dict(state_classes_by_name)
 
@@ -216,3 +234,8 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
     def _chat_message_from_dict(self, payload: dict[str, Any]) -> ChatMessage:
         return ChatMessage(**payload)
+
+
+
+    
+        
