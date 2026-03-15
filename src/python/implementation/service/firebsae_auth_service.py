@@ -69,13 +69,15 @@ class FirebaseAuthService(AuthService):
             return firebase_admin.get_app()
         except ValueError:
             project_id = os.getenv("GOOGLE_CLOUD_PROJECT_ID", "").strip()
+            if not project_id:
+                raise ValueError("GOOGLE_CLOUD_PROJECT_ID environment variable must be set for FirebaseAuthService")
             database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
+            if not database_url:
+                raise ValueError("FIREBASE_DATABASE_URL environment variable must be set for FirebaseAuthService")
 
             options: dict[str, str] = {}
-            if project_id:
-                options["projectId"] = project_id
-            if database_url:
-                options["databaseURL"] = database_url
+            options["projectId"] = project_id
+            options["databaseURL"] = database_url
 
             return firebase_admin.initialize_app(
                 credentials.ApplicationDefault(),
