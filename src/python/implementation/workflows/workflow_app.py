@@ -242,6 +242,7 @@ class WorkflowApp:
         return WorkflowResponse(
             node_message=new_state.message.txt_message,
             needs_input=(new_state.message.action == "NEEDS_INPUT"),
+            needs_data=(new_state.message.action == "NEEDS_DATA"),
             current_stage=new_state.name,
             current_stage_status=new_state.status,
             artifact_ids=new_state.message.artifact_ids,
