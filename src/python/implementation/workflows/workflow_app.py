@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass
+from uuid import UUID, uuid4
 from typing import Any, Mapping, Optional, Sequence, Type
-from uuid import UUID
+
+import pandas as pd
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
@@ -32,6 +35,12 @@ class WorkflowResponse:
     artifact_ids: Optional[Sequence[str]] = None
 
 
+@dataclass(frozen=True)
+class ArtifactResponse:
+    mime: str
+    content: bytes
+
+
 class WorkflowApp:
     def __init__(
         self,
@@ -56,6 +65,48 @@ class WorkflowApp:
         self._tool_factory = tool_factory
         self._history_limit = history_limit
         self._max_steps_per_call = max_steps_per_call
+
+    def upload_csv_data(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        csv_bytes: bytes,
+    ) -> UUID:
+        try:
+            df = pd.read_csv(io.BytesIO(csv_bytes), low_memory=False)
+        except Exception as exc:
+            raise ValueError(f"Uploaded file is not a valid CSV: {exc}") from exc
+
+        dataset_id = uuid4()
+        self._data_repo.save_csv_data(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            dataset_id=dataset_id,
+            df=df,
+            overwrite=False,
+        )
+        return dataset_id
+
+    def get_artifact(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        artifact_id: UUID,
+    ) -> ArtifactResponse:
+        mime = self._data_repo.get_artifact_mime(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            artifact_id=artifact_id,
+        )
+        content = self._data_repo.get_artifact_bytes(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            artifact_id=artifact_id,
+            expected_mime=mime,
+        )
+        return ArtifactResponse(mime=mime, content=content)
     
     def create_conversation(self, user_id: UUID, conversation_id: UUID) -> None:
         self._repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)

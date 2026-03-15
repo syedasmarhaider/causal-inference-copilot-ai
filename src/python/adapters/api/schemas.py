@@ -15,6 +15,12 @@ class CreateConversationResponse(BaseModel):
     conversation_id: UUID
 
 
+class UploadDatasetResponse(BaseModel):
+    user_id: UUID
+    conversation_id: UUID
+    dataset_id: UUID
+
+
 class InvokeRequest(BaseModel):
     user_id: UUID
     user_text: Optional[str] = Field(default=None)

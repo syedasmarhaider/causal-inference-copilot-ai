@@ -4,15 +4,16 @@ import asyncio
 import logging
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 
 from python.adapters.api.schemas import (
     CreateConversationRequest,
     CreateConversationResponse,
     InvokeRequest,
     InvokeResponse,
+    UploadDatasetResponse,
 )
 
 from python.implementation.workflows.depinit import make_workflow_app
@@ -57,14 +58,60 @@ def get_artifact(
         )
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="artifact not found")
+    except Exception as e:
+        log.exception("artifact download failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
-    return FileResponse(
-        path=ref.path,
+    return Response(
+        content=ref.content,
         media_type=ref.mime,
         headers={
             "Content-Disposition": "inline",
             "Cache-Control": "private, max-age=60",
         },
+    )
+
+
+@app.post(
+    "/v1/{user_id}/conversations/{conversation_id}/datasets",
+    response_model=UploadDatasetResponse,
+)
+async def upload_dataset_csv(
+    user_id: UUID,
+    conversation_id: UUID,
+    file: UploadFile = File(...),
+):
+    file_name = (file.filename or "").strip()
+    content_type = (file.content_type or "").lower()
+    is_csv_name = file_name.lower().endswith(".csv")
+    is_csv_type = "csv" in content_type or content_type == "application/vnd.ms-excel"
+
+    if not is_csv_name and not is_csv_type:
+        raise HTTPException(status_code=400, detail="Only CSV uploads are supported.")
+
+    csv_bytes = await file.read()
+    if not csv_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    try:
+        dataset_id = await asyncio.to_thread(
+            _workflow.upload_csv_data,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            csv_bytes=csv_bytes,
+        )
+    except FileExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.exception("dataset upload failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return UploadDatasetResponse(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        dataset_id=dataset_id,
     )
     
 @app.post("/v1/conversations", response_model=CreateConversationResponse)
@@ -73,7 +120,6 @@ def create_conversation(req: CreateConversationRequest):
     conversation_id = uuid4()
     logging.warning(f"Creating conversation: user_id={user_id}, conversation_id={conversation_id}")
     _workflow.create_conversation(user_id=user_id, conversation_id=conversation_id)
-    _workflow.create_init_files(user_id=user_id, conversation_id=conversation_id)
     return CreateConversationResponse(user_id=user_id, conversation_id=conversation_id)
 
 
