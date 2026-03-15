@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from functools import lru_cache
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
@@ -15,9 +16,15 @@ from python.adapters.api.schemas import (
     InvokeResponse,
     UploadDatasetResponse,
 )
+from python.domain.service.auth_service import AuthService, AuthenticatedUser
+from python.implementation.service.firebsae_auth_service import (
+    AuthServiceError,
+    FirebaseAuthService,
+    InvalidTokenError,
+)
 
 from python.implementation.workflows.depinit import make_workflow_app
-from python.implementation.workflows.workflow_app import WorkflowRequest
+from python.implementation.workflows.workflow_app import WorkflowApp, WorkflowRequest
 
 log = logging.getLogger(__name__)
 
@@ -33,8 +40,46 @@ app.add_middleware(
 
 logging.basicConfig(level=logging.INFO)
 
+def _unauthorized(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=401,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
-_workflow = make_workflow_app()
+
+@lru_cache(maxsize=1)
+def get_workflow_app() -> WorkflowApp:
+    return make_workflow_app()
+
+
+@lru_cache(maxsize=1)
+def get_auth_service() -> AuthService:
+    return FirebaseAuthService(app=FirebaseAuthService.get_firebase_auth_default_app())
+
+
+def get_authenticated_user(authorization: str | None = Header(default=None)) -> AuthenticatedUser:
+    if authorization is None:
+        raise _unauthorized("Missing Authorization header.")
+
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        raise _unauthorized("Authorization header must use the Bearer scheme.")
+
+    normalized_token = token.strip()
+    if not normalized_token:
+        raise _unauthorized("Bearer token is missing.")
+
+    try:
+        return get_auth_service().verify_token_and_get_user(normalized_token)
+    except (InvalidTokenError, ValueError) as exc:
+        raise _unauthorized("Invalid or expired bearer token.") from exc
+    except AuthServiceError as exc:
+        log.exception("authentication failed")
+        raise HTTPException(status_code=500, detail="authentication service unavailable") from exc
+    except Exception as exc:
+        log.exception("authentication failed")
+        raise HTTPException(status_code=500, detail="authentication service unavailable") from exc
 
 
 @app.get("/healthz")
@@ -42,17 +87,16 @@ def healthz():
     return {"ok": True}
 
 
-@app.get(path="/v1/{user_id}/conversations/{conversation_id}/artifacts/{artifact_id}")
+@app.get(path="/v1/conversations/{conversation_id}/artifacts/{artifact_id}")
 def get_artifact(
-    user_id: UUID,
     conversation_id: UUID,
     artifact_id: UUID,
+    authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
+    workflow: WorkflowApp = Depends(get_workflow_app),
 ):
-    # TODO: for now no authentication and authorization, but in the future we should check if the user has access to the conversation and artifact
-    uid = user_id
     try:
-        ref = _workflow.get_artifact(
-            user_id=uid,
+        ref = workflow.get_artifact(
+            user_id=authenticated_user.uid,
             conversation_id=conversation_id,
             artifact_id=artifact_id,
         )
@@ -73,13 +117,14 @@ def get_artifact(
 
 
 @app.post(
-    "/v1/{user_id}/conversations/{conversation_id}/datasets",
+    "/v1/conversations/{conversation_id}/datasets",
     response_model=UploadDatasetResponse,
 )
 async def upload_dataset_csv(
-    user_id: UUID,
     conversation_id: UUID,
     file: UploadFile = File(...),
+    authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
+    workflow: WorkflowApp = Depends(get_workflow_app),
 ):
     file_name = (file.filename or "").strip()
     content_type = (file.content_type or "").lower()
@@ -95,8 +140,8 @@ async def upload_dataset_csv(
 
     try:
         dataset_id = await asyncio.to_thread(
-            _workflow.upload_csv_data,
-            user_id=user_id,
+            workflow.upload_csv_data,
+            user_id=authenticated_user.uid,
             conversation_id=conversation_id,
             csv_bytes=csv_bytes,
         )
@@ -109,30 +154,40 @@ async def upload_dataset_csv(
         raise HTTPException(status_code=500, detail=str(e))
 
     return UploadDatasetResponse(
-        user_id=user_id,
+        user_id=authenticated_user.uid,
         conversation_id=conversation_id,
         dataset_id=dataset_id,
     )
     
 @app.post("/v1/conversations", response_model=CreateConversationResponse)
-def create_conversation(req: CreateConversationRequest):
-    user_id = req.user_id or uuid4()
+def create_conversation(
+    req: CreateConversationRequest | None = None,
+    authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
+    workflow: WorkflowApp = Depends(get_workflow_app),
+):
+    _ = req
+    user_id = authenticated_user.uid
     conversation_id = uuid4()
     logging.warning(f"Creating conversation: user_id={user_id}, conversation_id={conversation_id}")
-    _workflow.create_conversation(user_id=user_id, conversation_id=conversation_id)
+    workflow.create_conversation(user_id=user_id, conversation_id=conversation_id)
     return CreateConversationResponse(user_id=user_id, conversation_id=conversation_id)
 
 
 @app.post("/v1/conversations/{conversation_id}/invoke", response_model=InvokeResponse)
-async def invoke_once(conversation_id: UUID, req: InvokeRequest):
+async def invoke_once(
+    conversation_id: UUID,
+    req: InvokeRequest,
+    authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
+    workflow: WorkflowApp = Depends(get_workflow_app),
+):
     # single node execution per request
     txt = (req.user_text or "").strip() or None
 
     try:
         resp = await asyncio.to_thread(
-            _workflow.handle, 
+            workflow.handle,
             WorkflowRequest(
-                user_id=req.user_id,
+                user_id=authenticated_user.uid,
                 conversation_id=conversation_id,
                 user_message=txt,
             ),
@@ -143,7 +198,7 @@ async def invoke_once(conversation_id: UUID, req: InvokeRequest):
 
     return InvokeResponse(
         conversation_id=conversation_id,
-        user_id=req.user_id,
+        user_id=authenticated_user.uid,
         node_message=resp.node_message,
         needs_input=resp.needs_input,
         needs_data=resp.needs_data,

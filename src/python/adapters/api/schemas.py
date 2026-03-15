@@ -3,30 +3,37 @@ from __future__ import annotations
 from typing import Optional, Sequence
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CreateConversationRequest(BaseModel):
-    user_id: Optional[UUID] = None
+    model_config = ConfigDict(extra="forbid")
 
 
 class CreateConversationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     user_id: UUID
     conversation_id: UUID
 
 
 class UploadDatasetResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     user_id: UUID
     conversation_id: UUID
     dataset_id: UUID
 
 
 class InvokeRequest(BaseModel):
-    user_id: UUID
+    model_config = ConfigDict(extra="forbid")
+
     user_text: Optional[str] = Field(default=None)
 
 
 class InvokeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     conversation_id: UUID
     user_id: UUID
     node_message: Optional[str]

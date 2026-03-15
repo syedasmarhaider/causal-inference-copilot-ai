@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 from uuid import UUID, uuid5
 
 import firebase_admin
-from firebase_admin import auth
+from firebase_admin import auth, credentials
 
 from python.domain.service.auth_service import AuthService, AuthenticatedUser
 
@@ -57,4 +58,6 @@ class FirebaseAuthService(AuthService):
         try:
             return firebase_admin.get_app()
         except ValueError:
-            return firebase_admin.initialize_app()
+            database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
+            options = {"databaseURL": database_url} if database_url else None
+            return firebase_admin.initialize_app(credentials.ApplicationDefault(), options)
