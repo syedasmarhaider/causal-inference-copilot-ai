@@ -36,9 +36,9 @@ _OPENAPI_TAGS = [
 ]
 
 app = FastAPI(
-    title="Causal Copilot API",
+    title="AitiaMed Copilot API",
     version="0.1.0",
-    summary="Authenticated API for causal inference workflows",
+    summary="Authenticated API for medical causal inference workflow interactions.",
     description=(
         "Upload a CSV dataset, invoke the causal workflow, and download generated artifacts.\n\n"
         "Authentication:\n"

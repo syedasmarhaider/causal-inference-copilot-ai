@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from uuid import UUID, uuid5
 
@@ -36,7 +37,15 @@ class FirebaseAuthService(AuthService):
                 check_revoked=True,
             )
         except Exception as exc:
+            logging.warning("Failed to verify Firebase token: %s", exc)
             raise InvalidTokenError("failed to verify Firebase token") from exc
+        
+        logging.warning(
+            "Successfully verified Firebase token for uid=%s, email=%s, email_verified=%s",
+            raw_uid,
+            email,
+            decoded.get("email_verified", False),
+        )
 
         raw_uid = decoded.get("uid")
         if not isinstance(raw_uid, str) or not raw_uid.strip():
@@ -46,6 +55,7 @@ class FirebaseAuthService(AuthService):
         if email is not None and not isinstance(email, str):
             email = None
 
+   
         return AuthenticatedUser(
             uid=uuid5(_FIREBASE_USER_ID_NAMESPACE, raw_uid),
             email=email,
@@ -58,6 +68,16 @@ class FirebaseAuthService(AuthService):
         try:
             return firebase_admin.get_app()
         except ValueError:
+            project_id = os.getenv("GOOGLE_CLOUD_PROJECT_ID", "").strip()
             database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
-            options = {"databaseURL": database_url} if database_url else None
-            return firebase_admin.initialize_app(credentials.ApplicationDefault(), options)
+
+            options: dict[str, str] = {}
+            if project_id:
+                options["projectId"] = project_id
+            if database_url:
+                options["databaseURL"] = database_url
+
+            return firebase_admin.initialize_app(
+                credentials.ApplicationDefault(),
+                options or None,
+            )

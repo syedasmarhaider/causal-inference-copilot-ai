@@ -57,8 +57,8 @@ class GoogleCloudStorageDataRepo(DataRepo):
 
     @staticmethod
     def get_default_bucket() -> storage.Bucket:
-        project_name = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip() or None
-        client = storage.Client(project=project_name)
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT_ID", "").strip() or None
+        client = storage.Client(project=project_id)
         bucket_name = os.getenv("GCS_DATA_BUCKET_NAME", "").strip()
         if not bucket_name:
             raise ValueError("GCS_DATA_BUCKET_NAME must be configured for GoogleCloudStorageDataRepo")

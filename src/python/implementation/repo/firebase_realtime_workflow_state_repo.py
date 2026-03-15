@@ -18,20 +18,22 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     
     @staticmethod
     def get_default_firebase_database_app() -> FirebaseRealtimeWorkflowStateRepo:
-        database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
-        if not database_url:
-            raise ValueError(
-                "FIREBASE_DATABASE_URL must be configured when workflow_repo_backend='firebase_rtdb'"
-            ) 
         try:
-            app = firebase_admin.get_app()
-            return app
+            return firebase_admin.get_app()
         except ValueError:
-            app = firebase_admin.initialize_app(
+            project_id = os.getenv("GOOGLE_CLOUD_PROJECT_ID", "").strip()
+            database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
+
+            options: dict[str, str] = {}
+            if project_id:
+                options["projectId"] = project_id
+            if database_url:
+                options["databaseURL"] = database_url
+
+            return firebase_admin.initialize_app(
                 credentials.ApplicationDefault(),
-                {"databaseURL": database_url},
+                options or None,
             )
-            return app
         
         
     def __init__(
