@@ -16,13 +16,8 @@ from python.domain.workflows.node import Node
 from python.domain.workflows.route import Router
 from python.domain.workflows.state import State
 
-from python.implementation.repo.file_data_repo import FileDataRepo
-from python.implementation.repo.models_repo import FileSystemModelsRepo
-from python.implementation.repo.json_file_workflow_state_repo import (
-    JsonFileRepoConfig,
-    JsonFileWorkflowStateRepo,
-)
-
+from python.implementation.repo.google_cloud_storage_data_repo import GoogleCloudStorageDataRepo
+from python.implementation.repo.google_cloud_storage_model_repo import GoogleCloudStorageModelsRepo
 from python.implementation.service.llms.llm_service_factory import LLMServiceSettings, make_llm_service
 
 from python.implementation.workflows.router.llm_assisted_router import (
@@ -52,8 +47,6 @@ class WorkflowSettings:
 
     history_limit: int = 30
 
-    # JSON repo robustness knobs (optional)
-    json_repo: JsonFileRepoConfig = field(default_factory=JsonFileRepoConfig)
     firebase_repo: FirebaseRealtimeRepoSettings = field(default_factory=FirebaseRealtimeRepoSettings)
 
 
@@ -62,8 +55,8 @@ def make_workflow_app(settings: WorkflowSettings) -> WorkflowApp:
     llm: LLMService = make_llm_service(settings.llm)
 
     # 2) Repos
-    data_repo: DataRepo = FileDataRepo() 
-    models_repo: ModelsRepo = FileSystemModelsRepo(root_dir=settings.models_root_dir) 
+    data_repo: DataRepo = GoogleCloudStorageDataRepo(bucket_name="your-bucket-name")
+    models_repo: ModelsRepo = GoogleCloudStorageModelsRepo(bucket_name="your-bucket-name")  
 
     state_classes_by_name = build_state_classes_by_name()
 
