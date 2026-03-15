@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass
-from uuid import UUID, uuid4
+from uuid import UUID
 from typing import Any, Mapping, Optional, Sequence, Type
 
 import pandas as pd
@@ -83,35 +83,22 @@ class WorkflowApp:
         except Exception as exc:
             raise ValueError(f"Uploaded file is not a valid CSV: {exc}") from exc
 
-        dataset_id = uuid4()
+        active_name = self._repo.load_active_state_name(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if not active_name or LoadDatasetState.NAME != active_name:
+            raise ValueError(f"No active conversation found for user_id={user_id} and conversation_id={conversation_id} or state is not at load data set")
+        
+        dataset_id = LoadDatasetState.INIT_DATA_ID
         self._data_repo.save_csv_data(
             user_id=user_id,
             conversation_id=conversation_id,
             dataset_id=dataset_id,
             df=df,
-            overwrite=False,
+            overwrite=True,
         )
-
-        self._repo.store_state(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            state=LoadDatasetState(
-                LoadDatasetPayloadModel(
-                    id=dataset_id,
-                    summary=None,
-                    load_error=None,
-                    graph_picture_ids=None,
-                    user_message="Dataset uploaded successfully. I will summarize it next.",
-                    action="NONE",
-                )
-            ),
-        )
-        self._repo.store_active_state_name(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            state_name=LoadDatasetState.NAME,
-        )
-
+         
         return dataset_id
 
     def get_artifact(
@@ -255,7 +242,6 @@ class WorkflowApp:
         return WorkflowResponse(
             node_message=new_state.message.txt_message,
             needs_input=(new_state.message.action == "NEEDS_INPUT"),
-            needs_data=(new_state.message.action == "NEEDS_DATA"),
             current_stage=new_state.name,
             current_stage_status=new_state.status,
             artifact_ids=new_state.message.artifact_ids,
