@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final, Mapping, Optional, Protocol, cast
@@ -17,6 +17,7 @@ from google.cloud import storage  # pyright: ignore[reportMissingTypeStubs]
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
 
 DEFAULT_GCS_MODELS_PREFIX: Final[str] = "models"
+DEFAULT_GCS_TIMEOUT_SECONDS: Final[float] = 60.0
 
 
 def _utc_now_iso() -> str:
@@ -62,9 +63,22 @@ def _safe_unlink(path: Path) -> None:
 class GoogleCloudStorageModelsRepo(ModelsRepo):
     bucket: storage.Bucket
     
+    @staticmethod
+    def get_default_bucket() -> storage.Bucket:
+        client = storage.Client()
+        bucket_name = os.getenv("GCS_MODELS_BUCKET_NAME", "").strip()
+        if not bucket_name:
+            raise ValueError("GCS_MODELS_BUCKET_NAME must be configured for GoogleCloudStorageModelsRepo")
+        return client.bucket(bucket_name)
+
+    def __post_init__(self) -> None:
+        bucket_name = getattr(self.bucket, "name", "").strip()
+        if not bucket_name:
+            raise ValueError("bucket must have a non-empty name")
+
     def _models_prefix(self, *, user_id: UUID, conversation_id: UUID) -> str:
         parts = (
-            self.root_prefix,
+            DEFAULT_GCS_MODELS_PREFIX,
             "users",
             str(user_id),
             "conversations",
@@ -79,15 +93,9 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
     def _meta_blob_name(self, *, user_id: UUID, conversation_id: UUID, model_id: UUID) -> str:
         return f"{self._models_prefix(user_id=user_id, conversation_id=conversation_id)}/{model_id}.meta.json"
 
-    def _blob(self, *, blob_name: str) -> storage.Blob:
-        blob = self.bucket.blob(blob_name)
-        if self.chunk_size_bytes is not None:
-            blob.chunk_size = self.chunk_size_bytes
-        return blob
-
     def _artifact_blob(self, *, user_id: UUID, conversation_id: UUID, model_id: UUID) -> storage.Blob:
-        return self._blob(
-            blob_name=self._artifact_blob_name(
+        return self.bucket.blob(
+            self._artifact_blob_name(
                 user_id=user_id,
                 conversation_id=conversation_id,
                 model_id=model_id,
@@ -95,8 +103,8 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
         )
 
     def _meta_blob(self, *, user_id: UUID, conversation_id: UUID, model_id: UUID) -> storage.Blob:
-        return self._blob(
-            blob_name=self._meta_blob_name(
+        return self.bucket.blob(
+            self._meta_blob_name(
                 user_id=user_id,
                 conversation_id=conversation_id,
                 model_id=model_id,
@@ -141,7 +149,7 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
             "artifact_sha256": artifact_sha256,
             "saved_at_utc": _utc_now_iso(),
             "repo_backend": "gcs",
-            "bucket": self.bucket_name,
+            "bucket": self.bucket.name,
             "app_metadata": dict(app_metadata or {}),
         }
 
@@ -157,7 +165,7 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
                 user_id=user_id,
                 conversation_id=conversation_id,
                 model_id=model_id,
-            ).download_as_text(timeout=self.timeout_seconds)
+            ).download_as_text(timeout=DEFAULT_GCS_TIMEOUT_SECONDS)
         except NotFound:
             return {}
         except Exception:
@@ -194,7 +202,7 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
                 model_id=model_id,
             ),
             "repo_backend": "gcs",
-            "bucket": self.bucket_name,
+            "bucket": self.bucket.name,
             "app_metadata": {},
         }
 
@@ -231,7 +239,7 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
             artifact_blob.upload_from_filename(
                 filename=str(tmp_artifact),
                 content_type="application/octet-stream",
-                timeout=self.timeout_seconds,
+                timeout=DEFAULT_GCS_TIMEOUT_SECONDS,
             )
 
             repo_metadata = self._build_saved_metadata(
@@ -245,7 +253,7 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
             meta_blob.upload_from_string(
                 data=_json_dumps(repo_metadata),
                 content_type="application/json",
-                timeout=self.timeout_seconds,
+                timeout=DEFAULT_GCS_TIMEOUT_SECONDS,
             )
         finally:
             _safe_unlink(tmp_artifact)
@@ -262,7 +270,7 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
             conversation_id=conversation_id,
             model_id=model_id,
         )
-        if not artifact_blob.exists(client=self.client, timeout=self.timeout_seconds):
+        if not artifact_blob.exists(timeout=DEFAULT_GCS_TIMEOUT_SECONDS):
             return None
 
         metadata = self._load_metadata(
@@ -275,7 +283,7 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
         try:
             artifact_blob.download_to_filename(
                 filename=str(tmp_artifact),
-                timeout=self.timeout_seconds,
+                timeout=DEFAULT_GCS_TIMEOUT_SECONDS,
             )
             model = _joblib.load(tmp_artifact)
         finally:
@@ -302,7 +310,7 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
                 user_id=user_id,
                 conversation_id=conversation_id,
                 model_id=model_id,
-            ).exists(client=self.client, timeout=self.timeout_seconds)
+            ).exists(timeout=DEFAULT_GCS_TIMEOUT_SECONDS)
         )
 
     def delete_model(
@@ -325,7 +333,7 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
             ),
         ):
             try:
-                blob.delete(timeout=self.timeout_seconds)
+                blob.delete(timeout=DEFAULT_GCS_TIMEOUT_SECONDS)
             except NotFound:
                 pass
             except Exception:
