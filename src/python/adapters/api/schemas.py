@@ -31,6 +31,7 @@ class InvokeResponse(BaseModel):
     user_id: UUID
     node_message: Optional[str]
     needs_input: bool
+    needs_data: bool
     artifact_ids: Optional[Sequence[str]] = None
     current_stage: str
     current_stage_status: str

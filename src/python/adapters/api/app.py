@@ -146,6 +146,7 @@ async def invoke_once(conversation_id: UUID, req: InvokeRequest):
         user_id=req.user_id,
         node_message=resp.node_message,
         needs_input=resp.needs_input,
+        needs_data=resp.needs_data,
         current_stage=str(resp.current_stage),
         artifact_ids =resp.artifact_ids,
         current_stage_status=str(resp.current_stage_status),
