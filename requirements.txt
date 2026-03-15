@@ -19,3 +19,4 @@ matplotlib
 langfuse
 duckdb
 firebase-admin
+google-cloud-storage
