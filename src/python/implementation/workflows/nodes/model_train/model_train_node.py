@@ -360,6 +360,7 @@ class ModelTrainNode(Node):
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
+        input_extras: Optional[Mapping[str, Any]] = None,
     ) -> State:
         if not isinstance(state, ModelTrainState):
             raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")

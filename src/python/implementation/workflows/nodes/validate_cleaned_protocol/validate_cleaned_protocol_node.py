@@ -72,6 +72,7 @@ class ValidateCleanProtocolNode(Node):
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]],
+        input_extras: Optional[Mapping[str, Any]] = None,
     ) -> State:
         try:
             deps = ValidateCleanProtocolDeps.from_loaded(previous_state_dependencies)

@@ -74,10 +74,18 @@ class WorkflowApp:
         csv_bytes: bytes,
     ) -> UUID:
         try:
-            df = pd.read_csv(io.BytesIO(csv_bytes), low_memory=False)
+            
+            df = pd.read_csv(io.BytesIO(csv_bytes), low_memory=False) # pyright: ignore[reportUnknownMemberType]
         except Exception as exc:
             raise ValueError(f"Uploaded file is not a valid CSV: {exc}") from exc
 
+        active_name = self._repo.load_active_state_name(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if not active_name:
+            raise ValueError(f"No active conversation found for user_id={user_id} and conversation_id={conversation_id}")
+        
         dataset_id = uuid4()
         self._data_repo.save_csv_data(
             user_id=user_id,
@@ -86,6 +94,7 @@ class WorkflowApp:
             df=df,
             overwrite=False,
         )
+         
         return dataset_id
 
     def get_artifact(
