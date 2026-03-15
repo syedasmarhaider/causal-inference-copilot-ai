@@ -1,24 +1,26 @@
 from __future__ import annotations
 
-from firebase_admin import auth
+from uuid import UUID, uuid5
+
 import firebase_admin
+from firebase_admin import auth
 
 from python.domain.service.auth_service import AuthService, AuthenticatedUser
 
+
+_FIREBASE_USER_ID_NAMESPACE = UUID("2d5c4b6d-7f6b-4d8e-9a2d-1f5e9d9d8c11")
+
+
 class AuthServiceError(Exception):
-    """Base authentication service error."""
+    pass
 
 
 class InvalidTokenError(AuthServiceError):
-    """Raised when the provided token is invalid or cannot be verified."""
+    pass
 
 
 class FirebaseAuthService(AuthService):
-    def __init__(
-        self,
-        *,
-        app: firebase_admin.App
-    ) -> None:
+    def __init__(self, *, app: firebase_admin.App) -> None:
         self._app = app
 
     def verify_token_and_get_user(self, token: str) -> AuthenticatedUser:
@@ -35,8 +37,8 @@ class FirebaseAuthService(AuthService):
         except Exception as exc:
             raise InvalidTokenError("failed to verify Firebase token") from exc
 
-        uid = decoded.get("uid")
-        if not isinstance(uid, str) or not uid:
+        raw_uid = decoded.get("uid")
+        if not isinstance(raw_uid, str) or not raw_uid.strip():
             raise InvalidTokenError("verified Firebase token is missing uid")
 
         email = decoded.get("email")
@@ -44,14 +46,14 @@ class FirebaseAuthService(AuthService):
             email = None
 
         return AuthenticatedUser(
-            uid=uid,
+            uid=uuid5(_FIREBASE_USER_ID_NAMESPACE, raw_uid),
             email=email,
             email_verified=bool(decoded.get("email_verified", False)),
             claims=dict(decoded),
         )
-        
+
     @staticmethod
-    def get_firebase_auth_default_app() -> firebase_admin.App:        
+    def get_firebase_auth_default_app() -> firebase_admin.App:
         try:
             return firebase_admin.get_app()
         except ValueError:
