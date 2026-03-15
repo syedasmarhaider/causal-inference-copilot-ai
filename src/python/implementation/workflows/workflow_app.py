@@ -60,20 +60,6 @@ class WorkflowApp:
     def create_conversation(self, user_id: UUID, conversation_id: UUID) -> None:
         self._repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
 
-    # TODO: this will be removed just now for init data
-    def create_init_files(self, user_id: UUID, conversation_id: UUID) -> None: 
-        df= self._data_repo.get_csv_data(
-            user_id=UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
-            conversation_id=UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
-            dataset_id=UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
-        )
-        
-        self._data_repo.save_csv_data(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            dataset_id=UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
-            df=df,
-        )
         
     def handle(self, req: WorkflowRequest) -> WorkflowResponse:
         if req.user_message is not None and req.user_message.strip():

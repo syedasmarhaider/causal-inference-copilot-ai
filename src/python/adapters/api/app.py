@@ -15,7 +15,7 @@ from python.adapters.api.schemas import (
     InvokeResponse,
 )
 
-from python.implementation.workflows.depinit import WorkflowSettings, make_workflow_app
+from python.implementation.workflows.depinit import make_workflow_app
 from python.implementation.workflows.workflow_app import WorkflowRequest
 
 log = logging.getLogger(__name__)
