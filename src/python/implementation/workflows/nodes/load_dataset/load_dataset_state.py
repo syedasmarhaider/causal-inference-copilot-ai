@@ -12,8 +12,7 @@ from python.implementation.workflows.utils.utils import  uuid_from_any
 class LoadDatasetPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    # TODO: for now we keep dataset id fixed since we dont have actual dataset loading and this is just for prototyping. In the future when we implement actual dataset loading, we should generate a new UUID for each loaded dataset.
-    id: Optional[UUID] = UUID("486f4975-6cd9-4261-a122-e6b0fc46462d")
+    id: Optional[UUID] = None
     summary: Optional[DatasetSummaryModel] = None
     load_error: Optional[str] = None
     graph_picture_ids: Optional[Sequence[UUID]] = None

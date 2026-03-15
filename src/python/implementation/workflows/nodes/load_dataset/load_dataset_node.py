@@ -11,19 +11,28 @@ from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
-from python.implementation.workflows.nodes.load_dataset.load_dataset_prompts import load_dataset_node_info, load_dataset_system_prompt
+from python.implementation.workflows.nodes.load_dataset.load_dataset_prompts import (
+    load_dataset_node_info,
+    load_dataset_system_prompt,
+)
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetPayloadModel, LoadDatasetState
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingError, DatasetProfilingTool
 from python.implementation.workflows.utils.utils import JSONDict
 
 
-def _llm_message_strict(llm: LLMService, *, model_name: str, snapshot: JSONDict) -> str:
+def _llm_message_strict(
+    llm: LLMService,
+    *,
+    model_name: str,
+    snapshot: JSONDict,
+    history: Optional[Sequence[ChatMessage]],
+) -> str:
     cfg = LLMConfig(model="basic", temperature=0.5)
     msg = llm.generate(
         config=cfg,
         system_prompt=load_dataset_system_prompt(),
         user_prompt=json.dumps(snapshot, ensure_ascii=False),
-        history=None,
+        history=history,
     ).content
     if not msg:
         raise ValueError("LOAD_DATASET: LLM returned empty message")
@@ -35,6 +44,19 @@ def _format_columns_block(cols: list[str]) -> str:
     for i, c in enumerate(cols, start=1):
         lines.append(f"{i}. {c}")
     return "\n".join(lines)
+
+
+def _latest_user_question(messages_history: Optional[Sequence[ChatMessage]]) -> Optional[str]:
+    if not messages_history:
+        return None
+
+    for message in reversed(messages_history):
+        if message.role != "user":
+            continue
+        content = message.content.strip()
+        if content:
+            return content
+    return None
 
 
 class LoadDatasetNode(Node):
@@ -68,18 +90,29 @@ class LoadDatasetNode(Node):
         messages_history: Optional[Sequence[ChatMessage]],
         state: State,
     ) -> State:
-        
-        data_profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))        
         if not isinstance(state, LoadDatasetState):
             raise TypeError(f"{self.name}: expected LoadDatasetState, got {type(state).__name__}")
         
         if state.payload.id is None:
+            snapshot: JSONDict = {
+                "intent": "DATA_REQUIRED",
+                "latest_user_question": _latest_user_question(messages_history),
+                "error": "dataset_id missing",
+                "hint": "Answer the user's causal ML question generally, then ask them to upload a CSV dataset.",
+                "context": {},
+            }
+            msg = _llm_message_strict(
+                self._llm,
+                model_name=self._model_name,
+                snapshot=snapshot,
+                history=messages_history,
+            )
             return LoadDatasetState(
                 payload=LoadDatasetPayloadModel(
                     id=None,
                     summary=None,
                     load_error="dataset_id missing",
-                    user_message="Dataset ID is missing. Please re-upload or select a dataset.",
+                    user_message=msg,
                 )
             )
 
@@ -93,6 +126,28 @@ class LoadDatasetNode(Node):
                 dataset_id=dataset_id,
                 limit=1_000_000,
             )
+        except FileNotFoundError as e:
+            snapshot: JSONDict = {
+                "intent": "DATA_REQUIRED",
+                "latest_user_question": _latest_user_question(messages_history),
+                "error": str(e),
+                "hint": "Answer the user's causal ML question generally, then ask them to upload a CSV dataset.",
+                "context": {},
+            }
+            msg = _llm_message_strict(
+                self._llm,
+                model_name=self._model_name,
+                snapshot=snapshot,
+                history=messages_history,
+            )
+            return LoadDatasetState(
+                payload=LoadDatasetPayloadModel(
+                    id=None,
+                    summary=None,
+                    load_error=str(e),
+                    user_message=msg,
+                )
+            )
         except Exception as e:
             snapshot: JSONDict = {
                 "intent": "LOAD_FAILED",
@@ -100,7 +155,12 @@ class LoadDatasetNode(Node):
                 "hint": "Verify the configured CSV exists and is readable, then try again.",
                 "context": {},
             }
-            msg = _llm_message_strict(self._llm, model_name=self._model_name, snapshot=snapshot)
+            msg = _llm_message_strict(
+                self._llm,
+                model_name=self._model_name,
+                snapshot=snapshot,
+                history=messages_history,
+            )
             return LoadDatasetState(
                 payload=LoadDatasetPayloadModel(
                     id=dataset_id,
@@ -112,6 +172,7 @@ class LoadDatasetNode(Node):
 
         # ---- Profile summary (user-actionable failures handled) ----
         try:
+            data_profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))
             summary = data_profiling_tool.extract_dataset_summary(
                 df,
                 max_categories=1000,
@@ -153,7 +214,12 @@ class LoadDatasetNode(Node):
                 "hint": "Fix the dataset schema/format and reload.",
                 "context": {},
             }
-            msg = _llm_message_strict(self._llm, model_name=self._model_name, snapshot=snapshot)
+            msg = _llm_message_strict(
+                self._llm,
+                model_name=self._model_name,
+                snapshot=snapshot,
+                history=messages_history,
+            )
             return LoadDatasetState(
                 payload=LoadDatasetPayloadModel(
                     id=state.payload.id,
@@ -172,7 +238,12 @@ class LoadDatasetNode(Node):
             "dataset_preview": {"rows": int(n_rows), "cols": int(n_cols), "columns": cols},
             "summary_stats": {"rows": int(n_rows), "cols": int(n_cols)},
         }
-        msg_ok = _llm_message_strict(self._llm, model_name=self._model_name, snapshot=snapshot_ok)
+        msg_ok = _llm_message_strict(
+            self._llm,
+            model_name=self._model_name,
+            snapshot=snapshot_ok,
+            history=messages_history,
+        )
 
         final_msg = f"{_format_columns_block(cols)}\n\n{msg_ok}".strip()
         
