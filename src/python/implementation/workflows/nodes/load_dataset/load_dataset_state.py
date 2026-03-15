@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar, Dict, Optional, Sequence
 from uuid import UUID
+import uuid
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -37,6 +38,7 @@ class LoadDatasetPayloadModel(BaseModel):
 
 
 class LoadDatasetState(State):
+    INIT_DATA_ID = uuid.UUID("486f4975-6cd9-4261-a122-e6b0fc46462d")
     NAME: ClassVar[str] = "LOAD_DATASET"
 
     def __init__(self, payload: LoadDatasetPayloadModel) -> None:
