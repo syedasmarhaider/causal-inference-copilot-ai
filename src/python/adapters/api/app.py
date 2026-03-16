@@ -16,7 +16,7 @@ from python.adapters.api.schemas import (
     InvokeResponse,
     UploadDatasetResponse,
 )
-from python.domain.models.errors import ConversationNotFoundError
+from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
 from python.domain.service.auth_service import AuthService, AuthenticatedUser
 from python.implementation.service.firebsae_auth_service import (
     AuthServiceError,
@@ -334,3 +334,38 @@ async def invoke_once(
         artifact_ids =resp.artifact_ids,
         current_stage_status=str(resp.current_stage_status),
     )
+
+@app.post(
+    "/v1/conversations/{conversation_id}/revert",
+    tags=["conversations"],
+    summary="Revert to a previous state",
+    description="Reverts the authenticated user's conversation to a previous state.",
+    responses={
+        401: {"description": "Missing or invalid Bearer token."},
+        404: {"description": "Conversation or state not found for this authenticated user."},
+        500: {"description": "Unexpected failure reverting conversation state."},
+    },
+)
+def revert_to_state(
+    conversation_id: UUID = Path(description="Conversation UUID."),
+    state_name: str = Path(description="State name to revert to."),
+    authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
+    workflow: WorkflowApp = Depends(get_workflow_app),
+) -> None:
+    user_id = authenticated_user.uid
+    try:
+        workflow.raise_if_userid_not_relates_to_conversation_id(user_id=authenticated_user.uid, conversation_id=conversation_id)
+        workflow.revert_to_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=state_name,
+        )
+    except ConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    except StateNotFoundError:
+        raise HTTPException(status_code=404, detail="state not found")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="state not found")
+    except Exception as e:
+        log.exception("failed to revert conversation state")
+        raise HTTPException(status_code=500, detail=str(e))    
