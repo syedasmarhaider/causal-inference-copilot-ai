@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass
-from uuid import UUID
+from uuid import UUID, uuid4
 from typing import Any, Mapping, Optional, Sequence, Type
 
 import pandas as pd
@@ -69,6 +69,10 @@ class WorkflowApp:
         self._tool_factory = tool_factory
         self._history_limit = history_limit
         self._max_steps_per_call = max_steps_per_call
+    
+    
+    def check_if_userid_relates_to_conversation_id(self, *, user_id: UUID, conversation_id: UUID) -> bool:
+        return self._repo.is_conversation_id_for_user_id_exists(user_id=user_id, conversation_id=conversation_id)    
 
     def upload_csv_data(
         self,
@@ -77,6 +81,8 @@ class WorkflowApp:
         conversation_id: UUID,
         csv_bytes: bytes,
     ) -> UUID:
+        if not self.check_if_userid_relates_to_conversation_id(user_id=user_id, conversation_id=conversation_id):
+            raise ValueError(f"No active conversation found for user_id={user_id} and conversation_id={conversation_id}")
         try:
             
             df = pd.read_csv(io.BytesIO(csv_bytes), low_memory=False) # pyright: ignore[reportUnknownMemberType]
@@ -108,6 +114,8 @@ class WorkflowApp:
         conversation_id: UUID,
         artifact_id: UUID,
     ) -> ArtifactResponse:
+        if not self.check_if_userid_relates_to_conversation_id(user_id=user_id, conversation_id=conversation_id):
+            raise ValueError(f"No active conversation found for user_id={user_id} and conversation_id={conversation_id}")
         mime = self._data_repo.get_artifact_mime(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -121,11 +129,15 @@ class WorkflowApp:
         )
         return ArtifactResponse(mime=mime, content=content)
     
-    def create_conversation(self, user_id: UUID, conversation_id: UUID) -> None:
+    def create_conversation(self, user_id: UUID) -> UUID:
+        conversation_id = uuid4()
         self._repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
+        return conversation_id
 
         
     def handle(self, req: WorkflowRequest) -> WorkflowResponse:
+        if not self.check_if_userid_relates_to_conversation_id(user_id=req.user_id, conversation_id=req.conversation_id):
+            raise ValueError(f"No active conversation found for user_id={req.user_id} and conversation_id={req.conversation_id}")
         if req.user_message is not None and req.user_message.strip():
             self._repo.append_message(
                 user_id=req.user_id,

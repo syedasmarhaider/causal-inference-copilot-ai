@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from functools import lru_cache
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Path, Security, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -231,9 +231,7 @@ def create_conversation(
     workflow: WorkflowApp = Depends(get_workflow_app),
 ):
     user_id = authenticated_user.uid
-    conversation_id = uuid4()
-    logging.warning(f"Creating conversation: user_id={user_id}, conversation_id={conversation_id}")
-    workflow.create_conversation(user_id=user_id, conversation_id=conversation_id)
+    conversation_id = workflow.create_conversation(user_id=user_id)
     return CreateConversationResponse(user_id=user_id, conversation_id=conversation_id)
 
 
