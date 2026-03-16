@@ -241,6 +241,12 @@ variable "langfuse_debug" {
   default     = "False"
 }
 
+variable "langfuse_public_key" {
+  description = "Langfuse public key (non-secret)."
+  type        = string
+  default     = ""
+}
+
 variable "gcs_models_timeout_seconds" {
   description = "Model GCS read timeout."
   type        = number

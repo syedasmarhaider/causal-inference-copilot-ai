@@ -27,6 +27,7 @@ cloud_run_deletion_protection   = false
 
 langfuse_base_url = "https://cloud.langfuse.com"
 langfuse_debug    = "False"
+langfuse_public_key = "pk-lf-xxxxxxxxxxxxxxxx"
 
 gcs_models_timeout_seconds              = 60
 gcs_models_upload_timeout_seconds       = 300
@@ -45,10 +46,6 @@ secret_env_vars = {
   }
   LANGFUSE_SECRET_KEY = {
     secret_id = "langfuse-secret-key"
-    version   = "latest"
-  }
-  LANGFUSE_PUBLIC_KEY = {
-    secret_id = "langfuse-public-key"
     version   = "latest"
   }
 }

@@ -124,6 +124,7 @@ locals {
     {
       LANGFUSE_BASE_URL                       = var.langfuse_base_url
       LANGFUSE_DEBUG                          = var.langfuse_debug
+      LANGFUSE_PUBLIC_KEY                     = var.langfuse_public_key
       GOOGLE_CLOUD_PROJECT_ID                 = var.project_id
       FIREBASE_DATABASE_URL                   = module.firebase_rtdb.database_url
       GCS_MODELS_BUCKET_NAME                  = module.storage_buckets.models_bucket_name
