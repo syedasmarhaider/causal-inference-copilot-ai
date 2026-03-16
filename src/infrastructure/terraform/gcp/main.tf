@@ -147,16 +147,16 @@ module "cloud_run_service" {
   service_account_email = module.runtime_service_account.email
   env_vars              = local.plain_env_vars
   secret_env_vars       = var.secret_env_vars
-  cpu                   = var.cpu
-  memory                = var.memory
-  concurrency           = var.concurrency
-  timeout_seconds       = var.timeout_seconds
-  min_instances         = var.min_instances
-  max_instances         = var.max_instances
-  container_port        = var.container_port
-  ingress               = var.ingress
-  allow_unauthenticated = var.allow_unauthenticated
-  deletion_protection   = var.deletion_protection
+  cpu                   = var.cloud_run_cpu
+  memory                = var.cloud_run_memory
+  concurrency           = var.cloud_run_concurrency
+  timeout_seconds       = var.cloud_run_timeout_seconds
+  min_instances         = var.cloud_run_min_instances
+  max_instances         = var.cloud_run_max_instances
+  container_port        = var.cloud_run_container_port
+  ingress               = var.cloud_run_ingress
+  allow_unauthenticated = var.cloud_run_allow_unauthenticated
+  deletion_protection   = var.cloud_run_deletion_protection
   labels                = local.effective_labels
 
   depends_on = [

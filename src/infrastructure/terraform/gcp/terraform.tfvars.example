@@ -14,16 +14,16 @@ container_image = "europe-west3-docker.pkg.dev/your-gcp-project-dev/causal-dev-i
 firebase_database_region = "europe-west1"
 firebase_database_type   = "DEFAULT_DATABASE"
 
-cpu             = "1"
-memory          = "2Gi"
-concurrency     = 10
-timeout_seconds = 300
-min_instances   = 0
-max_instances   = 3
+cloud_run_cpu             = "1"
+cloud_run_memory          = "2Gi"
+cloud_run_concurrency     = 10
+cloud_run_timeout_seconds = 300
+cloud_run_min_instances   = 0
+cloud_run_max_instances   = 3
 
-container_port        = 8080
-allow_unauthenticated = false
-deletion_protection   = false
+cloud_run_container_port        = 8080
+cloud_run_allow_unauthenticated = false
+cloud_run_deletion_protection   = false
 
 langfuse_base_url = "https://cloud.langfuse.com"
 langfuse_debug    = "False"

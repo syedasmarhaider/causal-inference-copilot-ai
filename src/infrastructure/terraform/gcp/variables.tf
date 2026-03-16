@@ -135,74 +135,74 @@ variable "runtime_bucket_role" {
   default     = "roles/storage.admin"
 }
 
-variable "cpu" {
+variable "cloud_run_cpu" {
   description = "Cloud Run CPU limit."
   type        = string
   default     = "1"
 }
 
-variable "memory" {
+variable "cloud_run_memory" {
   description = "Cloud Run memory limit."
   type        = string
   default     = "2Gi"
 }
 
-variable "concurrency" {
+variable "cloud_run_concurrency" {
   description = "Cloud Run max concurrent requests per instance."
   type        = number
   default     = 10
 
   validation {
-    condition     = var.concurrency >= 1 && var.concurrency <= 1000
-    error_message = "concurrency must be between 1 and 1000."
+    condition     = var.cloud_run_concurrency >= 1 && var.cloud_run_concurrency <= 1000
+    error_message = "cloud_run_concurrency must be between 1 and 1000."
   }
 }
 
-variable "timeout_seconds" {
+variable "cloud_run_timeout_seconds" {
   description = "Cloud Run request timeout in seconds."
   type        = number
   default     = 300
 
   validation {
-    condition     = var.timeout_seconds >= 1 && var.timeout_seconds <= 3600
-    error_message = "timeout_seconds must be between 1 and 3600."
+    condition     = var.cloud_run_timeout_seconds >= 1 && var.cloud_run_timeout_seconds <= 3600
+    error_message = "cloud_run_timeout_seconds must be between 1 and 3600."
   }
 }
 
-variable "min_instances" {
+variable "cloud_run_min_instances" {
   description = "Cloud Run minimum instance count."
   type        = number
   default     = 0
 
   validation {
-    condition     = var.min_instances >= 0
-    error_message = "min_instances must be >= 0."
+    condition     = var.cloud_run_min_instances >= 0
+    error_message = "cloud_run_min_instances must be >= 0."
   }
 }
 
-variable "max_instances" {
+variable "cloud_run_max_instances" {
   description = "Cloud Run maximum instance count."
   type        = number
   default     = 1
 
   validation {
-    condition     = var.max_instances >= var.min_instances
-    error_message = "max_instances must be >= min_instances."
+    condition     = var.cloud_run_max_instances >= var.cloud_run_min_instances
+    error_message = "cloud_run_max_instances must be >= cloud_run_min_instances."
   }
 }
 
-variable "container_port" {
+variable "cloud_run_container_port" {
   description = "Container port exposed by the app."
   type        = number
   default     = 8080
 
   validation {
-    condition     = var.container_port >= 1 && var.container_port <= 65535
-    error_message = "container_port must be between 1 and 65535."
+    condition     = var.cloud_run_container_port >= 1 && var.cloud_run_container_port <= 65535
+    error_message = "cloud_run_container_port must be between 1 and 65535."
   }
 }
 
-variable "ingress" {
+variable "cloud_run_ingress" {
   description = "Cloud Run ingress policy."
   type        = string
   default     = "INGRESS_TRAFFIC_ALL"
@@ -212,18 +212,18 @@ variable "ingress" {
       "INGRESS_TRAFFIC_ALL",
       "INGRESS_TRAFFIC_INTERNAL_ONLY",
       "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER",
-    ], var.ingress)
-    error_message = "ingress must be one of INGRESS_TRAFFIC_ALL, INGRESS_TRAFFIC_INTERNAL_ONLY, or INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER."
+    ], var.cloud_run_ingress)
+    error_message = "cloud_run_ingress must be one of INGRESS_TRAFFIC_ALL, INGRESS_TRAFFIC_INTERNAL_ONLY, or INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER."
   }
 }
 
-variable "allow_unauthenticated" {
+variable "cloud_run_allow_unauthenticated" {
   description = "Whether to allow public unauthenticated access to the Cloud Run service."
   type        = bool
   default     = false
 }
 
-variable "deletion_protection" {
+variable "cloud_run_deletion_protection" {
   description = "Cloud Run deletion protection."
   type        = bool
   default     = false
