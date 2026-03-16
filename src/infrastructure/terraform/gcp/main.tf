@@ -119,24 +119,24 @@ locals {
 module "cloud_run_service" {
   source = "./modules/cloud_run_service"
 
-  project_id               = var.project_id
-  region                   = var.region
-  service_name             = var.service_name
-  container_image          = var.container_image
-  service_account_email    = module.runtime_service_account.email
-  env_vars                 = local.plain_env_vars
-  secret_env_vars          = var.secret_env_vars
-  cpu                      = var.cpu
-  memory                   = var.memory
-  concurrency              = var.concurrency
-  timeout_seconds          = var.timeout_seconds
-  min_instances            = var.min_instances
-  max_instances            = var.max_instances
-  container_port           = var.container_port
-  ingress                  = var.ingress
-  allow_unauthenticated    = var.allow_unauthenticated
-  deletion_protection      = var.deletion_protection
-  labels                   = var.labels
+  project_id            = var.project_id
+  region                = var.region
+  service_name          = var.service_name
+  container_image       = var.container_image
+  service_account_email = module.runtime_service_account.email
+  env_vars              = local.plain_env_vars
+  secret_env_vars       = var.secret_env_vars
+  cpu                   = var.cpu
+  memory                = var.memory
+  concurrency           = var.concurrency
+  timeout_seconds       = var.timeout_seconds
+  min_instances         = var.min_instances
+  max_instances         = var.max_instances
+  container_port        = var.container_port
+  ingress               = var.ingress
+  allow_unauthenticated = var.allow_unauthenticated
+  deletion_protection   = var.deletion_protection
+  labels                = var.labels
 
   depends_on = [
     module.project_services,
