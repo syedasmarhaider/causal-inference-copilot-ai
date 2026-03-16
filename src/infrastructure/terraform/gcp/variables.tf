@@ -13,20 +13,54 @@ variable "region" {
   }
 }
 
+variable "environment" {
+  description = "Deployment environment (dev, prod, feature)."
+  type        = string
+  default     = "dev"
+
+  validation {
+    condition     = contains(["dev", "prod", "feature"], lower(trimspace(var.environment)))
+    error_message = "environment must be one of: dev, prod, feature."
+  }
+}
+
+variable "name_prefix" {
+  description = "Prefix used when deriving resource names per environment."
+  type        = string
+  default     = "causal"
+
+  validation {
+    condition = (
+      length(trimspace(var.name_prefix)) > 0
+      && length(regexall("^[a-z][a-z0-9-]*$", var.name_prefix)) > 0
+    )
+    error_message = "name_prefix must start with a lowercase letter and contain only lowercase letters, digits, and '-'."
+  }
+}
+
+variable "feature_slug" {
+  description = "Short feature identifier used when environment=feature."
+  type        = string
+  default     = ""
+
+  validation {
+    condition = (
+      lower(trimspace(var.environment)) != "feature"
+      || (
+        length(trimspace(var.feature_slug)) > 0
+        && length(var.feature_slug) <= 20
+        && length(regexall("^[a-z0-9-]+$", lower(var.feature_slug))) > 0
+        && length(regexall("[a-z0-9]", lower(var.feature_slug))) > 0
+      )
+    )
+    error_message = "feature_slug must be <= 20 chars and contain only lowercase letters, digits, and '-'."
+  }
+}
+
 variable "labels" {
   description = "Common labels applied where supported."
   type        = map(string)
   default     = {}
-}
-
-variable "service_name" {
-  description = "Cloud Run service name."
-  type        = string
-
-  validation {
-    condition     = length(trimspace(var.service_name)) > 0
-    error_message = "service_name must not be empty."
-  }
 }
 
 variable "container_image" {
@@ -40,26 +74,10 @@ variable "artifact_registry_location" {
   default     = null
 }
 
-variable "artifact_registry_repository_id" {
-  description = "Artifact Registry Docker repository ID."
-  type        = string
-  default     = "backend-images"
-}
-
 variable "artifact_registry_description" {
   description = "Artifact Registry repository description."
   type        = string
   default     = "Docker repository for backend images"
-}
-
-variable "data_bucket_name" {
-  description = "GCS bucket name for application data."
-  type        = string
-}
-
-variable "models_bucket_name" {
-  description = "GCS bucket name for model artifacts."
-  type        = string
 }
 
 variable "buckets_location" {
@@ -91,8 +109,11 @@ variable "firebase_database_type" {
   default     = "DEFAULT_DATABASE"
 
   validation {
-    condition     = contains(["DEFAULT_DATABASE", "USER_DATABASE"], var.firebase_database_type)
-    error_message = "firebase_database_type must be DEFAULT_DATABASE or USER_DATABASE."
+    condition = (
+      contains(["DEFAULT_DATABASE", "USER_DATABASE"], var.firebase_database_type)
+      && (lower(trimspace(var.environment)) != "feature" || var.firebase_database_type == "USER_DATABASE")
+    )
+    error_message = "firebase_database_type must be DEFAULT_DATABASE or USER_DATABASE; feature environments must use USER_DATABASE."
   }
 }
 
@@ -100,12 +121,6 @@ variable "firebase_database_instance_id" {
   description = "Firebase RTDB instance ID. If null, a sensible default is derived."
   type        = string
   default     = null
-}
-
-variable "runtime_service_account_id" {
-  description = "Account ID (not email) for the Cloud Run runtime service account."
-  type        = string
-  default     = "aitia-backend"
 }
 
 variable "runtime_extra_project_roles" {

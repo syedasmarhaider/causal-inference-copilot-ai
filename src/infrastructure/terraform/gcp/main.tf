@@ -1,10 +1,31 @@
 locals {
+  environment_normalized = lower(trimspace(var.environment))
+  feature_slug_sanitized = trim(replace(lower(var.feature_slug), "/[^a-z0-9-]/", "-"), "-")
+  env_suffix = (
+    local.environment_normalized == "feature"
+    ? "feat-${local.feature_slug_sanitized}"
+    : local.environment_normalized
+  )
+  resource_prefix = "${var.name_prefix}-${local.env_suffix}"
+  project_env_prefix = (
+    endswith(var.project_id, "-${local.env_suffix}")
+    ? var.project_id
+    : "${var.project_id}-${local.env_suffix}"
+  )
+  service_name               = "${local.resource_prefix}-backend"
+  artifact_repository_id     = "${local.resource_prefix}-images"
+  data_bucket_name           = "${local.project_env_prefix}-data"
+  models_bucket_name         = "${local.project_env_prefix}-models"
+  runtime_sa_id_base         = trim(replace(local.resource_prefix, "/[^a-z0-9-]/", "-"), "-")
+  runtime_service_account_id = "${substr(local.runtime_sa_id_base, 0, 27)}-sa"
+  effective_labels           = merge(var.labels, { env = local.env_suffix })
+
   artifact_registry_location = coalesce(var.artifact_registry_location, var.region)
   buckets_location           = coalesce(var.buckets_location, var.region)
 
   firebase_database_instance_id = coalesce(
     var.firebase_database_instance_id,
-    var.firebase_database_type == "DEFAULT_DATABASE" ? "${var.project_id}-default-rtdb" : "${var.service_name}-rtdb"
+    var.firebase_database_type == "DEFAULT_DATABASE" ? "${var.project_id}-default-rtdb" : "${local.service_name}-rtdb"
   )
 
   required_services = toset([
@@ -32,9 +53,9 @@ module "artifact_registry" {
 
   project_id    = var.project_id
   location      = local.artifact_registry_location
-  repository_id = var.artifact_registry_repository_id
+  repository_id = local.artifact_repository_id
   description   = var.artifact_registry_description
-  labels        = var.labels
+  labels        = local.effective_labels
 
   depends_on = [module.project_services]
 }
@@ -44,11 +65,11 @@ module "storage_buckets" {
 
   project_id                  = var.project_id
   location                    = local.buckets_location
-  data_bucket_name            = var.data_bucket_name
-  models_bucket_name          = var.models_bucket_name
+  data_bucket_name            = local.data_bucket_name
+  models_bucket_name          = local.models_bucket_name
   data_bucket_force_destroy   = var.data_bucket_force_destroy
   models_bucket_force_destroy = var.models_bucket_force_destroy
-  labels                      = var.labels
+  labels                      = local.effective_labels
 
   depends_on = [module.project_services]
 }
@@ -72,8 +93,8 @@ module "runtime_service_account" {
   source = "./modules/service_account"
 
   project_id   = var.project_id
-  account_id   = var.runtime_service_account_id
-  display_name = "${var.service_name} Cloud Run runtime"
+  account_id   = local.runtime_service_account_id
+  display_name = "${local.service_name} Cloud Run runtime"
 
   secret_ids = toset([
     for _, cfg in var.secret_env_vars : cfg.secret_id
@@ -121,7 +142,7 @@ module "cloud_run_service" {
 
   project_id            = var.project_id
   region                = var.region
-  service_name          = var.service_name
+  service_name          = local.service_name
   container_image       = var.container_image
   service_account_email = module.runtime_service_account.email
   env_vars              = local.plain_env_vars
@@ -136,7 +157,7 @@ module "cloud_run_service" {
   ingress               = var.ingress
   allow_unauthenticated = var.allow_unauthenticated
   deletion_protection   = var.deletion_protection
-  labels                = var.labels
+  labels                = local.effective_labels
 
   depends_on = [
     module.project_services,
