@@ -16,6 +16,7 @@ from python.adapters.api.schemas import (
     InvokeResponse,
     UploadDatasetResponse,
 )
+from python.domain.models.errors import ConversationNotFoundError
 from python.domain.service.auth_service import AuthService, AuthenticatedUser
 from python.implementation.service.firebsae_auth_service import (
     AuthServiceError,
@@ -140,11 +141,14 @@ def get_artifact(
     workflow: WorkflowApp = Depends(get_workflow_app),
 ):
     try:
+        workflow.raise_if_userid_not_relates_to_conversation_id(user_id=authenticated_user.uid, conversation_id=conversation_id)
         ref = workflow.get_artifact(
             user_id=authenticated_user.uid,
             conversation_id=conversation_id,
             artifact_id=artifact_id,
         )
+    except ConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="conversation not found")
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="artifact not found")
     except Exception as e:
@@ -194,12 +198,15 @@ async def upload_dataset_csv(
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     try:
+        workflow.raise_if_userid_not_relates_to_conversation_id(user_id=authenticated_user.uid, conversation_id=conversation_id)
         dataset_id = await asyncio.to_thread(
             workflow.upload_csv_data,
             user_id=authenticated_user.uid,
             conversation_id=conversation_id,
             csv_bytes=csv_bytes,
         )
+    except ConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="conversation not found")
     except FileExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
@@ -258,6 +265,7 @@ async def invoke_once(
     txt = (req.user_text or "").strip() or None
 
     try:
+        workflow.raise_if_userid_not_relates_to_conversation_id(user_id=authenticated_user.uid, conversation_id=conversation_id)
         resp = await asyncio.to_thread(
             workflow.handle,
             WorkflowRequest(
@@ -266,6 +274,8 @@ async def invoke_once(
                 user_message=txt,
             ),
         )
+    except ConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="conversation not found")    
     except Exception as e:
         log.exception("invoke failed")
         raise HTTPException(status_code=500, detail=str(e))

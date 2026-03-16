@@ -7,6 +7,7 @@ from typing import Any, Mapping, Optional, Sequence, Type
 
 import pandas as pd
 
+from python.domain.models.errors import ConversationNotFoundError
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import ChatMessage
@@ -71,8 +72,10 @@ class WorkflowApp:
         self._max_steps_per_call = max_steps_per_call
     
     
-    def check_if_userid_relates_to_conversation_id(self, *, user_id: UUID, conversation_id: UUID) -> bool:
-        return self._repo.is_conversation_id_for_user_id_exists(user_id=user_id, conversation_id=conversation_id)    
+    def raise_if_userid_not_relates_to_conversation_id(self, *, user_id: UUID, conversation_id: UUID) -> None:
+        if not self._repo.is_conversation_id_for_user_id_exists(user_id=user_id, conversation_id=conversation_id):
+            raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation_id)
+                
 
     def upload_csv_data(
         self,
@@ -81,10 +84,7 @@ class WorkflowApp:
         conversation_id: UUID,
         csv_bytes: bytes,
     ) -> UUID:
-        if not self.check_if_userid_relates_to_conversation_id(user_id=user_id, conversation_id=conversation_id):
-            raise ValueError(f"No active conversation found for user_id={user_id} and conversation_id={conversation_id}")
         try:
-            
             df = pd.read_csv(io.BytesIO(csv_bytes), low_memory=False) # pyright: ignore[reportUnknownMemberType]
         except Exception as exc:
             raise ValueError(f"Uploaded file is not a valid CSV: {exc}") from exc
@@ -114,8 +114,6 @@ class WorkflowApp:
         conversation_id: UUID,
         artifact_id: UUID,
     ) -> ArtifactResponse:
-        if not self.check_if_userid_relates_to_conversation_id(user_id=user_id, conversation_id=conversation_id):
-            raise ValueError(f"No active conversation found for user_id={user_id} and conversation_id={conversation_id}")
         mime = self._data_repo.get_artifact_mime(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -136,8 +134,6 @@ class WorkflowApp:
 
         
     def handle(self, req: WorkflowRequest) -> WorkflowResponse:
-        if not self.check_if_userid_relates_to_conversation_id(user_id=req.user_id, conversation_id=req.conversation_id):
-            raise ValueError(f"No active conversation found for user_id={req.user_id} and conversation_id={req.conversation_id}")
         if req.user_message is not None and req.user_message.strip():
             self._repo.append_message(
                 user_id=req.user_id,
