@@ -68,18 +68,6 @@ variable "container_image" {
   type        = string
 }
 
-variable "artifact_registry_location" {
-  description = "Artifact Registry location. Defaults to var.region when null."
-  type        = string
-  default     = null
-}
-
-variable "artifact_registry_description" {
-  description = "Artifact Registry repository description."
-  type        = string
-  default     = "Docker repository for backend images"
-}
-
 variable "buckets_location" {
   description = "Bucket location. Defaults to var.region when null."
   type        = string

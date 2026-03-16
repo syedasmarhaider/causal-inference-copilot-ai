@@ -13,15 +13,13 @@ locals {
     : "${var.project_id}-${local.env_suffix}"
   )
   service_name               = "${local.resource_prefix}-backend"
-  artifact_repository_id     = "${local.resource_prefix}-images"
   data_bucket_name           = "${local.project_env_prefix}-data"
   models_bucket_name         = "${local.project_env_prefix}-models"
   runtime_sa_id_base         = trim(replace(local.resource_prefix, "/[^a-z0-9-]/", "-"), "-")
   runtime_service_account_id = "${substr(local.runtime_sa_id_base, 0, 27)}-sa"
   effective_labels           = merge(var.labels, { env = local.env_suffix })
 
-  artifact_registry_location = coalesce(var.artifact_registry_location, var.region)
-  buckets_location           = coalesce(var.buckets_location, var.region)
+  buckets_location = coalesce(var.buckets_location, var.region)
 
   firebase_database_instance_id = coalesce(
     var.firebase_database_instance_id,
@@ -30,7 +28,6 @@ locals {
 
   required_services = toset([
     "run.googleapis.com",
-    "artifactregistry.googleapis.com",
     "secretmanager.googleapis.com",
     "iam.googleapis.com",
     "serviceusage.googleapis.com",
@@ -46,18 +43,6 @@ module "project_services" {
 
   project_id = var.project_id
   services   = local.required_services
-}
-
-module "artifact_registry" {
-  source = "./modules/artifact_registry"
-
-  project_id    = var.project_id
-  location      = local.artifact_registry_location
-  repository_id = local.artifact_repository_id
-  description   = var.artifact_registry_description
-  labels        = local.effective_labels
-
-  depends_on = [module.project_services]
 }
 
 module "storage_buckets" {

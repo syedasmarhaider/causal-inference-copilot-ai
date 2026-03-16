@@ -6,10 +6,6 @@ output "cloud_run_service_name" {
   value = module.cloud_run_service.name
 }
 
-output "artifact_registry_repository_url" {
-  value = module.artifact_registry.repository_url
-}
-
 output "data_bucket_name" {
   value = module.storage_buckets.data_bucket_name
 }
