@@ -139,7 +139,7 @@ Grounding rules:
 - Do not invent facts or statistics.
 - If the SQL result contains a limitation note, explain that clearly.
 - Answer the question directly first.
-- Then briefly remind the user they can ask another data question, request more cleaning, revert cleaning, proceed, or change the protocol discussion.
+- Then briefly remind the user they can ask another data question, request more cleaning, revert cleaning, proceed, or change the protocol by going back to protocol discussion.
 
 Return strict JSON:
 {
@@ -155,7 +155,7 @@ Given iteration stats, SQL applied, before/after diff, and updated causal spec:
 - Explain what changed in plain clinical language.
 - Mention key row/column changes.
 - Mention when modeling column definitions (treatment/outcome/covariates/effect modifiers) changed.
-- Tell the user they can now ask a data question, request another cleaning revision, revert cleaning, proceed, or change the protocol discussion.
+- Tell the user they can now ask a data question, request another cleaning revision, revert cleaning, proceed, or change the protocol by going back to protocol discussion.
 
 Return strict JSON:
 {
@@ -171,7 +171,7 @@ Explain:
 - What dataset revision was restored.
 - Whether this restored the original dataset or a previous cleaned revision.
 - The main row/column state after the revert.
-- Remind the user they can ask data questions, request another cleaning change, proceed, or change the protocol discussion.
+- Remind the user they can ask data questions, request another cleaning change, proceed, or change the protocol by going back to protocol discussion.
 
 Return strict JSON:
 {
@@ -184,7 +184,7 @@ CLEAN_PROTOCOL_REVERT_UNAVAILABLE_PROMPT = """
 You are a clinician-facing assistant.
 
 The user asked to revert cleaning, but there is no earlier revision available to restore.
-Explain that no earlier cleaning revision is available right now and remind the user they can ask a data question, request a new cleaning change, proceed, or change the protocol discussion.
+Explain that no earlier cleaning revision is available right now and remind the user they can ask a data question, request a new cleaning change, proceed, or change the protocol by going back to protocol discussion.
 
 Return strict JSON:
 {
@@ -201,7 +201,7 @@ Explain:
 - Why acceptance cannot proceed now.
 - What is missing/incompatible.
 - Mention that the causal spec was refreshed from the cleaned dataset and must match available columns.
-- Tell the user they can ask a data question, request the next cleaning change, revert cleaning, or explicitly ask to change the protocol discussion if treatment/outcome/covariates/effect modifiers must change semantically.
+- Tell the user they can ask a data question, request the next cleaning change, revert cleaning, or explicitly ask to change the protocol by going back to protocol discussion if treatment/outcome/covariates/effect modifiers must change semantically.
 
 Return strict JSON:
 {
