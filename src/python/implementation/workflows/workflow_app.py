@@ -82,7 +82,32 @@ class WorkflowApp:
         return conversation_id    
     
     def list_conversations(self, user_id: UUID) -> Sequence[UUID]:
-        return self._repo.get_conversation_ids_for_user(user_id=user_id)        
+        return self._repo.get_conversation_ids_for_user(user_id=user_id)  
+    
+    def get_last_conversation_state(self, *, user_id: UUID, conversation_id: UUID) -> Optional[WorkflowResponse]:
+        active_name = self._repo.load_active_state_name(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if not active_name:
+            return None
+        
+        state = self._repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=active_name,
+        )
+        if state is None:
+            return None
+        
+        return WorkflowResponse(
+            node_message=state.message.txt_message,
+            needs_input=(state.message.action == "NEEDS_INPUT"),
+            needs_data=(state.message.action == "NEEDS_DATA"),
+            current_stage=state.name,
+            current_stage_status=state.status,
+            artifact_ids=state.message.artifact_ids,
+        )      
 
     def upload_csv_data(
         self,

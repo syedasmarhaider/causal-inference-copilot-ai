@@ -134,6 +134,7 @@ def healthz():
         500: {"description": "Unexpected artifact retrieval failure."},
     },
 )
+
 def get_artifact(
     conversation_id: UUID = Path(description="Conversation UUID."),
     artifact_id: UUID = Path(description="Artifact UUID to download."),
@@ -164,6 +165,49 @@ def get_artifact(
         },
     )
 
+
+@app.get(
+    path="/v1/conversations/{conversation_id}/lateststate",
+    tags=["conversations"],
+    summary="Get latest conversation state",
+    description="Returns the latest state name for the authenticated user's conversation.",
+    response_description="Latest state name for the conversation.",
+    responses={
+        401: {"description": "Missing or invalid Bearer token."},
+        404: {"description": "Conversation not found for this authenticated user."},
+        500: {"description": "Unexpected failure retrieving conversation state."},
+    },
+)
+def get_latest_conversation_state(
+    conversation_id: UUID = Path(description="Conversation UUID."),
+    authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
+    workflow: WorkflowApp = Depends(get_workflow_app),
+) -> InvokeResponse:
+    try:
+        workflow.raise_if_userid_not_relates_to_conversation_id(user_id=authenticated_user.uid, conversation_id=conversation_id)
+        resp = workflow.get_last_conversation_state(
+            user_id=authenticated_user.uid,
+            conversation_id=conversation_id,
+        )
+        if resp is None:
+            raise ConversationNotFoundError(user_id=authenticated_user.uid, conversation_id=conversation_id)
+        return InvokeResponse(
+            conversation_id=conversation_id,
+            user_id=authenticated_user.uid,
+            node_message=resp.node_message,
+            needs_input=resp.needs_input,
+            needs_data=resp.needs_data,
+            current_stage=str(resp.current_stage),
+            artifact_ids =resp.artifact_ids,
+            current_stage_status=str(resp.current_stage_status),
+        )
+    except ConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    except Exception as e:
+        log.exception("failed to get latest conversation state")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    
 
 @app.post(
     "/v1/conversations/{conversation_id}/datasets",
@@ -260,7 +304,7 @@ async def invoke_once(
     conversation_id: UUID = Path(description="Conversation UUID."),
     authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
     workflow: WorkflowApp = Depends(get_workflow_app),
-):
+) -> InvokeResponse:
     # single node execution per request
     txt = (req.user_text or "").strip() or None
 
