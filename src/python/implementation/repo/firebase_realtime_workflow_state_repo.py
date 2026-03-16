@@ -73,6 +73,10 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             except ValueError:
                 continue
         return conversation_ids
+    
+    def is_conversation_id_for_user_id_exists(self, *, user_id: UUID, conversation_id: UUID) -> bool:
+        conversation_ref = self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
+        return conversation_ref.get() is not None
 
     def load_active_state_name(self, *, user_id: UUID, conversation_id: UUID) -> Optional[str]:
         value = (

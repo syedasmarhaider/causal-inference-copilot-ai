@@ -27,7 +27,7 @@ class WorkflowStateRepo(ABC):
     
     
     @abstractmethod
-    def check_conversation_id_for_user(self, *, user_id: UUID, conversation_id: UUID) -> bool:
+    def is_conversation_id_for_user_id_exists(self, *, user_id: UUID, conversation_id: UUID) -> bool:
         raise NotImplementedError
 
     @abstractmethod
