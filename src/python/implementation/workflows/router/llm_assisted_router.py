@@ -33,7 +33,6 @@ class LLMAssistedRouterRouter(Router):
         self,
         *,
         llm: LLMService,
-        model_name: Optional[str] = None,
     ) -> None:
         self._llm = llm
         self._next_state_names_map: Mapping[str, Optional[str]] = init_next_state_names()
@@ -46,7 +45,7 @@ class LLMAssistedRouterRouter(Router):
     def get_done_state_name(self) -> str:
         return NoopDoneState.NAME
     
-    def _get_next_states_names(
+    def get_next_state_names(
         self,
         current_state_name: str,
     ) -> Sequence[str]:
@@ -150,7 +149,7 @@ class LLMAssistedRouterRouter(Router):
             raise ValueError(f"LLM selected state '{chosen}' which is not a previous state of '{current_state.name}' for recovery. Allowed previous states are: {sorted(allowed_prev)}.\n\nLLM message:\n{decision.router_message_for_node or ''}"
             )
 
-        next_states =  self._get_next_states_names(chosen)      
+        next_states =  self.get_next_state_names(chosen)      
         decision.delete_next_states_names = next_states if next_states else None  
         return decision
 

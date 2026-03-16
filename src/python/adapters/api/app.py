@@ -14,6 +14,7 @@ from python.adapters.api.schemas import (
     CreateConversationResponse,
     InvokeRequest,
     InvokeResponse,
+    RevertStateRequest,
     UploadDatasetResponse,
 )
 from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
@@ -347,12 +348,15 @@ async def invoke_once(
     },
 )
 def revert_to_state(
+    req: RevertStateRequest,
     conversation_id: UUID = Path(description="Conversation UUID."),
-    state_name: str = Path(description="State name to revert to."),
     authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
     workflow: WorkflowApp = Depends(get_workflow_app),
 ) -> None:
     user_id = authenticated_user.uid
+    state_name = (req.state_name or "").strip()
+    if not state_name:
+        raise HTTPException(status_code=422, detail="state_name must be a non-empty string")
     try:
         workflow.raise_if_userid_not_relates_to_conversation_id(user_id=authenticated_user.uid, conversation_id=conversation_id)
         workflow.revert_to_state(

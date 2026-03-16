@@ -53,6 +53,22 @@ class InvokeRequest(BaseModel):
         description="User message forwarded to the current workflow stage.",
     )
 
+class RevertStateRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "state_name": "LOAD_DATASET",
+            }
+        },
+    )
+
+    state_name: Optional[str] = Field(
+        default=None,
+        description="State name to revert to.",
+    )
+    
+
 
 class InvokeResponse(BaseModel):
     model_config = ConfigDict(
