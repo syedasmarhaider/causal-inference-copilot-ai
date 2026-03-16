@@ -24,6 +24,11 @@ class WorkflowStateRepo(ABC):
     @abstractmethod
     def get_conversation_ids_for_user(self, *, user_id: UUID) -> Sequence[UUID]:
         raise NotImplementedError
+    
+    
+    @abstractmethod
+    def check_conversation_id_for_user(self, *, user_id: UUID, conversation_id: UUID) -> bool:
+        raise NotImplementedError
 
     @abstractmethod
     def load_active_state_name(self, *, user_id: UUID, conversation_id: UUID) -> Optional[str]:
