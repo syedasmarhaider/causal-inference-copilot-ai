@@ -1,3 +1,11 @@
+terraform {
+  required_providers {
+    google-beta = {
+      source = "hashicorp/google-beta"
+    }
+  }
+}
+
 resource "google_firebase_project" "firebase" {
   provider = google-beta
   project  = var.project_id

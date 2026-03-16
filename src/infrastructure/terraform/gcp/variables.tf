@@ -6,6 +6,11 @@ variable "project_id" {
 variable "region" {
   description = "Primary region for Cloud Run."
   type        = string
+
+  validation {
+    condition     = length(trimspace(var.region)) > 0
+    error_message = "region must not be empty."
+  }
 }
 
 variable "labels" {
@@ -17,6 +22,11 @@ variable "labels" {
 variable "service_name" {
   description = "Cloud Run service name."
   type        = string
+
+  validation {
+    condition     = length(trimspace(var.service_name)) > 0
+    error_message = "service_name must not be empty."
+  }
 }
 
 variable "container_image" {
@@ -126,36 +136,70 @@ variable "concurrency" {
   description = "Cloud Run max concurrent requests per instance."
   type        = number
   default     = 10
+
+  validation {
+    condition     = var.concurrency >= 1 && var.concurrency <= 1000
+    error_message = "concurrency must be between 1 and 1000."
+  }
 }
 
 variable "timeout_seconds" {
   description = "Cloud Run request timeout in seconds."
   type        = number
   default     = 300
+
+  validation {
+    condition     = var.timeout_seconds >= 1 && var.timeout_seconds <= 3600
+    error_message = "timeout_seconds must be between 1 and 3600."
+  }
 }
 
 variable "min_instances" {
   description = "Cloud Run minimum instance count."
   type        = number
   default     = 0
+
+  validation {
+    condition     = var.min_instances >= 0
+    error_message = "min_instances must be >= 0."
+  }
 }
 
 variable "max_instances" {
   description = "Cloud Run maximum instance count."
   type        = number
   default     = 1
+
+  validation {
+    condition     = var.max_instances >= var.min_instances
+    error_message = "max_instances must be >= min_instances."
+  }
 }
 
 variable "container_port" {
   description = "Container port exposed by the app."
   type        = number
   default     = 8080
+
+  validation {
+    condition     = var.container_port >= 1 && var.container_port <= 65535
+    error_message = "container_port must be between 1 and 65535."
+  }
 }
 
 variable "ingress" {
   description = "Cloud Run ingress policy."
   type        = string
   default     = "INGRESS_TRAFFIC_ALL"
+
+  validation {
+    condition = contains([
+      "INGRESS_TRAFFIC_ALL",
+      "INGRESS_TRAFFIC_INTERNAL_ONLY",
+      "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER",
+    ], var.ingress)
+    error_message = "ingress must be one of INGRESS_TRAFFIC_ALL, INGRESS_TRAFFIC_INTERNAL_ONLY, or INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER."
+  }
 }
 
 variable "allow_unauthenticated" {
@@ -186,24 +230,44 @@ variable "gcs_models_timeout_seconds" {
   description = "Model GCS read timeout."
   type        = number
   default     = 60
+
+  validation {
+    condition     = var.gcs_models_timeout_seconds > 0
+    error_message = "gcs_models_timeout_seconds must be > 0."
+  }
 }
 
 variable "gcs_models_upload_timeout_seconds" {
   description = "Model upload timeout."
   type        = number
   default     = 300
+
+  validation {
+    condition     = var.gcs_models_upload_timeout_seconds > 0
+    error_message = "gcs_models_upload_timeout_seconds must be > 0."
+  }
 }
 
 variable "gcs_models_upload_retry_timeout_seconds" {
   description = "Model upload retry timeout."
   type        = number
   default     = 900
+
+  validation {
+    condition     = var.gcs_models_upload_retry_timeout_seconds > 0
+    error_message = "gcs_models_upload_retry_timeout_seconds must be > 0."
+  }
 }
 
 variable "gcs_models_upload_chunk_size_bytes" {
   description = "Model upload chunk size."
   type        = number
   default     = 8388608
+
+  validation {
+    condition     = var.gcs_models_upload_chunk_size_bytes > 0 && floor(var.gcs_models_upload_chunk_size_bytes) % (256 * 1024) == 0
+    error_message = "gcs_models_upload_chunk_size_bytes must be a positive multiple of 262144."
+  }
 }
 
 variable "extra_plain_env_vars" {
