@@ -7,7 +7,7 @@ from typing import Any, Mapping, Optional, Sequence, Type
 
 import pandas as pd
 
-from python.domain.models.errors import ConversationNotFoundError
+from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import ChatMessage
@@ -159,7 +159,47 @@ class WorkflowApp:
         )
         return ArtifactResponse(mime=mime, content=content)
     
+    def revert_to_state(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        state_name: str,
+    ) -> None:
+        state = self._repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=state_name,
+        )
+        if state is None:
+            raise StateNotFoundError(state_name=state_name)
         
+        state_names = self._router.get_next_state_names(state_name)
+        self._repo.delete_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=state_name,
+        )
+        for name in state_names:
+            self._repo.delete_state(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=name,
+            )
+        
+        self._repo.store_active_state_name(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=state_name,
+        )    
+        
+        self._repo.append_message(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    message=ChatMessage(role="system", content=f"User reverted to state {state_name}. and fresh start of this state. Deleted states: {', '.join(state_names)}"),
+        )
+             
+             
     def handle(self, req: WorkflowRequest) -> WorkflowResponse:
         if req.user_message is not None and req.user_message.strip():
             self._repo.append_message(

@@ -46,6 +46,20 @@ class LLMAssistedRouterRouter(Router):
     def get_done_state_name(self) -> str:
         return NoopDoneState.NAME
     
+    def _get_next_states_names(
+        self,
+        current_state_name: str,
+    ) -> Sequence[str]:
+        next_states: list[str] = []
+        cursor = current_state_name
+        while True:
+            nxt = self._next_state_names_map.get(cursor)
+            if nxt is None:
+                break
+            next_states.append(nxt)
+            cursor = nxt
+        return next_states
+    
     def decide_next(
         self,
         *,
@@ -73,94 +87,78 @@ class LLMAssistedRouterRouter(Router):
             
             
         if status == "ABORTED":
-            return _decision_on_aborted_state(
-                llm=self._llm,
-                model_name="basic",
+            return self._decision_on_aborted_state(
                 current_state=current_state,
-                get_next_state_names_map=self._next_state_names_map,
-                get_node_name_to_description_map=self._node_name_to_description_map,
                 messages_history=messages_history,
             )
             
-            
         raise ValueError(f"Router: unexpected status={status!r} for state={current_state.name!r}")
-
-
-
-
-def _decision_on_aborted_state(
-    *,
-    llm: LLMService,
-    model_name: str,
-    current_state: State,
-    get_next_state_names_map: Mapping[str, Optional[str]],
-    get_node_name_to_description_map: Mapping[str, str],
-    messages_history: Optional[Sequence[ChatMessage]],
-) -> NextDecision:
-    last_10_messages: list[ChatMessage] = list(messages_history[-10:]) if messages_history else []
     
-    prev_map: dict[str, str] = {
-        nxt: cur for cur, nxt in get_next_state_names_map.items() if nxt is not None
-    }
-
-    allowed_prev: set[str] = set()
-    cursor = current_state.name
-    while cursor in prev_map:
-        cursor = prev_map[cursor]
-        allowed_prev.add(cursor)
-
-    if not allowed_prev:
-        allowed_prev = {current_state.name}
+    def _decision_on_aborted_state(
+        self,
+        *,
+        current_state: State,
+        messages_history: Optional[Sequence[ChatMessage]],
+    ) -> NextDecision:
+        last_10_messages: list[ChatMessage] = list(messages_history[-10:]) if messages_history else []
         
-    prompt = _node_prompt_for_router()
-    prompt_filled = prompt.substitute(
-        current_node_name=current_state.name,
-        current_node_error=current_state.error or "null",
-        next_state_names_map=json.dumps(dict(get_next_state_names_map), ensure_ascii=False),
-        node_name_to_description_map=json.dumps(dict(get_node_name_to_description_map), ensure_ascii=False),
-        allowed_previous_states=json.dumps(sorted(allowed_prev), ensure_ascii=False),
-    )
+        prev_map: dict[str, str] = {
+            nxt: cur for cur, nxt in self._next_state_names_map.items() if nxt is not None
+        }
 
-    decision = llm.generate_json(
-        config=LLMConfig(model="basic", temperature=0.3),
-        system_prompt="Decide fallback state (must be previous). Output STRICT JSON matching schema.",
-        user_prompt=prompt_filled,
-        history=last_10_messages,
-        schema=NextDecision,
-        max_attempts=3,
-    )
+        allowed_prev: set[str] = set()
+        cursor = current_state.name
+        while cursor in prev_map:
+            cursor = prev_map[cursor]
+            allowed_prev.add(cursor)
 
-    chosen = decision.state_name
-
-    # ---- validation: must not be None ----
-    if not chosen:
-        raise ValueError(f"LLM failed to select a state for aborted '{current_state.name}'. Got empty/null response.\n\nLLM message:\n{decision.router_message_for_node or ''}"
+        if not allowed_prev:
+            allowed_prev = {current_state.name}
+            
+        prompt = _node_prompt_for_router()
+        prompt_filled = prompt.substitute(
+            current_node_name=current_state.name,
+            current_node_error=current_state.error or "null",
+            next_state_names_map=json.dumps(dict(self._next_state_names_map), ensure_ascii=False),
+            node_name_to_description_map=json.dumps(dict(self._node_name_to_description_map), ensure_ascii=False),
+            allowed_previous_states=json.dumps(sorted(allowed_prev), ensure_ascii=False),
         )
 
-    # ---- validation: membership ----
-    if chosen not in get_node_name_to_description_map or chosen not in get_next_state_names_map:
-        raise ValueError(f"LLM selected invalid state '{chosen}' for aborted '{current_state.name}'. It must be a key in next_state_names_map and node_name_to_description_map.\n\nLLM message:\n{decision.router_message_for_node or ''}"
+        decision = self._llm.generate_json(
+            config=LLMConfig(model="basic", temperature=0.3),
+            system_prompt="Decide fallback state (must be previous). Output STRICT JSON matching schema.",
+            user_prompt=prompt_filled,
+            history=last_10_messages,
+            schema=NextDecision,
+            max_attempts=3,
         )
 
-    # ---- validation: previous constraint ----
-    if chosen not in allowed_prev:
-        raise ValueError(f"LLM selected state '{chosen}' which is not a previous state of '{current_state.name}' for recovery. Allowed previous states are: {sorted(allowed_prev)}.\n\nLLM message:\n{decision.router_message_for_node or ''}"
-        )
-    
-    #TODO: temp sol delete later
-    next_states: list[str] = []
-    cursor = chosen
-    while True:
-        nxt = get_next_state_names_map.get(cursor)
-        if nxt is None:
-            break
-        next_states.append(nxt)
-        cursor = nxt
-        
-    decision.delete_next_states_names = next_states if next_states else None  
-    return decision
-        
+        chosen = decision.state_name
 
+        # ---- validation: must not be None ----
+        if not chosen:
+            raise ValueError(f"LLM failed to select a state for aborted '{current_state.name}'. Got empty/null response.\n\nLLM message:\n{decision.router_message_for_node or ''}"
+            )
+
+        # ---- validation: membership ----
+        if chosen not in self._node_name_to_description_map or chosen not in self._next_state_names_map:
+            raise ValueError(f"LLM selected invalid state '{chosen}' for aborted '{current_state.name}'. It must be a key in next_state_names_map and node_name_to_description_map.\n\nLLM message:\n{decision.router_message_for_node or ''}"
+            )
+
+        # ---- validation: previous constraint ----
+        if chosen not in allowed_prev:
+            raise ValueError(f"LLM selected state '{chosen}' which is not a previous state of '{current_state.name}' for recovery. Allowed previous states are: {sorted(allowed_prev)}.\n\nLLM message:\n{decision.router_message_for_node or ''}"
+            )
+
+        next_states =  self._get_next_states_names(chosen)      
+        decision.delete_next_states_names = next_states if next_states else None  
+        return decision
+
+
+
+
+
+        
 
 def _node_prompt_for_router() -> Template:
     return Template(
