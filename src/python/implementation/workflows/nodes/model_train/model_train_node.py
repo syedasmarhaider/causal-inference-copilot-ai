@@ -396,13 +396,28 @@ class ModelTrainNode(Node):
             )
 
         has_any_adjustment_cols = bool(causal_specs.covariates or []) or bool(causal_specs.effect_modifiers or [])
+        current_plan = state.payload.column_transformation_plan
+
+        log.warning(
+            "ModelTrainNode starting run. conversation_id=%s model=%s clean_dataset_id=%s has_existing_plan=%s has_adjustment_cols=%s",
+            conversation_id,
+            estimator_fqcn,
+            clean_dataset_id,
+            current_plan is not None,
+            has_any_adjustment_cols,
+        )
 
         # -----------------------------------------------------------------
         # Phase 1: prepare encoding plan if needed
         # -----------------------------------------------------------------
         if (
-            state.payload.column_transformation_plan is None and has_any_adjustment_cols
+            current_plan is None and has_any_adjustment_cols
         ):
+            log.warning(
+                "ModelTrainNode generating encoding plan before fit. conversation_id=%s model=%s",
+                conversation_id,
+                estimator_fqcn,
+            )
 
             user_discussion, plan = _generate_encoding_plan(
                 llm=self.llm,
@@ -431,15 +446,11 @@ class ModelTrainNode(Node):
             if plan is None:
                 raise ValueError("LLM indicated no user input needed but did not return a plan.")
 
-            return ModelTrainState(
-                payload=state.payload.model_copy(
-                    update={
-                        "column_transformation_plan": plan,
-                        "needs_user_input": False,
-                        "error": None,
-                        "user_message": user_discussion.message + "\n\nProceeding to training.",
-                    }
-                )
+            current_plan = plan
+            log.warning(
+                "ModelTrainNode generated encoding plan and will continue to fit in same run. conversation_id=%s model=%s",
+                conversation_id,
+                estimator_fqcn,
             )
 
         # -----------------------------------------------------------------
@@ -448,15 +459,15 @@ class ModelTrainNode(Node):
         order_effect_modifiers: Optional[list[str]] = None
         order_covariates: Optional[list[str]] = None
 
-        if state.payload.column_transformation_plan is not None:
+        if current_plan is not None:
             order_effect_modifiers = [
                 c.column
-                for c in state.payload.column_transformation_plan.columns
+                for c in current_plan.columns
                 if c.role == "effect_modifier"
             ]
             order_covariates = [
                 c.column
-                for c in state.payload.column_transformation_plan.columns
+                for c in current_plan.columns
                 if c.role == "covariate"
             ]
 
@@ -470,13 +481,20 @@ class ModelTrainNode(Node):
             order_effect_modifiers=order_effect_modifiers,
             order_covariates=order_covariates,
             transformation_plan=(
-                state.payload.column_transformation_plan
-                if state.payload.column_transformation_plan is not None
+                current_plan
+                if current_plan is not None
                 else None
             ),
             inputs=FitInputs(),
         )
 
+        log.warning(
+            "ModelTrainNode executing fit command. conversation_id=%s run_id=%s model=%s dataset_id=%s",
+            conversation_id,
+            run_id,
+            estimator_fqcn,
+            clean_dataset_id,
+        )
         res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)
         log.warning("Model training command executed with result: %s", res)
 
@@ -505,8 +523,10 @@ class ModelTrainNode(Node):
                         "training_warnings": warnings_str,
                         "order_effect_modifiers": order_effect_modifiers,
                         "order_covariates": order_covariates,
+                        "column_transformation_plan": current_plan,
                         "needs_user_input": False,
                         "no_of_times_trained": (state.payload.no_of_times_trained or 0) + 1,
+                        "prev_training_errors": None,
                         "error": None,
                         "user_message": message,
                     }
@@ -519,6 +539,13 @@ class ModelTrainNode(Node):
                     getattr(err_obj, "message", None)
                     or str(err_obj)
                     or "Training failed for an unknown reason."
+                )
+                log.warning(
+                    "ModelTrainNode fit failed. conversation_id=%s run_id=%s model=%s error=%s",
+                    conversation_id,
+                    run_id,
+                    estimator_fqcn,
+                    err_msg,
                 )
 
                 message = self.llm.generate(
