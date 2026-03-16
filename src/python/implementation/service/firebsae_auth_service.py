@@ -40,13 +40,6 @@ class FirebaseAuthService(AuthService):
             logging.warning("Failed to verify Firebase token: %s", exc)
             raise InvalidTokenError("failed to verify Firebase token") from exc
         
-        logging.warning(
-            "Successfully verified Firebase token for uid=%s, email=%s, email_verified=%s",
-            raw_uid,
-            email,
-            decoded.get("email_verified", False),
-        )
-
         raw_uid = decoded.get("uid")
         if not isinstance(raw_uid, str) or not raw_uid.strip():
             raise InvalidTokenError("verified Firebase token is missing uid")
