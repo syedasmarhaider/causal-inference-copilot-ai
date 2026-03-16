@@ -75,7 +75,14 @@ class WorkflowApp:
     def raise_if_userid_not_relates_to_conversation_id(self, *, user_id: UUID, conversation_id: UUID) -> None:
         if not self._repo.is_conversation_id_for_user_id_exists(user_id=user_id, conversation_id=conversation_id):
             raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation_id)
-                
+    
+    def create_conversation(self, user_id: UUID) -> UUID:
+        conversation_id = uuid4()
+        self._repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
+        return conversation_id    
+    
+    def list_conversations(self, user_id: UUID) -> Sequence[UUID]:
+        return self._repo.get_conversation_ids_for_user(user_id=user_id)        
 
     def upload_csv_data(
         self,
@@ -127,11 +134,6 @@ class WorkflowApp:
         )
         return ArtifactResponse(mime=mime, content=content)
     
-    def create_conversation(self, user_id: UUID) -> UUID:
-        conversation_id = uuid4()
-        self._repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
-        return conversation_id
-
         
     def handle(self, req: WorkflowRequest) -> WorkflowResponse:
         if req.user_message is not None and req.user_message.strip():
