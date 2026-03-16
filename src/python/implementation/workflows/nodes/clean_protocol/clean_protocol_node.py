@@ -56,6 +56,8 @@ from python.implementation.workflows.tools.data_profiling.plots.model import Gra
 
 log = logging.getLogger(__name__)
 
+_CLEAN_PROTOCOL_INPUT_TABLE_NAME = "cohort_df"
+
 
 class _IntentGateModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -398,6 +400,7 @@ class CleanProtocolNode(Node):
             state=state.payload,
             history=history,
         )
+        sql_request = _normalize_sql_request_table_name(sql_request)
 
         try:
             sql_result = data_processing_tool.execute(
@@ -657,6 +660,7 @@ class CleanProtocolNode(Node):
             source_summary=source_summary,
             state=state.payload,
         )
+        question_sql = _normalize_sql_request_table_name(question_sql)
 
         question_error: Optional[str] = None
         result_preview: dict[str, Any]
@@ -839,7 +843,7 @@ class CleanProtocolNode(Node):
     ) -> SQLStatements:
         payload = {
             "mode": mode,
-            "table_name": "cohort_df",
+            "table_name": _CLEAN_PROTOCOL_INPUT_TABLE_NAME,
             "user_request": user_request,
             "protocol_discussion": protocol_discussion,
             "current_causal_spec": causal_spec.model_dump(mode="json"),
@@ -865,7 +869,7 @@ class CleanProtocolNode(Node):
             ],
         }
 
-        return self.llm.generate_json(
+        generated = self.llm.generate_json(
             schema=SQLStatements,
             system_prompt=CLEAN_PROTOCOL_SQL_PLAN_PROMPT,
             user_prompt=json.dumps(payload, ensure_ascii=False),
@@ -873,6 +877,7 @@ class CleanProtocolNode(Node):
             history=history,
             max_attempts=3,
         )
+        return _normalize_sql_request_table_name(generated)
 
     def _generate_question_sql(
         self,
@@ -885,7 +890,7 @@ class CleanProtocolNode(Node):
         state: CleanProtocolPayloadModel,
     ) -> SQLStatements:
         payload = {
-            "table_name": "cohort_df",
+            "table_name": _CLEAN_PROTOCOL_INPUT_TABLE_NAME,
             "user_question": user_question,
             "protocol_discussion": protocol_discussion,
             "current_causal_spec": causal_spec.model_dump(mode="json"),
@@ -901,7 +906,7 @@ class CleanProtocolNode(Node):
                 for item in state.sql_history[-5:]
             ],
         }
-        return self.llm.generate_json(
+        generated = self.llm.generate_json(
             schema=SQLStatements,
             system_prompt=CLEAN_PROTOCOL_QUESTION_SQL_PROMPT,
             user_prompt=json.dumps(payload, ensure_ascii=False),
@@ -909,6 +914,7 @@ class CleanProtocolNode(Node):
             history=history,
             max_attempts=3,
         )
+        return _normalize_sql_request_table_name(generated)
 
     def _refresh_causal_spec(
         self,
@@ -1267,6 +1273,12 @@ def _last_user_text(history: Optional[Sequence[ChatMessage]]) -> str:
         if msg.role == "user" and msg.content.strip():
             return msg.content.strip()
     return ""
+
+
+def _normalize_sql_request_table_name(sql_request: SQLStatements) -> SQLStatements:
+    return sql_request.model_copy(
+        update={"table_name": _CLEAN_PROTOCOL_INPUT_TABLE_NAME}
+    )
 
 
 def _minimal_compatibility_error(df: pd.DataFrame, causal_spec: CausalSpec) -> Optional[str]:
