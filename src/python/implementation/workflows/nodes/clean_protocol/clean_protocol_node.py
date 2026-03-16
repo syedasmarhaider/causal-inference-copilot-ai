@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 import logging
+import re
 from typing import Any, ClassVar, List, Literal, Optional, Sequence, cast
 from uuid import UUID, uuid4
 
@@ -57,6 +58,13 @@ from python.implementation.workflows.tools.data_profiling.plots.model import Gra
 log = logging.getLogger(__name__)
 
 _CLEAN_PROTOCOL_INPUT_TABLE_NAME = "cohort_df"
+_EXPLICIT_MISSING_ROW_FILTER_PATTERNS = (
+    re.compile(r"\bcomplete[ -]?cases?\b"),
+    re.compile(r"\b(drop|remove|exclude|filter(?:\s+out)?|keep only)\b[\s\S]{0,80}\bmissing\b"),
+    re.compile(r"\b(drop|remove|exclude|filter(?:\s+out)?|keep only)\b[\s\S]{0,80}\bnull\b"),
+    re.compile(r"\b(non[- ]?missing|not null)\b[\s\S]{0,40}\b(rows?|records?|patients?)\b"),
+)
+DatasetScope = Literal["CURRENT_DATASET", "ORIGINAL_DATASET"]
 
 
 class _IntentGateModel(BaseModel):
@@ -72,6 +80,7 @@ class _IntentGateModel(BaseModel):
     ]
     reason: str
     reply_to_user: str
+    dataset_scope: Optional[DatasetScope] = None
     revert_target: Optional[Literal["PREVIOUS_STEP", "ORIGINAL_DATASET"]] = None
 
     @model_validator(mode="after")
@@ -80,6 +89,10 @@ class _IntentGateModel(BaseModel):
             raise ValueError("revert_target is required when action is REVERT")
         if self.action != "REVERT" and self.revert_target is not None:
             raise ValueError("revert_target must be null when action is not REVERT")
+        if self.action in {"ANSWER_QUESTION", "MODIFY"} and self.dataset_scope is None:
+            raise ValueError("dataset_scope is required when action is ANSWER_QUESTION or MODIFY")
+        if self.action not in {"ANSWER_QUESTION", "MODIFY"} and self.dataset_scope is not None:
+            raise ValueError("dataset_scope must be null when action is not ANSWER_QUESTION or MODIFY")
         return self
 
 
@@ -213,6 +226,7 @@ class CleanProtocolNode(Node):
                     conversation_id=conversation_id,
                     source_dataset_id=source_dataset_id,
                     source_df=source_df,
+                    dataset_scope="ORIGINAL_DATASET",
                     protocol_discussion=protocol_discussion,
                     causal_spec=initial_causal_spec,
                     state=state,
@@ -254,6 +268,7 @@ class CleanProtocolNode(Node):
             intent = self._decide_intent(
                 state=state,
                 history=recent_history,
+                original_dataset_summary=deps.load_dataset.payload.summary,
             )
 
             if intent.action == "CHANGE_PROTOCOL_DISCUSSION":
@@ -270,12 +285,31 @@ class CleanProtocolNode(Node):
                 )
 
             if intent.action == "ANSWER_QUESTION":
+                dataset_scope = cast(DatasetScope, intent.dataset_scope)
+                selected_dataset_id, selected_df = self._resolve_dataset_for_scope(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    current_dataset_id=source_dataset_id,
+                    current_df=source_df,
+                    original_dataset_id=dataset_id,
+                    requested_scope=dataset_scope,
+                )
+                scoped_causal_spec = self._resolve_causal_spec_for_scope(
+                    dataset_scope=dataset_scope,
+                    active_causal_spec=active_causal_spec,
+                    protocol_discussion=protocol_discussion,
+                    original_dataset_summary=deps.load_dataset.payload.summary,
+                    original_df=selected_df,
+                    data_profiling_tool=data_profiling_tool,
+                    history=recent_history,
+                )
                 user_question = _last_user_text(history=messages_history)
                 return self._answer_data_question(
                     state=state,
-                    source_df=source_df,
+                    source_df=selected_df,
+                    dataset_scope=dataset_scope,
                     protocol_discussion=protocol_discussion,
-                    causal_spec=active_causal_spec,
+                    causal_spec=scoped_causal_spec,
                     data_profiling_tool=data_profiling_tool,
                     data_processing_tool=data_processing_tool,
                     history=recent_history,
@@ -347,13 +381,32 @@ class CleanProtocolNode(Node):
             if not user_request:
                 user_request = "Apply another cleaning revision."
 
+            dataset_scope = cast(DatasetScope, intent.dataset_scope)
+            selected_dataset_id, selected_df = self._resolve_dataset_for_scope(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                current_dataset_id=source_dataset_id,
+                current_df=source_df,
+                original_dataset_id=dataset_id,
+                requested_scope=dataset_scope,
+            )
+            scoped_causal_spec = self._resolve_causal_spec_for_scope(
+                dataset_scope=dataset_scope,
+                active_causal_spec=active_causal_spec,
+                protocol_discussion=protocol_discussion,
+                original_dataset_summary=deps.load_dataset.payload.summary,
+                original_df=selected_df,
+                data_profiling_tool=data_profiling_tool,
+                history=recent_history,
+            )
             return self._run_modify_iteration(
                 user_id=user_id,
                 conversation_id=conversation_id,
-                source_dataset_id=source_dataset_id,
-                source_df=source_df,
+                source_dataset_id=selected_dataset_id,
+                source_df=selected_df,
+                dataset_scope=dataset_scope,
                 protocol_discussion=protocol_discussion,
-                causal_spec=active_causal_spec,
+                causal_spec=scoped_causal_spec,
                 state=state,
                 data_processing_tool=data_processing_tool,
                 data_profiling_tool=data_profiling_tool,
@@ -377,6 +430,7 @@ class CleanProtocolNode(Node):
         conversation_id: UUID,
         source_dataset_id: UUID,
         source_df: pd.DataFrame,
+        dataset_scope: DatasetScope,
         protocol_discussion: str,
         causal_spec: CausalSpec,
         state: CleanProtocolState,
@@ -386,20 +440,41 @@ class CleanProtocolNode(Node):
         user_request: str,
         mode: Literal["INITIAL", "MODIFY"],
     ) -> CleanProtocolState:
+        def _scoped_message(message: str) -> str:
+            return _prepend_dataset_scope_note(
+                message=message,
+                dataset_scope=dataset_scope,
+                operation="MODIFY",
+            )
+
         source_summary = self._extract_summary(
             tool=data_profiling_tool,
             df=source_df,
         )
 
-        sql_request = self._generate_sql_request(
-            mode=mode,
-            user_request=user_request,
-            protocol_discussion=protocol_discussion,
-            causal_spec=causal_spec,
-            source_summary=source_summary,
-            state=state.payload,
-            history=history,
-        )
+        try:
+            sql_request = self._generate_sql_request(
+                mode=mode,
+                user_request=user_request,
+                protocol_discussion=protocol_discussion,
+                causal_spec=causal_spec,
+                source_summary=source_summary,
+                state=state.payload,
+                history=history,
+            )
+        except Exception as e:
+            msg = self._render_compatibility_failure_message(
+                history=history,
+                compatibility_error=(
+                    "Failed to generate cleaning SQL: "
+                    f"{e!r}"
+                ),
+                payload=state.payload,
+            )
+            return self._pending_state(
+                payload=state.payload,
+                message=_scoped_message(msg.message_for_user),
+            )
         sql_request = _normalize_sql_request_table_name(sql_request)
 
         try:
@@ -415,7 +490,7 @@ class CleanProtocolNode(Node):
             )
             return self._pending_state(
                 payload=state.payload,
-                message=msg.message_for_user,
+                message=_scoped_message(msg.message_for_user),
             )
 
         if not sql_result.has_result_set:
@@ -429,7 +504,7 @@ class CleanProtocolNode(Node):
             )
             return self._pending_state(
                 payload=state.payload,
-                message=msg.message_for_user,
+                message=_scoped_message(msg.message_for_user),
             )
 
         cleaned_df_candidate = sql_result.dataframe
@@ -458,7 +533,7 @@ class CleanProtocolNode(Node):
             )
             return self._pending_state(
                 payload=state.payload,
-                message=msg.message_for_user,
+                message=_scoped_message(msg.message_for_user),
             )
 
         required_modeling_columns = _required_modeling_columns(refreshed_causal_spec)
@@ -472,7 +547,7 @@ class CleanProtocolNode(Node):
             )
             return self._pending_state(
                 payload=state.payload,
-                message=msg.message_for_user,
+                message=_scoped_message(msg.message_for_user),
             )
 
         missing_required_columns = [
@@ -550,7 +625,7 @@ class CleanProtocolNode(Node):
                 update={
                     "clean_dataset_id": clean_dataset_id,
                     "cleaning_error": None,
-                    "user_message": user_message.message_for_user,
+                    "user_message": _scoped_message(user_message.message_for_user),
                     "summary": cleaned_summary,
                     "user_acceptance": None,
                     "graph_picture_ids": None,
@@ -575,6 +650,7 @@ class CleanProtocolNode(Node):
         *,
         state: CleanProtocolState,
         history: Optional[Sequence[ChatMessage]],
+        original_dataset_summary: Any,
     ) -> _IntentGateModel:
         latest_sql = (
             state.payload.sql_history[-1].sql_request
@@ -585,9 +661,15 @@ class CleanProtocolNode(Node):
         payload = {
             "iteration_index": state.payload.iteration_index,
             "latest_user_message": _last_user_text(history=history),
+            "has_cleaned_iteration": bool(state.payload.iteration_index >= 1),
             "current_dataset_summary": (
                 state.payload.summary.model_dump(mode="json")
                 if state.payload.summary is not None
+                else None
+            ),
+            "original_dataset_summary": (
+                original_dataset_summary.model_dump(mode="json")
+                if original_dataset_summary is not None
                 else None
             ),
             "latest_sql_request": (
@@ -641,6 +723,7 @@ class CleanProtocolNode(Node):
         *,
         state: CleanProtocolState,
         source_df: pd.DataFrame,
+        dataset_scope: DatasetScope,
         protocol_discussion: str,
         causal_spec: CausalSpec,
         data_profiling_tool: DatasetProfilingTool,
@@ -698,7 +781,60 @@ class CleanProtocolNode(Node):
         )
         return self._pending_state(
             payload=state.payload,
-            message=message.message_for_user,
+            message=_prepend_dataset_scope_note(
+                message=message.message_for_user,
+                dataset_scope=dataset_scope,
+                operation="ANSWER_QUESTION",
+            ),
+        )
+
+    def _resolve_dataset_for_scope(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        current_dataset_id: UUID,
+        current_df: pd.DataFrame,
+        original_dataset_id: UUID,
+        requested_scope: DatasetScope,
+    ) -> tuple[UUID, pd.DataFrame]:
+        if requested_scope == "CURRENT_DATASET":
+            return current_dataset_id, current_df
+        if current_dataset_id == original_dataset_id:
+            return original_dataset_id, current_df
+        original_df = self.data_repo.get_csv_data(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            dataset_id=original_dataset_id,
+            limit=None,
+        )
+        return original_dataset_id, original_df
+
+    def _resolve_causal_spec_for_scope(
+        self,
+        *,
+        dataset_scope: DatasetScope,
+        active_causal_spec: CausalSpec,
+        protocol_discussion: str,
+        original_dataset_summary: Any,
+        original_df: pd.DataFrame,
+        data_profiling_tool: DatasetProfilingTool,
+        history: Optional[Sequence[ChatMessage]],
+    ) -> CausalSpec:
+        if dataset_scope == "CURRENT_DATASET":
+            return active_causal_spec
+
+        dataset_summary = original_dataset_summary
+        if dataset_summary is None:
+            dataset_summary = self._extract_summary(
+                tool=data_profiling_tool,
+                df=original_df,
+            )
+
+        return self._compile_initial_causal_spec(
+            history=history,
+            protocol_discussion=protocol_discussion,
+            dataset_summary=dataset_summary,
         )
 
     def _revert_cleaning_iteration(
@@ -846,6 +982,17 @@ class CleanProtocolNode(Node):
             "table_name": _CLEAN_PROTOCOL_INPUT_TABLE_NAME,
             "user_request": user_request,
             "protocol_discussion": protocol_discussion,
+            "missingness_row_filter_policy": {
+                "treatment_and_outcome": (
+                    "Rows may be excluded when treatment or outcome cannot be defined "
+                    "from the available data."
+                ),
+                "covariates_and_effect_modifiers": (
+                    "Do not exclude rows solely because covariates or effect modifiers "
+                    "are missing unless the user explicitly asked for complete-case "
+                    "filtering or row exclusion for missing adjustment variables."
+                ),
+            },
             "current_causal_spec": causal_spec.model_dump(mode="json"),
             "time_zero_policy": (
                 "Use time-zero columns only for filtering or derived transformations. "
@@ -877,7 +1024,42 @@ class CleanProtocolNode(Node):
             history=history,
             max_attempts=3,
         )
-        return _normalize_sql_request_table_name(generated)
+        normalized = _normalize_sql_request_table_name(generated)
+        if _user_explicitly_requested_missing_row_filter(user_request):
+            return normalized
+
+        disallowed_columns = _disallowed_missing_feature_row_filters(
+            sql_request=normalized,
+            causal_spec=causal_spec,
+        )
+        if not disallowed_columns:
+            return normalized
+
+        repair_payload = dict(payload)
+        repair_payload["repair_reason"] = (
+            "The previous SQL filtered rows because covariate/effect-modifier columns "
+            f"were NULL. That is not allowed unless the user explicitly asked for it. "
+            f"Problem columns: {disallowed_columns}."
+        )
+        repaired = self.llm.generate_json(
+            schema=SQLStatements,
+            system_prompt=CLEAN_PROTOCOL_SQL_PLAN_PROMPT,
+            user_prompt=json.dumps(repair_payload, ensure_ascii=False),
+            config=LLMConfig(model="pro", temperature=0.0),
+            history=history,
+            max_attempts=3,
+        )
+        normalized_repaired = _normalize_sql_request_table_name(repaired)
+        remaining_disallowed = _disallowed_missing_feature_row_filters(
+            sql_request=normalized_repaired,
+            causal_spec=causal_spec,
+        )
+        if remaining_disallowed:
+            raise ValueError(
+                "Generated SQL attempted to exclude rows for missing covariates/effect "
+                f"modifiers without an explicit user request. Columns: {remaining_disallowed}"
+            )
+        return normalized_repaired
 
     def _generate_question_sql(
         self,
@@ -1279,6 +1461,100 @@ def _normalize_sql_request_table_name(sql_request: SQLStatements) -> SQLStatemen
     return sql_request.model_copy(
         update={"table_name": _CLEAN_PROTOCOL_INPUT_TABLE_NAME}
     )
+
+
+def _user_explicitly_requested_missing_row_filter(user_request: str) -> bool:
+    normalized = user_request.strip().lower()
+    if not normalized:
+        return False
+    return any(pattern.search(normalized) for pattern in _EXPLICIT_MISSING_ROW_FILTER_PATTERNS)
+
+
+def _disallowed_missing_feature_row_filters(
+    *,
+    sql_request: SQLStatements,
+    causal_spec: CausalSpec,
+) -> List[str]:
+    columns = _dedup_strings(
+        [*causal_spec.covariates, *causal_spec.effect_modifiers]
+    )
+    if not columns:
+        return []
+
+    offenders: List[str] = []
+    for column in columns:
+        if _sql_filters_on_missing_column(sql_request=sql_request, column=column):
+            offenders.append(column)
+    return offenders
+
+
+def _sql_filters_on_missing_column(*, sql_request: SQLStatements, column: str) -> bool:
+    identifier = _sql_identifier_pattern(column)
+    null_filter_patterns = (
+        re.compile(rf"{identifier}\s+is\s+null"),
+        re.compile(rf"{identifier}\s+is\s+not\s+null"),
+        re.compile(rf"not\s*\(\s*{identifier}\s+is\s+null\s*\)"),
+        re.compile(rf"not\s*\(\s*{identifier}\s+is\s+not\s+null\s*\)"),
+    )
+
+    for statement in sql_request.statements:
+        filter_clause = _extract_sql_filter_clause(str(statement))
+        if filter_clause is None:
+            continue
+        if any(pattern.search(filter_clause) for pattern in null_filter_patterns):
+            return True
+    return False
+
+
+def _extract_sql_filter_clause(statement: str) -> str | None:
+    lowered = statement.lower()
+    for keyword in (" where ", "\nwhere ", "\twhere "):
+        index = lowered.find(keyword)
+        if index >= 0:
+            return lowered[index:]
+    return None
+
+
+def _sql_identifier_pattern(column: str) -> str:
+    escaped = re.escape(column.lower())
+    return rf"(?<![a-z0-9_])\"?{escaped}\"?(?![a-z0-9_])"
+
+
+def _dedup_strings(values: Sequence[str]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+
+def _prepend_dataset_scope_note(
+    *,
+    message: str,
+    dataset_scope: DatasetScope,
+    operation: Literal["ANSWER_QUESTION", "MODIFY"],
+) -> str:
+    if operation == "ANSWER_QUESTION":
+        note = (
+            "Dataset scope: current cleaned dataset."
+            if dataset_scope == "CURRENT_DATASET"
+            else "Dataset scope: original uploaded dataset."
+        )
+    else:
+        note = (
+            "Cleaning scope: current cleaned dataset."
+            if dataset_scope == "CURRENT_DATASET"
+            else "Cleaning scope: original uploaded dataset."
+        )
+
+    normalized_message = message.strip()
+    if normalized_message.startswith(note):
+        return normalized_message
+    return f"{note}\n\n{normalized_message}"
 
 
 def _minimal_compatibility_error(df: pd.DataFrame, causal_spec: CausalSpec) -> Optional[str]:
