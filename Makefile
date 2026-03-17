@@ -20,7 +20,7 @@ PIP := $(PYBIN)/pip
 # FastAPI entrypoint module:path
 API_APP ?= python.adapters.api.app:app
 API_HOST ?= 0.0.0.0
-API_PORT ?= 8000
+API_PORT ?= 8080
 
 # Container image naming (industry-style split: host/project/repo/service:tag)
 DEPLOY_ENV ?= dev
@@ -91,7 +91,7 @@ run-api-local: venv
 	set +a; \
 	$(PYBIN)/uvicorn $(API_APP) \
 		--host "$${API_HOST:-0.0.0.0}" \
-		--port "$${API_PORT:-8000}" \
+		--port "$${API_PORT:-8080}" \
 		--reload
 
 

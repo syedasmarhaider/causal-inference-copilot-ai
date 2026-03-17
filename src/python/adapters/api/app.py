@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from functools import lru_cache
 from uuid import UUID
 
@@ -372,4 +373,10 @@ def revert_to_state(
         raise HTTPException(status_code=404, detail="state not found")
     except Exception as e:
         log.exception("failed to revert conversation state")
-        raise HTTPException(status_code=500, detail=str(e))    
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("python.adapters.api.app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
