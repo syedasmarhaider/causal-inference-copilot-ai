@@ -114,7 +114,9 @@ variable "firebase_database_instance_id" {
 variable "runtime_extra_project_roles" {
   description = "Extra project-level roles for the runtime service account."
   type        = list(string)
-  default     = []
+  default = [
+    "roles/firebaseauth.viewer",
+  ]
 }
 
 variable "runtime_bucket_role" {

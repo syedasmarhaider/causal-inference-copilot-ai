@@ -50,7 +50,9 @@ secret_env_vars = {
   }
 }
 
-runtime_extra_project_roles = []
+runtime_extra_project_roles = [
+  "roles/firebaseauth.viewer",
+]
 
 labels = {
   app = "causal-backend"
