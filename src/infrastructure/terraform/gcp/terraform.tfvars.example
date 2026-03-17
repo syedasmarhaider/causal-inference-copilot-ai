@@ -52,6 +52,7 @@ secret_env_vars = {
 
 runtime_extra_project_roles = [
   "roles/firebaseauth.viewer",
+  "roles/firebasedatabase.admin",
 ]
 
 labels = {

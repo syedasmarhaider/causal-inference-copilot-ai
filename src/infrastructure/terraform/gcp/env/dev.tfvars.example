@@ -29,6 +29,12 @@ secret_env_vars = {
   }
 }
 
+# Required for Firebase Admin SDK RTDB read/write when database rules are locked down.
+runtime_extra_project_roles = [
+  "roles/firebaseauth.viewer",
+  "roles/firebasedatabase.admin",
+]
+
 labels = {
   app = "causal-backend"
 }
