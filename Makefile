@@ -22,13 +22,11 @@ API_PORT ?= 8000
 
 # Container image naming (industry-style split: host/project/repo/service:tag)
 DEPLOY_ENV ?= dev
-DEPLOY_ENV_UPPER := $(shell echo $(DEPLOY_ENV) | tr '[:lower:]' '[:upper:]')
-REGISTRY_PROJECT_DEFAULT := $(REGISTRY_PROJECT_$(DEPLOY_ENV_UPPER))
 SERVICE_NAME ?= some-service
 IMAGE_TAG ?= $(DEPLOY_ENV)
 REGISTRY_HOST ?= europe-west3-docker.pkg.dev
 REGISTRY_REPOSITORY ?= causal-dev-images
-REGISTRY_PROJECT ?= $(if $(REGISTRY_PROJECT_DEFAULT),$(REGISTRY_PROJECT_DEFAULT),your-gcp-project-dev)
+REGISTRY_PROJECT ?= your-gcp-project
 IMAGE_REPOSITORY := $(REGISTRY_HOST)/$(REGISTRY_PROJECT)/$(REGISTRY_REPOSITORY)/$(SERVICE_NAME)
 IMAGE_URI := $(IMAGE_REPOSITORY):$(IMAGE_TAG)
 
