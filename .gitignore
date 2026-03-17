@@ -230,3 +230,7 @@ typings/**/*.pyi
 # emulator of firebase
 *.firebaserc
 *firebase.json
+
+# Local docker image config
+docker.env
+!docker.env.example

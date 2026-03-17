@@ -1,11 +1,14 @@
 # ---- Makefile ----
 SHELL := /bin/bash
 
-SHELL := /bin/bash
-
 ENV_FILE ?= .env
+DOCKER_CONFIG ?= docker.env
+DOCKER_CONFIG_EXAMPLE ?= docker.env.example
 
-.PHONY: help venv install dev-tools lint lint-fix format format-fix test test-quick clean run-cli run-api run-api-prod run-api-local
+-include $(DOCKER_CONFIG_EXAMPLE)
+-include $(DOCKER_CONFIG)
+
+.PHONY: help venv install dev-tools lint lint-fix format format-fix test test-quick clean run-cli run-api run-api-prod run-api-local docker-image docker-build docker-push
 
 VENV ?= .venv
 PYBIN := $(VENV)/bin
@@ -16,6 +19,18 @@ PIP := $(PYBIN)/pip
 API_APP ?= python.adapters.api.app:app
 API_HOST ?= 0.0.0.0
 API_PORT ?= 8000
+
+# Container image naming (industry-style split: host/project/repo/service:tag)
+DEPLOY_ENV ?= dev
+DEPLOY_ENV_UPPER := $(shell echo $(DEPLOY_ENV) | tr '[:lower:]' '[:upper:]')
+REGISTRY_PROJECT_DEFAULT := $(REGISTRY_PROJECT_$(DEPLOY_ENV_UPPER))
+SERVICE_NAME ?= some-service
+IMAGE_TAG ?= $(DEPLOY_ENV)
+REGISTRY_HOST ?= europe-west3-docker.pkg.dev
+REGISTRY_REPOSITORY ?= causal-dev-images
+REGISTRY_PROJECT ?= $(if $(REGISTRY_PROJECT_DEFAULT),$(REGISTRY_PROJECT_DEFAULT),your-gcp-project-dev)
+IMAGE_REPOSITORY := $(REGISTRY_HOST)/$(REGISTRY_PROJECT)/$(REGISTRY_REPOSITORY)/$(SERVICE_NAME)
+IMAGE_URI := $(IMAGE_REPOSITORY):$(IMAGE_TAG)
 
 # Make Python see your src/ packages
 export PYTHONPATH := src
@@ -32,6 +47,9 @@ help:
 	@echo "make run-cli ARGS='...'  - run console copilot CLI (args forwarded)"
 	@echo "make run-api             - run FastAPI (REST + WebSocket) with reload"
 	@echo "make run-api-prod        - run FastAPI (REST + WebSocket) without reload"
+	@echo "make docker-image        - print full image URI"
+	@echo "make docker-build        - build Docker image for current env/tag"
+	@echo "make docker-push         - push Docker image to registry"
 	@echo "make clean               - remove venv + caches"
 
 venv:
@@ -79,6 +97,17 @@ run-api-local: venv
 
 run-api-prod: venv
 	@$(PYBIN)/uvicorn $(API_APP) --host $(API_HOST) --port $(API_PORT)
+
+docker-image:
+	@echo $(IMAGE_URI)
+
+docker-build:
+	@echo "Building image: $(IMAGE_URI)"
+	@docker build --platform linux/amd64 -t $(IMAGE_URI) -f Dockerfile .
+
+docker-push: docker-build
+	@echo "Pushing image: $(IMAGE_URI)"
+	@docker push $(IMAGE_URI)
 
 clean:
 	@rm -rf $(VENV) .pytest_cache .ruff_cache .coverage coverage.xml htmlcov __pycache__ **/__pycache__
