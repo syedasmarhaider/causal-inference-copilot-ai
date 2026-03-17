@@ -232,5 +232,5 @@ typings/**/*.pyi
 *firebase.json
 
 # Local docker image config
-docker.env
-!docker.env.example
+.docker.env
+!.docker.env.example

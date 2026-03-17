@@ -12,8 +12,12 @@ CONFIG_FILE_INPUT="${3:-}"
 
 if [[ -n "$CONFIG_FILE_INPUT" ]]; then
   CONFIG_FILE="$CONFIG_FILE_INPUT"
+elif [[ -f ".docker.env" ]]; then
+  CONFIG_FILE=".docker.env"
 elif [[ -f "docker.env" ]]; then
   CONFIG_FILE="docker.env"
+elif [[ -f ".docker.env.example" ]]; then
+  CONFIG_FILE=".docker.env.example"
 else
   CONFIG_FILE="docker.env.example"
 fi

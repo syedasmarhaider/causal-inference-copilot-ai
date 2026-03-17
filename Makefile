@@ -2,10 +2,12 @@
 SHELL := /bin/bash
 
 ENV_FILE ?= .env
-DOCKER_CONFIG ?= docker.env
-DOCKER_CONFIG_EXAMPLE ?= docker.env.example
+DOCKER_CONFIG ?= .docker.env
+DOCKER_CONFIG_EXAMPLE ?= .docker.env.example
 
+-include docker.env.example
 -include $(DOCKER_CONFIG_EXAMPLE)
+-include docker.env
 -include $(DOCKER_CONFIG)
 
 .PHONY: help venv install dev-tools lint lint-fix format format-fix test test-quick clean run-cli run-api run-api-prod run-api-local docker-image docker-build docker-push
