@@ -1,19 +1,27 @@
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass
+from uuid import UUID, uuid4
 from typing import Any, Mapping, Optional, Sequence, Type
-from uuid import UUID
 
-from python.domain.repo.data_repo import ArtifactRef, DataRepo
+import pandas as pd
+
+from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
+from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import ChatMessage
 from python.domain.workflows.node import Node
 from python.domain.workflows.route import Router
 from python.domain.workflows.state import State, Status
 from python.domain.workflows.tool_factory import ToolFactory
+from python.implementation.workflows.nodes.load_dataset.load_dataset_state import (
+    LoadDatasetState,
+)
 
 Stage = str
 
+_MESSAGES_HISTORY_LIMIT = 30
 
 @dataclass(frozen=True)
 class WorkflowRequest:
@@ -28,7 +36,14 @@ class WorkflowResponse:
     needs_input: bool
     current_stage: Stage
     current_stage_status: Status
+    needs_data: bool = False
     artifact_ids: Optional[Sequence[str]] = None
+
+
+@dataclass(frozen=True)
+class ArtifactResponse:
+    mime: str
+    content: bytes
 
 
 class WorkflowApp:
@@ -41,7 +56,7 @@ class WorkflowApp:
         nodes_by_state_name: Mapping[str, Node],
         state_classes_by_name: Mapping[str, Type[State]],
         tool_factory: ToolFactory,
-        history_limit: int = 30,
+        history_limit: int = _MESSAGES_HISTORY_LIMIT,
         max_steps_per_call: int = 1,
     ) -> None:
         if max_steps_per_call <= 0:
@@ -56,28 +71,135 @@ class WorkflowApp:
         self._history_limit = history_limit
         self._max_steps_per_call = max_steps_per_call
     
-    def get_artifact(self, user_id: UUID, conversation_id: UUID, artifact_id: UUID) -> ArtifactRef:
-        return self._data_repo.get_artifact_ref(
+    
+    def raise_if_userid_not_relates_to_conversation_id(self, *, user_id: UUID, conversation_id: UUID) -> None:
+        if not self._repo.is_conversation_id_for_user_id_exists(user_id=user_id, conversation_id=conversation_id):
+            raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation_id)
+    
+    def create_conversation(self, user_id: UUID) -> UUID:
+        conversation_id = uuid4()
+        self._repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
+        return conversation_id    
+    
+    def list_conversations(self, user_id: UUID) -> Sequence[UUID]:
+        return self._repo.get_conversation_ids_for_user(user_id=user_id)  
+    
+    def get_last_conversation_state(self, *, user_id: UUID, conversation_id: UUID) -> Optional[WorkflowResponse]:
+        active_name = self._repo.load_active_state_name(
             user_id=user_id,
             conversation_id=conversation_id,
-            artifact_id=artifact_id,
-        ) 
-    
-    # TODO: this will be removed just now for init data
-    def create_init_files(self, user_id: UUID, conversation_id: UUID) -> None: 
-        df= self._data_repo.get_csv_data(
-            user_id=UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
-            conversation_id=UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
-            dataset_id=UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
         )
+        if not active_name:
+            return None
         
+        state = self._repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=active_name,
+        )
+        if state is None:
+            return None
+        
+        return WorkflowResponse(
+            node_message=state.message.txt_message,
+            needs_input=(state.message.action == "NEEDS_INPUT"),
+            needs_data=(state.message.action == "NEEDS_DATA"),
+            current_stage=state.name,
+            current_stage_status=state.status,
+            artifact_ids=state.message.artifact_ids,
+        )      
+
+    def upload_csv_data(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        csv_bytes: bytes,
+    ) -> UUID:
+        try:
+            df = pd.read_csv(io.BytesIO(csv_bytes), low_memory=False) # pyright: ignore[reportUnknownMemberType]
+        except Exception as exc:
+            raise ValueError(f"Uploaded file is not a valid CSV: {exc}") from exc
+
+        active_name = self._repo.load_active_state_name(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if not active_name or LoadDatasetState.NAME != active_name:
+            raise ValueError(f"No active conversation found for user_id={user_id} and conversation_id={conversation_id} or state is not at load data set")
+        
+        dataset_id = LoadDatasetState.INIT_DATA_ID
         self._data_repo.save_csv_data(
             user_id=user_id,
             conversation_id=conversation_id,
-            dataset_id=UUID("486f4975-6cd9-4261-a122-e6b0fc46462d"),
+            dataset_id=dataset_id,
             df=df,
+            overwrite=True,
         )
+         
+        return dataset_id
+
+    def get_artifact(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        artifact_id: UUID,
+    ) -> ArtifactResponse:
+        mime = self._data_repo.get_artifact_mime(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            artifact_id=artifact_id,
+        )
+        content = self._data_repo.get_artifact_bytes(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            artifact_id=artifact_id,
+            expected_mime=mime,
+        )
+        return ArtifactResponse(mime=mime, content=content)
+    
+    def revert_to_state(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        state_name: str,
+    ) -> None:
+        state = self._repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=state_name,
+        )
+        if state is None:
+            raise StateNotFoundError(state_name=state_name)
         
+        state_names = self._router.get_next_state_names(state_name)
+        self._repo.delete_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=state_name,
+        )
+        for name in state_names:
+            self._repo.delete_state(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=name,
+            )
+        
+        self._repo.store_active_state_name(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=state_name,
+        )    
+        
+        self._repo.append_message(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    message=ChatMessage(role="system", content=f"User reverted to state {state_name}. and fresh start of this state. Deleted states: {', '.join(state_names)}"),
+        )
+             
+             
     def handle(self, req: WorkflowRequest) -> WorkflowResponse:
         if req.user_message is not None and req.user_message.strip():
             self._repo.append_message(
@@ -194,7 +316,8 @@ class WorkflowApp:
             
         return WorkflowResponse(
             node_message=new_state.message.txt_message,
-            needs_input=(new_state.needs_action == "NEEDS_INPUT"),
+            needs_input=(new_state.message.action == "NEEDS_INPUT"),
+            needs_data=(new_state.message.action == "NEEDS_DATA"),
             current_stage=new_state.name,
             current_stage_status=new_state.status,
             artifact_ids=new_state.message.artifact_ids,

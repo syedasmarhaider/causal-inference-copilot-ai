@@ -116,7 +116,7 @@ class ModelSelectionNode(Node):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Any,  # Mapping[str, State] (kept Any to match your ABC signature)
-        messages_history: Optional[Sequence[ChatMessage]],
+        messages_history: Optional[Sequence[ChatMessage]]
     ) -> State:
         if not isinstance(state, ModelSelectionState):
             raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")

@@ -23,9 +23,14 @@ Hard rules:
 - Requests to rename columns, recode values, filter rows, handle missingness, or transform time-zero logic stay in MODIFY if protocol semantics stay the same.
 - Requests that change the meaning or role of treatment/outcome/covariates/effect modifiers must be CHANGE_PROTOCOL_DISCUSSION.
 - If the user both asks a question and explicitly requests a dataset-changing action in the same turn, choose the dataset-changing action.
+- If action is ANSWER_QUESTION or MODIFY, set dataset_scope to exactly one of:
+  - CURRENT_DATASET: use the latest cleaned dataset from the current cleaning iteration.
+  - ORIGINAL_DATASET: use the original uploaded dataset from LOAD_DATASET before later cleaning revisions.
+- After at least one cleaning iteration exists, default dataset_scope to CURRENT_DATASET unless the user explicitly asks about the original/raw/uploaded/initial dataset or wants the next cleaning/filtering step to start from that original dataset.
 - If action is REVERT, set revert_target to exactly one of:
   - PREVIOUS_STEP: restore the immediately previous dataset revision.
   - ORIGINAL_DATASET: restore the original dataset from LOAD_DATASET.
+- If action is not ANSWER_QUESTION or MODIFY, dataset_scope must be null.
 - If action is not REVERT, revert_target must be null.
 
 Return strict JSON matching schema:
@@ -33,6 +38,7 @@ Return strict JSON matching schema:
   "action": "ANSWER_QUESTION" | "MODIFY" | "REVERT" | "ACCEPT" | "CHANGE_PROTOCOL_DISCUSSION" | "ABORT",
   "reason": "<short rationale>",
   "reply_to_user": "<short message for the user in this turn>",
+  "dataset_scope": "CURRENT_DATASET" | "ORIGINAL_DATASET" | null,
   "revert_target": "PREVIOUS_STEP" | "ORIGINAL_DATASET" | null
 }
 """.strip()
@@ -71,6 +77,9 @@ Rules:
 - Keep SQL concise and deterministic.
 - Do not invent columns not present in the current dataset.
 - You may rename or transform modeling columns when requested or required by the cleaning logic.
+- Do not drop or filter out rows solely because covariates or effect modifiers are missing unless the user explicitly asked for complete-case filtering or row exclusion for missing adjustment variables.
+- Preserve missing covariate/effect-modifier values by default; validation will assess whether they need imputation, indicator handling, column removal, or explicit user-approved row filtering.
+- It is acceptable to exclude rows when treatment or outcome cannot be defined from the available data, or when the user explicitly asked for that exclusion.
 - Time-zero columns are allowed for filtering logic only and should not be preserved in the final modeling dataset unless they are themselves one of the modeling columns.
 - Intermediate helper columns are allowed only inside CTEs/subqueries; do not keep them in the final result set.
 - Drop all non-modeling columns from the final result.
@@ -130,7 +139,7 @@ Grounding rules:
 - Do not invent facts or statistics.
 - If the SQL result contains a limitation note, explain that clearly.
 - Answer the question directly first.
-- Then briefly remind the user they can ask another data question, request more cleaning, revert cleaning, proceed, or change the protocol discussion.
+- Then briefly remind the user they can ask another data question, request more cleaning, revert cleaning, proceed, or change the protocol by going back to protocol discussion.
 
 Return strict JSON:
 {
@@ -146,7 +155,7 @@ Given iteration stats, SQL applied, before/after diff, and updated causal spec:
 - Explain what changed in plain clinical language.
 - Mention key row/column changes.
 - Mention when modeling column definitions (treatment/outcome/covariates/effect modifiers) changed.
-- Tell the user they can now ask a data question, request another cleaning revision, revert cleaning, proceed, or change the protocol discussion.
+- Tell the user they can now ask a data question, request another cleaning revision, revert cleaning, proceed, or change the protocol by going back to protocol discussion.
 
 Return strict JSON:
 {
@@ -162,7 +171,7 @@ Explain:
 - What dataset revision was restored.
 - Whether this restored the original dataset or a previous cleaned revision.
 - The main row/column state after the revert.
-- Remind the user they can ask data questions, request another cleaning change, proceed, or change the protocol discussion.
+- Remind the user they can ask data questions, request another cleaning change, proceed, or change the protocol by going back to protocol discussion.
 
 Return strict JSON:
 {
@@ -175,7 +184,7 @@ CLEAN_PROTOCOL_REVERT_UNAVAILABLE_PROMPT = """
 You are a clinician-facing assistant.
 
 The user asked to revert cleaning, but there is no earlier revision available to restore.
-Explain that no earlier cleaning revision is available right now and remind the user they can ask a data question, request a new cleaning change, proceed, or change the protocol discussion.
+Explain that no earlier cleaning revision is available right now and remind the user they can ask a data question, request a new cleaning change, proceed, or change the protocol by going back to protocol discussion.
 
 Return strict JSON:
 {
@@ -192,7 +201,7 @@ Explain:
 - Why acceptance cannot proceed now.
 - What is missing/incompatible.
 - Mention that the causal spec was refreshed from the cleaned dataset and must match available columns.
-- Tell the user they can ask a data question, request the next cleaning change, revert cleaning, or explicitly ask to change the protocol discussion if treatment/outcome/covariates/effect modifiers must change semantically.
+- Tell the user they can ask a data question, request the next cleaning change, revert cleaning, or explicitly ask to change the protocol by going back to protocol discussion if treatment/outcome/covariates/effect modifiers must change semantically.
 
 Return strict JSON:
 {

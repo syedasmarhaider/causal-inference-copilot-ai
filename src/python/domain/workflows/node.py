@@ -29,6 +29,6 @@ class Node(ABC):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
-        messages_history: Optional[Sequence[ChatMessage]],
+        messages_history: Optional[Sequence[ChatMessage]]
     ) -> State:
         raise NotImplementedError

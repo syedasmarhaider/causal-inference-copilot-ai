@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from python.domain.workflows.state import ACTION, State, StateMessage, Status
+from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 
@@ -61,13 +61,11 @@ class ModelTrainState(State):
                 "ModelTrainState.message is required but missing. "
                 "Don't access .message outside the node/UI context where user_message is guaranteed."
             )
-        return StateMessage(txt_message=self.payload.user_message)
+        action = "NONE"
+        if  self.payload.needs_user_input is not None and self.payload.needs_user_input:
+            action = "NEEDS_INPUT"     
+        return StateMessage(txt_message=self.payload.user_message, action=action)
 
-    @property
-    def needs_action(self) -> ACTION:
-        if self.payload.needs_user_input is not None and self.payload.needs_user_input:
-            return "NEEDS_INPUT"
-        return "NONE"
 
     def pre_required_states_names(self) -> Sequence[str]:
         # Fill this based on your pipeline, e.g. ("MODEL_SELECTION", "ENCODING", "VALIDATE_INFERENCE_READY")

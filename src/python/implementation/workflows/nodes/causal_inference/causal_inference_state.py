@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from python.domain.workflows.state import ACTION, State, StateMessage, Status
+from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import CausalInferenceDeps
 
 class CausalInferencePayload(BaseModel):
@@ -52,15 +52,10 @@ class CausalInferenceState(State):
             )
         return StateMessage(
             txt_message=self.payload.message,
+            action="NONE" if self.status == "ABORTED" else "NEEDS_INPUT",
             artifact_ids=[str(aid) for aid in self.current_artifact_ids] if self.current_artifact_ids else None,
         )
-
-    @property
-    def needs_action(self) -> ACTION:
-        if self.status == "ABORTED":
-            return "NONE"
-        return "NEEDS_INPUT"
-
+        
     def pre_required_states_names(self) -> Sequence[str]:
         return CausalInferenceDeps.pre_required_states_names()
 

@@ -1,0 +1,40 @@
+project_id = "your-gcp-project-dev"
+region     = "europe-west3"
+
+environment = "dev"
+name_prefix = "causal"
+
+# Full image ref passed by CI/CD.
+container_image = "europe-west3-docker.pkg.dev/your-gcp-project-dev/causal-dev-images/backend:dev"
+
+firebase_database_region = "europe-west1"
+firebase_database_type   = "DEFAULT_DATABASE"
+langfuse_public_key      = "pk-lf-xxxxxxxxxxxxxxxx"
+
+cloud_run_allow_unauthenticated = false
+cloud_run_deletion_protection   = false
+
+extra_plain_env_vars = {
+  APP_ENV = "dev"
+}
+
+secret_env_vars = {
+  GEMINI_API_KEY = {
+    secret_id = "gemini-api-key"
+    version   = "latest"
+  }
+  LANGFUSE_SECRET_KEY = {
+    secret_id = "langfuse-secret-key"
+    version   = "latest"
+  }
+}
+
+# Required for Firebase Admin SDK RTDB read/write when database rules are locked down.
+runtime_extra_project_roles = [
+  "roles/firebaseauth.viewer",
+  "roles/firebasedatabase.admin",
+]
+
+labels = {
+  app = "causal-backend"
+}

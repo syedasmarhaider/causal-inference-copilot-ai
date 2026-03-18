@@ -92,9 +92,9 @@ def _build_chat_models(
 
     from langchain_google_genai import ChatGoogleGenerativeAI
 
-    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("Missing API key. Set GOOGLE_API_KEY (preferred) or GEMINI_API_KEY.")
+        raise ValueError("Missing API key. Set GEMINI_API_KEY.")
 
     unique_models: Dict[str, BaseChatModel] = {}
     alias_models: Dict[AvailableModelsKey, BaseChatModel] = {}

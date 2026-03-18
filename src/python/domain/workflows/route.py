@@ -27,6 +27,10 @@ class Router(ABC):
         raise NotImplementedError
     
     @abstractmethod
+    def get_next_state_names(self, current_state_name: str) -> Sequence[str]:
+        raise NotImplementedError
+    
+    @abstractmethod
     def decide_next(
         self,
         *,

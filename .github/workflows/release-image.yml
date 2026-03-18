@@ -1,0 +1,86 @@
+name: release-image
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      deploy_env:
+        description: "Target deployment environment"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - prod
+          - feature
+      image_tag:
+        description: "Optional explicit image tag (defaults to git tag or deploy env)"
+        required: false
+        type: string
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run tests
+        run: make test
+
+  build_and_push:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_env || 'prod' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image config
+        env:
+          GH_SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+          GH_REGISTRY_HOST: ${{ vars.REGISTRY_HOST }}
+          GH_REGISTRY_REPOSITORY: ${{ vars.REGISTRY_REPOSITORY }}
+          GH_REGISTRY_PROJECT: ${{ vars.REGISTRY_PROJECT }}
+        run: |
+          DEPLOY_ENV="${{ github.event_name == 'workflow_dispatch' && inputs.deploy_env || 'prod' }}"
+          IMAGE_TAG_INPUT="${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || '' }}"
+          if [[ -z "${IMAGE_TAG_INPUT}" && "${{ github.event_name }}" == "push" ]]; then
+            IMAGE_TAG_INPUT="${GITHUB_REF_NAME}"
+          fi
+          ci/scripts/resolve_image_vars.sh "${DEPLOY_ENV}" "${IMAGE_TAG_INPUT}" >> "${GITHUB_ENV}"
+
+      - name: Print image URI
+        run: echo "Resolved image URI: ${IMAGE_URI}"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_CI_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth
+        run: gcloud auth configure-docker "${REGISTRY_HOST}" --quiet
+
+      - name: Build and push
+        run: |
+          make docker-push \
+            SERVICE_NAME="${SERVICE_NAME}" \
+            DEPLOY_ENV="${DEPLOY_ENV}" \
+            IMAGE_TAG="${IMAGE_TAG}" \
+            REGISTRY_HOST="${REGISTRY_HOST}" \
+            REGISTRY_PROJECT="${REGISTRY_PROJECT}" \
+            REGISTRY_REPOSITORY="${REGISTRY_REPOSITORY}"
