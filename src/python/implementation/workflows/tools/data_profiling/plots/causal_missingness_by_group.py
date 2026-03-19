@@ -81,12 +81,28 @@ def generate_causal_missingness_by_group_graph(
     fig = plt.figure(figsize=(10.5, max(4.2, 0.35 * len(show) + 2.2)))
     ax = fig.add_subplot(111)
 
-    ax.scatter(miss_c_s.to_numpy(), y, label=f"Control: {control_name}")
-    ax.scatter(miss_t_s.to_numpy(), y, label=f"Treated: {treated_name}")
+    # Use horizontal bars (not scatter) for cleaner comparison.
+    bar_h = 0.34
+    ax.barh(
+        y - bar_h / 2,
+        miss_c_s.to_numpy(dtype=float),
+        height=bar_h,
+        label=f"Control: {control_name}",
+        alpha=0.85,
+    )
+    ax.barh(
+        y + bar_h / 2,
+        miss_t_s.to_numpy(dtype=float),
+        height=bar_h,
+        label=f"Treated: {treated_name}",
+        alpha=0.85,
+    )
 
-    # Connect points so the gap is visually immediate
+    # Draw a thin connector between the two group values so gap remains obvious.
     for i in range(len(show)):
-        ax.plot([miss_c_s.iat[i], miss_t_s.iat[i]], [i, i], linewidth=1)
+        x0 = float(miss_c_s.iat[i])
+        x1 = float(miss_t_s.iat[i])
+        ax.plot([x0, x1], [i, i], linewidth=1.0)
 
     ax.set_yticks(y)
     ax.set_yticklabels(show)
@@ -97,6 +113,7 @@ def generate_causal_missingness_by_group_graph(
 
     ax.set_xlabel("Not recorded at baseline (fraction missing)")
     ax.set_title("Baseline data completeness differs by group (potential bias risk)")
+    ax.grid(axis="x", alpha=0.2)
 
     # Small, clinical-friendly reference guides
     ax.axvline(0.1, linewidth=1)
