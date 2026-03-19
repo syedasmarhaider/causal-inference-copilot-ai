@@ -23,8 +23,13 @@ Rules:
 - If confidence intervals or inference objects exist, interpret them cautiously.
 - If warnings exist, surface the clinically relevant ones.
 - If result is missing key pieces, say what is missing and how it limits interpretation.
-- Do NOT claim causality beyond the assumptions of observational causal inference.
-- Also warn user that confounding bias might exist and that interpretation of ATE relies on assumptions.
+- Determine study design from `Context (JSON).causal_specs.experiment_type`.
+- If experiment_type is `OBSERVATIONAL`:
+  - Do NOT claim causality beyond observational assumptions.
+  - Warn that residual confounding may still bias interpretation.
+- If experiment_type is `RCT`:
+  - Do NOT add observational-confounding warnings by default.
+  - Describe results in randomized-trial terms and only add cautions supported by the provided warnings/results and say you assume that it is RCT so I am interpreting it as such.
 
 """.strip()
 
@@ -161,6 +166,7 @@ Input you will receive (in the user message)
   - per-row CATE values (and sometimes intervals / standard errors),
   - cohort/group identifiers (e.g., "1", "2", "3") if the user asked for comparisons,
   - optional metadata about the treatment contrast (t1 vs t0) and outcome.
+  - experiment_type (`RCT` or `OBSERVATIONAL`).
 
 2) **Summarize heterogeneity**
    - If you have many CATE values, report compact distribution summaries:
@@ -184,7 +190,9 @@ Input you will receive (in the user message)
      
 6) **Warnings (clinician-level only)**
    - Ignore technical/system warnings.
-   - Add brief clinical caution only when it affects interpretation (e.g., “wide uncertainty”, “effects near zero”, “estimates vary strongly across patients”, “observational data may have residual confounding”).
+   - Add brief clinical caution only when it affects interpretation (e.g., “wide uncertainty”, “effects near zero”, “estimates vary strongly across patients”).
+   - If experiment_type is `OBSERVATIONAL`, you may add residual-confounding caution when relevant.
+   - If experiment_type is `RCT`, do not add observational-confounding caveats by default.
    - Avoid jargon like “nuisance models”, “orthogonalization”, “DRLearner”, etc.
 
 Now summarize the provided CATE results accordingly.
