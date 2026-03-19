@@ -109,20 +109,44 @@ def _plot_propensity_vs_confounder(
 
     if _is_numericish(x):
         xv = pd.to_numeric(x, errors="coerce")
-        m = xv.notna()
+        m = xv.notna() & np.isfinite(scores)
+        x_arr = xv[m].to_numpy(dtype=float)
+        p_arr = scores[m.to_numpy()].astype(float)
 
-        # Density-friendly option: hexbin (avoids “blue cloud” overplotting)
-        # If you prefer scatter, swap this with ax.scatter(..., alpha=0.2)
-        ax.hexbin(xv[m].to_numpy(dtype=float), scores[m.to_numpy()], gridsize=45, mincnt=1)
+        if len(x_arr) == 0:
+            ax.text(0.5, 0.5, "No numeric values available for this baseline driver.", ha="center", va="center", transform=ax.transAxes)
+        else:
+            # Curve-only view for continuous drivers (no scatter / no bins cloud).
+            if np.unique(x_arr).size < 2:
+                ax.axhline(float(np.mean(p_arr)), linewidth=2.3, label="Average propensity")
+                ax.legend(loc="best", frameon=True)
+            else:
+                idx = np.argsort(x_arr)
+                x_sorted = x_arr[idx]
+                p_sorted = p_arr[idx]
 
-        # Decile trend line (clinically readable)
-        try:
-            q = pd.qcut(xv[m], q=10, duplicates="drop")
-            tmp = pd.DataFrame({"x": xv[m].to_numpy(dtype=float), "p": scores[m.to_numpy()], "bin": q})
-            grp = tmp.groupby("bin", observed=True).agg(x_mean=("x", "mean"), p_mean=("p", "mean")).sort_values("x_mean")
-            ax.plot(grp["x_mean"].to_numpy(), grp["p_mean"].to_numpy(), marker="o", linewidth=2)
-        except Exception:
-            pass
+                # Rolling smoothing over sorted x creates a continuous trend curve.
+                window = max(15, min(len(p_sorted), max(15, len(p_sorted) // 20)))
+                smooth = pd.Series(p_sorted).rolling(
+                    window=window,
+                    center=True,
+                    min_periods=max(3, window // 4),
+                ).mean()
+                y_smooth = smooth.interpolate(limit_direction="both").to_numpy(dtype=float)
+
+                # Downsample for rendering stability on very large cohorts.
+                if len(x_sorted) > 1200:
+                    take = np.linspace(0, len(x_sorted) - 1, num=1200, dtype=int)
+                    x_plot = x_sorted[take]
+                    y_plot = y_smooth[take]
+                else:
+                    x_plot = x_sorted
+                    y_plot = y_smooth
+
+                ax.plot(x_plot, y_plot, linewidth=2.5, label="Smoothed trend")
+                ax.legend(loc="best", frameon=True)
+
+            ax.set_ylim(0.0, 1.0)
 
         ax.set_xlabel(f"{confounder} (baseline)")
         ax.set_ylabel("Likelihood of being treated (based on baseline profile)")

@@ -769,6 +769,7 @@ def _process_cate_question(
     # ---------------------------
     llm_payload = { # pyright: ignore[reportUnknownVariableType]
         "selected_model": selected_model_fqcn,
+        "experiment_type": causal_specs.experiment_type,
         "outcome_kind": outcome_kind,
         "treatment_column": getattr(causal_specs.treatment_spec, "column", None),
         "cohorts": group_payloads,
