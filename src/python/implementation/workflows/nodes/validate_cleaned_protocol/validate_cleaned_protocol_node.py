@@ -301,6 +301,7 @@ class ValidateCleanProtocolNode(Node):
                     out_cols = [y]
 
         return {
+            "experiment_type": getattr(causal_spec, "experiment_type", None),
             "treatment_col": getattr(getattr(causal_spec, "treatment_spec", None), "column", None),
             "treatment_kind": getattr(getattr(causal_spec, "treatment_spec", None), "kind", None),
             "outcome_kind": getattr(ospec, "kind", None) if ospec is not None else None,
