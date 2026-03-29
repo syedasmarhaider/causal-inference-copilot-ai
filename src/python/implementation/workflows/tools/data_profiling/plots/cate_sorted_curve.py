@@ -37,7 +37,7 @@ def plot_cate_sorted_curve(
 
     any_plotted = False
 
-    for i, c in enumerate(cohorts):
+    for _i, c in enumerate(cohorts):
         cate_f, lo_f, hi_f = align_finite_triplet(c.cate, c.lower, c.upper)
         if cate_f.size == 0:
             continue

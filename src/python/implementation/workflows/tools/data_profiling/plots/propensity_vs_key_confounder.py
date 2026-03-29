@@ -86,10 +86,7 @@ def _rank_confounders(d: pd.DataFrame, t_bin: np.ndarray, candidates: Sequence[s
     scored: list[tuple[str, float]] = []
     for c in candidates:
         s = d[c]
-        if _is_numericish(s):
-            score = _abs_corr_with_t(s, t_bin)
-        else:
-            score = _cramers_v(s, t_bin)
+        score = _abs_corr_with_t(s, t_bin) if _is_numericish(s) else _cramers_v(s, t_bin)
         if math.isfinite(score) and score > 0:
             scored.append((c, float(score)))
     scored.sort(key=lambda x: x[1], reverse=True)

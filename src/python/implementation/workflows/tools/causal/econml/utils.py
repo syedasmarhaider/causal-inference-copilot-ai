@@ -132,7 +132,7 @@ def validate_flat_options(
     Raise ValueError on unknown keys.
     """
     allowed = set(init_map.keys()) | set(fit_map.keys())
-    unknown = [k for k in options.keys() if k not in allowed]
+    unknown = [k for k in options if k not in allowed]
     if unknown:
         raise ValueError(f"Unknown option keys: {unknown}")
 

@@ -65,6 +65,7 @@ bearer_scheme = HTTPBearer(
     auto_error=False,
     description="Firebase Bearer JWT. Paste the raw Firebase ID token.",
 )
+CREDENTIALS_SECURITY = Security(bearer_scheme)
 
 def _unauthorized(detail: str) -> HTTPException:
     return HTTPException(
@@ -85,7 +86,7 @@ def get_auth_service() -> AuthService:
 
 
 def get_authenticated_user(
-    credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = CREDENTIALS_SECURITY,
     authorization: str | None = Header(default=None, include_in_schema=False),
 ) -> AuthenticatedUser:
     if authorization is None:
@@ -113,6 +114,16 @@ def get_authenticated_user(
         raise HTTPException(status_code=500, detail="authentication service unavailable") from exc
 
 
+CONVERSATION_ID_PATH_PARAM = Path(description="Conversation UUID.")
+ARTIFACT_ID_PATH_PARAM = Path(description="Artifact UUID to download.")
+UPLOAD_DATASET_FILE_PARAM = File(
+    ...,
+    description="CSV file to upload for this conversation.",
+)
+AUTHENTICATED_USER_DEP = Depends(get_authenticated_user)
+WORKFLOW_APP_DEP = Depends(get_workflow_app)
+
+
 @app.get(
     "/healthz",
     tags=["system"],
@@ -137,10 +148,10 @@ def healthz():
 )
 
 def get_artifact(
-    conversation_id: UUID = Path(description="Conversation UUID."),
-    artifact_id: UUID = Path(description="Artifact UUID to download."),
-    authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
-    workflow: WorkflowApp = Depends(get_workflow_app),
+    conversation_id: UUID = CONVERSATION_ID_PATH_PARAM,
+    artifact_id: UUID = ARTIFACT_ID_PATH_PARAM,
+    authenticated_user: AuthenticatedUser = AUTHENTICATED_USER_DEP,
+    workflow: WorkflowApp = WORKFLOW_APP_DEP,
 ):
     try:
         workflow.raise_if_userid_not_relates_to_conversation_id(user_id=authenticated_user.uid, conversation_id=conversation_id)
@@ -149,13 +160,13 @@ def get_artifact(
             conversation_id=conversation_id,
             artifact_id=artifact_id,
         )
-    except ConversationNotFoundError:
-        raise HTTPException(status_code=404, detail="conversation not found")
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="artifact not found")
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="conversation not found") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="artifact not found") from exc
     except Exception as e:
         log.exception("artifact download failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     return Response(
         content=ref.content,
@@ -180,9 +191,9 @@ def get_artifact(
     },
 )
 def get_latest_conversation_state(
-    conversation_id: UUID = Path(description="Conversation UUID."),
-    authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
-    workflow: WorkflowApp = Depends(get_workflow_app),
+    conversation_id: UUID = CONVERSATION_ID_PATH_PARAM,
+    authenticated_user: AuthenticatedUser = AUTHENTICATED_USER_DEP,
+    workflow: WorkflowApp = WORKFLOW_APP_DEP,
 ) -> InvokeResponse:
     try:
         workflow.raise_if_userid_not_relates_to_conversation_id(user_id=authenticated_user.uid, conversation_id=conversation_id)
@@ -202,11 +213,11 @@ def get_latest_conversation_state(
             artifact_ids =resp.artifact_ids,
             current_stage_status=str(resp.current_stage_status),
         )
-    except ConversationNotFoundError:
-        raise HTTPException(status_code=404, detail="conversation not found")
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="conversation not found") from exc
     except Exception as e:
         log.exception("failed to get latest conversation state")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     
 
@@ -225,10 +236,10 @@ def get_latest_conversation_state(
     },
 )
 async def upload_dataset_csv(
-    conversation_id: UUID = Path(description="Conversation UUID."),
-    file: UploadFile = File(..., description="CSV file to upload for this conversation."),
-    authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
-    workflow: WorkflowApp = Depends(get_workflow_app),
+    conversation_id: UUID = CONVERSATION_ID_PATH_PARAM,
+    file: UploadFile = UPLOAD_DATASET_FILE_PARAM,
+    authenticated_user: AuthenticatedUser = AUTHENTICATED_USER_DEP,
+    workflow: WorkflowApp = WORKFLOW_APP_DEP,
 ):
     file_name = (file.filename or "").strip()
     content_type = (file.content_type or "").lower()
@@ -250,15 +261,15 @@ async def upload_dataset_csv(
             conversation_id=conversation_id,
             csv_bytes=csv_bytes,
         )
-    except ConversationNotFoundError:
-        raise HTTPException(status_code=404, detail="conversation not found")
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="conversation not found") from exc
     except FileExistsError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         log.exception("dataset upload failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     return UploadDatasetResponse(
         user_id=authenticated_user.uid,
@@ -279,8 +290,8 @@ async def upload_dataset_csv(
     },
 )
 def create_conversation(
-    authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
-    workflow: WorkflowApp = Depends(get_workflow_app),
+    authenticated_user: AuthenticatedUser = AUTHENTICATED_USER_DEP,
+    workflow: WorkflowApp = WORKFLOW_APP_DEP,
 ):
     user_id = authenticated_user.uid
     conversation_id = workflow.create_conversation(user_id=user_id)
@@ -302,9 +313,9 @@ def create_conversation(
 )
 async def invoke_once(
     req: InvokeRequest,
-    conversation_id: UUID = Path(description="Conversation UUID."),
-    authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
-    workflow: WorkflowApp = Depends(get_workflow_app),
+    conversation_id: UUID = CONVERSATION_ID_PATH_PARAM,
+    authenticated_user: AuthenticatedUser = AUTHENTICATED_USER_DEP,
+    workflow: WorkflowApp = WORKFLOW_APP_DEP,
 ) -> InvokeResponse:
     # single node execution per request
     txt = (req.user_text or "").strip() or None
@@ -319,11 +330,11 @@ async def invoke_once(
                 user_message=txt,
             ),
         )
-    except ConversationNotFoundError:
-        raise HTTPException(status_code=404, detail="conversation not found")    
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="conversation not found") from exc
     except Exception as e:
         log.exception("invoke failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     return InvokeResponse(
         conversation_id=conversation_id,
@@ -349,9 +360,9 @@ async def invoke_once(
 )
 def revert_to_state(
     req: RevertStateRequest,
-    conversation_id: UUID = Path(description="Conversation UUID."),
-    authenticated_user: AuthenticatedUser = Depends(get_authenticated_user),
-    workflow: WorkflowApp = Depends(get_workflow_app),
+    conversation_id: UUID = CONVERSATION_ID_PATH_PARAM,
+    authenticated_user: AuthenticatedUser = AUTHENTICATED_USER_DEP,
+    workflow: WorkflowApp = WORKFLOW_APP_DEP,
 ) -> None:
     user_id = authenticated_user.uid
     state_name = (req.state_name or "").strip()
@@ -364,15 +375,15 @@ def revert_to_state(
             conversation_id=conversation_id,
             state_name=state_name,
         )
-    except ConversationNotFoundError:
-        raise HTTPException(status_code=404, detail="conversation not found")
-    except StateNotFoundError:
-        raise HTTPException(status_code=404, detail="state not found")
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="state not found")
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="conversation not found") from exc
+    except StateNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="state not found") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="state not found") from exc
     except Exception as e:
         log.exception("failed to revert conversation state")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 if __name__ == "__main__":

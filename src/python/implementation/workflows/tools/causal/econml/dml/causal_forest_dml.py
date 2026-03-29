@@ -224,10 +224,7 @@ def _normalize_model_spec_to_wrapped_list(
 
     # Normalize input to list
     items: list[str | BaseEstimator]
-    if isinstance(spec_value, (str, BaseEstimator)):
-        items = [spec_value]
-    else:
-        items = list(spec_value)
+    items = [spec_value] if isinstance(spec_value, (str, BaseEstimator)) else list(spec_value)
 
     out: list[BaseEstimator] = []
     for item in items:

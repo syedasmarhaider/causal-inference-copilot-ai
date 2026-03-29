@@ -55,10 +55,7 @@ class ValidateCleanProtocolState(State):
     def message(self) -> StateMessage:
         if self.payload.user_message is None:
             raise ValueError("ValidateCleanProtocolState message is required but missing. State must have user message. Dont call this property if this is not runned in the node context where user_message is guaranteed to be set.")
-        if self.status in ("ABORTED", "DONE"):
-            action = "NONE"
-        else:
-            action = "NEEDS_INPUT"
+        action = "NONE" if self.status in ("ABORTED", "DONE") else "NEEDS_INPUT"
         return StateMessage(txt_message=self.payload.user_message,action=action)
 
     @property

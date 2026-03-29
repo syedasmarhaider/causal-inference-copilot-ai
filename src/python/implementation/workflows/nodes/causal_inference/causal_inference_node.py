@@ -472,7 +472,7 @@ def _make_llm_cate_payload_for_group(
         if lo is not None and hi is not None and lo.size == n and hi.size == n:
             out["cate_interval"] = {
                 "available": True,
-                "pairs": [{"lower": float(a), "upper": float(b)} for a, b in zip(lo.tolist(), hi.tolist())],
+                "pairs": [{"lower": float(a), "upper": float(b)} for a, b in zip(lo.tolist(), hi.tolist(), strict=False)],
             }
         else:
             out["cate_interval"] = _interval_stats(lo, hi)

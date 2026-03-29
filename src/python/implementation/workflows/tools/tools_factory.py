@@ -41,7 +41,7 @@ class DefaultToolFactory(ToolFactory):
         return tool.get_tool_info()
 
     def get_tools_info(self) -> dict[str, str]:
-        return {k: self._tools[k].get_tool_info() for k in self._tools.keys()}
+        return {k: self._tools[k].get_tool_info() for k in self._tools}
 
     def has_tool(self, name: str) -> bool:
         return name in self._tools

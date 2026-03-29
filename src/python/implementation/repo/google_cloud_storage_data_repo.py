@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -237,10 +238,8 @@ class GoogleCloudStorageDataRepo(DataRepo):
                 meta_blob.upload_from_string(**meta_upload_kwargs)
             except Exception:
                 if not overwrite:
-                    try:
+                    with contextlib.suppress(Exception):
                         artifact_blob.delete(timeout=DEFAULT_GCS_TIMEOUT_SECONDS)
-                    except Exception:
-                        pass
                 raise
 
             if overwrite:

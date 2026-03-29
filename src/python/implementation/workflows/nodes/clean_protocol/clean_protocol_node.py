@@ -1413,9 +1413,7 @@ def _is_first_run(payload: CleanProtocolPayloadModel) -> bool:
         return True
     if payload.summary is None:
         return True
-    if payload.compiled_causal_spec is None:
-        return True
-    return False
+    return payload.compiled_causal_spec is None
 
 
 def _result_preview(df: pd.DataFrame, *, max_rows: int = 25, max_cols: int = 12) -> dict[str, Any]:

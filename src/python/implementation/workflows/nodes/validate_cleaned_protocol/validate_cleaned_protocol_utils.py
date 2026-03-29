@@ -272,7 +272,7 @@ def validate_treatment(
     metrics["allowed_unique"] = list(allowed_unique)
     metrics["allowed_normalized"] = [
         {"literal": _safe_display(raw), "normalized_key": _discrete_key_text(key)}
-        for raw, key in zip(allowed_unique, allowed_norm_keys)
+        for raw, key in zip(allowed_unique, allowed_norm_keys, strict=False)
     ]
 
     if allowed_collisions:
@@ -313,7 +313,7 @@ def validate_treatment(
 
     counts_by_allowed: dict[str, int] = {
         str(_safe_display(raw)): int(obs_counts.get(key, 0))
-        for raw, key in zip(allowed_unique, allowed_norm_keys)
+        for raw, key in zip(allowed_unique, allowed_norm_keys, strict=False)
     }
 
     metrics.update(
@@ -328,7 +328,7 @@ def validate_treatment(
     # -------------------------
     unexpected_keys = sorted(list(obs_key_set - allowed_key_set), key=_discrete_key_text)
     missing_allowed = [
-        raw for raw, key in zip(allowed_unique, allowed_norm_keys) if key not in obs_key_set
+        raw for raw, key in zip(allowed_unique, allowed_norm_keys, strict=False) if key not in obs_key_set
     ]
 
     metrics.update(
@@ -374,7 +374,7 @@ def validate_treatment(
     # -------------------------
     low_counts: list[dict[str, Any]] = [
         {"literal": _safe_display(raw), "count": int(obs_counts.get(key, 0))}
-        for raw, key in zip(allowed_unique, allowed_norm_keys)
+        for raw, key in zip(allowed_unique, allowed_norm_keys, strict=False)
         if int(obs_counts.get(key, 0)) < int(min_count_per_literal_fail)
     ]
     metrics["n_low_count"] = int(len(low_counts))
@@ -410,7 +410,7 @@ def validate_treatment(
 
     shares_by_allowed = {
         str(_safe_display(raw)): float(obs_counts.get(key, 0) / total)
-        for raw, key in zip(allowed_unique, allowed_norm_keys)
+        for raw, key in zip(allowed_unique, allowed_norm_keys, strict=False)
     }
     min_share = float(min(shares_by_allowed.values()))
     min_count = int(min(ordered_counts))
@@ -639,7 +639,7 @@ def _missingness_by_expected_treatment_arm(
     }
     unexpected_rows: dict[DiscreteKey, dict[str, Any]] = {}
 
-    for tv, yv in zip(t.tolist(), y.tolist()):
+    for tv, yv in zip(t.tolist(), y.tolist(), strict=False):
         tkey = _normalize_discrete_literal(tv)
 
         if tkey in expected_rows:
@@ -722,7 +722,7 @@ def _binary_event_stats_by_expected_treatment_arm(
     }
     unexpected_rows: dict[DiscreteKey, dict[str, Any]] = {}
 
-    for tv, yv in zip(t.tolist(), y.tolist()):
+    for tv, yv in zip(t.tolist(), y.tolist(), strict=False):
         tkey = _normalize_discrete_literal(tv)
 
         if tkey in expected_rows:
@@ -817,7 +817,7 @@ def _modifier_binary_support_one_at_a_time(
 
     level_rows: dict[DiscreteKey, dict[str, Any]] = {}
 
-    for mv, tv, yv in zip(s_mod.tolist(), s_t.tolist(), s_y.tolist()):
+    for mv, tv, yv in zip(s_mod.tolist(), s_t.tolist(), s_y.tolist(), strict=False):
         try:
             if pd.isna(mv):
                 continue
@@ -1300,7 +1300,7 @@ def validate_outcome(
                 "allowed_outcome_literals": [_safe_display(x) for x in allowed_unique],
                 "allowed_outcome_normalized": [
                     {"literal": _safe_display(raw), "normalized_key": _discrete_key_text(key)}
-                    for raw, key in zip(allowed_unique, allowed_norm_keys)
+                    for raw, key in zip(allowed_unique, allowed_norm_keys, strict=False)
                 ],
                 "event_literal": _safe_display(ys.event),
                 "non_event_literal": _safe_display(ys.non_event),
