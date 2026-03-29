@@ -139,7 +139,7 @@ class LoadDatasetNode(Node):
                 df,
                 max_categories=200,
                 sample_distinct=200,
-                compute_quantiles=True,
+                compute_quantiles=False,
                 strict=True,
             )
             graphs_list = data_profiling_tool.generate_basic_stats_graphs(df=df)
