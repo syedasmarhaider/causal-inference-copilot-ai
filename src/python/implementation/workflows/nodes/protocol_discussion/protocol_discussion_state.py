@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict, Optional, Sequence
+from typing import Any, ClassVar, Dict, Literal, Optional, Sequence
 from pydantic import BaseModel, ConfigDict, field_validator
-from python.domain.workflows.state import ACTION, State, StateMessage, Status
+from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import ProtocolDiscussionDeps
 
 
@@ -10,10 +10,9 @@ class ProtocolDiscussionPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     discussion: str = ""
+    readiness: Literal["READY", "PENDING", "ABORT"] = "PENDING"
     node_message: Optional[str] = None
     error_message: Optional[str] = None
-    action: ACTION = "NONE"
-    node_status: Status = "PENDING"
 
     @field_validator("discussion", mode="before")
     @classmethod
@@ -50,13 +49,18 @@ class ProtocolDiscussionState(State):
 
     @property
     def status(self) -> Status:
-        return self.payload.node_status
+        if self.payload.readiness == "ABORT" or self.payload.error_message is not None:
+            return "ABORTED"
+        if self.payload.readiness == "READY":
+            return "DONE"
+        return "PENDING"
 
     @property
     def message(self) -> StateMessage:
         if self.payload.node_message is None:
             raise ValueError("ProtocolDiscussionState message is required but missing. State must have node message. Dont call this property if this is not runned in the node context where node_message is guaranteed to be set.")
-        return StateMessage(txt_message=self.payload.node_message, action=self.payload.action)
+        action = "NEEDS_INPUT" if self.payload.readiness == "PENDING" else "NONE"
+        return StateMessage(txt_message=self.payload.node_message, action=action)
 
     @property
     def error(self) -> Optional[str]:

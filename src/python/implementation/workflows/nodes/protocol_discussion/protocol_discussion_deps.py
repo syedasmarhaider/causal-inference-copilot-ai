@@ -6,11 +6,12 @@ from typing import Sequence
 
 from python.domain.workflows.state import State
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
+from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 
 @dataclass(frozen=True)
 class ProtocolDiscussionDeps:
-    load_dataset: LoadDatasetState
+    dataset_summary : DatasetSummaryModel
     
     @classmethod
     def pre_required_states_names(cls) -> Sequence[str]:
@@ -27,4 +28,6 @@ class ProtocolDiscussionDeps:
                 f"ProtocolDiscussionDeps: invalid {LoadDatasetState.NAME} "
                 f"(expected LoadDatasetState, got {type(ld).__name__})"
             )
-        return cls(load_dataset=ld)
+        if ld.payload.summary is None:
+            raise ValueError(f"ProtocolDiscussionDeps: {LoadDatasetState.NAME} is not DONE yet (missing dataset summary)")
+        return cls(dataset_summary=ld.payload.summary)
