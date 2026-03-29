@@ -1,22 +1,28 @@
-pandas
-pytest
-pandas-stubs
-fastmcp
-langgraph
-python-dotenv
-fastapi>=0.110
-uvicorn[standard]>=0.27
-pydantic
-firebase-admin
-structlog>=24.1
-joblib
-scikit-learn
-econml
-langchain-core 
-langchain-google-genai
-langchain-openai
-matplotlib
-langfuse
-duckdb
-firebase-admin
-google-cloud-storage
+# Production/runtime dependencies (direct only).
+# Pinned for reproducible builds.
+
+# API and validation
+fastapi==0.128.5
+uvicorn[standard]==0.38.0
+pydantic==2.12.5
+typing-extensions==4.15.0
+python-multipart==0.0.20
+
+# Data and ML
+pandas==2.3.3
+numpy==2.3.5
+scipy==1.17.0
+scikit-learn==1.6.1
+econml==0.16.0
+matplotlib==3.10.8
+duckdb==1.4.4
+joblib==1.5.3
+
+# LLM stack
+langchain-core==1.2.13
+langchain-google-genai==4.2.0
+langfuse==3.14.5
+
+# Cloud services
+firebase-admin==7.2.0
+google-cloud-storage==3.9.0
