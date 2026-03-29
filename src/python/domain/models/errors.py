@@ -4,7 +4,6 @@ from uuid import UUID
 
 class WorkflowError(Exception):
     """Base exception for workflow-related errors."""
-    pass
 
 
 class ConversationNotFoundError(WorkflowError):
@@ -51,7 +50,6 @@ class ArtifactNotFoundError(WorkflowError):
 
 class AuthenticationError(WorkflowError):
     """Raised when authentication fails."""
-    pass
 
 
 class ValidationError(WorkflowError):

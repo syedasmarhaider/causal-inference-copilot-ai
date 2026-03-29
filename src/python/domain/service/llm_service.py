@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Protocol, Sequence, TypedDict, TypeVar
+from typing import Any, Literal, Protocol, TypedDict, TypeVar
 
 from pydantic import BaseModel
 
@@ -17,29 +18,29 @@ class ChatMessage:
     content: str
 
 
-ProviderExtra = Dict[str, Any]
+ProviderExtra = dict[str, Any]
 
 
 @dataclass(frozen=True)
 class LLMConfig:
     model: AvailableModelsKey = "basic"
-    temperature: Optional[float] = 0.2
-    top_p: Optional[float] = 0.95
-    max_tokens: Optional[int] = 60000
-    stop: Optional[List[str]] = None
-    extra: Optional[ProviderExtra] = None
+    temperature: float | None = 0.2
+    top_p: float | None = 0.95
+    max_tokens: int | None = 60000
+    stop: list[str] | None = None
+    extra: ProviderExtra | None = None
 
 class ToolCall(TypedDict, total=False):
     id: str
     name: str
-    args: Dict[str, Any]
+    args: dict[str, Any]
 
 
 @dataclass(frozen=True)
 class LLMResponse:
     content: str
-    finish_reason: Optional[str] = None
-    tool_calls: Optional[List[ToolCall]] = None
+    finish_reason: str | None = None
+    tool_calls: list[ToolCall] | None = None
     raw: Any = None
 
 
@@ -50,7 +51,7 @@ class LLMService(Protocol):
         system_prompt: str | None,
         user_prompt: str,
         config: LLMConfig,
-        history: Optional[Sequence[ChatMessage]],
+        history: Sequence[ChatMessage] | None,
     ) -> LLMResponse: ...
 
     def generate_json(
@@ -60,6 +61,6 @@ class LLMService(Protocol):
         system_prompt: str | None,
         user_prompt: str,
         config: LLMConfig,
-        history: Optional[Sequence[ChatMessage]],
+        history: Sequence[ChatMessage] | None,
         max_attempts: int = 3,
     ) -> T: ...

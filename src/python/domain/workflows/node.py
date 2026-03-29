@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
-from typing import Optional, Sequence
+from collections.abc import Mapping, Sequence
 from uuid import UUID
+
 from python.domain.service.llm_service import ChatMessage
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
@@ -29,6 +29,6 @@ class Node(ABC):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
-        messages_history: Optional[Sequence[ChatMessage]]
+        messages_history: Sequence[ChatMessage] | None
     ) -> State:
         raise NotImplementedError

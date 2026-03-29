@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
 import time
-from typing import ClassVar, List
+from dataclasses import dataclass
+from typing import ClassVar
 
 import duckdb
 import pandas as pd
@@ -16,12 +16,12 @@ from python.domain.workflows.tool import Tool
 class SQLStatements(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    statements: List[NonEmptyStr] = Field(min_length=1)
+    statements: list[NonEmptyStr] = Field(min_length=1)
     table_name: NonEmptyStr
     analytic_only: bool
 
     @model_validator(mode="after")
-    def _validate_statements(self) -> "SQLStatements":
+    def _validate_statements(self) -> SQLStatements:
         if not self.statements:
             raise ValueError("statements must contain at least one SQL statement")
         return self
@@ -30,8 +30,8 @@ class SQLStatements(BaseModel):
 @dataclass(frozen=True)
 class DuckDBSQLExecutionResult:
     table_name: str
-    executed_statements: List[str]
-    columns: List[str]
+    executed_statements: list[str]
+    columns: list[str]
     row_count: int
     has_result_set: bool
     elapsed_ms: float
@@ -79,7 +79,7 @@ class DuckDBInMemorySQLTool(Tool):
 
             last_has_result_set = False
             last_dataframe = pd.DataFrame()
-            last_columns: List[str] = []
+            last_columns: list[str] = []
 
             for statement in statements:
                 con.execute(statement)

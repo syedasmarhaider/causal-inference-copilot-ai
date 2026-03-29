@@ -5,10 +5,11 @@ import json
 import logging
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Mapping, Optional, Protocol, cast
+from typing import Any, Final, Protocol, cast
 from uuid import UUID
 
 import joblib  # pyright: ignore[reportMissingTypeStubs]
@@ -108,7 +109,7 @@ def _gcs_upload_chunk_size_bytes() -> int:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _json_dumps(obj: Mapping[str, Any]) -> str:
@@ -124,7 +125,7 @@ class _JoblibLike(Protocol):
         protocol: int = ...,
     ) -> Any: ...
 
-    def load(self, filename: Any, mmap_mode: Optional[str] = ...) -> Any: ...
+    def load(self, filename: Any, mmap_mode: str | None = ...) -> Any: ...
 
 
 _joblib: _JoblibLike = cast(_JoblibLike, joblib)
@@ -217,7 +218,7 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
         model_id: UUID,
         artifact_bytes: int,
         artifact_sha256: str,
-        app_metadata: Optional[Mapping[str, Any]],
+        app_metadata: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         return {
             "model_id": str(model_id),
@@ -310,7 +311,7 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
         conversation_id: UUID,
         model_id: UUID,
         model: Any,
-        metadata: Optional[Mapping[str, Any]] = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
         artifact_blob = self._artifact_blob(
             user_id=user_id,
@@ -483,4 +484,3 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
                     blob.name,
                     exc_info=True,
                 )
-                pass

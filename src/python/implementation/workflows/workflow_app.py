@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import io
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 from uuid import UUID, uuid4
-from typing import Any, Mapping, Optional, Sequence, Type
 
 import pandas as pd
 
@@ -27,7 +28,7 @@ _MESSAGES_HISTORY_LIMIT = 30
 class WorkflowRequest:
     user_id: UUID
     conversation_id: UUID
-    user_message: Optional[str]  # raw user text
+    user_message: str | None  # raw user text
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,7 @@ class WorkflowResponse:
     current_stage: Stage
     current_stage_status: Status
     needs_data: bool = False
-    artifact_ids: Optional[Sequence[str]] = None
+    artifact_ids: Sequence[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -54,7 +55,7 @@ class WorkflowApp:
         data_repo: DataRepo,
         router: Router,
         nodes_by_state_name: Mapping[str, Node],
-        state_classes_by_name: Mapping[str, Type[State]],
+        state_classes_by_name: Mapping[str, type[State]],
         tool_factory: ToolFactory,
         history_limit: int = _MESSAGES_HISTORY_LIMIT,
         max_steps_per_call: int = 1,
@@ -84,7 +85,7 @@ class WorkflowApp:
     def list_conversations(self, user_id: UUID) -> Sequence[UUID]:
         return self._repo.get_conversation_ids_for_user(user_id=user_id)  
     
-    def get_last_conversation_state(self, *, user_id: UUID, conversation_id: UUID) -> Optional[WorkflowResponse]:
+    def get_last_conversation_state(self, *, user_id: UUID, conversation_id: UUID) -> WorkflowResponse | None:
         active_name = self._repo.load_active_state_name(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -125,7 +126,7 @@ class WorkflowApp:
             user_id=user_id,
             conversation_id=conversation_id,
         )
-        if not active_name or LoadDatasetState.NAME != active_name:
+        if not active_name or active_name != LoadDatasetState.NAME:
             raise ValueError(f"No active conversation found for user_id={user_id} and conversation_id={conversation_id} or state is not at load data set")
         
         dataset_id = LoadDatasetState.INIT_DATA_ID

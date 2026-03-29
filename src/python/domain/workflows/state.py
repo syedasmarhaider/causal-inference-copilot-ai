@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Literal, Optional, Sequence
+from typing import Any, Literal
 
 from python.domain.models.errors import NodeExecutionError
-
 
 Status = Literal["PENDING", "DONE", "ABORTED"]
 ACTION = Literal["NONE", "NEEDS_INPUT","NEEDS_DATA"]
@@ -15,7 +15,7 @@ ACTION = Literal["NONE", "NEEDS_INPUT","NEEDS_DATA"]
 class StateMessage:
     txt_message: str
     action: ACTION 
-    artifact_ids: Optional[Sequence[str]] = None
+    artifact_ids: Sequence[str] | None = None
 
 class State(ABC):
     @property
@@ -35,7 +35,7 @@ class State(ABC):
 
     @property
     @abstractmethod
-    def error(self) -> Optional[NodeExecutionError]:
+    def error(self) -> NodeExecutionError | None:
         raise NotImplementedError
 
     @abstractmethod
@@ -43,15 +43,15 @@ class State(ABC):
         raise NotImplementedError
     
     @abstractmethod
-    def to_json_dict(self) -> Dict[str, Any]:
+    def to_json_dict(self) -> dict[str, Any]:
         raise NotImplementedError
 
     @classmethod
     @abstractmethod
-    def from_json_dict(cls, payload: Dict[str, Any]) -> "State":
+    def from_json_dict(cls, payload: dict[str, Any]) -> State:
         raise NotImplementedError
     
     @classmethod
     @abstractmethod
-    def init_empty(cls) -> "State":
+    def init_empty(cls) -> State:
         raise NotImplementedError

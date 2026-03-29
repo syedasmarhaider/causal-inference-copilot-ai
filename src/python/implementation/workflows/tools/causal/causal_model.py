@@ -3,7 +3,15 @@ from __future__ import annotations
 from typing import Protocol, Union
 from uuid import UUID
 
-from python.implementation.workflows.tools.causal.causal_command import ATECommand, ATEResult, CATECommand, CATEResult, CommandType, FitCommand, FitResult
+from python.implementation.workflows.tools.causal.causal_command import (
+    ATECommand,
+    ATEResult,
+    CATECommand,
+    CATEResult,
+    CommandType,
+    FitCommand,
+    FitResult,
+)
 
 CausalCommand = Union[
     FitCommand,

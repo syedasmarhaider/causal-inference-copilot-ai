@@ -1,27 +1,31 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import math
 import numbers
-from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, TypedDict
-
-import pandas as pd
-import pandas.api.types as ptypes
-from typing import cast
-from python.implementation.workflows.tools.causal.causal_spec import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CausalSpec, ContinuousOutcomeSpecModel
-from python.implementation.workflows.utils.utils import BOOL_FALSE, BOOL_TRUE
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, TypedDict, cast
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any, Literal, TypedDict, cast
 
 import numpy as np
+import pandas as pd
+import pandas.api.types as ptypes
 
+from python.implementation.workflows.tools.causal.causal_spec import (
+    BinaryOutcomeSpecModel,
+    BinaryTreatmentSpecModel,
+    CausalSpec,
+    ContinuousOutcomeSpecModel,
+)
+from python.implementation.workflows.utils.utils import BOOL_FALSE, BOOL_TRUE
 from python.implementation.workflows.utils.validation import ValidationSeverity
+
 
 # TODO: move to tools
 class ValidationIssue(TypedDict):
     severity: ValidationSeverity
     message: str
-    evidence: Dict[str, Any]
+    evidence: dict[str, Any]
     fix_hint: str | None
 
 # =============================================================================
@@ -32,7 +36,7 @@ def validate_min_rows(
     df: pd.DataFrame,
     *,
     min_rows_fail: int = 20,
-) -> Tuple[List[ValidationIssue], Dict[str, Any]]:
+) -> tuple[list[ValidationIssue], dict[str, Any]]:
     """
     Hard structural check: we need rows to even talk about treatment/outcome variation later.
     """
@@ -53,7 +57,7 @@ def validate_min_rows(
     return [], metrics
 
 
-def validate_protocol_role_columns_invariants(causal_spec: CausalSpec) -> List[ValidationIssue]:
+def validate_protocol_role_columns_invariants(causal_spec: CausalSpec) -> list[ValidationIssue]:
     """
     Pure protocol invariants about referenced column names (no DataFrame needed).
 
@@ -66,7 +70,7 @@ def validate_protocol_role_columns_invariants(causal_spec: CausalSpec) -> List[V
       - covariates and effect_modifiers overlap
       - time_zero overlaps with any other role column when time_zero_type == "COLUMN"
     """
-    issues: List[ValidationIssue] = []
+    issues: list[ValidationIssue] = []
 
     # -------------------------
     # Treatment column
@@ -82,8 +86,8 @@ def validate_protocol_role_columns_invariants(causal_spec: CausalSpec) -> List[V
     # -------------------------
     # Covariates / effect modifiers
     # -------------------------
-    covariates: List[str] = list(causal_spec.covariates or [])
-    effect_modifiers: List[str] = list(causal_spec.effect_modifiers or [])
+    covariates: list[str] = list(causal_spec.covariates or [])
+    effect_modifiers: list[str] = list(causal_spec.effect_modifiers or [])
 
 
     # -------------------------
@@ -119,7 +123,7 @@ def validate_protocol_role_columns_invariants(causal_spec: CausalSpec) -> List[V
     # -------------------------
     # 2) covariates/effect_modifiers must not include treatment/outcome columns (FAIL)
     # -------------------------
-    forbidden: Set[str] = {treatment_col, *outcome_cols}
+    forbidden: set[str] = {treatment_col, *outcome_cols}
 
     cov_bad = sorted([c for c in covariates if c in forbidden])
     em_bad = sorted([c for c in effect_modifiers if c in forbidden])
@@ -163,7 +167,7 @@ def validate_protocol_role_columns_invariants(causal_spec: CausalSpec) -> List[V
 # =============================================================================
 # 3) Treatment validations (pre-transform; whitelist already applied upstream)
 # =============================================================================
-def _treatment_allowed_literals(causal_spec: CausalSpec) -> List[Any]:
+def _treatment_allowed_literals(causal_spec: CausalSpec) -> list[Any]:
     """
     Returns the allowed literal domain for treatment_spec.
     - binary -> [treated, control]
@@ -186,7 +190,7 @@ def validate_treatment(
     min_share_fail: float = 0.05,
     max_ratio_fail: float = 20.0,
     min_neff_fail: float = 100.0,
-) -> Tuple[List[ValidationIssue], Dict[str, Any]]:
+) -> tuple[list[ValidationIssue], dict[str, Any]]:
     """
     STRICT (FAIL-only) treatment validation.
 
@@ -196,7 +200,7 @@ def validate_treatment(
       - booleans are NOT collapsed into 0/1
       - non-numeric / non-boolean strings remain strings
     """
-    issues: List[ValidationIssue] = []
+    issues: list[ValidationIssue] = []
 
     # -------------------------
     # Step 0: Column presence
@@ -219,7 +223,7 @@ def validate_treatment(
     n_rows = int(s.shape[0])
     missing_rate = float(s.isna().mean()) if n_rows > 0 else 0.0
 
-    metrics: Dict[str, Any] = {
+    metrics: dict[str, Any] = {
         "treatment_col": tcol,
         "present": True,
         "treatment_kind": getattr(causal_spec.treatment_spec, "kind", None),
@@ -307,7 +311,7 @@ def validate_treatment(
     obs_counts, obs_examples = _normalized_value_counts(s_nonnull)
     obs_key_set = set(obs_counts.keys())
 
-    counts_by_allowed: Dict[str, int] = {
+    counts_by_allowed: dict[str, int] = {
         str(_safe_display(raw)): int(obs_counts.get(key, 0))
         for raw, key in zip(allowed_unique, allowed_norm_keys)
     }
@@ -368,7 +372,7 @@ def validate_treatment(
     # -------------------------
     # Step 5: Minimum count per literal gate
     # -------------------------
-    low_counts: List[Dict[str, Any]] = [
+    low_counts: list[dict[str, Any]] = [
         {"literal": _safe_display(raw), "count": int(obs_counts.get(key, 0))}
         for raw, key in zip(allowed_unique, allowed_norm_keys)
         if int(obs_counts.get(key, 0)) < int(min_count_per_literal_fail)
@@ -471,7 +475,7 @@ def validate_treatment(
 # =============================================================================
 # 4) Outcome validations (pre-transform; whitelist already applied upstream)
 # =============================================================================
-DiscreteKey = Tuple[str, Any]
+DiscreteKey = tuple[str, Any]
 
 
 def _discrete_key_text(k: DiscreteKey) -> str:
@@ -522,13 +526,13 @@ def _normalize_discrete_literal(v: Any) -> DiscreteKey:
 
 
 def _build_allowed_literal_meta(
-    allowed_literals: List[Any],
-) -> Tuple[List[Any], List[DiscreteKey], Dict[DiscreteKey, List[Any]]]:
-    allowed_unique: List[Any] = []
-    allowed_norm_keys: List[DiscreteKey] = []
-    collisions: Dict[DiscreteKey, List[Any]] = {}
+    allowed_literals: list[Any],
+) -> tuple[list[Any], list[DiscreteKey], dict[DiscreteKey, list[Any]]]:
+    allowed_unique: list[Any] = []
+    allowed_norm_keys: list[DiscreteKey] = []
+    collisions: dict[DiscreteKey, list[Any]] = {}
 
-    seen: Dict[DiscreteKey, Any] = {}
+    seen: dict[DiscreteKey, Any] = {}
     for raw in allowed_literals:
         k = _normalize_discrete_literal(raw)
         if k not in seen:
@@ -542,9 +546,9 @@ def _build_allowed_literal_meta(
     return allowed_unique, allowed_norm_keys, collisions
 
 
-def _normalized_value_counts(s: pd.Series) -> Tuple[Dict[DiscreteKey, int], Dict[DiscreteKey, List[Any]]]:
-    counts: Dict[DiscreteKey, int] = {}
-    examples: Dict[DiscreteKey, List[Any]] = {}
+def _normalized_value_counts(s: pd.Series) -> tuple[dict[DiscreteKey, int], dict[DiscreteKey, list[Any]]]:
+    counts: dict[DiscreteKey, int] = {}
+    examples: dict[DiscreteKey, list[Any]] = {}
 
     for v in s.tolist():
         k = _normalize_discrete_literal(v)
@@ -558,7 +562,7 @@ def _normalized_value_counts(s: pd.Series) -> Tuple[Dict[DiscreteKey, int], Dict
 
 def _strict_binary_outcome_literal_meta(
     outcome_spec: BinaryOutcomeSpecModel,
-) -> Tuple[List[Any], List[DiscreteKey], Dict[DiscreteKey, List[Any]], DiscreteKey, DiscreteKey]:
+) -> tuple[list[Any], list[DiscreteKey], dict[DiscreteKey, list[Any]], DiscreteKey, DiscreteKey]:
     """
     STRICT:
       - requires explicit event / non_event
@@ -582,7 +586,7 @@ def _strict_binary_outcome_literal_meta(
 
 def _strict_binary_treatment_literal_meta(
     treatment_spec: BinaryTreatmentSpecModel,
-) -> Tuple[List[Any], List[DiscreteKey], Dict[DiscreteKey, List[Any]], DiscreteKey, DiscreteKey]:
+) -> tuple[list[Any], list[DiscreteKey], dict[DiscreteKey, list[Any]], DiscreteKey, DiscreteKey]:
     """
     STRICT:
       - requires explicit treated / control
@@ -609,13 +613,13 @@ def _missingness_by_expected_treatment_arm(
     y: pd.Series,
     control_key: DiscreteKey,
     treated_key: DiscreteKey,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Returns:
       - per-expected-arm stats for control/treated
       - unexpected treatment value stats
     """
-    expected_rows: Dict[DiscreteKey, Dict[str, Any]] = {
+    expected_rows: dict[DiscreteKey, dict[str, Any]] = {
         control_key: {
             "treatment_key": _discrete_key_text(control_key),
             "arm_role": "control",
@@ -633,7 +637,7 @@ def _missingness_by_expected_treatment_arm(
             "treatment_examples": [],
         },
     }
-    unexpected_rows: Dict[DiscreteKey, Dict[str, Any]] = {}
+    unexpected_rows: dict[DiscreteKey, dict[str, Any]] = {}
 
     for tv, yv in zip(t.tolist(), y.tolist()):
         tkey = _normalize_discrete_literal(tv)
@@ -664,7 +668,7 @@ def _missingness_by_expected_treatment_arm(
         except Exception:
             bucket["n_y_nonmissing"] += 1
 
-    expected_out: List[Dict[str, Any]] = []
+    expected_out: list[dict[str, Any]] = []
     for key in [control_key, treated_key]:
         d = expected_rows[key]
         n = int(d["n"])
@@ -675,7 +679,7 @@ def _missingness_by_expected_treatment_arm(
             }
         )
 
-    unexpected_out: List[Dict[str, Any]] = []
+    unexpected_out: list[dict[str, Any]] = []
     for _, d in sorted(unexpected_rows.items(), key=lambda kv: kv[1]["treatment_key"]):
         n = int(d["n"])
         unexpected_out.append(
@@ -695,8 +699,8 @@ def _binary_event_stats_by_expected_treatment_arm(
     treated_key: DiscreteKey,
     event_key: DiscreteKey,
     non_event_key: DiscreteKey,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    expected_rows: Dict[DiscreteKey, Dict[str, Any]] = {
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    expected_rows: dict[DiscreteKey, dict[str, Any]] = {
         control_key: {
             "treatment_key": _discrete_key_text(control_key),
             "arm_role": "control",
@@ -716,7 +720,7 @@ def _binary_event_stats_by_expected_treatment_arm(
             "non_event_count": 0,
         },
     }
-    unexpected_rows: Dict[DiscreteKey, Dict[str, Any]] = {}
+    unexpected_rows: dict[DiscreteKey, dict[str, Any]] = {}
 
     for tv, yv in zip(t.tolist(), y.tolist()):
         tkey = _normalize_discrete_literal(tv)
@@ -753,7 +757,7 @@ def _binary_event_stats_by_expected_treatment_arm(
         elif ykey == non_event_key:
             bucket["non_event_count"] += 1
 
-    expected_out: List[Dict[str, Any]] = []
+    expected_out: list[dict[str, Any]] = []
     for key in [control_key, treated_key]:
         d = expected_rows[key]
         n_nonmissing = int(d["n_y_nonmissing"])
@@ -764,7 +768,7 @@ def _binary_event_stats_by_expected_treatment_arm(
             }
         )
 
-    unexpected_out: List[Dict[str, Any]] = []
+    unexpected_out: list[dict[str, Any]] = []
     for _, d in sorted(unexpected_rows.items(), key=lambda kv: kv[1]["treatment_key"]):
         n_nonmissing = int(d["n_y_nonmissing"])
         unexpected_out.append(
@@ -789,7 +793,7 @@ def _modifier_binary_support_one_at_a_time(
     min_rows_per_arm_per_level_warn: int,
     min_events_per_level_warn: int,
     max_levels_report: int = 50,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Strict heterogeneity-support diagnostics for ONE modifier at a time.
 
@@ -811,7 +815,7 @@ def _modifier_binary_support_one_at_a_time(
             "message": "Numeric effect modifier support not assessed in outcome validation without explicit discretization spec.",
         }
 
-    level_rows: Dict[DiscreteKey, Dict[str, Any]] = {}
+    level_rows: dict[DiscreteKey, dict[str, Any]] = {}
 
     for mv, tv, yv in zip(s_mod.tolist(), s_t.tolist(), s_y.tolist()):
         try:
@@ -864,8 +868,8 @@ def _modifier_binary_support_one_at_a_time(
             bucket["event_count_total"] += 1
             bucket["arm_event_counts"][tkey_text] += 1
 
-    levels_report: List[Dict[str, Any]] = []
-    unsupported_levels: List[Dict[str, Any]] = []
+    levels_report: list[dict[str, Any]] = []
+    unsupported_levels: list[dict[str, Any]] = []
     n_levels_supported = 0
 
     control_key_text = _discrete_key_text(control_key)
@@ -889,7 +893,7 @@ def _modifier_binary_support_one_at_a_time(
             and event_count_total >= int(min_events_per_level_warn)
         )
 
-        level_out: Dict[str, Any] = {
+        level_out: dict[str, Any] = {
             **level,
             "has_both_expected_arms": has_both_expected_arms,
             "min_rows_any_expected_arm_nonmissing_y": int(min_rows_any_arm),
@@ -933,7 +937,7 @@ def validate_outcome(
     assess_effect_modifier_support: bool = True,
     min_rows_per_arm_per_modifier_level_warn: int = 10,
     min_events_per_modifier_level_warn: int = 5,
-) -> Tuple[List[ValidationIssue], Dict[str, Any]]:
+) -> tuple[list[ValidationIssue], dict[str, Any]]:
     """
     Outcome validation ONLY.
 
@@ -950,7 +954,7 @@ def validate_outcome(
       - propensity logic
       - broad treatment-design validation beyond minimum arm visibility needed here
     """
-    issues: List[ValidationIssue] = []
+    issues: list[ValidationIssue] = []
 
     ys = causal_spec.outcome_spec
     ts = causal_spec.treatment_spec
@@ -1086,7 +1090,7 @@ def validate_outcome(
     ]
     arm_diff = float(max(eligible_arm_rates) - min(eligible_arm_rates)) if len(eligible_arm_rates) >= 2 else 0.0
 
-    metrics: Dict[str, Any] = {
+    metrics: dict[str, Any] = {
         "present": True,
         "outcome_kind": getattr(ys, "kind", None),
         "treatment_col": tcol,
@@ -1436,7 +1440,7 @@ def validate_outcome(
                 )
             )
 
-        low_event_arms: List[Dict[str, Any]] = [
+        low_event_arms: list[dict[str, Any]] = [
             {
                 "arm_role": a["arm_role"],
                 "treatment_key": a["treatment_key"],
@@ -1460,7 +1464,7 @@ def validate_outcome(
         # Step 5: optional effect-modifier support diagnostics
         # --------------------------------------------------------------
         if assess_effect_modifier_support and getattr(causal_spec, "effect_modifiers", None):
-            modifier_support_reports: List[Dict[str, Any]] = []
+            modifier_support_reports: list[dict[str, Any]] = []
             missing_modifier_cols = [c for c in causal_spec.effect_modifiers if c not in df.columns]
 
             if missing_modifier_cols:
@@ -1534,7 +1538,7 @@ def validate_covariate_and_effect_modifier_presence(
     df: pd.DataFrame,
     causal_spec: CausalSpec,
     require_covariates: bool,
-) -> Tuple[List["ValidationIssue"], Dict[str, Any]]:
+) -> tuple[list[ValidationIssue], dict[str, Any]]:
     """
     Protocol-native presence + overlap validation for:
       - covariates (adjustment set)
@@ -1553,14 +1557,14 @@ def validate_covariate_and_effect_modifier_presence(
     Returns:
       (issues, metrics) with bounded evidence payloads.
     """
-    issues: List["ValidationIssue"] = []
+    issues: list[ValidationIssue] = []
 
     # -------------------------
     # 0) Global schema sanity: duplicate df column labels are ambiguous in pandas
     # -------------------------
     if not df.columns.is_unique:
         dupes = df.columns[df.columns.duplicated()].tolist()
-        counts: Dict[str, int] = {}
+        counts: dict[str, int] = {}
         for c in dupes:
             counts[c] = counts.get(c, 0) + 1
 
@@ -1584,9 +1588,9 @@ def validate_covariate_and_effect_modifier_presence(
     # -------------------------
     # 1) Pull protocol lists (defensive de-dup, stable order)
     # -------------------------
-    def _dedup_keep_order(xs: List[str]) -> List[str]:
+    def _dedup_keep_order(xs: list[str]) -> list[str]:
         seen: set[str] = set()
-        out: List[str] = []
+        out: list[str] = []
         for x in xs:
             if  x.strip() and x not in seen:
                 seen.add(x)
@@ -1607,7 +1611,7 @@ def validate_covariate_and_effect_modifier_presence(
 
     overlap_cols = sorted(set(covariates).intersection(set(effect_modifiers)))
 
-    metrics: Dict[str, Any] = {
+    metrics: dict[str, Any] = {
         "n_rows": int(df.shape[0]),
         "n_df_cols": int(df.shape[1]),
         "require_covariates": bool(require_covariates),
@@ -1705,7 +1709,7 @@ def validate_covariate_and_effect_modifier_missingness(
     missing_rate_fail: float = 0.30,
     ignore_cols: Sequence[str] = (),
     max_cols: int = 500,
-) -> Tuple[List["ValidationIssue"], Dict[str, Any]]:
+) -> tuple[list[ValidationIssue], dict[str, Any]]:
     """
     Protocol-native missingness check for covariates + effect_modifiers (pre-transform).
 
@@ -1719,12 +1723,12 @@ def validate_covariate_and_effect_modifier_missingness(
     Returns:
       (issues, metrics)
     """
-    issues: List["ValidationIssue"] = []
+    issues: list[ValidationIssue] = []
     ignore = {c for c in ignore_cols if c.strip()}
 
-    def _dedup_keep_order(xs: List[str]) -> List[str]:
+    def _dedup_keep_order(xs: list[str]) -> list[str]:
         seen: set[str] = set()
-        out: List[str] = []
+        out: list[str] = []
         for x in xs:
             if x.strip() and x not in seen:
                 seen.add(x)
@@ -1740,7 +1744,7 @@ def validate_covariate_and_effect_modifier_missingness(
     missing_cols = [c for c in cols_all if c not in df.columns]
     n_rows = int(df.shape[0])
 
-    metrics: Dict[str, Any] = {
+    metrics: dict[str, Any] = {
         "n_rows": n_rows,
         "n_covariates_protocol": int(len(covariates)),
         "n_effect_modifiers_protocol": int(len(effect_modifiers)),
@@ -1762,13 +1766,13 @@ def validate_covariate_and_effect_modifier_missingness(
         )
         return issues, metrics
 
-    warn_off: List[Dict[str, Any]] = []
-    fail_off: List[Dict[str, Any]] = []
+    warn_off: list[dict[str, Any]] = []
+    fail_off: list[dict[str, Any]] = []
 
     for c in cols_all:
         s = df[c]
         mr = float(s.isna().mean()) if n_rows > 0 else 0.0
-        row: Dict[str, Any] = {"col": c, "missing_rate": mr, "dtype": str(s.dtype)}
+        row: dict[str, Any] = {"col": c, "missing_rate": mr, "dtype": str(s.dtype)}
         if mr >= float(missing_rate_fail):
             fail_off.append(row)
         elif mr >= float(missing_rate_warn):
@@ -1818,7 +1822,7 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
     ignore_cols: Sequence[str] = (),
     max_cols: int = 300,
     min_arm_n: int = 25,
-) -> Tuple[List["ValidationIssue"], Dict[str, Any]]:
+) -> tuple[list[ValidationIssue], dict[str, Any]]:
     """
     Detect differential missingness across treatment arms for covariates/effect_modifiers.
 
@@ -1838,13 +1842,13 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
     Returns:
       (issues, metrics)
     """
-    issues: List["ValidationIssue"] = []
+    issues: list[ValidationIssue] = []
     ignore = {c for c in ignore_cols if c.strip()}
 
     ts = causal_spec.treatment_spec
     tcol = ts.column
 
-    metrics: Dict[str, Any] = {
+    metrics: dict[str, Any] = {
         "treatment_col": tcol,
         "treatment_kind": getattr(ts, "kind", None),
         "delta_warn": float(delta_warn),
@@ -1898,7 +1902,7 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
         ss = series.astype("string").str.strip().str.casefold()
         return ss.eq(lit.casefold())
 
-    arm_masks: Dict[str, pd.Series] = {}
+    arm_masks: dict[str, pd.Series] = {}
 
     if isinstance(ts, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         arm_masks["treated"] = _mask_equals_literal(sT, ts.treated)
@@ -1932,9 +1936,9 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
         )
         return issues, metrics
 
-    def _dedup_keep_order(xs: List[str]) -> List[str]:
+    def _dedup_keep_order(xs: list[str]) -> list[str]:
         seen: set[str] = set()
-        out: List[str] = []
+        out: list[str] = []
         for x in xs:
             if  x not in seen:
                 seen.add(x)
@@ -1959,12 +1963,12 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
         )
         return issues, metrics
 
-    offenders_warn: List[Dict[str, Any]] = []
-    offenders_fail: List[Dict[str, Any]] = []
+    offenders_warn: list[dict[str, Any]] = []
+    offenders_fail: list[dict[str, Any]] = []
 
     for c in cols_all:
         s = df[c]
-        per_arm: Dict[str, float] = {}
+        per_arm: dict[str, float] = {}
         for a in eligible_arms:
             m = arm_masks[a]
             sa = s.loc[m]
@@ -1972,7 +1976,7 @@ def validate_covariate_and_effect_modifier_missingness_by_treatment(
 
         gap = float(max(per_arm.values()) - min(per_arm.values())) if per_arm else 0.0
 
-        row: Dict[str, Any] = {
+        row: dict[str, Any] = {
             "col": c,
             "dtype": str(s.dtype),
             "missing_rate_by_arm": per_arm,
@@ -2025,7 +2029,7 @@ def validate_covariate_and_effect_modifier_constantness(
     max_cols: int = 500,
     # treat "all missing" as constant-like (but missingness validator should usually fail earlier)
     treat_all_missing_as_constant: bool = True,
-) -> Tuple[List["ValidationIssue"], Dict[str, Any]]:
+) -> tuple[list[ValidationIssue], dict[str, Any]]:
     """
     Protocol-native constant/near-constant detection for covariates + effect_modifiers (pre-transform).
 
@@ -2040,12 +2044,12 @@ def validate_covariate_and_effect_modifier_constantness(
     Returns:
       (issues, metrics)
     """
-    issues: List["ValidationIssue"] = []
+    issues: list[ValidationIssue] = []
     ignore = {c for c in ignore_cols if c.strip()}
 
-    def _dedup_keep_order(xs: List[str]) -> List[str]:
+    def _dedup_keep_order(xs: list[str]) -> list[str]:
         seen: set[str] = set()
-        out: List[str] = []
+        out: list[str] = []
         for x in xs:
             if x.strip() and x not in seen:
                 seen.add(x)
@@ -2057,7 +2061,7 @@ def validate_covariate_and_effect_modifier_constantness(
     cols_all = _dedup_keep_order([c for c in (covariates + effect_modifiers) if c not in ignore])[: int(max_cols)]
 
     missing_cols = [c for c in cols_all if c not in df.columns]
-    metrics: Dict[str, Any] = {
+    metrics: dict[str, Any] = {
         "n_rows": int(df.shape[0]),
         "n_checked": int(len(cols_all)),
         "n_missing_cols": int(len(missing_cols)),
@@ -2078,8 +2082,8 @@ def validate_covariate_and_effect_modifier_constantness(
         )
         return issues, metrics
 
-    constant_like: List[Dict[str, Any]] = []
-    numeric_near_constant: List[Dict[str, Any]] = []
+    constant_like: list[dict[str, Any]] = []
+    numeric_near_constant: list[dict[str, Any]] = []
 
     for c in cols_all:
         s = df[c]
@@ -2184,7 +2188,7 @@ def validate_covariate_and_effect_modifier_high_cardinality_and_id_like(
     ignore_cols: Sequence[str] = (),
     max_cols: int = 500,
     sample_n_for_obj_type_scan: int = 200,
-) -> Tuple[List["ValidationIssue"], Dict[str, Any]]:
+) -> tuple[list[ValidationIssue], dict[str, Any]]:
     """
     Protocol-native high-cardinality + ID-like detection for covariates/effect_modifiers (pre-transform).
 
@@ -2199,12 +2203,12 @@ def validate_covariate_and_effect_modifier_high_cardinality_and_id_like(
     Returns:
       (issues, metrics)
     """
-    issues: List["ValidationIssue"] = []
+    issues: list[ValidationIssue] = []
     ignore = {c for c in ignore_cols if c.strip()}
 
-    def _dedup_keep_order(xs: List[str]) -> List[str]:
+    def _dedup_keep_order(xs: list[str]) -> list[str]:
         seen: set[str] = set()
-        out: List[str] = []
+        out: list[str] = []
         for x in xs:
             if x.strip() and x not in seen:
                 seen.add(x)
@@ -2218,7 +2222,7 @@ def validate_covariate_and_effect_modifier_high_cardinality_and_id_like(
     missing_cols = [c for c in cols_all if c not in df.columns]
     n_rows = int(df.shape[0])
 
-    metrics: Dict[str, Any] = {
+    metrics: dict[str, Any] = {
         "n_rows": n_rows,
         "n_checked": int(len(cols_all)),
         "n_missing_cols": int(len(missing_cols)),
@@ -2242,10 +2246,10 @@ def validate_covariate_and_effect_modifier_high_cardinality_and_id_like(
         )
         return issues, metrics
 
-    hi_warn: List[Dict[str, Any]] = []
-    hi_fail: List[Dict[str, Any]] = []
-    id_warn: List[Dict[str, Any]] = []
-    id_fail: List[Dict[str, Any]] = []
+    hi_warn: list[dict[str, Any]] = []
+    hi_fail: list[dict[str, Any]] = []
+    id_warn: list[dict[str, Any]] = []
+    id_fail: list[dict[str, Any]] = []
 
     for c in cols_all:
         s = df[c]
@@ -2261,7 +2265,7 @@ def validate_covariate_and_effect_modifier_high_cardinality_and_id_like(
         nunique = int(s.nunique(dropna=False))
         uniq_ratio = float(nunique / max(1, n_rows))
 
-        row: Dict[str, Any] = {
+        row: dict[str, Any] = {
             "col": c,
             "dtype": str(dt),
             "nunique": nunique,
@@ -2361,7 +2365,7 @@ def validate_covariate_and_effect_modifier_type_risks(
     warn_on_datetime: bool = True,
     # If you have a strict policy that "object dtype is not allowed" pre-transform, set to True
     fail_on_object_mixed_types: bool = False,
-) -> Tuple[List["ValidationIssue"], Dict[str, Any]]:
+) -> tuple[list[ValidationIssue], dict[str, Any]]:
     """
     Protocol-native type-risk validation for covariates + effect_modifiers (pre-transform).
 
@@ -2382,12 +2386,12 @@ def validate_covariate_and_effect_modifier_type_risks(
     Returns:
       (issues, metrics)
     """
-    issues: List["ValidationIssue"] = []
+    issues: list[ValidationIssue] = []
     ignore = {c for c in ignore_cols if c and c.strip()}
 
-    def _dedup_keep_order(xs: List[str]) -> List[str]:
+    def _dedup_keep_order(xs: list[str]) -> list[str]:
         seen: set[str] = set()
-        out: List[str] = []
+        out: list[str] = []
         for x in xs:
             if x.strip() and x not in seen:
                 seen.add(x)
@@ -2401,7 +2405,7 @@ def validate_covariate_and_effect_modifier_type_risks(
     missing_cols = [c for c in cols_all if c not in df.columns]
     n_rows = int(df.shape[0])
 
-    metrics: Dict[str, Any] = {
+    metrics: dict[str, Any] = {
         "n_rows": n_rows,
         "n_checked": int(len(cols_all)),
         "n_missing_cols": int(len(missing_cols)),
@@ -2422,10 +2426,10 @@ def validate_covariate_and_effect_modifier_type_risks(
         )
         return issues, metrics
 
-    datetime_cols: List[Dict[str, Any]] = []
-    mixed_object_cols: List[Dict[str, Any]] = []
-    long_text_cols: List[Dict[str, Any]] = []
-    object_high_card_cols: List[Dict[str, Any]] = []
+    datetime_cols: list[dict[str, Any]] = []
+    mixed_object_cols: list[dict[str, Any]] = []
+    long_text_cols: list[dict[str, Any]] = []
+    object_high_card_cols: list[dict[str, Any]] = []
 
     for c in cols_all:
         s = df[c]
@@ -2553,11 +2557,11 @@ ArmKind = Literal["binary", "continuous"]
 class ArmMasks:
     kind: ArmKind
     treatment_col: str
-    masks: Dict[str, pd.Series]  # arm_name -> bool mask
-    counts: Dict[str, int]       # arm_name -> count
-    notes: Optional[str] = None
+    masks: dict[str, pd.Series]  # arm_name -> bool mask
+    counts: dict[str, int]       # arm_name -> count
+    notes: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "kind": self.kind,
             "treatment_col": self.treatment_col,
@@ -2571,7 +2575,7 @@ class ArmMasks:
 # Small helpers
 # -----------------------------------------------------------------------------
 
-def _parse_bool_token(raw: str) -> Optional[bool]:
+def _parse_bool_token(raw: str) -> bool | None:
     tok = str(raw).strip().casefold()
     if tok in BOOL_TRUE:
         return True
@@ -2616,9 +2620,9 @@ def _mask_equals_literal(s: pd.Series, literal: str) -> pd.Series:
     return ss.eq(lit.casefold())
 
 
-def _dedup_keep_order(xs: List[str]) -> List[str]:
+def _dedup_keep_order(xs: list[str]) -> list[str]:
     seen: set[str] = set()
-    out: List[str] = []
+    out: list[str] = []
     for x in xs:
         if  x.strip() and x not in seen:
             seen.add(x)
@@ -2673,7 +2677,7 @@ def validate_overlap_positivity_univariate(
     # numeric overlap via quantile intervals
     q_lo: float = 0.10,
     q_hi: float = 0.90,
-) -> Tuple[List["ValidationIssue"], Dict[str, Any]]:
+) -> tuple[list[ValidationIssue], dict[str, Any]]:
     """
     Flags overlap/positivity risks by checking whether covariate/effect-modifier support differs across arms.
 
@@ -2687,7 +2691,7 @@ def validate_overlap_positivity_univariate(
     Returns:
       (issues, metrics)
     """
-    issues: List["ValidationIssue"] = []
+    issues: list[ValidationIssue] = []
     ignore = {c for c in ignore_cols if c.strip()}
 
     covariates = _dedup_keep_order(list(getattr(causal_spec, "covariates", []) or []))
@@ -2697,7 +2701,7 @@ def validate_overlap_positivity_univariate(
     feat_cols = _dedup_keep_order([c for c in feat_cols if c not in ignore])[: int(max_cols)]
 
     missing = [c for c in feat_cols if c not in df.columns]
-    metrics: Dict[str, Any] = {
+    metrics: dict[str, Any] = {
         "arm_kind": arm_masks.kind,
         "treatment_col": arm_masks.treatment_col,
         "arm_counts": arm_masks.counts,
@@ -2737,7 +2741,7 @@ def validate_overlap_positivity_univariate(
         )
         return issues, metrics
 
-    exclusive_flags: List[Dict[str, Any]] = []
+    exclusive_flags: list[dict[str, Any]] = []
     checked = 0
 
     for c in feat_cols:
@@ -2772,7 +2776,7 @@ def validate_overlap_positivity_univariate(
                 continue
 
             # Quantile interval overlap check (only if enough non-missing)
-            intervals: Dict[str, Tuple[float, float, int]] = {}
+            intervals: dict[str, tuple[float, float, int]] = {}
             for a in arms:
                 xa = per_arm_num[a].dropna()
                 if int(xa.shape[0]) < int(min_support_per_arm):
@@ -2784,7 +2788,7 @@ def validate_overlap_positivity_univariate(
             if len(intervals) >= 2:
                 # measure overlap of intervals pairwise: intersection length / union length
                 # for multi-arm, take worst-case (min overlap)
-                overlaps: List[float] = []
+                overlaps: list[float] = []
                 arm_list = list(intervals.keys())
                 for i in range(len(arm_list)):
                     for j in range(i + 1, len(arm_list)):
@@ -2887,7 +2891,7 @@ def validate_overlap_propensity_proxy(
     extreme_hi: float = 0.99,
     auc_warn: float = 0.90,
     extreme_share_warn: float = 0.20,
-) -> Tuple[List["ValidationIssue"], Dict[str, Any]]:
+) -> tuple[list[ValidationIssue], dict[str, Any]]:
     """
     Binary-treatment-only proxy:
       Fit a simple logistic regression on numeric-coercible covariates (and optionally effect_modifiers).
@@ -2897,9 +2901,9 @@ def validate_overlap_propensity_proxy(
 
     If sklearn is unavailable, emits WARN and skips.
     """
-    issues: List["ValidationIssue"] = []
+    issues: list[ValidationIssue] = []
 
-    metrics: Dict[str, Any] = {
+    metrics: dict[str, Any] = {
         "enabled": False,
         "reason": None,
         "treatment_col": causal_spec.treatment_spec.column,
@@ -2968,8 +2972,8 @@ def validate_overlap_propensity_proxy(
 
     metrics["n_features_candidate"] = int(len(feat_cols))
 
-    X_parts: List[np.ndarray] = []
-    used: List[str] = []
+    X_parts: list[np.ndarray] = []
+    used: list[str] = []
 
     for c in feat_cols:
         if len(used) >= int(max_features):
@@ -3079,7 +3083,7 @@ def validate_overlap_and_positivity(
     use_effect_modifiers_univariate: bool = True,
     # propensity proxy knobs
     enable_propensity_proxy: bool = True,
-) -> Tuple[List["ValidationIssue"], Dict[str, Any]]:
+) -> tuple[list[ValidationIssue], dict[str, Any]]:
     """
     Advanced overlap/positivity validation suite.
 
@@ -3091,7 +3095,7 @@ def validate_overlap_and_positivity(
     Returns:
       (issues, metrics)
     """
-    issues: List["ValidationIssue"] = []
+    issues: list[ValidationIssue] = []
 
     # Build masks (this can raise if T missing; let caller run treatment presence checks earlier)
     arms = compute_arm_masks_from_protocol(df=df, causal_spec=causal_spec)
@@ -3119,7 +3123,7 @@ def validate_overlap_and_positivity(
     )
     issues.extend(iss_u)
 
-    metrics: Dict[str, Any] = {"arm_masks": arms.to_dict(), "univariate": met_u}
+    metrics: dict[str, Any] = {"arm_masks": arms.to_dict(), "univariate": met_u}
 
     # Optional propensity proxy
     if enable_propensity_proxy:
@@ -3141,7 +3145,7 @@ def _issue(
     *,
     severity: ValidationSeverity,
     message: str,
-    evidence: Dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
     fix_hint: str | None = None,
 ) -> ValidationIssue:
     return {
@@ -3160,9 +3164,9 @@ def _safe_display(v: Any) -> Any:
     return str(v)
 
 
-def _duplicates(cols: Sequence[str]) -> List[str]:
+def _duplicates(cols: Sequence[str]) -> list[str]:
     seen: set[str] = set()
-    dups: List[str] = []
+    dups: list[str] = []
     for c in cols:
         if c in seen and c not in dups:
             dups.append(c)

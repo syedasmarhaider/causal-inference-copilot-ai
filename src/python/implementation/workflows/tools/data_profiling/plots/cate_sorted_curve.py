@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
-import numpy as np
 import matplotlib
+import numpy as np
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from python.implementation.workflows.tools.data_profiling.plots.utils import fig_to_png_bytes
 from python.implementation.workflows.tools.data_profiling.plots.model import CohortCate, GraphImage
-from python.implementation.workflows.tools.data_profiling.plots.utils import align_finite_triplet
+from python.implementation.workflows.tools.data_profiling.plots.utils import (
+    align_finite_triplet,
+    fig_to_png_bytes,
+)
 
 
 def plot_cate_sorted_curve(

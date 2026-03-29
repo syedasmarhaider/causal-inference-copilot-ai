@@ -19,13 +19,12 @@ from python.adapters.api.schemas import (
     UploadDatasetResponse,
 )
 from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
-from python.domain.service.auth_service import AuthService, AuthenticatedUser
+from python.domain.service.auth_service import AuthenticatedUser, AuthService
 from python.implementation.service.firebsae_auth_service import (
     AuthServiceError,
     FirebaseAuthService,
     InvalidTokenError,
 )
-
 from python.implementation.workflows.depinit import make_workflow_app
 from python.implementation.workflows.workflow_app import WorkflowApp, WorkflowRequest
 

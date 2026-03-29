@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, Sequence
+from collections.abc import Sequence
 from uuid import UUID
 
 from python.domain.service.llm_service import ChatMessage
@@ -31,7 +31,7 @@ class WorkflowStateRepo(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def load_active_state_name(self, *, user_id: UUID, conversation_id: UUID) -> Optional[str]:
+    def load_active_state_name(self, *, user_id: UUID, conversation_id: UUID) -> str | None:
         raise NotImplementedError
 
     @abstractmethod
@@ -43,7 +43,7 @@ class WorkflowStateRepo(ABC):
     # -----------------------
 
     @abstractmethod
-    def load_state(self, *, user_id: UUID, conversation_id: UUID, state_name: str) -> Optional[State]:
+    def load_state(self, *, user_id: UUID, conversation_id: UUID, state_name: str) -> State | None:
         raise NotImplementedError
 
     @abstractmethod

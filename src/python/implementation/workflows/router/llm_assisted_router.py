@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 import json
+from collections.abc import Mapping, Sequence
 from string import Template
-from typing import Optional, Sequence, Type
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
@@ -11,22 +10,43 @@ from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.route import NextDecision, Router
 from python.domain.workflows.state import State
-from python.implementation.workflows.nodes.causal_inference.causal_inference_node import CausalInferenceNode
-from python.implementation.workflows.nodes.causal_inference.causal_inference_state import CausalInferenceState
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_node import CleanProtocolNode
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
+from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
+    CausalInferenceNode,
+)
+from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
+    CausalInferenceState,
+)
+from python.implementation.workflows.nodes.clean_protocol.clean_protocol_node import (
+    CleanProtocolNode,
+)
+from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import (
+    CleanProtocolState,
+)
 from python.implementation.workflows.nodes.load_dataset.load_dataset_node import LoadDatasetNode
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
-from python.implementation.workflows.nodes.model_selection.mode_selection_state import ModelSelectionState
-from python.implementation.workflows.nodes.model_selection.model_selection_node import ModelSelectionNode
+from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
+    ModelSelectionState,
+)
+from python.implementation.workflows.nodes.model_selection.model_selection_node import (
+    ModelSelectionNode,
+)
 from python.implementation.workflows.nodes.model_train.model_train_node import ModelTrainNode
 from python.implementation.workflows.nodes.model_train.model_train_state import ModelTrainState
 from python.implementation.workflows.nodes.noop_done.noop_done_node import NoopDoneNode
 from python.implementation.workflows.nodes.noop_done.noop_done_state import NoopDoneState
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import ProtocolDiscussionNode
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
-from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_node import ValidateCleanProtocolNode
-from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import ValidateCleanProtocolState
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import (
+    ProtocolDiscussionNode,
+)
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
+    ProtocolDiscussionState,
+)
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_node import (
+    ValidateCleanProtocolNode,
+)
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import (
+    ValidateCleanProtocolState,
+)
+
 
 class LLMAssistedRouterRouter(Router):
     def __init__(
@@ -35,7 +55,7 @@ class LLMAssistedRouterRouter(Router):
         llm: LLMService,
     ) -> None:
         self._llm = llm
-        self._next_state_names_map: Mapping[str, Optional[str]] = init_next_state_names()
+        self._next_state_names_map: Mapping[str, str | None] = init_next_state_names()
         self._node_name_to_description_map: Mapping[str, str] = get_node_name_with_description()
     
     
@@ -62,7 +82,7 @@ class LLMAssistedRouterRouter(Router):
     def decide_next(
         self,
         *,
-        current_state: Optional[State],
+        current_state: State | None,
         messages_history: Sequence[ChatMessage],
     ) -> NextDecision:
         if current_state is None:
@@ -97,7 +117,7 @@ class LLMAssistedRouterRouter(Router):
         self,
         *,
         current_state: State,
-        messages_history: Optional[Sequence[ChatMessage]],
+        messages_history: Sequence[ChatMessage] | None,
     ) -> NextDecision:
         last_10_messages: list[ChatMessage] = list(messages_history[-10:]) if messages_history else []
         
@@ -190,7 +210,7 @@ Output (STRICT JSON ONLY; no extra text)
     )
 
 
-def build_state_classes_by_name() -> Mapping[str, Type[State]]:
+def build_state_classes_by_name() -> Mapping[str, type[State]]:
     return {
         LoadDatasetState.NAME: LoadDatasetState,
         ProtocolDiscussionState.NAME: ProtocolDiscussionState,
@@ -203,7 +223,7 @@ def build_state_classes_by_name() -> Mapping[str, Type[State]]:
     }
         
 
-def init_next_state_names() -> Mapping[str, Optional[str]]:
+def init_next_state_names() -> Mapping[str, str | None]:
     return {
         LoadDatasetState.NAME: ProtocolDiscussionState.NAME,
         ProtocolDiscussionState.NAME: CleanProtocolState.NAME,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict, List, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any, ClassVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -10,10 +11,10 @@ from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_deps import (
     CleanProtocolDeps,
 )
+from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.data_processing.data_processing_tool import (
     SQLStatements,
 )
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetSummaryModel,
 )
@@ -29,8 +30,8 @@ class CleanDataDiffModel(BaseModel):
     cols_after: int
     rows_delta: int
     cols_delta: int
-    added_columns: List[str] = Field(default_factory=list)
-    removed_columns: List[str] = Field(default_factory=list)
+    added_columns: list[str] = Field(default_factory=list)
+    removed_columns: list[str] = Field(default_factory=list)
 
 
 class SQLHistoryItemModel(BaseModel):
@@ -78,23 +79,23 @@ class CausalSpecHistoryItemModel(BaseModel):
 class CleanProtocolPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    clean_dataset_id: Optional[UUID] = None
-    cleaning_error: Optional[str] = None
-    user_message: Optional[str] = None
-    summary: Optional[DatasetSummaryModel] = None
-    user_acceptance: Optional[bool] = None
-    graph_picture_ids: Optional[Sequence[UUID]] = None
+    clean_dataset_id: UUID | None = None
+    cleaning_error: str | None = None
+    user_message: str | None = None
+    summary: DatasetSummaryModel | None = None
+    user_acceptance: bool | None = None
+    graph_picture_ids: Sequence[UUID] | None = None
 
     iteration_index: int = 0
-    latest_diff: Optional[CleanDataDiffModel] = None
-    compiled_causal_spec: Optional[CausalSpec] = None
-    sql_history: List[SQLHistoryItemModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
-    iteration_history: List[CleanIterationRecordModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
-    causal_spec_history: List[CausalSpecHistoryItemModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
+    latest_diff: CleanDataDiffModel | None = None
+    compiled_causal_spec: CausalSpec | None = None
+    sql_history: list[SQLHistoryItemModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
+    iteration_history: list[CleanIterationRecordModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
+    causal_spec_history: list[CausalSpecHistoryItemModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
 
     @field_validator("cleaning_error", "user_message", mode="before")
     @classmethod
-    def _empty_str_to_none(cls, v: Any) -> Optional[str]:
+    def _empty_str_to_none(cls, v: Any) -> str | None:
         if v is None:
             return None
         if isinstance(v, str):
@@ -104,7 +105,7 @@ class CleanProtocolPayloadModel(BaseModel):
 
     @field_validator("clean_dataset_id", mode="before")
     @classmethod
-    def _parse_uuid(cls, v: Any) -> Optional[UUID]:
+    def _parse_uuid(cls, v: Any) -> UUID | None:
         return uuid_from_any(v)
 
 
@@ -147,7 +148,7 @@ class CleanProtocolState(State):
         return StateMessage(txt_message=self.payload.user_message, artifact_ids=artifacts, action=action)
 
     @property
-    def error(self) -> Optional[NodeExecutionError]:
+    def error(self) -> NodeExecutionError | None:
         if self.payload.cleaning_error is not None:
             return NodeExecutionError(state_name=self.NAME, error=self.payload.cleaning_error)
         return None
@@ -155,14 +156,14 @@ class CleanProtocolState(State):
     def pre_required_states_names(self) -> Sequence[str]:
         return CleanProtocolDeps.pre_required_states_names()
 
-    def to_json_dict(self) -> Dict[str, Any]:
+    def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json")
 
     @classmethod
-    def from_json_dict(cls, payload: Dict[str, Any]) -> "CleanProtocolState":
+    def from_json_dict(cls, payload: dict[str, Any]) -> CleanProtocolState:
         model = CleanProtocolPayloadModel.model_validate(payload)
         return cls(model)
 
     @classmethod
-    def init_empty(cls) -> "CleanProtocolState":
+    def init_empty(cls) -> CleanProtocolState:
         return cls(CleanProtocolPayloadModel())

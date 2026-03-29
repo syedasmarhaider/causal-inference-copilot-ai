@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from collections.abc import Mapping
-from typing import Sequence
 from uuid import UUID
 
 from python.domain.models.errors import StateDependencyError
 from python.domain.workflows.state import State
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
+from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import (
+    CleanProtocolState,
+)
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 
 
@@ -23,7 +24,7 @@ class ValidateCleanProtocolDeps:
         return (CleanProtocolState.NAME,)
 
     @classmethod
-    def from_loaded(cls, loaded: Mapping[str, State]) -> "ValidateCleanProtocolDeps":
+    def from_loaded(cls, loaded: Mapping[str, State]) -> ValidateCleanProtocolDeps:
         
         # ---- CleanProtocolState ----
         clp = loaded.get(CleanProtocolState.NAME)

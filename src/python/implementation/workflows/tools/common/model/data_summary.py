@@ -1,32 +1,31 @@
 from __future__ import annotations
 
-from typing import Dict, List, Literal, Optional, Union
+from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field
-from pydantic import ConfigDict
-from typing_extensions import Annotated
+from pydantic import BaseModel, ConfigDict, Field
+
 
 class NumericSummaryModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    min: Optional[float] = None
-    max: Optional[float] = None
-    mean: Optional[float] = None
-    std: Optional[float] = None
-    quantiles: Optional[Dict[str, float]] = None  # {"0.05": 1.2, ...}
+    min: float | None = None
+    max: float | None = None
+    mean: float | None = None
+    std: float | None = None
+    quantiles: dict[str, float] | None = None  # {"0.05": 1.2, ...}
 
 
 class DatetimeSummaryModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    min: Optional[str] = None  # isoformat-ish
-    max: Optional[str] = None
+    min: str | None = None  # isoformat-ish
+    max: str | None = None
 
 
 class BooleanSummaryModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    counts: Dict[str, int]  # keys are stringified values
+    counts: dict[str, int]  # keys are stringified values
 
 
 class CategoryCountModel(BaseModel):
@@ -39,26 +38,26 @@ class CategoryCountModel(BaseModel):
 class CategoricalSummaryModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    top_categories: List[CategoryCountModel]
+    top_categories: list[CategoryCountModel]
     other_count: int
 
 
 class OtherSummaryModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    distinct_values_sample: List[str]
+    distinct_values_sample: list[str]
 
 
 class ColumnProfileCommonModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     name: str
-    dtype: Optional[str] = None
+    dtype: str | None = None
     n_rows: int
     n_missing: int
     missing_rate: float
-    distinct_count: Optional[int] = None
-    note: Optional[str] = None  # only used in non-strict mode fallbacks
+    distinct_count: int | None = None
+    note: str | None = None  # only used in non-strict mode fallbacks
 
 
 class NumericColumnProfileModel(ColumnProfileCommonModel):
@@ -104,4 +103,4 @@ class DatasetSummaryModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     n_rows: int
-    profiles: List[ColumnProfileModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
+    profiles: list[ColumnProfileModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]

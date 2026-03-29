@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal,  Optional,  Union
+from datetime import UTC, datetime
+from typing import Any, Literal, Union
 from uuid import UUID
 
 import pandas as pd
 
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 CommandType = Literal["FIT", "ATE", "CATE"]
 
@@ -23,13 +23,13 @@ class BaseCommand:
     model_name: str
     dataset_id: UUID
     run_id: UUID
-    order_effect_modifiers: Optional[List[str]] = None
-    order_covariates: Optional[List[str]] = None
+    order_effect_modifiers: list[str] | None = None
+    order_covariates: list[str] | None = None
     data_summary: DatasetSummaryModel
-    transformation_plan: Optional[TransformPlan] = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    transformation_plan: TransformPlan | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     causal_specs: CausalSpec
-    options: Dict[str, Any] = field(default_factory=lambda: {})
+    options: dict[str, Any] = field(default_factory=dict)
 
 
 # =============================================================================
@@ -38,7 +38,7 @@ class BaseCommand:
 
 @dataclass(frozen=True, slots=True)
 class FitInputs:
-    model_spec: Optional[Dict[str, Any]] = None
+    model_spec: dict[str, Any] | None = None
 
 @dataclass(frozen=True, slots=True)
 class FitCommand(BaseCommand):
@@ -56,17 +56,17 @@ ResultStatus = Literal["SUCCEEDED", "FAILED"]
 class ErrorInfo:
     code: str                 # e.g., "DATA_VALIDATION_FAILED", "NO_OVERLAP", "ESTIMATOR_ERROR"
     message: str              # short human-friendly message
-    details: Dict[str, Any] = field(default_factory=lambda: {})  # structured debug payload
+    details: dict[str, Any] = field(default_factory=dict)  # structured debug payload
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BaseResult:
     run_id: UUID
     status: ResultStatus
-    started_at: Optional[datetime] = None
-    finished_at: Optional[datetime] = None
-    warnings: List[str] = field(default_factory=lambda: [])
-    meta: Dict[str, Any] = field(default_factory=lambda: {})  # metrics, logs pointers, etc.
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    warnings: list[str] = field(default_factory=list)
+    meta: dict[str, Any] = field(default_factory=dict)  # metrics, logs pointers, etc.
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +81,7 @@ class CommandFailure(BaseResult):
 class FitSuccess(BaseResult):
     fitted_model_id: UUID
     # keep it flexible: training metrics, featurizer info, nuisance model details, etc.
-    artifacts: Dict[str, Any] = field(default_factory=lambda: {})
+    artifacts: dict[str, Any] = field(default_factory=dict)
     status: Literal["SUCCEEDED"] = field(init=False, default="SUCCEEDED")
 
 
@@ -117,9 +117,9 @@ class ATESuccess(BaseResult):
     interval/inference are optional depending on request + estimator support.
     """
     fitted_model_id: UUID
-    contrast: Dict[str, Any]
-    ate: List[Dict[ATEModelResult, Any]]                      
-    artifacts: Dict[str, Any] = field(default_factory=lambda: {})
+    contrast: dict[str, Any]
+    ate: list[dict[ATEModelResult, Any]]                      
+    artifacts: dict[str, Any] = field(default_factory=dict)
     status: Literal["SUCCEEDED"] = field(init=False, default="SUCCEEDED")
 
 
@@ -156,9 +156,9 @@ CATEModelResult = Literal["for_treatment","cate", "cate_interval", "cate_inferen
 @dataclass(frozen=True, slots=True)
 class CATESuccess(BaseResult):
     fitted_model_id: UUID
-    x_cols: List[str]
+    x_cols: list[str]
     # one item per contrast (binary -> 1 item, categorical -> many items)
-    effects: Dict[CATEModelResult, Any] = field(default_factory=lambda: {})
+    effects: dict[CATEModelResult, Any] = field(default_factory=dict)
     status: Literal["SUCCEEDED"] = field(init=False, default="SUCCEEDED")
 
 

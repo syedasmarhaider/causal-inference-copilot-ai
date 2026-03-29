@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence, cast, ClassVar, Mapping
+from typing import Any, ClassVar, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -12,7 +13,6 @@ from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
-
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.nodes.model_train.model_train_prompts import (
     ENCODING_PLAN_PLAN_USER_PROMPT_TEMPLATE,
@@ -23,7 +23,6 @@ from python.implementation.workflows.nodes.model_train.model_train_prompts impor
 from python.implementation.workflows.nodes.model_train.model_train_state import (
     ModelTrainState,
 )
-
 from python.implementation.workflows.tools.causal.causal_command import (
     CommandFailure,
     FitCommand,
@@ -31,12 +30,15 @@ from python.implementation.workflows.tools.causal.causal_command import (
     FitResult,
     FitSuccess,
 )
-from python.implementation.workflows.tools.causal.causal_model_factory_tool import CausalModelFactoryTool
+from python.implementation.workflows.tools.causal.causal_model_factory_tool import (
+    CausalModelFactoryTool,
+)
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
+    DatasetSummaryModel,
+)
 from python.implementation.workflows.utils.validation import ValidationIssueModel
-
 
 log = logging.getLogger(__name__)
 
@@ -128,8 +130,8 @@ def _validate_plan_against_constraints(
     eligible_cols: set[str],
     expected_covariate_cols: set[str],
     expected_effect_modifier_cols: set[str],
-    treatment_col: Optional[str],
-    outcome_col: Optional[str],
+    treatment_col: str | None,
+    outcome_col: str | None,
 ) -> list[ValidationIssueModel]:
 
     logging.warning(
@@ -228,10 +230,10 @@ def _generate_encoding_plan(
     causal_specs: CausalSpec,
     selected_model: Any,
     dataset_summary: DatasetSummaryModel,
-    prev_training_error: Optional[str] = None,
-    documentation: Optional[str] = None,
-    history: Optional[Sequence[ChatMessage]],
-) -> tuple[UserPlanInput, Optional[TransformPlan]]:
+    prev_training_error: str | None = None,
+    documentation: str | None = None,
+    history: Sequence[ChatMessage] | None,
+) -> tuple[UserPlanInput, TransformPlan | None]:
 
     for _, _ in enumerate(range(2)):
         covariate_cols = set(causal_specs.covariates or [])
@@ -359,7 +361,7 @@ class ModelTrainNode(Node):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
-        messages_history: Optional[Sequence[ChatMessage]]
+        messages_history: Sequence[ChatMessage] | None
     ) -> State:
         if not isinstance(state, ModelTrainState):
             raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")
@@ -448,8 +450,8 @@ class ModelTrainNode(Node):
         # -----------------------------------------------------------------
         # Phase 2: training
         # -----------------------------------------------------------------
-        order_effect_modifiers: Optional[list[str]] = None
-        order_covariates: Optional[list[str]] = None
+        order_effect_modifiers: list[str] | None = None
+        order_covariates: list[str] | None = None
 
         if current_plan is not None:
             order_effect_modifiers = [

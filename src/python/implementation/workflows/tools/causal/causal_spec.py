@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -19,7 +19,7 @@ class BinaryTreatmentSpecModel(BaseModel):
     control: NonEmptyStr
 
 TreatmentSpecModel = Annotated[
-    Union[BinaryTreatmentSpecModel],
+    BinaryTreatmentSpecModel,
     Field(discriminator="kind"),
 ]
 
@@ -35,13 +35,13 @@ class ContinuousOutcomeSpecModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     kind: Literal["continuous"]
     column: NonEmptyStr
-    unit: Optional[NonEmptyStr] = None
-    clip_min: Optional[float] = None
-    clip_max: Optional[float] = None
+    unit: NonEmptyStr | None = None
+    clip_min: float | None = None
+    clip_max: float | None = None
 
 
 OutcomeSpecModel = Annotated[
-    Union[BinaryOutcomeSpecModel, ContinuousOutcomeSpecModel],
+    BinaryOutcomeSpecModel | ContinuousOutcomeSpecModel,
     Field(discriminator="kind"),
 ]
 
@@ -51,8 +51,8 @@ class CausalSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     treatment_spec: TreatmentSpecModel
     outcome_spec: OutcomeSpecModel
-    covariates: List[NonEmptyStr]
-    effect_modifiers: List[NonEmptyStr]
+    covariates: list[NonEmptyStr]
+    effect_modifiers: list[NonEmptyStr]
     experiment_type: ExperimentType
 
 # ----------------------------
@@ -66,11 +66,11 @@ def _fmt_loc(loc: Any) -> str:
 
 def validate_protocol_payload_structured(
     payload: Mapping[str, Any],
-) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     try:
         model = CausalSpec.model_validate(payload)
     except ValidationError as e:
-        issues: List[Dict[str, Any]] = []
+        issues: list[dict[str, Any]] = []
         for err in e.errors():
             issues.append(
                 {
@@ -87,7 +87,7 @@ def validate_protocol_payload_structured(
 
 def validate_protocol_payload(
     payload: Mapping[str, Any],
-) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+) -> tuple[dict[str, Any] | None, list[str]]:
     model_dict, issues = validate_protocol_payload_structured(payload)
     if model_dict is None:
         msgs = [f"{i.get('path')}: {i.get('message')}" for i in issues]

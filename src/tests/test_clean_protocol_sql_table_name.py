@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence, TypeVar
+from typing import Any, TypeVar
 
 import pytest
-from pydantic import BaseModel
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMResponse
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_node import (
@@ -48,7 +48,7 @@ class _FakeLLM:
         system_prompt: str | None,
         user_prompt: str,
         config: LLMConfig,
-        history: Optional[Sequence[ChatMessage]],
+        history: Sequence[ChatMessage] | None,
     ) -> LLMResponse:
         raise AssertionError("generate should not be called in this test")
 
@@ -59,7 +59,7 @@ class _FakeLLM:
         system_prompt: str | None,
         user_prompt: str,
         config: LLMConfig,
-        history: Optional[Sequence[ChatMessage]],
+        history: Sequence[ChatMessage] | None,
         max_attempts: int = 3,
     ) -> T:
         if not self.responses:

@@ -1,32 +1,32 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
 import inspect
 import logging
-from typing import Any, Dict, List, Optional, Sequence, Union
-from uuid import UUID
 import warnings
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+from uuid import UUID
 
 import numpy as np
 import pandas as pd
+from econml.dml import KernelDML
+from econml.sklearn_extensions.linear_model import WeightedLassoCVWrapper
 from pandas.api.types import is_numeric_dtype
-from scipy.sparse import issparse 
-from econml.dml import KernelDML  
-
+from scipy.sparse import issparse
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.linear_model import LogisticRegressionCV, RidgeCV
 from sklearn.ensemble import (
     ExtraTreesClassifier,
     ExtraTreesRegressor,
-    RandomForestClassifier,
-    RandomForestRegressor,
     HistGradientBoostingClassifier,
     HistGradientBoostingRegressor,
+    RandomForestClassifier,
+    RandomForestRegressor,
 )
-from econml.sklearn_extensions.linear_model import WeightedLassoCVWrapper
+from sklearn.linear_model import LogisticRegressionCV, RidgeCV
+from sklearn.pipeline import Pipeline
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
@@ -64,10 +64,9 @@ from python.implementation.workflows.tools.causal.econml.utils import (
     required_init_keys,
     serialize_inference_obj,
 )
+from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.encoding_util import EncodingUtil
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
-from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
-
 
 # =============================================================================
 # Helpers
@@ -91,7 +90,7 @@ def _wrap_with_pre(
     model: BaseEstimator,
     require_dense: bool,
 ) -> BaseEstimator:
-    steps: List[tuple[str, BaseEstimator]] = [("pre", pre_XW)]
+    steps: list[tuple[str, BaseEstimator]] = [("pre", pre_XW)]
     if require_dense:
         steps.append(("dense", _ToDense()))
     steps.append(("model", model))
@@ -100,12 +99,12 @@ def _wrap_with_pre(
 
 def _normalize_model_spec_to_wrapped_list(
     *,
-    spec_value: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]],
+    spec_value: str | BaseEstimator | Sequence[str | BaseEstimator],
     pre_XW: ColumnTransformer,
     is_discrete: bool,
     missingness: bool,
-    random_state: Optional[int],
-    n_jobs: Optional[int],
+    random_state: int | None,
+    n_jobs: int | None,
 ) -> Sequence[BaseEstimator]:
     """
     Accepts: keyword ('auto', 'automl', 'linear'...), estimator, or list of these.
@@ -222,7 +221,7 @@ def _normalize_model_spec_to_wrapped_list(
             return build_boosting_candidates()
         raise ValueError(f"Unknown model keyword: {key!r}")
 
-    items: List[Union[str, BaseEstimator]]
+    items: list[str | BaseEstimator]
     if isinstance(spec_value, (str, BaseEstimator)):
         items = [spec_value]
     else:
@@ -251,14 +250,14 @@ def _get_default_models_for_t_and_y(
     pre_XW: ColumnTransformer,
     *,
     missingness: bool,
-    random_state: Optional[int] = None,
-    n_jobs: Optional[int] = None,
-) -> Dict[str, Any]:
+    random_state: int | None = None,
+    n_jobs: int | None = None,
+) -> dict[str, Any]:
     disc_t = specs.treatment_spec.kind in ("binary", "categorical")
     disc_y = specs.outcome_spec.kind == "binary"
 
-    default_model_y: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
-    default_model_t: Union[str, BaseEstimator, Sequence[Union[str, BaseEstimator]]] = "auto_plus"
+    default_model_y: str | BaseEstimator | Sequence[str | BaseEstimator] = "auto_plus"
+    default_model_t: str | BaseEstimator | Sequence[str | BaseEstimator] = "auto_plus"
 
     model_y = list(
         _normalize_model_spec_to_wrapped_list(
@@ -411,10 +410,10 @@ class KernelDMLCausalModel(CausalModel):
         try:
             specs: CausalSpec = command.causal_specs
             data_summary: DatasetSummaryModel = command.data_summary
-            transformation_plan: Optional[TransformPlan] = command.transformation_plan
+            transformation_plan: TransformPlan | None = command.transformation_plan
 
-            covariates_order: List[str] = list(specs.covariates or [])
-            effect_modifiers_order: List[str] = list(specs.effect_modifiers or [])
+            covariates_order: list[str] = list(specs.covariates or [])
+            effect_modifiers_order: list[str] = list(specs.effect_modifiers or [])
 
             plan = (
                 self.encoding_util.compile(
@@ -494,7 +493,7 @@ class KernelDMLCausalModel(CausalModel):
             )
             init_map = maps["init"]
 
-            defaults: Dict[str, Any] = {}
+            defaults: dict[str, Any] = {}
 
             disc_t = specs.treatment_spec.kind in ("binary", "categorical")
             disc_y = specs.outcome_spec.kind == "binary"
@@ -535,7 +534,7 @@ class KernelDMLCausalModel(CausalModel):
             fit_warnings = [f"{w.category.__name__}: {str(w.message)}" for w in ws]
 
             n = int(df.shape[0])
-            fit_meta: Dict[str, Any] = {
+            fit_meta: dict[str, Any] = {
                 "warnings": fit_warnings,
                 "meta": {
                     "backend": "econml.dml.KernelDML",
@@ -614,12 +613,12 @@ class KernelDMLCausalModel(CausalModel):
         started_at: datetime,
     ) -> CausalResult:
         try:
-            warnings_list: List[str] = []
+            warnings_list: list[str] = []
             spec: CausalSpec = command.causal_specs
-            order_effect_modifiers: List[str] = list(
+            order_effect_modifiers: list[str] = list(
                 command.order_effect_modifiers or spec.effect_modifiers or []
             )
-            order_covariates: List[str] = list(
+            order_covariates: list[str] = list(
                 command.order_covariates or spec.covariates or []
             )
 
@@ -649,9 +648,9 @@ class KernelDMLCausalModel(CausalModel):
             if t1 == t0:
                 raise ModelSpecError(f"Invalid contrast: t1 value {t1} is the same as t0 baseline {t0}.")
 
-            effects: List[Dict[ATEModelResult, Any]] = []
+            effects: list[dict[ATEModelResult, Any]] = []
 
-            item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
+            item: dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
             item["ate"] = est.ate(X=X, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
             logging.info("Computed ATE for contrast t0=%s vs t1=%s: %s", t0, t1, item["ate"])
 
@@ -741,7 +740,7 @@ class KernelDMLCausalModel(CausalModel):
         command: CATECommand,
         started_at: datetime,
     ) -> CausalResult:
-        warnings_list: List[str] = []
+        warnings_list: list[str] = []
         try:
             model_record: ModelRecord | None = self.models_repo.load_model(
                 user_id=user_id,
@@ -764,7 +763,7 @@ class KernelDMLCausalModel(CausalModel):
 
             est: KernelDML = model_record.model
             spec: CausalSpec = command.causal_specs
-            effect_modifiers_order: List[str] = list(
+            effect_modifiers_order: list[str] = list(
                 command.order_effect_modifiers or spec.effect_modifiers or []
             )
 
@@ -795,7 +794,7 @@ class KernelDMLCausalModel(CausalModel):
                 is_global_counter_factual=command.inputs.counterfactual,
             )
 
-            effects: Dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
+            effects: dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
 
             try:
                 effects["cate"] = est.effect(X_query, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
@@ -840,7 +839,7 @@ class KernelDMLCausalModel(CausalModel):
                 warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                 effects["cate_inference"] = None
 
-            if effects.get("cate", None) is None:
+            if effects.get("cate") is None:
                 return CommandFailure(
                     run_id=command.run_id,
                     started_at=started_at,

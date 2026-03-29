@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from collections.abc import Mapping
-from typing import Sequence, TypeVar
+from typing import TypeVar
 from uuid import UUID
 
 from python.domain.models.errors import StateDependencyError
 from python.domain.workflows.state import State
-
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import CleanProtocolState
-from python.implementation.workflows.nodes.model_selection.mode_selection_state import ModelSelectionState
+from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import (
+    CleanProtocolState,
+)
+from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
+    ModelSelectionState,
+)
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
-
 
 T = TypeVar("T", bound=State)
 
@@ -33,7 +35,7 @@ class ModelTrainDeps:
         )
 
     @classmethod
-    def from_loaded(cls, loaded: Mapping[str, State]) -> "ModelTrainDeps":
+    def from_loaded(cls, loaded: Mapping[str, State]) -> ModelTrainDeps:
         def _get(name: str, expected_type: type[T]) -> T:
             st = loaded.get(name)
             if st is None:

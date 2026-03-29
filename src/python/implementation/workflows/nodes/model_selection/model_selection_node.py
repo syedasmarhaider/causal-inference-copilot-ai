@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence, cast
+from typing import Any, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,9 +12,14 @@ from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
-
-from python.implementation.workflows.nodes.model_selection.mode_selection_state import ConfirmedModelSelectionPayload, ModelSelectionPayload, ModelSelectionState
-from python.implementation.workflows.nodes.model_selection.model_selection_deps import ModelSelectionDeps
+from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
+    ConfirmedModelSelectionPayload,
+    ModelSelectionPayload,
+    ModelSelectionState,
+)
+from python.implementation.workflows.nodes.model_selection.model_selection_deps import (
+    ModelSelectionDeps,
+)
 from python.implementation.workflows.nodes.model_selection.model_selection_prompts import (
     MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
     MODEL_SELECTION_NEGOTIATOR_USER_PROMPT_TEMPLATE,
@@ -21,7 +27,9 @@ from python.implementation.workflows.nodes.model_selection.model_selection_promp
     MODEL_SELECTION_RECOMMENDER_USER_PROMPT_TEMPLATE,
     get_model_selection_node_info,
 )
-from python.implementation.workflows.tools.causal.causal_model_factory_tool import CausalModelFactoryTool
+from python.implementation.workflows.tools.causal.causal_model_factory_tool import (
+    CausalModelFactoryTool,
+)
 
 
 # ----------------------------
@@ -34,7 +42,7 @@ class _RecommendationItem(BaseModel):
     title: str
     best_when: str
     why: str
-    tradeoffs: Optional[str] = None
+    tradeoffs: str | None = None
 
 
 class _ModelShortlist(BaseModel):
@@ -115,7 +123,7 @@ class ModelSelectionNode(Node):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Any,  # Mapping[str, State] (kept Any to match your ABC signature)
-        messages_history: Optional[Sequence[ChatMessage]]
+        messages_history: Sequence[ChatMessage] | None
     ) -> State:
         if not isinstance(state, ModelSelectionState):
             raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")

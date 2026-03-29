@@ -1,16 +1,24 @@
 
 from __future__ import annotations
+
 from typing import Any
+
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
 from python.domain.workflows.tool import Tool
 from python.domain.workflows.tool_factory import ToolFactory
-from python.implementation.workflows.tools.causal.causal_model_factory_tool import CausalModelFactoryTool
+from python.implementation.workflows.tools.causal.causal_model_factory_tool import (
+    CausalModelFactoryTool,
+)
 from python.implementation.workflows.tools.data_processing.data_processing_tool import (
     DuckDBInMemorySQLTool,
 )
-from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import CausalDataProfilingTool
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool
+from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import (
+    CausalDataProfilingTool,
+)
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
+    DatasetProfilingTool,
+)
 
 
 class DefaultToolFactory(ToolFactory):

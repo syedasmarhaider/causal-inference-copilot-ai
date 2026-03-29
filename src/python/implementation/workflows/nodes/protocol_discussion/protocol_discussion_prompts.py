@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import List
-
 
 def get_protocol_discussion_get_node_info() -> str:
     return (
@@ -120,7 +118,7 @@ Output format:
 Return ONLY plain text user message (no JSON, no markdown, no commentary).
 """.strip()
 
-def get_questions() -> List[str]:
+def get_questions() -> list[str]:
     return [
         "1) Causal question: What is the effect of [treatment/exposure T] on [outcome Y]?",
         "2) Study type: RCT / Observational (Only these are supported).",

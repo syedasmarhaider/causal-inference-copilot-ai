@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 from pydantic import BaseModel, ConfigDict
 
@@ -12,9 +12,9 @@ from python.domain.workflows.state import State
 class NextDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     state_name: str
-    router_message_for_node: Optional[str] = None
+    router_message_for_node: str | None = None
     # TODO: temp sol change later when we do snapshot mode.
-    delete_next_states_names: Optional[Sequence[str]] = None
+    delete_next_states_names: Sequence[str] | None = None
 
 
 class Router(ABC):
@@ -34,7 +34,7 @@ class Router(ABC):
     def decide_next(
         self,
         *,
-        current_state: Optional[State],
+        current_state: State | None,
         messages_history: Sequence[ChatMessage],
     ) -> NextDecision:
         raise NotImplementedError

@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 
 from python.domain.workflows.tool import Tool
 
+
 class ToolFactory(ABC):
     @abstractmethod
     def get_tool_names(self) -> list[str]:

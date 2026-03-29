@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar, List, Literal, Optional, Sequence, Tuple, Union, cast
+from typing import Any, ClassVar, Literal, Union, cast
 
 import numpy as np
 import pandas as pd
@@ -11,8 +12,10 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from python.implementation.workflows.tools.causal.encoding_plan import EncodingPresetSpec, TransformPlan
-
+from python.implementation.workflows.tools.causal.encoding_plan import (
+    EncodingPresetSpec,
+    TransformPlan,
+)
 
 
 class EncodingUtil:
@@ -60,7 +63,7 @@ def _make_one_hot_encoder(
     *,
     handle_unknown: Literal["ignore", "error"],
     drop_first: bool,
-    max_categories: Optional[int],
+    max_categories: int | None,
     dense_output: bool,
 ) -> OneHotEncoder:
     drop = "first" if drop_first else None
@@ -128,8 +131,8 @@ class MinMaxEpsScaler(BaseEstimator, TransformerMixin):
     """
     def __init__(self, *, eps: float = 1e-12):
         self.eps = float(eps)
-        self.data_min_: Optional[np.ndarray] = None
-        self.data_max_: Optional[np.ndarray] = None
+        self.data_min_: np.ndarray | None = None
+        self.data_max_: np.ndarray | None = None
 
     def fit(self, X, y=None):
         arr = np.asarray(X, dtype="float64")
@@ -159,9 +162,9 @@ class BinaryMapTransformer(BaseEstimator, TransformerMixin):
         mapping: dict[str, float],
         *,
         allow_unknown: bool,
-        unknown_value: Optional[float],
+        unknown_value: float | None,
         missing: Literal["as_unknown", "impute_token", "error"],
-        missing_token: Optional[str],
+        missing_token: str | None,
     ):
         self.mapping = dict(mapping)
         self.allow_unknown = bool(allow_unknown)
@@ -224,10 +227,10 @@ class OrdinalMapTransformer(BaseEstimator, TransformerMixin):
         *,
         start: int,
         allow_unknown: bool,
-        unknown_value: Optional[int],
+        unknown_value: int | None,
         missing: Literal["as_unknown", "impute_token", "error"],
-        missing_token: Optional[str],
-        token_position: Optional[Literal["prepend", "append"]],
+        missing_token: str | None,
+        token_position: Literal["prepend", "append"] | None,
     ):
         self.order = list(order)
         self.start = int(start)
@@ -396,7 +399,7 @@ def compile_plan_to_transformers(
         if missing_plans:
             raise ValueError(f"Missing encoding plan for columns: {missing_plans}")
 
-        extra_plans = [c for c in plan_by_col.keys() if c not in set(xw_cols)]
+        extra_plans = [c for c in plan_by_col if c not in set(xw_cols)]
         if extra_plans:
             raise ValueError(
                 "Plan contains columns not present in effect_modifiers_order/covariates_order: "
@@ -412,7 +415,7 @@ def compile_plan_to_transformers(
             return "passthrough"
 
         if preset == "cat_onehot":
-            steps: List[Tuple[str, BaseEstimator]] = []
+            steps: list[tuple[str, BaseEstimator]] = []
             if enc.missing == "error":
                 steps.append(("check_missing", RaiseIfMissing()))
                 steps.append((
@@ -453,7 +456,7 @@ def compile_plan_to_transformers(
             ])
 
         if preset == "num_log1p":
-            steps2: List[Tuple[str, BaseEstimator]] = [
+            steps2: list[tuple[str, BaseEstimator]] = [
                 ("impute", SimpleImputer(strategy=enc.impute, add_indicator=enc.add_missing_indicator)),
                 ("log1p", Log1pSafeTransformer(allow_negative=enc.allow_negative)),
             ]
@@ -496,8 +499,8 @@ def compile_plan_to_transformers(
     # -------------------------------------------------------------------------
     # Compile with deterministic ordering: iterate by effect_modifiers / (effect_modifiers + covariates)
     # -------------------------------------------------------------------------
-    x_trs: List[Tuple[str, CTTransformer, List[int]]] = []
-    xw_trs: List[Tuple[str, CTTransformer, List[int]]] = []
+    x_trs: list[tuple[str, CTTransformer, list[int]]] = []
+    xw_trs: list[tuple[str, CTTransformer, list[int]]] = []
 
     # pre_X: only effect_modifier columns, in effect_modifiers order
     for col in effect_modifiers_l:
@@ -531,7 +534,7 @@ def compile_plan_to_transformers(
         )
     
     # Ensure we have at least one non-dropped transformer in each view
-    def _has_non_drop(trs: List[Tuple[str, CTTransformer, List[int]]]) -> bool:
+    def _has_non_drop(trs: list[tuple[str, CTTransformer, list[int]]]) -> bool:
         return any(t[1] != "drop" for t in trs)
 
     if not x_trs:

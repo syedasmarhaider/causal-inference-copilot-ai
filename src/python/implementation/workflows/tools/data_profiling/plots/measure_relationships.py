@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-import pandas as pd
 import matplotlib.pyplot as plt
+import pandas as pd
 
 from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
-from python.implementation.workflows.tools.data_profiling.plots.utils import fig_to_png_bytes, select_numeric_columns
-
-
+from python.implementation.workflows.tools.data_profiling.plots.utils import (
+    fig_to_png_bytes,
+    select_numeric_columns,
+)
 
 KEY = "numeric_correlation_heatmap"
 

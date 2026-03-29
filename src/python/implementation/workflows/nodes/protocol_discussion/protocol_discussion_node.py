@@ -1,27 +1,32 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 import json
 import logging
-from typing import Any, ClassVar, Optional, Sequence, cast
+from collections.abc import Mapping, Sequence
+from typing import Any, ClassVar, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
-from typing_extensions import Literal
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import ProtocolDiscussionDeps
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import (
+    ProtocolDiscussionDeps,
+)
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
     get_protocol_discussion_get_node_info,
     get_protocol_discussion_update_and_gate_prompt,
     get_protocol_discussion_user_message_prompt,
     get_questions,
 )
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
+    ProtocolDiscussionState,
+)
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
+    DatasetProfilingTool,
+)
 from python.implementation.workflows.utils.utils import safe_err
 
 log = logging.getLogger(__name__)
@@ -75,7 +80,7 @@ class ProtocolDiscussionNode(Node):
         *,
         base_payload: Mapping[str, Any],
         protocol_discussion: str,
-        history: Optional[Sequence[ChatMessage]],
+        history: Sequence[ChatMessage] | None,
     ) -> _DiscussionAndGateModel:
         payload = dict(base_payload)
         payload["protocol_discussion"] = protocol_discussion
@@ -94,7 +99,7 @@ class ProtocolDiscussionNode(Node):
         *,
         base_payload: Mapping[str, Any],
         gate: _DiscussionAndGateModel,
-        history: Optional[Sequence[ChatMessage]],
+        history: Sequence[ChatMessage] | None,
     ) -> str:
         payload = dict(base_payload)
         payload["readiness"] = gate.readiness
@@ -120,7 +125,7 @@ class ProtocolDiscussionNode(Node):
         conversation_id: UUID,
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, Any],
-        messages_history: Optional[Sequence[ChatMessage]],
+        messages_history: Sequence[ChatMessage] | None,
         state: State,
     ) -> State:
         _ = user_id

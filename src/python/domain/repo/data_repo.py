@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Literal, Optional
+from typing import Literal
 from uuid import UUID
 
 import pandas as pd
@@ -74,7 +74,7 @@ class DataRepo(ABC):
         conversation_id: UUID,
         artifact_id: UUID,
         *,
-        expected_mime: Optional[ImageMime] = None,
+        expected_mime: ImageMime | None = None,
     ) -> bytes:
         """
         Return artifact bytes. If expected_mime is provided and mismatched, raise.

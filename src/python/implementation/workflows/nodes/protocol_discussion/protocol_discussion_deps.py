@@ -1,8 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from collections.abc import Mapping
-from typing import Sequence
 
 from python.domain.models.errors import StateDependencyError
 from python.domain.workflows.state import State
@@ -19,7 +18,7 @@ class ProtocolDiscussionDeps:
         return [LoadDatasetState.NAME]
 
     @classmethod
-    def from_loaded(cls, loaded: Mapping[str, State]) -> "ProtocolDiscussionDeps":
+    def from_loaded(cls, loaded: Mapping[str, State]) -> ProtocolDiscussionDeps:
         # ---- LoadDatasetState ----
         ld = loaded.get(LoadDatasetState.NAME)
         if ld is None:

@@ -2,19 +2,18 @@ from __future__ import annotations
 
 import io
 import math
-from typing import Any, List, Literal, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any, Literal
 
+import matplotlib
 import numpy as np
-
+import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-import pandas as pd
-
-import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
@@ -41,7 +40,7 @@ def fmt_k(n: int) -> str:
     return f"{int(round(n/1000)):d}k"
 
 
-def safe_nunique(s: pd.Series) -> Optional[int]:
+def safe_nunique(s: pd.Series) -> int | None:
     try:
         return int(s.nunique(dropna=True))
     except Exception:
@@ -73,7 +72,7 @@ def select_numeric_columns(
     max_cols: int,
     min_non_missing_rate: float = 0.7,
     numeric_like_threshold: float = 0.9,
-) -> List[str]:
+) -> list[str]:
     """
     Picks numeric-ish columns in a clinical-friendly way:
       - true numeric dtypes OR mostly numeric-like strings
@@ -81,7 +80,7 @@ def select_numeric_columns(
       - filters out constant columns
       - ranks by low missingness, then high variance
     """
-    scores: List[Tuple[str, float, float]] = []  # (col, missing_rate, variance)
+    scores: list[tuple[str, float, float]] = []  # (col, missing_rate, variance)
 
     for c in df.columns:
         s = df[c]
@@ -111,7 +110,7 @@ def select_numeric_columns(
 # Protocol role extraction (T / Y / W / X)
 # -----------------------------------------------------------------------------
 
-def protocol_treatment_info(protocol: Any) -> Tuple[str, str, Optional[str], Optional[str], Optional[List[str]]]:
+def protocol_treatment_info(protocol: Any) -> tuple[str, str, str | None, str | None, list[str] | None]:
     """
     Returns:
       (kind, treatment_col, treated, control, levels)
@@ -124,12 +123,12 @@ def protocol_treatment_info(protocol: Any) -> Tuple[str, str, Optional[str], Opt
     if t_spec is None:
         raise ValueError("protocol.treatment_spec is missing")
 
-    kind = str(getattr(t_spec, "kind"))
-    col = str(getattr(t_spec, "column"))
+    kind = str(t_spec.kind)
+    col = str(t_spec.column)
 
     if kind == "binary":
-        treated = str(getattr(t_spec, "treated"))
-        control = str(getattr(t_spec, "control"))
+        treated = str(t_spec.treated)
+        control = str(t_spec.control)
         return kind, col, treated, control, None
 
     if kind == "categorical":
@@ -146,18 +145,18 @@ def protocol_outcome_column(protocol: Any) -> str:
     y_spec = getattr(protocol, "outcome_spec", None)
     if y_spec is None:
         raise ValueError("protocol.outcome_spec is missing")
-    return str(getattr(y_spec, "column"))
+    return str(y_spec.column)
 
 
-def protocol_covariates(protocol: Any) -> List[str]:
+def protocol_covariates(protocol: Any) -> list[str]:
     return [str(x) for x in (getattr(protocol, "covariates", None) or [])] # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType]
 
 
-def protocol_effect_modifiers(protocol: Any) -> List[str]:
+def protocol_effect_modifiers(protocol: Any) -> list[str]:
     return [str(x) for x in (getattr(protocol, "effect_modifiers", None) or [])] # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType]
 
 
-def protocol_WX_columns(protocol: Any, *, include_effect_modifiers: bool = True) -> Tuple[List[str], List[str], List[str]]:
+def protocol_WX_columns(protocol: Any, *, include_effect_modifiers: bool = True) -> tuple[list[str], list[str], list[str]]:
     """
     Returns (W_cols, X_cols, feature_cols_for_scoring).
     For scoring we usually want W + (optionally) X.
@@ -180,9 +179,9 @@ def build_binary_treatment_from_protocol(
     df: pd.DataFrame,
     protocol: Any,
     *,
-    categorical_contrast: Optional[str] = None,
+    categorical_contrast: str | None = None,
     categorical_strategy: Literal["most_common", "first_available"] = "most_common",
-) -> Tuple[pd.DataFrame, np.ndarray, str, int]:
+) -> tuple[pd.DataFrame, np.ndarray, str, int]:
     """
     Converts treatment into a binary indicator for the comparability map.
 
@@ -257,9 +256,9 @@ def _split_numeric_categorical_for_score(
     cols: Sequence[str],
     *,
     numeric_like_threshold: float,
-) -> Tuple[List[str], List[str]]:
-    num: List[str] = []
-    cat: List[str] = []
+) -> tuple[list[str], list[str]]:
+    num: list[str] = []
+    cat: list[str] = []
     for c in cols:
         s = df[c]
         is_num = pd.api.types.is_numeric_dtype(s) or (coerce_numeric_ratio(s) >= numeric_like_threshold)
@@ -345,7 +344,7 @@ def fit_treatment_likelihood_scores(
     return scores
 
 
-def finite_1d(x: Optional[np.ndarray]) -> np.ndarray:
+def finite_1d(x: np.ndarray | None) -> np.ndarray:
     if x is None:
         return np.array([], dtype=float)
     a = np.asarray(x, dtype=float).ravel()
@@ -354,9 +353,9 @@ def finite_1d(x: Optional[np.ndarray]) -> np.ndarray:
 
 def align_finite_triplet(
     cate: np.ndarray,
-    lower: Optional[np.ndarray],
-    upper: Optional[np.ndarray],
-) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+    lower: np.ndarray | None,
+    upper: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
     """
     Filters to rows where cate is finite. If lower/upper exist and are aligned,
     also filters them to the same finite mask; otherwise returns them as None.
@@ -392,7 +391,7 @@ def bootstrap_ci_mean(
     n_boot: int = 500,
     alpha: float = 0.05,
     seed: int = 0,
-) -> Tuple[float, float, float]:
+) -> tuple[float, float, float]:
     """
     Percentile bootstrap CI for mean(x). Deterministic given seed.
     Returns (mean, lo, hi).

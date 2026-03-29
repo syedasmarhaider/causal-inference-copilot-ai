@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict, Literal, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any, ClassVar, Literal
+
 from pydantic import BaseModel, ConfigDict, field_validator
+
 from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import ProtocolDiscussionDeps
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import (
+    ProtocolDiscussionDeps,
+)
 
 
 class ProtocolDiscussionPayloadModel(BaseModel):
@@ -12,8 +17,8 @@ class ProtocolDiscussionPayloadModel(BaseModel):
 
     discussion: str = ""
     readiness: Literal["READY", "PENDING", "ABORT"] = "PENDING"
-    node_message: Optional[str] = None
-    error_message: Optional[str] = None
+    node_message: str | None = None
+    error_message: str | None = None
 
     @field_validator("discussion", mode="before")
     @classmethod
@@ -26,7 +31,7 @@ class ProtocolDiscussionPayloadModel(BaseModel):
 
     @field_validator("node_message", "error_message", mode="before")
     @classmethod
-    def _empty_str_to_none(cls, v: Any) -> Optional[str]:
+    def _empty_str_to_none(cls, v: Any) -> str | None:
         if v is None:
             return None
         if isinstance(v, str):
@@ -64,7 +69,7 @@ class ProtocolDiscussionState(State):
         return StateMessage(txt_message=self.payload.node_message, action=action)
 
     @property
-    def error(self) -> Optional[NodeExecutionError]:
+    def error(self) -> NodeExecutionError | None:
         if self.payload.error_message is not None:
             return NodeExecutionError(state_name=self.NAME, error=self.payload.error_message)
         return None
@@ -72,14 +77,14 @@ class ProtocolDiscussionState(State):
     def pre_required_states_names(self) -> Sequence[str]:
         return  ProtocolDiscussionDeps.pre_required_states_names()
 
-    def to_json_dict(self) -> Dict[str, Any]:
+    def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json")
 
     @classmethod
-    def from_json_dict(cls, payload: Dict[str, Any]) -> "ProtocolDiscussionState":
+    def from_json_dict(cls, payload: dict[str, Any]) -> ProtocolDiscussionState:
         model = ProtocolDiscussionPayloadModel.model_validate(payload)
         return cls(model)
     
     @classmethod
-    def init_empty(cls) -> "ProtocolDiscussionState":
+    def init_empty(cls) -> ProtocolDiscussionState:
         return cls(ProtocolDiscussionPayloadModel())

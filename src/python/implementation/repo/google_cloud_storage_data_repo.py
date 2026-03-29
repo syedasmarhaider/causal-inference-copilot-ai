@@ -4,7 +4,7 @@ import io
 import json
 import os
 from dataclasses import dataclass
-from typing import Final, Optional
+from typing import Final
 from uuid import UUID
 
 import pandas as pd
@@ -340,7 +340,7 @@ class GoogleCloudStorageDataRepo(DataRepo):
         conversation_id: UUID,
         artifact_id: UUID,
         *,
-        expected_mime: Optional[ImageMime] = None,
+        expected_mime: ImageMime | None = None,
     ) -> bytes:
         actual_mime = self.get_artifact_mime(
             user_id=user_id,

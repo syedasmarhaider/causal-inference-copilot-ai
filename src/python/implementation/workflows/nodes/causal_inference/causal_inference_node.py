@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import logging
-from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import numpy as np
@@ -15,8 +16,9 @@ from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
-
-from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import CausalInferenceDeps
+from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import (
+    CausalInferenceDeps,
+)
 from python.implementation.workflows.nodes.causal_inference.causal_inference_prompts import (
     CATE_GENERAL_PROMPT,
     CATE_INCLUSION_PROMPT,
@@ -25,9 +27,9 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_pro
     CAUSAL_INFERENCE_ATE_SUMMARY_USER_PROMPT_TEMPLATE,
     INVALID_PLAN_MESSAGE_PROMPT,
 )
-from python.implementation.workflows.nodes.causal_inference.causal_inference_state import CausalInferenceState
-
-
+from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
+    CausalInferenceState,
+)
 from python.implementation.workflows.tools.causal.causal_command import (
     ATECommand,
     ATEInputsModel,
@@ -41,20 +43,23 @@ from python.implementation.workflows.tools.causal.causal_command import (
     CommandFailure,
 )
 from python.implementation.workflows.tools.causal.causal_model import CausalModel
-from python.implementation.workflows.tools.causal.causal_model_factory_tool import CausalModelFactoryTool
+from python.implementation.workflows.tools.causal.causal_model_factory_tool import (
+    CausalModelFactoryTool,
+)
 from python.implementation.workflows.tools.causal.causal_spec import (
     BinaryOutcomeSpecModel,
     CausalSpec,
     ContinuousOutcomeSpecModel,
 )
-
 from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.tools.data_processing.data_processing_tool import (
     DuckDBInMemorySQLTool,
     SQLStatements,
 )
-from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import CausalDataProfilingTool
+from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import (
+    CausalDataProfilingTool,
+)
 from python.implementation.workflows.tools.data_profiling.plots.model import CohortCate, GraphImage
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
@@ -83,7 +88,7 @@ class CausalInferenceNode(Node):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Any,
-        messages_history: Optional[Sequence[ChatMessage]],
+        messages_history: Sequence[ChatMessage] | None,
     ) -> State:
         if not isinstance(state, CausalInferenceState):
             raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")
@@ -247,7 +252,7 @@ def _serialize_result_to_json_str(res: Any) -> str:
     return _dumps({"repr": repr(res)})
 
 
-def _last_user_text(history: Optional[Sequence[ChatMessage]]) -> str:
+def _last_user_text(history: Sequence[ChatMessage] | None) -> str:
     if not history:
         return ""
     for msg in reversed(history):
@@ -277,7 +282,7 @@ class _CateIntentPayload(BaseModel):
     answer: str = ""
 
     @model_validator(mode="after")
-    def _normalize(self) -> "_CateIntentPayload":
+    def _normalize(self) -> _CateIntentPayload:
         if not self.prev_context_relevant:
             self.answer = ""
         return self
@@ -299,15 +304,15 @@ class _CohortSQLPlanItem(BaseModel):
 class InclusionPlanModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    rules: List[_CohortSQLPlanItem] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
+    rules: list[_CohortSQLPlanItem] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
 
 
 def _validate_inclusion_plan_semantic(
     *,
     plan: InclusionPlanModel,
     effect_modifiers: Sequence[str],
-) -> List[ValidationIssueModel]:
-    issues: List[ValidationIssueModel] = []
+) -> list[ValidationIssueModel]:
+    issues: list[ValidationIssueModel] = []
     _ = effect_modifiers
 
     if not plan.rules:
@@ -347,7 +352,7 @@ def _validate_inclusion_plan_semantic(
 # CATE post-processing: raw if n<=5 else stats (cate + intervals + inference)
 # ============================================================
 
-def _to_1d_float(arr: Any) -> Optional[np.ndarray]:
+def _to_1d_float(arr: Any) -> np.ndarray | None:
     if arr is None:
         return None
     if isinstance(arr, np.ndarray):
@@ -364,7 +369,7 @@ def _to_1d_float(arr: Any) -> Optional[np.ndarray]:
     return a.astype(float, copy=False).ravel()
 
 
-def _stats(arr: np.ndarray) -> Dict[str, Any]:
+def _stats(arr: np.ndarray) -> dict[str, Any]:
     a = arr[np.isfinite(arr)]
     if a.size == 0:
         return {"n": 0}
@@ -385,7 +390,7 @@ def _stats(arr: np.ndarray) -> Dict[str, Any]:
     }
 
 
-def _interval_stats(lower: Optional[np.ndarray], upper: Optional[np.ndarray]) -> Dict[str, Any]:
+def _interval_stats(lower: np.ndarray | None, upper: np.ndarray | None) -> dict[str, Any]:
     if lower is None or upper is None:
         return {"available": False}
     if lower.shape != upper.shape:
@@ -409,7 +414,7 @@ def _interval_stats(lower: Optional[np.ndarray], upper: Optional[np.ndarray]) ->
     }
 
 
-def _extract_effect_fields(effect_obj: Dict[CATEModelResult, Any]) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Any]:
+def _extract_effect_fields(effect_obj: dict[CATEModelResult, Any]) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, Any]:
     """
     Supports dict-like payloads with keys:
       - "cate"
@@ -441,11 +446,11 @@ def _make_llm_cate_payload_for_group(
     sql_request: SQLStatements,
     is_counterfactual: bool,
     outcome_kind: str,
-    effect_obj: Dict[CATEModelResult, Any],
-) -> Dict[str, Any]:
+    effect_obj: dict[CATEModelResult, Any],
+) -> dict[str, Any]:
     cate, lo, hi, inf = _extract_effect_fields(effect_obj)
 
-    out: Dict[str, Any] = {
+    out: dict[str, Any] = {
         "group_key": group_key,
         "is_counterfactual": bool(is_counterfactual),
         "outcome_kind": outcome_kind,
@@ -504,12 +509,12 @@ def _process_cate_question(
     user_id: UUID,
     conversation_id: UUID,
     ate_model_output_json_str: str,
-    messages_history: Optional[Sequence[ChatMessage]],
+    messages_history: Sequence[ChatMessage] | None,
     current_state: CausalInferenceState,
     causal_specs: CausalSpec,
     clean_dataset_id: UUID,
     data_summary: DatasetSummaryModel,
-    transformation_plan: Optional[TransformPlan],
+    transformation_plan: TransformPlan | None,
     selected_model_fqcn: str,
     trained_model_id: UUID,
     order_effect_modifiers: Sequence[str],
@@ -552,12 +557,12 @@ def _process_cate_question(
     # 2) Build inclusion plan (multi-cohort, X-only)
     # ---------------------------
     user_q = _last_user_text(messages_history)
-    error_message: Optional[str] = None
-    plan: Optional[InclusionPlanModel] = None
+    error_message: str | None = None
+    plan: InclusionPlanModel | None = None
     
     effect_modifiers_summary = _filter_dataset_summary_to_effect_modifiers(summary=data_summary, effect_modifiers=causal_specs.effect_modifiers)
     logging.warning(f"Effect modifiers summary for prompt: {effect_modifiers_summary.model_dump_json()}")
-    plot_cohorts: List[CohortCate] = [] 
+    plot_cohorts: list[CohortCate] = [] 
     for attempt in range(3):
         plan = llm.generate_json(
             schema=InclusionPlanModel,
@@ -620,7 +625,7 @@ def _process_cate_question(
     elif isinstance(causal_specs.outcome_spec, ContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
         outcome_kind = "continuous"
 
-    group_payloads: List[Dict[str, Any]] = []
+    group_payloads: list[dict[str, Any]] = []
     non_empty_any = False
 
     for cohort in plan.rules: # pyright: ignore[reportOptionalMemberAccess]
@@ -729,8 +734,8 @@ def _process_cate_question(
             )
         )
     
-    graphs: List[GraphImage] = []
-    artifacts: Optional[List[UUID]] = []
+    graphs: list[GraphImage] = []
+    artifacts: list[UUID] | None = []
     if len(plot_cohorts) > 0:
         graphs.append(data_profiling_tool.plot_cate_distribution(plot_cohorts, causal_specs))
     if len(plot_cohorts) == 1:
@@ -781,11 +786,11 @@ def _process_cate_question(
 
 
 def _validate_inclusion_plan(
-    plan: Optional[InclusionPlanModel],
+    plan: InclusionPlanModel | None,
     *,
     effect_modifiers: Sequence[str],
     require_rules_per_cohort: bool = True,   # comparisons should be True
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     if plan is None:
         return False, "plan is None"
     if not plan.rules:
@@ -848,7 +853,7 @@ def _invalid_plan_message(
     model_name: str,
     effect_modifiers: Sequence[str],
     effect_modifiers_summary: DatasetSummaryModel,
-    history: Optional[Sequence[ChatMessage]] = None,
+    history: Sequence[ChatMessage] | None = None,
 ) -> str:
     last_user_message = _last_user_text(history)
     cols = [str(c) for c in effect_modifiers]

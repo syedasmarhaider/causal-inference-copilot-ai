@@ -1,21 +1,27 @@
 from __future__ import annotations
 
 import json
-import logging
 import random
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Type, TypeVar
-
-from pydantic import BaseModel, ValidationError
+from typing import Any, TypeVar
 
 from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, ValidationError
 
-from python.domain.service.llm_service import AvailableModelsKey, ChatMessage, LLMConfig, LLMResponse, LLMService
+from python.domain.service.llm_service import (
+    AvailableModelsKey,
+    ChatMessage,
+    LLMConfig,
+    LLMResponse,
+    LLMService,
+)
 
 T = TypeVar("T", bound=BaseModel)
 from langfuse import observe
@@ -61,8 +67,8 @@ class LangChainLLMService(LLMService):
     ) -> None:
         self._rel = self._validate_rel(reliability)
 
-        self._models: Dict[AvailableModelsKey, BaseChatModel] = dict(models)
-        self._model_names: Dict[AvailableModelsKey, str] = dict(model_names)
+        self._models: dict[AvailableModelsKey, BaseChatModel] = dict(models)
+        self._model_names: dict[AvailableModelsKey, str] = dict(model_names)
         self._max_tokens_param_name = max_tokens_param_name
         self._executor = ThreadPoolExecutor(max_workers=self._rel.executor_workers)
 
@@ -76,7 +82,7 @@ class LangChainLLMService(LLMService):
         system_prompt: str | None,
         user_prompt: str,
         config: LLMConfig,
-        history: Optional[Sequence[ChatMessage]],
+        history: Sequence[ChatMessage] | None,
     ) -> LLMResponse:
         messages = self._to_messages(
             system_prompt=system_prompt,
@@ -92,11 +98,11 @@ class LangChainLLMService(LLMService):
     def generate_json(
         self,
         *,
-        schema: Type[T],
+        schema: type[T],
         system_prompt: str | None,
         user_prompt: str,
         config: LLMConfig,
-        history: Optional[Sequence[ChatMessage]],
+        history: Sequence[ChatMessage] | None,
         max_attempts: int = 3,
     ) -> T:
         if max_attempts < 1:
@@ -174,9 +180,9 @@ class LangChainLLMService(LLMService):
         *,
         system_prompt: str | None,
         user_prompt: str,
-        history: Optional[Sequence[ChatMessage]],
-    ) -> List[BaseMessage]:
-        messages: List[BaseMessage] = []
+        history: Sequence[ChatMessage] | None,
+    ) -> list[BaseMessage]:
+        messages: list[BaseMessage] = []
 
         if system_prompt:
             messages.append(SystemMessage(content=system_prompt))
@@ -211,7 +217,7 @@ class LangChainLLMService(LLMService):
         key = self._resolve_model_key(model)
         return self._models[key]
 
-    def _invoke_with_retries(self, *, messages: List[BaseMessage], config: LLMConfig) -> AIMessage:
+    def _invoke_with_retries(self, *, messages: list[BaseMessage], config: LLMConfig) -> AIMessage:
         last_exc: Exception | None = None
 
         for attempt in range(self._rel.max_retries + 1):
@@ -232,7 +238,7 @@ class LangChainLLMService(LLMService):
         assert last_exc is not None
         raise last_exc
 
-    def _invoke_once(self, *, messages: List[BaseMessage], config: LLMConfig) -> Any:
+    def _invoke_once(self, *, messages: list[BaseMessage], config: LLMConfig) -> Any:
         model = self._get_model(config.model)
         kwargs = self._invoke_kwargs(config)
 
@@ -246,8 +252,8 @@ class LangChainLLMService(LLMService):
             deadline_s=self._rel.hard_deadline_s,
         )
 
-    def _invoke_kwargs(self, config: LLMConfig) -> Dict[str, Any]:
-        kwargs: Dict[str, Any] = {}
+    def _invoke_kwargs(self, config: LLMConfig) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
 
         if config.temperature is not None:
             kwargs["temperature"] = config.temperature
@@ -274,8 +280,8 @@ class LangChainLLMService(LLMService):
         self,
         *,
         model: BaseChatModel,
-        messages: List[BaseMessage],
-        kwargs: Dict[str, Any],
+        messages: list[BaseMessage],
+        kwargs: dict[str, Any],
         deadline_s: float,
     ) -> Any:
         future = self._executor.submit(model.invoke, messages, **kwargs)
@@ -341,7 +347,7 @@ class LangChainLLMService(LLMService):
             return content
 
         if isinstance(content, list):
-            parts: List[str] = []
+            parts: list[str] = []
             for item in content:
                 if isinstance(item, str):
                     parts.append(item)

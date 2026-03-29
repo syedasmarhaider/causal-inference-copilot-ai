@@ -2,26 +2,40 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
+from typing import Any, ClassVar, Literal
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict
 from pandas.api.types import (
     is_bool_dtype,
     is_datetime64_any_dtype,
     is_numeric_dtype,
 )
+from pydantic import BaseModel, ConfigDict
 
 from python.domain.workflows.tool import Tool
-
-import pandas as pd
-from python.domain.workflows.tool import Tool
-from python.implementation.workflows.tools.common.model.data_summary import BooleanColumnProfileModel, BooleanSummaryModel, CategoricalColumnProfileModel, CategoricalSummaryModel, CategoryCountModel, ColumnProfileCommonModel, DatasetSummaryModel, DatetimeColumnProfileModel, DatetimeSummaryModel, DiscriminatedColumnProfile, NumericColumnProfileModel, NumericSummaryModel, OtherColumnProfileModel, OtherSummaryModel
-from python.implementation.workflows.tools.data_profiling.plots.data_missingness import generate_data_completeness_graph
-from python.implementation.workflows.tools.data_profiling.plots.measure_relationships import generate_measure_relationships_graph
-from python.implementation.workflows.tools.data_profiling.plots.measure_relationships import generate_measure_relationships_graph
+from python.implementation.workflows.tools.common.model.data_summary import (
+    BooleanColumnProfileModel,
+    BooleanSummaryModel,
+    CategoricalColumnProfileModel,
+    CategoricalSummaryModel,
+    CategoryCountModel,
+    ColumnProfileCommonModel,
+    DatasetSummaryModel,
+    DatetimeColumnProfileModel,
+    DatetimeSummaryModel,
+    DiscriminatedColumnProfile,
+    NumericColumnProfileModel,
+    NumericSummaryModel,
+    OtherColumnProfileModel,
+    OtherSummaryModel,
+)
+from python.implementation.workflows.tools.data_profiling.plots.data_missingness import (
+    generate_data_completeness_graph,
+)
+from python.implementation.workflows.tools.data_profiling.plots.measure_relationships import (
+    generate_measure_relationships_graph,
+)
 from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
-
 
 InferredKind = Literal["NUMERIC", "DATETIME", "BOOLEAN", "CATEGORICAL", "OTHER"]
 
@@ -33,10 +47,10 @@ InferredKind = Literal["NUMERIC", "DATETIME", "BOOLEAN", "CATEGORICAL", "OTHER"]
 class ColumnProfileErrorDetailsModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    column: Optional[str] = None
+    column: str | None = None
     reason: str
-    hint: Optional[str] = None
-    evidence: Optional[Dict[str, Any]] = None
+    hint: str | None = None
+    evidence: dict[str, Any] | None = None
 
 
 class DatasetProfilingError(RuntimeError):
@@ -74,7 +88,7 @@ class DatasetProfilingTool(Tool):
         self,
         *,
         df: pd.DataFrame,
-    ) -> List[GraphImage]:  
+    ) -> list[GraphImage]:  
         return [
              generate_data_completeness_graph(df),
              generate_measure_relationships_graph(df),
@@ -95,7 +109,7 @@ class DatasetProfilingTool(Tool):
         n_rows = _safe_n_rows(df, strict=strict)
         dtypes = getattr(df, "dtypes", None)
 
-        profiles: List[DiscriminatedColumnProfile] = []
+        profiles: list[DiscriminatedColumnProfile] = []
 
         for col_key in cols:
             name = str(col_key).strip()
@@ -233,7 +247,7 @@ def _validate_params(*, max_categories: int, sample_distinct: int) -> None:
         )
 
 
-def _get_columns(df: Any, *, strict: bool) -> List[Any]:
+def _get_columns(df: Any, *, strict: bool) -> list[Any]:
     raw_cols = getattr(df, "columns", None)
     if raw_cols is None:
         raise DatasetProfilingError(
@@ -314,7 +328,7 @@ def _get_series(df: Any, col_key: Any, col_name: str, *, strict: bool) -> Any:
         )
 
 
-def _dtype_to_str(dtypes: Any, col_key: Any) -> Optional[str]:
+def _dtype_to_str(dtypes: Any, col_key: Any) -> str | None:
     try:
         if dtypes is None:
             return None
@@ -323,7 +337,7 @@ def _dtype_to_str(dtypes: Any, col_key: Any) -> Optional[str]:
         return None
 
 
-def _missingness(series: Any, *, n_rows: int) -> Tuple[int, float]:
+def _missingness(series: Any, *, n_rows: int) -> tuple[int, float]:
     try:
         if hasattr(series, "isna"):
             n_missing = int(series.isna().sum())
@@ -346,7 +360,7 @@ def _missingness(series: Any, *, n_rows: int) -> Tuple[int, float]:
     return n_missing, float(rate)
 
 
-def _distinct_count(series: Any) -> Optional[int]:
+def _distinct_count(series: Any) -> int | None:
     try:
         if hasattr(series, "nunique"):
             return int(series.nunique(dropna=True))
@@ -355,7 +369,7 @@ def _distinct_count(series: Any) -> Optional[int]:
     return None
 
 
-def _as_float_or_none(v: Any) -> Optional[float]:
+def _as_float_or_none(v: Any) -> float | None:
     try:
         if v is None:
             return None
@@ -367,7 +381,7 @@ def _as_float_or_none(v: Any) -> Optional[float]:
         return None
 
 
-def _as_datetime_str(v: Any) -> Optional[str]:
+def _as_datetime_str(v: Any) -> str | None:
     try:
         if v is None:
             return None
@@ -394,13 +408,13 @@ def _numeric_summary(series: Any, *, compute_quantiles: bool) -> NumericSummaryM
         mean = _as_float_or_none(getattr(s, "mean", lambda: None)())
         std = _as_float_or_none(getattr(s, "std", lambda: None)())
 
-        quantiles: Optional[Dict[str, float]] = None
+        quantiles: dict[str, float] | None = None
         if compute_quantiles and hasattr(s, "quantile"):
             qs = [0.05, 0.25, 0.5, 0.75, 0.95]
             qvals = s.quantile(qs)
             items = list(qvals.items()) if hasattr(qvals, "items") else []
 
-            out: Dict[str, float] = {}
+            out: dict[str, float] = {}
             for k, v in items:
                 fv = _as_float_or_none(v)
                 if fv is not None:
@@ -441,7 +455,7 @@ def _boolean_summary(series: Any) -> BooleanSummaryModel:
         if hasattr(series, "value_counts"):
             vc = series.value_counts(dropna=True)
             items = list(vc.items()) if hasattr(vc, "items") else []
-            counts: Dict[str, int] = {}
+            counts: dict[str, int] = {}
             for k, v in items:
                 counts[str(k)] = int(v)
             return BooleanSummaryModel(counts=counts)
@@ -470,7 +484,7 @@ def _categorical_summary(series: Any, *, max_categories: int) -> CategoricalSumm
             items = list(vc.items()) if hasattr(vc, "items") else []
         else:
             vals = [x for x in list(series) if x is not None]
-            freq: Dict[str, int] = {}
+            freq: dict[str, int] = {}
             for x in vals:
                 sx = str(x)
                 freq[sx] = freq.get(sx, 0) + 1
@@ -497,10 +511,10 @@ def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummaryModel:
         s = series.dropna() if hasattr(series, "dropna") else [x for x in list(series) if x is not None]
 
         if hasattr(s, "unique"):
-            uniq: List[Any] = list(s.unique()) # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownArgumentType]
+            uniq: list[Any] = list(s.unique()) # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownArgumentType]
             distinct = [str(x) for x in uniq[:sample_distinct]]
         else:
-            seen: List[str] = []
+            seen: list[str] = []
             for x in list(s):
                 sx = str(x)
                 if sx not in seen:

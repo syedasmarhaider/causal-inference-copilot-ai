@@ -9,7 +9,11 @@ from fastapi.testclient import TestClient
 from python.adapters.api import app as app_module
 from python.domain.service.auth_service import AuthenticatedUser
 from python.implementation.service.firebsae_auth_service import InvalidTokenError
-from python.implementation.workflows.workflow_app import ArtifactResponse, WorkflowRequest, WorkflowResponse
+from python.implementation.workflows.workflow_app import (
+    ArtifactResponse,
+    WorkflowRequest,
+    WorkflowResponse,
+)
 
 
 def _auth_header(token: str = "valid-token") -> dict[str, str]:

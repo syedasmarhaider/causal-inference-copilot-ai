@@ -1,29 +1,32 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, ClassVar, Dict, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any, ClassVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
+    DatasetSummaryModel,
+)
 from python.implementation.workflows.utils.utils import uuid_from_any
 
 
 class LoadDatasetPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    id: Optional[UUID] = None
-    summary: Optional[DatasetSummaryModel] = None
-    load_error: Optional[str] = None
-    graph_picture_ids: Optional[Sequence[UUID]] = None
-    user_message: Optional[str] = "Not run yet"
+    id: UUID | None = None
+    summary: DatasetSummaryModel | None = None
+    load_error: str | None = None
+    graph_picture_ids: Sequence[UUID] | None = None
+    user_message: str | None = "Not run yet"
 
     @field_validator("load_error", "user_message", mode="before")
     @classmethod
-    def _empty_str_to_none(cls, value: Any) -> Optional[str]:
+    def _empty_str_to_none(cls, value: Any) -> str | None:
         if value is None:
             return None
         if isinstance(value, str):
@@ -33,7 +36,7 @@ class LoadDatasetPayloadModel(BaseModel):
 
     @field_validator("id", mode="before")
     @classmethod
-    def _parse_uuid(cls, value: Any) -> Optional[UUID]:
+    def _parse_uuid(cls, value: Any) -> UUID | None:
         return uuid_from_any(value)
 
 
@@ -79,15 +82,15 @@ class LoadDatasetState(State):
     def pre_required_states_names(self) -> Sequence[str]:
         return ()
 
-    def to_json_dict(self) -> Dict[str, Any]:
+    def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json", exclude_none=True)
 
     @classmethod
-    def from_json_dict(cls, payload: Dict[str, Any]) -> "LoadDatasetState":
+    def from_json_dict(cls, payload: dict[str, Any]) -> LoadDatasetState:
         return cls(LoadDatasetPayloadModel.model_validate(payload))
 
     @classmethod
-    def init_empty(cls) -> "LoadDatasetState":
+    def init_empty(cls) -> LoadDatasetState:
         return cls(
             LoadDatasetPayloadModel(
                 id=None,
