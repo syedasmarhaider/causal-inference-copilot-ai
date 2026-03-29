@@ -137,8 +137,8 @@ class LoadDatasetNode(Node):
             data_profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))
             summary = data_profiling_tool.extract_dataset_summary(
                 df,
-                max_categories=1000,
-                sample_distinct=1000,
+                max_categories=200,
+                sample_distinct=200,
                 compute_quantiles=True,
                 strict=True,
             )

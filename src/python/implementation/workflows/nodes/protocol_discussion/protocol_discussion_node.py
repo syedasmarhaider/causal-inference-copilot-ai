@@ -86,12 +86,11 @@ class ProtocolDiscussionNode(Node):
         assert summary_state is not None
 
         summary_string = data_set_profiling_tool.dataset_summary_to_json(summary_state)
-        latest_12_messages = messages_history[-12:] if messages_history else None
+        last_6_messages = messages_history[-6:] if messages_history else None
 
         payload: dict[str, Any] = {
             "prev_questions_answers_discussion_state": get_questions(),
             "dataset_columns_summary": summary_string,
-            # include the current discussion doc so LLM#1 can update it
             "protocol_discussion": state.payload.discussion,
         }
 
@@ -102,11 +101,11 @@ class ProtocolDiscussionNode(Node):
             updated_discussion = _llm_call_text(
                 llm=self._llm,
                 model_name="basic",
-                temperature=0.7,
+                temperature=0.2,
                 system_prompt=get_protocol_discussion_system_prompt(),
                 user_payload=payload,
                 empty_err="LLM#1 returned empty discussion",
-                history=latest_12_messages,
+                history=last_6_messages,
             )
         except Exception as e:
             new_payload = state.payload.model_copy(
@@ -141,7 +140,7 @@ class ProtocolDiscussionNode(Node):
                 system_prompt=system_prompt,
                 user_prompt=json.dumps(user_payload, ensure_ascii=False),
                 config=LLMConfig(model="pro", temperature=0.8),
-                history=latest_12_messages,
+                history=last_6_messages,
                 max_attempts=2,
             )
         except Exception as e:
