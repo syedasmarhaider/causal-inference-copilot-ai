@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetSummaryModel
 from python.implementation.workflows.utils.utils import uuid_from_any
@@ -70,8 +71,10 @@ class LoadDatasetState(State):
         return StateMessage(txt_message=self.payload.user_message, action=action, artifact_ids=artifact_ids)  
 
     @property
-    def error(self) -> Optional[str]:
-        return self.payload.load_error
+    def error(self) -> NodeExecutionError | None:
+        if self.payload.load_error is not None:
+            return NodeExecutionError(state_name=self.NAME, error=self.payload.load_error)
+        return None
 
     def pre_required_states_names(self) -> Sequence[str]:
         return ()

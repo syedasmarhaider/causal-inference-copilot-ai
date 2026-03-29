@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar, Dict, Literal, Optional, Sequence
 from pydantic import BaseModel, ConfigDict, field_validator
+from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import ProtocolDiscussionDeps
 
@@ -63,8 +64,10 @@ class ProtocolDiscussionState(State):
         return StateMessage(txt_message=self.payload.node_message, action=action)
 
     @property
-    def error(self) -> Optional[str]:
-        return self.payload.error_message
+    def error(self) -> Optional[NodeExecutionError]:
+        if self.payload.error_message is not None:
+            return NodeExecutionError(state_name=self.NAME, error=self.payload.error_message)
+        return None
 
     def pre_required_states_names(self) -> Sequence[str]:
         return  ProtocolDiscussionDeps.pre_required_states_names()

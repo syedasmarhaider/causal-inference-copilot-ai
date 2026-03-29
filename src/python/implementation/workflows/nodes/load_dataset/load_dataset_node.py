@@ -104,10 +104,10 @@ class LoadDatasetNode(Node):
         state: State,
     ) -> State:
         if not isinstance(state, LoadDatasetState):
-            raise TypeError(f"{self.name}: expected LoadDatasetState, got {type(state).__name__}")
-
+            raise TypeError(f"LoadDatasetNode: expected LoadDatasetState, got {type(state)}")
+        
         load_dataset_id = LoadDatasetState.INIT_DATA_ID
-
+        
         # ---- Load dataframe ----
         try:
             df = self._data_repo.get_csv_data(

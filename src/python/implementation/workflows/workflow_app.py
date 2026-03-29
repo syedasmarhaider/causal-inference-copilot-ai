@@ -7,7 +7,7 @@ from typing import Any, Mapping, Optional, Sequence, Type
 
 import pandas as pd
 
-from python.domain.models.error.workflow_errors import ConversationNotFoundError, StateNotFoundError
+from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import ChatMessage

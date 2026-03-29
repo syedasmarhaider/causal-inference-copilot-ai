@@ -5,6 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_deps import (
     CleanProtocolDeps,
@@ -146,8 +147,10 @@ class CleanProtocolState(State):
         return StateMessage(txt_message=self.payload.user_message, artifact_ids=artifacts, action=action)
 
     @property
-    def error(self) -> Optional[str]:
-        return self.payload.cleaning_error
+    def error(self) -> Optional[NodeExecutionError]:
+        if self.payload.cleaning_error is not None:
+            return NodeExecutionError(state_name=self.NAME, error=self.payload.cleaning_error)
+        return None
     
     def pre_required_states_names(self) -> Sequence[str]:
         return CleanProtocolDeps.pre_required_states_names()

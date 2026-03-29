@@ -18,7 +18,7 @@ from python.adapters.api.schemas import (
     RevertStateRequest,
     UploadDatasetResponse,
 )
-from python.domain.models.error.workflow_errors import ConversationNotFoundError, StateNotFoundError
+from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
 from python.domain.service.auth_service import AuthService, AuthenticatedUser
 from python.implementation.service.firebsae_auth_service import (
     AuthServiceError,

@@ -3,18 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections.abc import Mapping
 from typing import Sequence
+from uuid import UUID
 
 from python.domain.workflows.state import State
 from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionState,
 )
+from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 
 @dataclass(frozen=True)
 class CleanProtocolDeps:
-    load_dataset: LoadDatasetState
-    protocol_discussion: ProtocolDiscussionState
+    id: UUID
+    summary: DatasetSummaryModel
+    protocol_discsussion: str
 
     @classmethod
     def pre_required_states_names(cls) -> Sequence[str]:
@@ -44,5 +47,10 @@ class CleanProtocolDeps:
                 f"CleanProtocolDeps: invalid {ProtocolDiscussionState.NAME} "
                 f"(expected ProtocolDiscussionState, got {type(pd).__name__})"
             )
-
-        return cls(load_dataset=ld, protocol_discussion=pd)
+        if ld.payload.id is None:
+            raise ValueError(f"CleanProtocolDeps: {LoadDatasetState.NAME} is not DONE yet (missing dataset id)")
+        if ld.payload.summary is None:
+            raise ValueError(f"CleanProtocolDeps: {LoadDatasetState.NAME} is not DONE yet (missing dataset summary)")
+        if pd.payload.discussion == "":
+            raise ValueError(f"CleanProtocolDeps: {ProtocolDiscussionState.NAME} is not DONE yet (missing discussion summary)")
+        return cls(id=ld.payload.id, summary=ld.payload.summary, protocol_discsussion=pd.payload.discussion)

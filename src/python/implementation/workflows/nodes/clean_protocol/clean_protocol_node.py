@@ -147,27 +147,10 @@ class CleanProtocolNode(Node):
             )
 
             deps = CleanProtocolDeps.from_loaded(previous_state_dependencies)
-            dataset_id = deps.load_dataset.payload.id
-            if dataset_id is None:
-                return self._abort_state(
-                    payload=state.payload,
-                    message="Dataset id is missing. Re-run LOAD_DATASET.",
-                    reason="LOAD_DATASET.id is missing; cannot load data.",
-                )
-
-            protocol_discussion = deps.protocol_discussion.payload.discussion.strip()
-            if not protocol_discussion:
-                return self._abort_state(
-                    payload=state.payload,
-                    message=(
-                        "Protocol discussion is missing, so I cannot build the causal "
-                        "specs for cleaning. Please return to protocol discussion."
-                    ),
-                    reason="PROTOCOL_DISCUSSION discussion is empty.",
-                )
-
+            protocol_discussion = deps.protocol_discsussion
+            
             first_run = _is_first_run(state.payload)
-            source_dataset_id = dataset_id if first_run else state.payload.clean_dataset_id
+            source_dataset_id = deps.id if first_run else state.payload.clean_dataset_id
             if source_dataset_id is None:
                 return self._abort_state(
                     payload=state.payload,
@@ -194,7 +177,7 @@ class CleanProtocolNode(Node):
                     ),
                 )
 
-            recent_history = messages_history[-12:] if messages_history else None
+            last_4_messages = messages_history[-4:] if messages_history else None
 
             if first_run:
                 source_summary = self._extract_summary(
@@ -203,7 +186,7 @@ class CleanProtocolNode(Node):
                 )
                 try:
                     initial_causal_spec = self._compile_initial_causal_spec(
-                        history=recent_history,
+                        history=last_4_messages,
                         protocol_discussion=protocol_discussion,
                         dataset_summary=source_summary,
                     )
@@ -232,7 +215,7 @@ class CleanProtocolNode(Node):
                     state=state,
                     data_processing_tool=data_processing_tool,
                     data_profiling_tool=data_profiling_tool,
-                    history=recent_history,
+                    history=last_4_messages,
                     user_request=(
                         "Initial cleaning pass from protocol discussion. Create the "
                         "first cleaned dataset revision."
@@ -248,7 +231,7 @@ class CleanProtocolNode(Node):
                 )
                 try:
                     active_causal_spec = self._compile_initial_causal_spec(
-                        history=recent_history,
+                        history=last_4_messages,
                         protocol_discussion=protocol_discussion,
                         dataset_summary=source_summary,
                     )
@@ -267,8 +250,8 @@ class CleanProtocolNode(Node):
 
             intent = self._decide_intent(
                 state=state,
-                history=recent_history,
-                original_dataset_summary=deps.load_dataset.payload.summary,
+                history=last_4_messages,
+                original_dataset_summary=deps.summary,
             )
 
             if intent.action == "CHANGE_PROTOCOL_DISCUSSION":
@@ -291,17 +274,17 @@ class CleanProtocolNode(Node):
                     conversation_id=conversation_id,
                     current_dataset_id=source_dataset_id,
                     current_df=source_df,
-                    original_dataset_id=dataset_id,
+                    original_dataset_id=deps.id,
                     requested_scope=dataset_scope,
                 )
                 scoped_causal_spec = self._resolve_causal_spec_for_scope(
                     dataset_scope=dataset_scope,
                     active_causal_spec=active_causal_spec,
                     protocol_discussion=protocol_discussion,
-                    original_dataset_summary=deps.load_dataset.payload.summary,
+                    original_dataset_summary=deps.summary,
                     original_df=selected_df,
                     data_profiling_tool=data_profiling_tool,
-                    history=recent_history,
+                    history=last_4_messages,
                 )
                 user_question = _last_user_text(history=messages_history)
                 return self._answer_data_question(
@@ -312,7 +295,7 @@ class CleanProtocolNode(Node):
                     causal_spec=scoped_causal_spec,
                     data_profiling_tool=data_profiling_tool,
                     data_processing_tool=data_processing_tool,
-                    history=recent_history,
+                    history=last_4_messages,
                     user_question=user_question or intent.reply_to_user,
                 )
 
@@ -321,10 +304,10 @@ class CleanProtocolNode(Node):
                     user_id=user_id,
                     conversation_id=conversation_id,
                     state=state,
-                    load_dataset_id=dataset_id,
+                    load_dataset_id=deps.id,
                     protocol_discussion=protocol_discussion,
                     data_profiling_tool=data_profiling_tool,
-                    history=recent_history,
+                    history=last_4_messages,
                     revert_target=cast(
                         Literal["PREVIOUS_STEP", "ORIGINAL_DATASET"],
                         intent.revert_target,
@@ -342,7 +325,7 @@ class CleanProtocolNode(Node):
                 compat_err = _minimal_compatibility_error(source_df, active_causal_spec)
                 if compat_err is not None:
                     msg = self._render_compatibility_failure_message(
-                        history=recent_history,
+                        history=last_4_messages,
                         compatibility_error=compat_err,
                         payload=state.payload,
                     )
@@ -360,7 +343,7 @@ class CleanProtocolNode(Node):
                 )
 
                 final_message = self._render_final_acceptance_message(
-                    history=recent_history,
+                    history=last_4_messages,
                     payload=state.payload,
                     graph_count=len(artifacts or []),
                 )
@@ -387,17 +370,17 @@ class CleanProtocolNode(Node):
                 conversation_id=conversation_id,
                 current_dataset_id=source_dataset_id,
                 current_df=source_df,
-                original_dataset_id=dataset_id,
+                original_dataset_id=deps.id,
                 requested_scope=dataset_scope,
             )
             scoped_causal_spec = self._resolve_causal_spec_for_scope(
                 dataset_scope=dataset_scope,
                 active_causal_spec=active_causal_spec,
                 protocol_discussion=protocol_discussion,
-                original_dataset_summary=deps.load_dataset.payload.summary,
+                original_dataset_summary=deps.summary,
                 original_df=selected_df,
                 data_profiling_tool=data_profiling_tool,
-                history=recent_history,
+                history=last_4_messages,
             )
             return self._run_modify_iteration(
                 user_id=user_id,
@@ -410,7 +393,7 @@ class CleanProtocolNode(Node):
                 state=state,
                 data_processing_tool=data_processing_tool,
                 data_profiling_tool=data_profiling_tool,
-                history=recent_history,
+                history=last_4_messages,
                 user_request=user_request,
                 mode="MODIFY",
             )

@@ -4,7 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional, Sequence
 
-from python.domain.models.error.node_errors import NodeExecutionError
+from python.domain.models.errors import NodeExecutionError
+
 
 Status = Literal["PENDING", "DONE", "ABORTED"]
 ACTION = Literal["NONE", "NEEDS_INPUT","NEEDS_DATA"]
@@ -34,7 +35,7 @@ class State(ABC):
 
     @property
     @abstractmethod
-    def error(self) -> NodeExecutionError | None:
+    def error(self) -> Optional[NodeExecutionError]:
         raise NotImplementedError
 
     @abstractmethod

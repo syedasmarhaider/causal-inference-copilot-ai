@@ -56,8 +56,15 @@ class AuthenticationError(WorkflowError):
 
 class ValidationError(WorkflowError):
     """Raised when input validation fails."""
-    
     def __init__(self, field: str, reason: str):
         self.field = field
         self.reason = reason
         super().__init__(f"Validation error for '{field}': {reason}")
+                
+class NodeExecutionError(WorkflowError):
+    def __init__(self, state_name: str, error: str):
+        self.state_name = state_name
+        self.error = error
+        super().__init__(f"Error '{state_name}': {error}")          
+                      
+        
