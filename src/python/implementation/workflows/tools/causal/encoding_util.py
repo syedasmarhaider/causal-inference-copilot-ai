@@ -48,14 +48,6 @@ class CompiledTransformers:
 
 CTTransformer = Union[BaseEstimator, Literal["passthrough"], Literal["drop"]]
 
-
-def _require_non_empty(name: str, xs: Sequence[str]) -> None:
-    if xs is None:  # type: ignore[truthy-bool]
-        raise ValueError(f"{name} must be provided (got None).")
-    if len(xs) == 0:
-        raise ValueError(f"{name} must be non-empty.")
-
-
 # =============================================================================
 # Helpers: sklearn-compat OneHotEncoder (version differences) + sparse/dense control
 # =============================================================================
