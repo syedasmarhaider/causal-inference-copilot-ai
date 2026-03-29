@@ -133,11 +133,12 @@ class MapOrdinalParams(_BaseParams):
     def _validate_map_ordinal(self) -> MapOrdinalParams:
         if len(self.order) != len(set(self.order)):
             raise ValueError("map_ordinal: 'order' must not contain duplicates.")
-        if self.missing == "impute_token":
-            if self.missing_token is None or self.token_position is None:
-                raise ValueError(
-                    "map_ordinal: missing_token and token_position required when missing='impute_token'."
-                )
+        if self.missing == "impute_token" and (
+            self.missing_token is None or self.token_position is None
+        ):
+            raise ValueError(
+                "map_ordinal: missing_token and token_position required when missing='impute_token'."
+            )
         # Strong safety: avoid NaNs escaping unless explicitly configured
         if self.allow_unknown and self.unknown_value is None:
             raise ValueError("map_ordinal: unknown_value required when allow_unknown=True (avoid NaNs).")

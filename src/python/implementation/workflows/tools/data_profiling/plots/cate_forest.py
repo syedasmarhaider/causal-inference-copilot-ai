@@ -53,7 +53,7 @@ def plot_cate_forest_mean_ci(
     rows.sort(key=lambda r: r[1])
     names = [f"{nm} (n={n})" for nm, _, _, _, n in rows]
     means = np.array([m for _, m, _, _, _ in rows], dtype=float)
-    lows  = np.array([l for _, _, l, _, _ in rows], dtype=float)
+    lows = np.array([lo for _, _, lo, _, _ in rows], dtype=float)
     highs = np.array([h for _, _, _, h, _ in rows], dtype=float)
 
     y = np.arange(len(rows), dtype=float)

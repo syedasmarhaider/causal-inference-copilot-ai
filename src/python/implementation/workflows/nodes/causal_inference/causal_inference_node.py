@@ -399,18 +399,18 @@ def _interval_stats(lower: np.ndarray | None, upper: np.ndarray | None) -> dict[
     mask = np.isfinite(lower) & np.isfinite(upper)
     if not np.any(mask):
         return {"available": False, "reason": "no_finite"}
-    l = lower[mask]
-    u = upper[mask]
-    w = width[mask]
-    crosses0 = (l <= 0.0) & (u >= 0.0)
+    lower_f = lower[mask]
+    upper_f = upper[mask]
+    width_f = width[mask]
+    crosses0 = (lower_f <= 0.0) & (upper_f >= 0.0)
     return {
         "available": True,
-        "n": int(l.size),
-        "mean_width": float(np.mean(w)),
-        "median_width": float(np.median(w)),
+        "n": int(lower_f.size),
+        "mean_width": float(np.mean(width_f)),
+        "median_width": float(np.median(width_f)),
         "frac_crosses_zero": float(np.mean(crosses0)),
-        "mean_lower": float(np.mean(l)),
-        "mean_upper": float(np.mean(u)),
+        "mean_lower": float(np.mean(lower_f)),
+        "mean_upper": float(np.mean(upper_f)),
     }
 
 

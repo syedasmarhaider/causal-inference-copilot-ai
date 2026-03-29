@@ -69,7 +69,7 @@ def plot_cate_distribution(
     y_base = np.arange(len(cleaned), dtype=float)
     rng = np.random.default_rng(0)
 
-    for i, (name, x) in enumerate(cleaned):
+    for i, (_name, x) in enumerate(cleaned):
         n = int(x.size)
         if n <= 30:
             y = np.full(n, y_base[i]) + rng.normal(0.0, 0.08, size=n)

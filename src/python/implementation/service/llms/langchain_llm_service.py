@@ -13,6 +13,7 @@ from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
+from langfuse import observe
 from pydantic import BaseModel, ValidationError
 
 from python.domain.service.llm_service import (
@@ -24,7 +25,6 @@ from python.domain.service.llm_service import (
 )
 
 T = TypeVar("T", bound=BaseModel)
-from langfuse import observe
 
 MAX_TIMEOUT_S: float = 300.0  # 5 minutes
 
@@ -63,8 +63,10 @@ class LangChainLLMService(LLMService):
         models: Mapping[AvailableModelsKey, BaseChatModel],
         model_names: Mapping[AvailableModelsKey, str],
         max_tokens_param_name: str,
-        reliability: ReliabilityPolicy = ReliabilityPolicy(),
+        reliability: ReliabilityPolicy | None = None,
     ) -> None:
+        if reliability is None:
+            reliability = ReliabilityPolicy()
         self._rel = self._validate_rel(reliability)
 
         self._models: dict[AvailableModelsKey, BaseChatModel] = dict(models)

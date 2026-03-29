@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TypeAlias, Union
+from typing import Any, TypeAlias
 from uuid import UUID
 
 JSONValue: TypeAlias = Any
@@ -31,4 +31,4 @@ def safe_err(e: Exception, limit: int = 500) -> str:
 BOOL_TRUE = {"true", "1", "yes"}
 BOOL_FALSE = {"false", "0", "no"}
 # ---------- core ----------
-ScalarValue = Union[str, int, float, bool]  # or Strict* variants if you want strictness
+ScalarValue = str | int | float | bool  # or Strict* variants if you want strictness

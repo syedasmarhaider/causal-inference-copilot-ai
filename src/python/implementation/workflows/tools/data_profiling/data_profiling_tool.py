@@ -268,7 +268,7 @@ def _get_columns(df: Any, *, strict: bool) -> list[Any]:
                 hint="Ensure df.columns is iterable.",
                 evidence={"df_type": type(df).__name__, "error": repr(e)},
             )
-        )
+        ) from e
     if strict and not cols:
         raise DatasetProfilingError(
             ColumnProfileErrorDetailsModel(
@@ -297,7 +297,7 @@ def _safe_n_rows(df: Any, *, strict: bool) -> int:
                     hint="Ensure df.shape is valid (pandas DataFrame recommended).",
                     evidence={"df_type": type(df).__name__, "error": repr(e)},
                 )
-            )
+            ) from e
     try:
         n = int(len(df))
         if n < 0:
@@ -311,7 +311,7 @@ def _safe_n_rows(df: Any, *, strict: bool) -> int:
                 hint="Ensure df implements __len__ or provides df.shape.",
                 evidence={"df_type": type(df).__name__, "error": repr(e)},
             )
-        )
+        ) from e
 
 
 def _get_series(df: Any, col_key: Any, col_name: str, *, strict: bool) -> Any:
@@ -325,7 +325,7 @@ def _get_series(df: Any, col_key: Any, col_name: str, *, strict: bool) -> Any:
                 hint="Verify the column exists and df supports __getitem__ (pandas DataFrame recommended).",
                 evidence={"col_key": repr(col_key), "df_type": type(df).__name__, "error": repr(e)},
             )
-        )
+        ) from e
 
 
 def _dtype_to_str(dtypes: Any, col_key: Any) -> str | None:
@@ -354,7 +354,7 @@ def _missingness(series: Any, *, n_rows: int) -> tuple[int, float]:
                 hint="Ensure the column supports isna()/isnull() or is iterable.",
                 evidence={"error": repr(e)},
             )
-        )
+        ) from e
 
     rate = (n_missing / n_rows) if n_rows > 0 else 0.0
     return n_missing, float(rate)
@@ -430,7 +430,7 @@ def _numeric_summary(series: Any, *, compute_quantiles: bool) -> NumericSummaryM
                 hint="Verify the column is numeric or coercible to float.",
                 evidence={"error": repr(e)},
             )
-        )
+        ) from e
 
 
 def _datetime_summary(series: Any) -> DatetimeSummaryModel:
@@ -447,7 +447,7 @@ def _datetime_summary(series: Any) -> DatetimeSummaryModel:
                 hint="Verify the column is datetime-like.",
                 evidence={"error": repr(e)},
             )
-        )
+        ) from e
 
 
 def _boolean_summary(series: Any) -> BooleanSummaryModel:
@@ -474,7 +474,7 @@ def _boolean_summary(series: Any) -> BooleanSummaryModel:
                 hint="Verify the column is boolean-like or has value_counts().",
                 evidence={"error": repr(e)},
             )
-        )
+        ) from e
 
 
 def _categorical_summary(series: Any, *, max_categories: int) -> CategoricalSummaryModel:
@@ -503,7 +503,7 @@ def _categorical_summary(series: Any, *, max_categories: int) -> CategoricalSumm
                 hint="Verify the column is categorical/string-like or iterable.",
                 evidence={"error": repr(e)},
             )
-        )
+        ) from e
 
 
 def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummaryModel:
@@ -532,7 +532,7 @@ def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummaryModel:
                 hint="Verify the column is iterable or provides .unique().",
                 evidence={"error": repr(e)},
             )
-        )   
+        ) from e
         
 def _infer_kind(
     series: pd.Series,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal, Union
+from typing import Any, Literal
 from uuid import UUID
 
 import pandas as pd
@@ -85,7 +85,7 @@ class FitSuccess(BaseResult):
     status: Literal["SUCCEEDED"] = field(init=False, default="SUCCEEDED")
 
 
-FitResult = Union[FitSuccess, CommandFailure]
+FitResult = FitSuccess | CommandFailure
 
 
 
@@ -123,7 +123,7 @@ class ATESuccess(BaseResult):
     status: Literal["SUCCEEDED"] = field(init=False, default="SUCCEEDED")
 
 
-ATEResult = Union[ATESuccess, CommandFailure]
+ATEResult = ATESuccess | CommandFailure
 
 
 # =============================================================================
@@ -162,4 +162,4 @@ class CATESuccess(BaseResult):
     status: Literal["SUCCEEDED"] = field(init=False, default="SUCCEEDED")
 
 
-CATEResult = Union[CATESuccess, CommandFailure]  
+CATEResult = CATESuccess | CommandFailure

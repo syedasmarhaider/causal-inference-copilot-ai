@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -85,13 +85,13 @@ class OtherColumnProfileModel(ColumnProfileCommonModel):
     summary: OtherSummaryModel
 
 
-ColumnProfileModel = Union[
-    NumericColumnProfileModel,
-    DatetimeColumnProfileModel,
-    BooleanColumnProfileModel,
-    CategoricalColumnProfileModel,
-    OtherColumnProfileModel,
-]
+ColumnProfileModel = (
+    NumericColumnProfileModel
+    | DatetimeColumnProfileModel
+    | BooleanColumnProfileModel
+    | CategoricalColumnProfileModel
+    | OtherColumnProfileModel
+)
 
 
 DiscriminatedColumnProfile = Annotated[ColumnProfileModel, Field(discriminator="inferred_kind")]

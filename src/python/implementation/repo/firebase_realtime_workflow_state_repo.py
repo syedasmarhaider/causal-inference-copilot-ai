@@ -52,13 +52,13 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             if not project_id:
                 raise ValueError(
                     "GOOGLE_CLOUD_PROJECT_ID environment variable must be set"
-                )
+                ) from None
 
             database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
             if not database_url:
                 raise ValueError(
                     "FIREBASE_DATABASE_URL environment variable must be set"
-                )
+                ) from None
 
             return firebase_admin.initialize_app(
                 credentials.ApplicationDefault(),
