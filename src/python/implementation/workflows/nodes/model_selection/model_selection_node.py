@@ -56,15 +56,15 @@ def _safe_model_dump(x: Any) -> Any:
     return x
 
 def _build_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
-    causal_specs = deps.clean_protocol.payload.compiled_causal_spec
-    cl = deps.clean_protocol.payload
-    vc = deps.validate_clean_protocol.payload
-
-    treatment_spec = getattr(causal_specs, "treatment_spec", None)
-    outcome_spec = getattr(causal_specs, "outcome_spec", None)
-    covariates = getattr(causal_specs, "covariates", None)
-    effect_modifiers = getattr(causal_specs, "effect_modifiers", None)
-    experiment_type = getattr(causal_specs, "experiment_type", None)
+    causal_specs = deps.compiled_causal_spec
+    validation_issues = deps.validation_errors
+    summary = deps.clean_dataset_summary
+    
+    treatment_spec = causal_specs.treatment_spec
+    outcome_spec = causal_specs.outcome_spec
+    covariates = causal_specs.covariates
+    effect_modifiers = causal_specs.effect_modifiers
+    experiment_type = causal_specs.experiment_type
 
     return {
     
@@ -73,10 +73,9 @@ def _build_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
         "covariates": _safe_model_dump(covariates),
         "effect_modifiers": _safe_model_dump(effect_modifiers),
         "experiment_type": _safe_model_dump(experiment_type),
-        "summary": _safe_model_dump(getattr(cl, "summary", None)),
+        "summary": _safe_model_dump(getattr(summary, "summary", None)),
         "validate_clean_protocol": {
-            "validation_error": getattr(vc, "validation_error", None),
-            "issues": _safe_model_dump(getattr(vc, "issues", None)),
+            "issues": _safe_model_dump(getattr(validation_issues, "issues", None)),
         },
     }
 
@@ -124,6 +123,7 @@ class ModelSelectionNode(Node):
         # deps
         deps = ModelSelectionDeps.from_loaded(previous_state_dependencies)
         context = _build_context(deps=deps)
+        last_5_messages = messages_history[-5:] if messages_history else None
         
         ci_tool_factory_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
         ci_tool_factory = cast(CausalModelFactoryTool, ci_tool_factory_raw)
@@ -145,7 +145,7 @@ class ModelSelectionNode(Node):
                     system_prompt=MODEL_SELECTION_RECOMMENDER_SYSTEM_PROMPT,
                     user_prompt=user_prompt,
                     config= LLMConfig(temperature=1.0, model="pro"),
-                    history=messages_history,
+                    history=last_5_messages,
                     max_attempts=3,
                 )
 
@@ -190,14 +190,12 @@ class ModelSelectionNode(Node):
             context_json=_dumps(context),
         )
         
-        last_12_messages = messages_history[-12:] if messages_history else None
-
         decision = self.llm.generate_json(
                 schema=ConfirmedModelSelectionPayload,
                 system_prompt=MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
                 user_prompt=negotiator_user_prompt,
                 config= LLMConfig(temperature=0.2, model="basic"),
-                history=last_12_messages,
+                history=last_5_messages,
                 max_attempts=3,
             )
       

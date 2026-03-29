@@ -365,33 +365,25 @@ class ModelTrainNode(Node):
             raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")
 
         deps = ModelTrainDeps.from_loaded(previous_state_dependencies)
-
-        causal_specs = deps.clean_protocol.payload.compiled_causal_spec
-        assert causal_specs is not None, "Compiled causal specs must be available for model training."
-
-        selected = deps.model_selection.payload.confirmed_model_selection
-        assert selected is not None, "Confirmed model selection must be available for model training."
-
-        clean_dataset_id = getattr(deps.clean_protocol.payload, "clean_dataset_id", None)
-        assert clean_dataset_id is not None, "Clean dataset ID must be available for model training."
-
-        dataset_summary = deps.clean_protocol.payload.summary
-        assert dataset_summary is not None, (
-            "Cleaned dataset summary must be available for encoding plan generation."
-        )
+        causal_specs = deps.causal_specs
+        selected_estimator = deps.selected_model
+        clean_dataset_id = deps.dataset_id
+        dataset_summary = deps.dataset_summary
+        
+        last_4_messages = messages_history[-4:] if messages_history else None
+        
 
         mf_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
         model_factory = cast(CausalModelFactoryTool, mf_raw)
 
-        estimator_fqcn = selected.selected_model
-        assert estimator_fqcn is not None, (
+        assert selected_estimator is not None, (
             "Selected model must include the fully qualified class name."
         )
 
-        model = model_factory.resolve(estimator_fqcn)
+        model = model_factory.resolve(selected_estimator)
         if model is None:
             raise ValueError(
-                f"Selected model '{estimator_fqcn}' is not supported by the "
+                f"Selected model '{selected_estimator}' is not supported by the "
                 f"CausalModelFactoryTool."
             )
 
@@ -401,7 +393,7 @@ class ModelTrainNode(Node):
         log.warning(
             "ModelTrainNode starting run. conversation_id=%s model=%s clean_dataset_id=%s has_existing_plan=%s has_adjustment_cols=%s",
             conversation_id,
-            estimator_fqcn,
+            selected_estimator,
             clean_dataset_id,
             current_plan is not None,
             has_any_adjustment_cols,
@@ -416,15 +408,15 @@ class ModelTrainNode(Node):
             log.warning(
                 "ModelTrainNode generating encoding plan before fit. conversation_id=%s model=%s",
                 conversation_id,
-                estimator_fqcn,
+                selected_estimator,
             )
 
             user_discussion, plan = _generate_encoding_plan(
                 llm=self.llm,
                 causal_specs=causal_specs,
-                selected_model=selected,
+                selected_model=selected_estimator,
                 dataset_summary=dataset_summary,
-                history=messages_history,
+                history=last_4_messages,
                 prev_training_error=state.payload.prev_training_errors,
                 documentation=model.get_command_info("FIT"),
             )
@@ -450,7 +442,7 @@ class ModelTrainNode(Node):
             log.warning(
                 "ModelTrainNode generated encoding plan and will continue to fit in same run. conversation_id=%s model=%s",
                 conversation_id,
-                estimator_fqcn,
+                selected_estimator,
             )
 
         # -----------------------------------------------------------------
@@ -473,7 +465,7 @@ class ModelTrainNode(Node):
 
         run_id = uuid4()
         cmd = FitCommand(
-            model_name=estimator_fqcn,
+            model_name=selected_estimator,
             dataset_id=clean_dataset_id,
             run_id=run_id,
             causal_specs=causal_specs,
@@ -492,7 +484,7 @@ class ModelTrainNode(Node):
             "ModelTrainNode executing fit command. conversation_id=%s run_id=%s model=%s dataset_id=%s",
             conversation_id,
             run_id,
-            estimator_fqcn,
+            selected_estimator,
             clean_dataset_id,
         )
         res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)
@@ -510,7 +502,7 @@ class ModelTrainNode(Node):
                         f"Model training succeeded with warnings: {res.warnings}. "
                         f"Explain to the user in a clinician-friendly way."
                     ),
-                    history=messages_history,
+                    history=last_4_messages,
                 ).content
 
                 fitted_model_id = res.fitted_model_id
@@ -544,7 +536,7 @@ class ModelTrainNode(Node):
                     "ModelTrainNode fit failed. conversation_id=%s run_id=%s model=%s error=%s",
                     conversation_id,
                     run_id,
-                    estimator_fqcn,
+                    selected_estimator,
                     err_msg,
                 )
 
@@ -555,7 +547,7 @@ class ModelTrainNode(Node):
                         f"Model training failed with error: {err_msg}. "
                         f"Explain to the user in a clinician-friendly way and suggest next steps."
                     ),
-                    history=messages_history,
+                    history=last_4_messages,
                 ).content
 
                 if (

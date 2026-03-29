@@ -89,27 +89,14 @@ class CausalInferenceNode(Node):
             raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")
 
         deps = CausalInferenceDeps.from_loaded(previous_state_dependencies)
-
-        causal_specs = deps.clean_protocol.payload.compiled_causal_spec
-        assert causal_specs is not None, "CausalSpecs is required in CleanProtocolState payload"
-
-        trained_model_id = getattr(deps.model_train.payload, "trained_model_id", None)
-        assert trained_model_id is not None, "trained_model_id is required in ModelTrainState payload"
-
-        clean_dataset_id = getattr(deps.clean_protocol.payload, "clean_dataset_id", None)
-        assert clean_dataset_id is not None, "clean_dataset_id is required in CleanProtocolState payload"
-
-        selected = deps.model_selection.payload.confirmed_model_selection
-        assert selected is not None, "Confirmed model selection is required in ModelSelectionState payload"
-
-        selected_model_fqcn = selected.selected_model
-        assert selected_model_fqcn is not None, "selected_model (fqcn) is required"
-
-        data_summary = deps.clean_protocol.payload.summary
-        assert data_summary is not None, "dataset_summary is required in CleanProtocolState"
-
-        order_effect_modifiers = deps.model_train.payload.order_effect_modifiers or []
-        order_covariates = deps.model_train.payload.order_covariates or  []
+        causal_specs = deps.causal_specs
+        trained_model_id = deps.trained_model_id
+        clean_dataset_id =deps.dataset_id
+        selected_model_fqcn = deps.selected_model
+        data_summary = deps.dataset_summary
+        col_transformation_plan = deps.column_transformation_plan
+        order_effect_modifiers = deps.order_effect_modifiers or []
+        order_covariates = deps.order_covariates or  []
         
         if len(order_effect_modifiers) < 1 and len(causal_specs.effect_modifiers) > 0:
             raise ValueError("ModelTrainState is missing order_effect_modifiers, which are required for CausalInferenceNode.")
@@ -137,7 +124,7 @@ class CausalInferenceNode(Node):
             "dataset_summary": data_summary.model_dump(mode="json"),
         }
 
-        last_8 = messages_history[-8:] if messages_history else None
+        last_6_messages = messages_history[-6:] if messages_history else None
 
         # ---------------------------
         # ATE: compute once (idempotent)
@@ -149,7 +136,7 @@ class CausalInferenceNode(Node):
                 dataset_id=clean_dataset_id,
                 run_id=uuid4(),
                 data_summary=data_summary,
-                transformation_plan=deps.model_train.payload.column_transformation_plan,
+                transformation_plan=col_transformation_plan,
                 causal_specs=causal_specs,
                 fitted_model_id=trained_model_id,
                 order_effect_modifiers=list(order_effect_modifiers),
@@ -179,7 +166,7 @@ class CausalInferenceNode(Node):
                             warnings_json=_dumps(warnings),
                         ),
                         config=LLMConfig(temperature=0.2, model="basic"),
-                        history=last_8,
+                        history=last_6_messages,
                     ).content.strip()
 
                     return CausalInferenceState(
@@ -224,7 +211,7 @@ class CausalInferenceNode(Node):
             causal_specs=causal_specs,
             clean_dataset_id=clean_dataset_id,
             data_summary=data_summary,
-            transformation_plan=deps.model_train.payload.column_transformation_plan,
+            transformation_plan=col_transformation_plan,
             selected_model_fqcn=selected_model_fqcn,
             trained_model_id=trained_model_id,
             order_effect_modifiers=order_effect_modifiers,

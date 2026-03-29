@@ -65,6 +65,12 @@ class NodeExecutionError(WorkflowError):
     def __init__(self, state_name: str, error: str):
         self.state_name = state_name
         self.error = error
-        super().__init__(f"Error '{state_name}': {error}")          
-                      
+        super().__init__(f"Error '{state_name}': {error}")
         
+class StateDependencyError(NodeExecutionError):
+    """Raised when a state transition fails due to unmet dependencies."""
+    def __init__(self, from_state: str, to_state: str, missing_dependencies: list[str]):
+        super().__init__(from_state, to_state)
+        self.missing_dependencies = missing_dependencies
+        self.message = f"Cannot transition from '{from_state}' to '{to_state}' due to missing dependencies: {', '.join(missing_dependencies)}"                    
+                      

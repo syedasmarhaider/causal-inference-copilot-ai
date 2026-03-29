@@ -4,6 +4,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_deps import ValidateCleanProtocolDeps
 from python.implementation.workflows.utils.validation import ValidationIssueModel
@@ -58,8 +59,10 @@ class ValidateCleanProtocolState(State):
         return StateMessage(txt_message=self.payload.user_message,action=action)
 
     @property
-    def error(self) -> Optional[str]:
-        return self.payload.validation_error
+    def error(self) -> Optional[NodeExecutionError]:
+        if self.payload.validation_error is None:
+            return None
+        return NodeExecutionError(state_name=self.NAME, error=self.payload.validation_error)
 
     def pre_required_states_names(self) -> Sequence[str]:
         return ValidateCleanProtocolDeps.pre_required_states_names()

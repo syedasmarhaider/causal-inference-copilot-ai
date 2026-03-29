@@ -73,19 +73,11 @@ class ValidateCleanProtocolNode(Node):
         previous_state_dependencies: Mapping[str, State],
         messages_history: Optional[Sequence[ChatMessage]]
     ) -> State:
+        last_4_messages = messages_history[-4:] if messages_history is not None else None
         try:
             deps = ValidateCleanProtocolDeps.from_loaded(previous_state_dependencies)
-
-            # ----------------------------
-            # Guardrails: upstream sanity
-            # ----------------------------
-            causal_specs = deps.clean_protocol.payload.compiled_causal_spec
-            assert causal_specs is not None, (
-                "CleanProtocolState must provide latest compiled_causal_spec for validation."
-            )
-
-            clean_id = deps.clean_protocol.payload.clean_dataset_id
-            assert clean_id is not None, "CleanProtocolState must provide a clean_dataset_id for validation."
+            causal_specs = deps.causal_spec
+            clean_id = deps.dataset_id
 
             # ----------------------------
             # Load cleaned dataframe
@@ -206,7 +198,7 @@ class ValidateCleanProtocolNode(Node):
             has_fail = any(i.severity == "FAIL" for i in issue_models)
 
             msg = self._make_user_message(
-                messages_history=messages_history,
+                messages_history=last_4_messages,
                 protocol_summary=self._protocol_summary(causal_specs),
                 metrics=metrics,
                 issues=[i.model_dump(mode="json") for i in issue_models],
@@ -223,7 +215,7 @@ class ValidateCleanProtocolNode(Node):
 
         except ValidationError as e:
             return self._abort(
-                messages_history=messages_history,
+                messages_history=last_4_messages,
                 validation_error=f"Pydantic validation error: {e.errors()}",
                 issues=[
                     {
@@ -237,7 +229,7 @@ class ValidateCleanProtocolNode(Node):
         except Exception as e:
             log.exception("Unexpected error in ValidateCleanProtocolNode: %s", repr(e))
             return self._abort(
-                messages_history=messages_history,
+                messages_history=last_4_messages,
                 validation_error=repr(e),
                 issues=[
                     {

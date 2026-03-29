@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import CausalInferenceDeps
 
@@ -34,8 +35,10 @@ class CausalInferenceState(State):
         return self.NAME
 
     @property
-    def error(self) -> Optional[str]:
-        return self.payload.error
+    def error(self) -> Optional[NodeExecutionError]:
+        if self.payload.error is not None:
+            return NodeExecutionError(state_name=self.NAME, error=self.payload.error)
+        return None
 
     @property
     def status(self) -> Status:

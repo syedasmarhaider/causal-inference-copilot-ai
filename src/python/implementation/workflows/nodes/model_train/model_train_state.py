@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
@@ -43,8 +44,10 @@ class ModelTrainState(State):
         return self.NAME
 
     @property
-    def error(self) -> Optional[str]:
-        return self.payload.error
+    def error(self) -> Optional[NodeExecutionError]:
+        if self.payload.error is not None:
+            return NodeExecutionError(state_name=self.NAME, error=self.payload.error)
+        return None
 
     @property
     def status(self) -> Status:
