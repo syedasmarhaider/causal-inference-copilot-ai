@@ -112,8 +112,8 @@ Task:
 {_SHARED_GUARDRAILS}
 
 Message policy by readiness:
-- READY: provide a compact protocol summary and clearly state you will proceed to validation.
-- PENDING: answer latest user point first, then ask at most 2 targeted follow-up questions.
+- READY: provide a compact protocol summary and clearly state you will proceed to cleaning the data and validation.
+- PENDING: answer latest user point first in detail, and then ask follow up question which is missing/unclear
 - ABORT: explain briefly why infeasible and the minimum change needed to continue.
 
 Output format:

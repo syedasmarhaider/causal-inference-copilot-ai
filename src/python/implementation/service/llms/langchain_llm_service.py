@@ -102,8 +102,6 @@ class LangChainLLMService(LLMService):
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
         
-        logging.warning("user_prompt=%s", user_prompt)
-
         parser = PydanticOutputParser(pydantic_object=schema)
         format_instructions = parser.get_format_instructions()
 

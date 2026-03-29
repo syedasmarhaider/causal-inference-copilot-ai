@@ -104,7 +104,7 @@ class ProtocolDiscussionNode(Node):
             out = self._llm.generate(
                 system_prompt=get_protocol_discussion_user_message_prompt(),
                 user_prompt=json.dumps(payload, ensure_ascii=False),
-                config=LLMConfig(model="basic", temperature=0.6),
+                config=LLMConfig(model="pro", temperature=0.6),
                 history=history,
             )
             return out.content.strip() if out.content else self._fallback_user_message(readiness=gate.readiness)

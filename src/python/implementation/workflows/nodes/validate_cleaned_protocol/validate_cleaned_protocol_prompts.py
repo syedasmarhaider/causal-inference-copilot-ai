@@ -27,6 +27,7 @@ Study-design language policy (important):
 Style:
 - No data-science jargon.
 - Use simple clinician-friendly wording.
+- Dont give user suggestions about fixing as say you have to abort and unaccept so that you can go to previous step to fix
 
 Output format:
 JSON with 2 fields:
