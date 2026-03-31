@@ -127,6 +127,7 @@ def _force_plan_roles_from_causal_specs (
 def _validate_plan_against_constraints(
     *,
     plan: TransformPlan,
+    dataset_summary: DatasetSummaryModel,
     eligible_cols: set[str],
     expected_covariate_cols: set[str],
     expected_effect_modifier_cols: set[str],
@@ -221,7 +222,83 @@ def _validate_plan_against_constraints(
             )
         )
 
+    profile_kind_by_col = {
+        str(profile.name): str(getattr(profile, "inferred_kind", "OTHER"))
+        for profile in dataset_summary.profiles
+    }
+    incompatible_presets: list[dict[str, str]] = []
+    missing_profile_columns: list[str] = []
+
+    for col_plan in plan.columns:
+        col_name = str(col_plan.column)
+        inferred_kind = profile_kind_by_col.get(col_name)
+        if inferred_kind is None:
+            missing_profile_columns.append(col_name)
+            continue
+
+        preset = str(col_plan.encoding.preset)
+        if not _is_encoding_preset_compatible_with_kind(
+            inferred_kind=inferred_kind,
+            preset=preset,
+        ):
+            incompatible_presets.append(
+                {
+                    "column": col_name,
+                    "inferred_kind": inferred_kind,
+                    "preset": preset,
+                }
+            )
+
+    if missing_profile_columns:
+        validation_issues.append(
+            ValidationIssueModel(
+                severity="FAIL",
+                message="Encoding plan includes columns not present in dataset summary.",
+                evidence={"columns": sorted(set(missing_profile_columns))},
+                fix_hint="Regenerate the encoding plan using the latest dataset summary columns.",
+            )
+        )
+
+    if incompatible_presets:
+        validation_issues.append(
+            ValidationIssueModel(
+                severity="FAIL",
+                message="Encoding plan has column type and preset incompatibilities.",
+                evidence={"incompatibilities": incompatible_presets},
+                fix_hint=(
+                    "Use numeric presets for NUMERIC columns and categorical/datetime presets "
+                    "for non-numeric columns."
+                ),
+            )
+        )
+
     return validation_issues
+
+
+def _is_encoding_preset_compatible_with_kind(
+    *,
+    inferred_kind: str,
+    preset: str,
+) -> bool:
+    if preset in {"drop", "passthrough"}:
+        return True
+    if inferred_kind == "NUMERIC":
+        return preset in {"num_standard", "num_minmax", "num_log1p"}
+    if inferred_kind == "CATEGORICAL":
+        return preset in {"cat_onehot", "map_binary", "map_ordinal"}
+    if inferred_kind == "BOOLEAN":
+        return preset in {
+            "cat_onehot",
+            "map_binary",
+            "map_ordinal",
+            "num_standard",
+            "num_minmax",
+            "num_log1p",
+        }
+    if inferred_kind == "DATETIME":
+        return preset == "datetime_epoch_seconds"
+    # OTHER: do not allow complex preset inference; keep this explicit.
+    return False
 
 
 def _generate_encoding_plan(
@@ -309,6 +386,7 @@ def _generate_encoding_plan(
 
         validation_issues = _validate_plan_against_constraints(
             plan=plan,
+            dataset_summary=dataset_summary,
             eligible_cols=eligible,
             expected_covariate_cols=covariate_cols - {treatment_col, outcome_col},
             expected_effect_modifier_cols=effect_modifier_cols - {treatment_col, outcome_col},

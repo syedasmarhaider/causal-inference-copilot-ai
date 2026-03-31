@@ -1300,26 +1300,53 @@ class CleanProtocolNode(Node):
         ):
             return None
 
+        graphs: list[GraphImage] = []
+
         try:
-            graphs: list[GraphImage] = [
+            graphs.append(
                 tool.generate_causal_missingness_by_group_graph(
                     df=df,
                     protocol=causal_spec,
-                ),
+                )
+            )
+        except Exception as e:
+            log.warning(
+                "CleanProtocolNode: failed to generate causal missingness graph",
+                error=e,
+            )
+
+        try:
+            graphs.append(
                 tool.generate_comparability_overlap_histogram(
                     df=df,
                     protocol=causal_spec,
-                ),
-            ]
+                )
+            )
+        except Exception as e:
+            log.warning(
+                "CleanProtocolNode: failed to generate comparability overlap graph",
+                error=e,
+            )
+
+        try:
             graphs.extend(
                 tool.generate_propensity_vs_top_confounders_graphs(
                     df=df,
                     protocol=causal_spec,
                 )
             )
+        except Exception as e:
+            log.warning(
+                "CleanProtocolNode: failed to generate propensity confounder graphs",
+                error=e,
+            )
 
-            artifacts: list[UUID] = []
-            for graph in graphs:
+        if not graphs:
+            return None
+
+        artifacts: list[UUID] = []
+        for graph in graphs:
+            try:
                 artifact_id = uuid4()
                 self.data_repo.save_artifact(
                     user_id=user_id,
@@ -1330,10 +1357,14 @@ class CleanProtocolNode(Node):
                     overwrite=True,
                 )
                 artifacts.append(artifact_id)
-            return artifacts
-        except Exception as e:
-            log.exception("CleanProtocolNode: final graph generation failed", error = e)
-            return None
+            except Exception as e:
+                log.exception(
+                    "CleanProtocolNode: final graph artifact save failed",
+                    error=e,
+                    graph_key=graph.key,
+                )
+
+        return artifacts or None
 
     @staticmethod
     def _extract_summary(
