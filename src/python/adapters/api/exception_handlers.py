@@ -45,7 +45,7 @@ _WORKFLOW_ERROR_MAPPING: tuple[tuple[MappedErrorType, ErrorMapping], ...] = (
 def map_workflow_error_to_http_exception(exc: Exception) -> HTTPException | None:
     for error_type, mapped in _WORKFLOW_ERROR_MAPPING:
         if isinstance(exc, error_type):
-            return HTTPException(status_code=mapped.status_code, detail=mapped.detail)
+            return HTTPException(status_code=mapped.status_code, detail=str(exc))
     return None
 
 
@@ -55,7 +55,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         http_exc = map_workflow_error_to_http_exception(exc)
         if http_exc is None:
             log.exception(
-                "unmapped workflow error",
+                "unmapped workflow error so server error",
                 error=exc,
                 error_type=type(exc).__name__,
             )
@@ -68,6 +68,7 @@ def register_exception_handlers(app: FastAPI) -> None:
                 error_type=type(exc).__name__,
                 status_code=http_exc.status_code,
             )
+            return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
         return JSONResponse(status_code=http_exc.status_code, content={"detail": http_exc.detail})
 
@@ -82,7 +83,7 @@ def register_exception_handlers(app: FastAPI) -> None:
                     error_type=type(exc).__name__,
                     status_code=http_exc.status_code,
                 )
-            return JSONResponse(status_code=http_exc.status_code, content={"detail": http_exc.detail})
+            return JSONResponse(status_code=http_exc.status_code, content="Internal server error" if http_exc.status_code >= 500 else {"detail": http_exc.detail})
 
         log.exception(
             "unhandled exception in API adapter",
