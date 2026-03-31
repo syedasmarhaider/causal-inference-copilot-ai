@@ -13,7 +13,6 @@ from python.domain.models.models import NonEmptyStr
 class WorkingDataSQLRequest:
     statements: Sequence[NonEmptyStr]
     table_name: NonEmptyStr
-    analytic_only: bool
 
     def __post_init__(self) -> None:
         if len(self.statements) == 0:

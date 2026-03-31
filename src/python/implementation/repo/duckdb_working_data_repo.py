@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import re
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import duckdb
 import pandas as pd
@@ -15,11 +17,18 @@ from python.domain.repo.working_data_repo import (
 
 _REGISTERED_DF_NAME = "__working_input_dataframe"
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_ANALYTIC_ONLY_ALLOWED_START = re.compile(r"^\s*(select|with|values)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
 class DuckDBWorkingDatatRepo(WorkingDatatRepo):
+    database: str = ":memory:"
+    _connection: duckdb.DuckDBPyConnection = field(init=False, repr=False)
+    _lock: threading.RLock = field(init=False, repr=False, default_factory=threading.RLock)
+    _closed: bool = field(init=False, repr=False, default=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_connection", duckdb.connect(self.database))
+
     def execute_sql(
         self,
         *,
@@ -32,17 +41,12 @@ class DuckDBWorkingDatatRepo(WorkingDatatRepo):
         statements = tuple(str(statement).strip() for statement in request.statements)
         table_name = str(request.table_name)
 
-        if request.analytic_only:
-            for statement in statements:
-                if not self._is_analytic_only_statement(statement):
-                    raise ValueError(
-                        "analytic_only request cannot include mutating/non-analytic SQL statements"
-                    )
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("DuckDBWorkingDatatRepo is closed")
 
-        con = duckdb.connect(":memory:")
-        try:
             self._register_dataframe_as_table(
-                con=con,
+                con=self._connection,
                 dataframe=dataframe,
                 table_name=table_name,
             )
@@ -54,12 +58,12 @@ class DuckDBWorkingDatatRepo(WorkingDatatRepo):
             last_columns: tuple[str, ...] = ()
 
             for statement in statements:
-                con.execute(statement)
+                self._connection.execute(statement)
 
-                description = con.description
+                description = self._connection.description
                 has_result_set = bool(description)
                 if has_result_set:
-                    result_df = con.fetchdf()
+                    result_df = self._connection.fetchdf()
                     result_columns = tuple(str(col) for col in result_df.columns)
                 else:
                     result_df = pd.DataFrame()
@@ -80,8 +84,18 @@ class DuckDBWorkingDatatRepo(WorkingDatatRepo):
                 elapsed_ms=elapsed_ms,
                 dataframe=last_dataframe,
             )
-        finally:
-            con.close()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            with contextlib.suppress(Exception):
+                self._connection.close()
+            object.__setattr__(self, "_closed", True)
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.close()
 
     @staticmethod
     def _validate_dataframe(dataframe: pd.DataFrame) -> None:
@@ -94,10 +108,6 @@ class DuckDBWorkingDatatRepo(WorkingDatatRepo):
             raise ValueError(
                 f"dataframe has duplicate column names: {duplicate_columns}"
             )
-
-    @staticmethod
-    def _is_analytic_only_statement(statement: str) -> bool:
-        return bool(_ANALYTIC_ONLY_ALLOWED_START.match(statement))
 
     @staticmethod
     def _validate_identifier(value: str) -> None:
@@ -115,12 +125,15 @@ class DuckDBWorkingDatatRepo(WorkingDatatRepo):
         table_name: str,
     ) -> None:
         con.register(_REGISTERED_DF_NAME, dataframe)
-        con.execute(
-            f"CREATE OR REPLACE TEMP TABLE {self._quote_ident(table_name)} AS "
-            f"SELECT * FROM {self._quote_ident(_REGISTERED_DF_NAME)}"
-        )
+        try:
+            con.execute(
+                f"CREATE OR REPLACE TEMP TABLE {self._quote_ident(table_name)} AS "
+                f"SELECT * FROM {self._quote_ident(_REGISTERED_DF_NAME)}"
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                con.unregister(_REGISTERED_DF_NAME)
 
     @staticmethod
     def _quote_ident(value: str) -> str:
         return '"' + value.replace('"', '""') + '"'
-

@@ -12,7 +12,6 @@ def test_execute_sql_returns_last_result_set_and_metadata() -> None:
     df = pd.DataFrame([{"a": 1, "b": 2}, {"a": 3, "b": 4}, {"a": 5, "b": 6}])
     request = WorkingDataSQLRequest(
         table_name="input_table",
-        analytic_only=False,
         statements=(
             "SELECT a, b FROM input_table ORDER BY a DESC LIMIT 2",
         ),
@@ -36,7 +35,6 @@ def test_execute_sql_mutating_statement_returns_count_result_set() -> None:
     df = pd.DataFrame([{"a": 1}, {"a": 2}])
     request = WorkingDataSQLRequest(
         table_name="t",
-        analytic_only=False,
         statements=("DELETE FROM t WHERE a = 999",),
     )
 
@@ -53,7 +51,6 @@ def test_execute_sql_rejects_invalid_table_name() -> None:
     df = pd.DataFrame([{"a": 1}])
     request = WorkingDataSQLRequest(
         table_name="bad table",
-        analytic_only=False,
         statements=("SELECT * FROM \"bad table\"",),
     )
 
@@ -66,7 +63,6 @@ def test_execute_sql_rejects_dataframe_with_duplicate_columns() -> None:
     df = pd.DataFrame([[1, 2]], columns=["x", "x"])
     request = WorkingDataSQLRequest(
         table_name="t",
-        analytic_only=False,
         statements=("SELECT * FROM t",),
     )
 
@@ -79,7 +75,6 @@ def test_execute_sql_rejects_dataframe_without_columns() -> None:
     df = pd.DataFrame(index=[0, 1, 2])
     request = WorkingDataSQLRequest(
         table_name="t",
-        analytic_only=False,
         statements=("SELECT 1",),
     )
 
@@ -87,30 +82,18 @@ def test_execute_sql_rejects_dataframe_without_columns() -> None:
         repo.execute_sql(dataframe=df, request=request)
 
 
-def test_execute_sql_rejects_mutating_sql_when_analytic_only() -> None:
+def test_execute_sql_reloads_table_when_new_dataframe_is_passed() -> None:
     repo = DuckDBWorkingDatatRepo()
-    df = pd.DataFrame([{"a": 1}])
-    request = WorkingDataSQLRequest(
-        table_name="t",
-        analytic_only=True,
-        statements=("DELETE FROM t WHERE a = 1",),
+    request = WorkingDataSQLRequest(table_name="t", statements=("SELECT SUM(a) AS total FROM t",))
+
+    result_1 = repo.execute_sql(
+        dataframe=pd.DataFrame([{"a": 1}, {"a": 2}]),
+        request=request,
+    )
+    result_2 = repo.execute_sql(
+        dataframe=pd.DataFrame([{"a": 10}, {"a": 20}]),
+        request=request,
     )
 
-    with pytest.raises(ValueError, match=r"analytic_only request cannot include"):
-        repo.execute_sql(dataframe=df, request=request)
-
-
-def test_execute_sql_allows_select_when_analytic_only() -> None:
-    repo = DuckDBWorkingDatatRepo()
-    df = pd.DataFrame([{"a": 1}, {"a": 2}])
-    request = WorkingDataSQLRequest(
-        table_name="t",
-        analytic_only=True,
-        statements=("SELECT COUNT(*) AS n FROM t",),
-    )
-
-    result = repo.execute_sql(dataframe=df, request=request)
-
-    assert result.has_result_set is True
-    assert result.columns == ("n",)
-    assert result.dataframe.to_dict(orient="records") == [{"n": 2}]
+    assert result_1.dataframe.to_dict(orient="records") == [{"total": 3.0}]
+    assert result_2.dataframe.to_dict(orient="records") == [{"total": 30.0}]
