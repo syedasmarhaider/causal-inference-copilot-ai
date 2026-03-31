@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -13,10 +12,7 @@ from python.domain.models.models import NonEmptyStr
 from python.domain.repo.working_data_repo import WorkingDataSQLRequest, WorkingDatatRepo
 from python.domain.service.llm_service import AvailableModelsKey, LLMConfig, LLMService
 from python.implementation.service.logging.default_logging import get_app_logger
-from python.implementation.workflows.nodes.service.data_manupulation_service.data_manipulation_prompts import (
-    DATA_MANIPULATION_SQL_SYSTEM_PROMPT,
-    DATA_MANIPULATION_SQL_USER_PROMPT_TEMPLATE,
-)
+from python.implementation.workflows.nodes.node_service.data_manupulation_service.data_manipulation_prompts import DATA_MANIPULATION_SQL_SYSTEM_PROMPT, DATA_MANIPULATION_SQL_USER_PROMPT_TEMPLATE
 
 log = get_app_logger(__name__, component="data_manipulation_service", log_type="service")
 
