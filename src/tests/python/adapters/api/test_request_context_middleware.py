@@ -90,6 +90,8 @@ def test_request_context_middleware_populates_headers_state_and_logs() -> None:
             "request_id": request.state.request_id,
             "trace_id": request.state.trace_id,
             "span_id": request.state.span_id,
+            "http_method": request.state.http_method,
+            "http_route": request.state.http_route,
         }
 
     client = TestClient(app)
@@ -108,6 +110,8 @@ def test_request_context_middleware_populates_headers_state_and_logs() -> None:
     assert payload["request_id"] == "req-123"
     assert payload["trace_id"] == trace_id
     assert payload["span_id"] == span_id
+    assert payload["http_method"] == "GET"
+    assert payload["http_route"] == "/ping"
 
     assert response.headers["x-request-id"] == "req-123"
     assert response.headers["x-trace-id"] == trace_id
@@ -119,6 +123,8 @@ def test_request_context_middleware_populates_headers_state_and_logs() -> None:
         "trace_id": trace_id,
         "span_id": span_id,
         "trace_sampled": True,
+        "http_method": "GET",
+        "http_route": "/ping",
     }
 
 
@@ -146,3 +152,25 @@ def test_request_context_middleware_generates_ids_when_missing() -> None:
 
     assert response.headers["x-request-id"] == payload["request_id"]
     assert response.headers["x-trace-id"] == payload["trace_id"]
+
+
+def test_request_context_middleware_uses_route_template_not_concrete_path() -> None:
+    logger_name = "tests.request_context_middleware.route_template"
+    _, capture = _isolated_logger(logger_name)
+    app_logger = get_logger(logger_name, component="TestEndpoint", log_type="test")
+
+    app = FastAPI()
+    app.add_middleware(RequestContextMiddleware)
+
+    @app.get("/users/{user_id}/orders/{order_id}")
+    async def get_order(user_id: str, order_id: str) -> dict[str, str]:
+        app_logger.info("inside route template endpoint", user_id=user_id, order_id=order_id)
+        return {"ok": "true"}
+
+    client = TestClient(app)
+    response = client.get("/users/123/orders/999")
+
+    assert response.status_code == 200
+    assert len(capture.records) == 1
+    assert capture.records[0].context["http_method"] == "GET"
+    assert capture.records[0].context["http_route"] == "/users/{user_id}/orders/{order_id}"

@@ -16,6 +16,8 @@ _request_id_ctx: ContextVar[str | None] = ContextVar("request_id", default=None)
 _trace_id_ctx: ContextVar[str | None] = ContextVar("trace_id", default=None)
 _span_id_ctx: ContextVar[str | None] = ContextVar("span_id", default=None)
 _trace_sampled_ctx: ContextVar[bool | None] = ContextVar("trace_sampled", default=None)
+_http_method_ctx: ContextVar[str | None] = ContextVar("http_method", default=None)
+_http_route_ctx: ContextVar[str | None] = ContextVar("http_route", default=None)
 
 
 class AppLogger(Protocol):
@@ -41,6 +43,8 @@ class LogContextTokens:
     trace_id: Token[str | None]
     span_id: Token[str | None]
     trace_sampled: Token[bool | None]
+    http_method: Token[str | None]
+    http_route: Token[str | None]
 
 
 class JSONLogFormatter(logging.Formatter):
@@ -149,12 +153,16 @@ def set_log_context(
     trace_id: str | None,
     span_id: str | None = None,
     trace_sampled: bool | None = None,
+    http_method: str | None = None,
+    http_route: str | None = None,
 ) -> LogContextTokens:
     return LogContextTokens(
         request_id=_request_id_ctx.set(request_id),
         trace_id=_trace_id_ctx.set(trace_id),
         span_id=_span_id_ctx.set(span_id),
         trace_sampled=_trace_sampled_ctx.set(trace_sampled),
+        http_method=_http_method_ctx.set(http_method),
+        http_route=_http_route_ctx.set(http_route),
     )
 
 
@@ -163,6 +171,8 @@ def reset_log_context(tokens: LogContextTokens) -> None:
     _trace_id_ctx.reset(tokens.trace_id)
     _span_id_ctx.reset(tokens.span_id)
     _trace_sampled_ctx.reset(tokens.trace_sampled)
+    _http_method_ctx.reset(tokens.http_method)
+    _http_route_ctx.reset(tokens.http_route)
 
 
 def get_log_context() -> dict[str, Any]:
@@ -171,6 +181,8 @@ def get_log_context() -> dict[str, Any]:
     trace_id = _trace_id_ctx.get()
     span_id = _span_id_ctx.get()
     trace_sampled = _trace_sampled_ctx.get()
+    http_method = _http_method_ctx.get()
+    http_route = _http_route_ctx.get()
 
     if request_id:
         context["request_id"] = request_id
@@ -180,6 +192,10 @@ def get_log_context() -> dict[str, Any]:
         context["span_id"] = span_id
     if trace_sampled is not None:
         context["trace_sampled"] = trace_sampled
+    if http_method:
+        context["http_method"] = http_method
+    if http_route:
+        context["http_route"] = http_route
 
     return context
 

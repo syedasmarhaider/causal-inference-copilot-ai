@@ -8,6 +8,7 @@ from uuid import uuid4
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
+from starlette.routing import Match
 
 from python.implementation.service.logging.default_logging import (
     reset_log_context,
@@ -38,17 +39,23 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         trace_context = extract_trace_context_from_headers(request.headers)
 
         trace_id = trace_context.trace_id or uuid4().hex
+        http_method = request.method
+        http_route = _extract_route_template(request)
 
         request.state.request_id = request_id
         request.state.trace_id = trace_id
         request.state.span_id = trace_context.span_id
         request.state.trace_sampled = trace_context.trace_sampled
+        request.state.http_method = http_method
+        request.state.http_route = http_route
 
         tokens = set_log_context(
             request_id=request_id,
             trace_id=trace_id,
             span_id=trace_context.span_id,
             trace_sampled=trace_context.trace_sampled,
+            http_method=http_method,
+            http_route=http_route,
         )
         try:
             response = await call_next(request)
@@ -83,6 +90,28 @@ def _normalize_request_id(raw_request_id: str | None) -> str:
         return uuid4().hex
     trimmed = raw_request_id.strip()
     return trimmed if trimmed else uuid4().hex
+
+
+def _extract_route_template(request: Request) -> str | None:
+    route = request.scope.get("route")
+    if route is None:
+        for candidate in request.app.router.routes:
+            match, _ = candidate.matches(request.scope)
+            if match is Match.FULL:
+                route = candidate
+                break
+        if route is None:
+            return None
+
+    path = getattr(route, "path", None)
+    if isinstance(path, str) and path.strip():
+        return path
+
+    path_format = getattr(route, "path_format", None)
+    if isinstance(path_format, str) and path_format.strip():
+        return path_format
+
+    return None
 
 
 def _parse_traceparent(raw_header: str | None) -> TraceContext | None:
