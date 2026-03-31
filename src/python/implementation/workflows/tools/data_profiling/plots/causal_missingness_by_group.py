@@ -75,7 +75,6 @@ def generate_causal_missingness_by_group_graph(
     show = order[: max(1, min(int(top_k), len(order)))]
     miss_t_s = miss_t.reindex(show)
     miss_c_s = miss_c.reindex(show)
-    gap.reindex(show)
 
     y = np.arange(len(show))
 
