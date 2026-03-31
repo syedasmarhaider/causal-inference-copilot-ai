@@ -7,17 +7,18 @@ from typing import Any, Literal, Protocol, TypedDict, TypeVar
 
 from pydantic import BaseModel
 
+from python.domain.models.models import Artifact_Id
+
 T = TypeVar("T", bound=BaseModel)
 
 Role = Literal["user", "assistant","system"]
 AvailableModelsKey = Literal["mini","basic", "pro","thinking"]
 
-
 @dataclass(frozen=True, slots=True)
 class ChatMessage:
     role: Role
     content: str
-    artifacts_ids: Sequence[dict[str, str]] | None = None
+    artifacts_ids: Sequence[Artifact_Id] | None = None
     id: str | None = None
 
     @property

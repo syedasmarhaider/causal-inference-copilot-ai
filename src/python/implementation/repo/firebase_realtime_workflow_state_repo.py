@@ -12,6 +12,7 @@ from firebase_admin import credentials, db
 
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import (
+    Artifact_Id,
     ChatMessage,
     get_chat_message_role_and_message_json,
 )
@@ -424,7 +425,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         base_payload: dict[str, Any] = json.loads(get_chat_message_role_and_message_json(message))
         if is_dataclass(message):
             raw_payload = asdict(message)
-            artifacts_ids = raw_payload.get("artifacts_ids")
+            artifacts_ids = self._serialize_artifacts_ids(raw_payload.get("artifacts_ids"))
             message_id = raw_payload.get("id")
             if artifacts_ids is not None:
                 base_payload["artifacts_ids"] = artifacts_ids
@@ -435,7 +436,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     def _chat_message_from_dict(self, payload: dict[str, Any]) -> ChatMessage:
         role = payload.get("role")
         content = payload.get("message", payload.get("content"))
-        artifacts_ids = payload.get("artifacts_ids")
+        artifacts_ids = self._normalize_artifacts_ids(payload.get("artifacts_ids"))
         message_id = payload.get("id")
 
         if not isinstance(role, str) or not isinstance(content, str):
@@ -444,6 +445,41 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         return ChatMessage(
             role=role,  # type: ignore[arg-type]
             content=content,
-            artifacts_ids=artifacts_ids if isinstance(artifacts_ids, list) else None,
+            artifacts_ids=artifacts_ids,
             id=message_id if isinstance(message_id, str) else None,
         )
+
+    @staticmethod
+    def _serialize_artifacts_ids(value: Any) -> list[dict[str, str]] | None:
+        normalized = FirebaseRealtimeWorkflowStateRepo._normalize_artifacts_ids(value)
+        if normalized is None:
+            return None
+
+        return [
+            {"id": str(item["id"]), "type": item["type"]}
+            for item in normalized
+        ]
+
+    @staticmethod
+    def _normalize_artifacts_ids(value: Any) -> list[Artifact_Id] | None:
+        if not isinstance(value, list):
+            return None
+
+        normalized: list[Artifact_Id] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+
+            artifact_id = item.get("id")
+            artifact_type = item.get("type")
+            if artifact_type not in {"csv", "json"}:
+                continue
+
+            try:
+                parsed_artifact_id = artifact_id if isinstance(artifact_id, UUID) else UUID(str(artifact_id).strip())
+            except (TypeError, ValueError, AttributeError):
+                continue
+
+            normalized.append({"id": parsed_artifact_id, "type": artifact_type})
+
+        return normalized or None

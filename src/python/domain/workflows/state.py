@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from python.domain.models.errors import NodeExecutionError
+from python.domain.models.models import Artifact_Id
 
 Status = Literal["PENDING", "DONE", "ABORTED"]
 ACTION = Literal["NONE", "NEEDS_INPUT","NEEDS_DATA"]
@@ -14,8 +15,8 @@ ACTION = Literal["NONE", "NEEDS_INPUT","NEEDS_DATA"]
 @dataclass(frozen=True, slots=True)
 class StateMessage:
     txt_message: str
-    action: ACTION 
-    artifacts: Sequence[dict[str, Any]] | None = None
+    action: ACTION
+    artifact_ids: Sequence[Artifact_Id] | None = None
 
 class State(ABC):
     @property
