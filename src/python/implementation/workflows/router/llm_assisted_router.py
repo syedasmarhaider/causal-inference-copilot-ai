@@ -10,6 +10,7 @@ from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.route import NextDecision, Router
 from python.domain.workflows.state import State
+from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
     CausalInferenceNode,
 )
@@ -47,6 +48,8 @@ from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cl
     ValidateCleanProtocolState,
 )
 
+log = get_logger(__name__, component="LLMAssistedRouterRouter", log_type="workflow_router")
+
 
 class LLMAssistedRouterRouter(Router):
     def __init__(
@@ -57,6 +60,11 @@ class LLMAssistedRouterRouter(Router):
         self._llm = llm
         self._next_state_names_map: Mapping[str, str | None] = init_next_state_names()
         self._node_name_to_description_map: Mapping[str, str] = get_node_name_with_description()
+        log.info(
+            "router initialized",
+            states_count=len(self._next_state_names_map),
+            described_nodes_count=len(self._node_name_to_description_map),
+        )
     
     
     def get_initial_state_name(self) -> str:
@@ -86,19 +94,31 @@ class LLMAssistedRouterRouter(Router):
         messages_history: Sequence[ChatMessage],
     ) -> NextDecision:
         if current_state is None:
+            log.debug("router selected initial state because current state is missing")
             return NextDecision(state_name=LoadDatasetState.NAME, router_message_for_node=None)
 
         status = current_state.status
         
         if status == "PENDING":
+            log.debug("router kept current state because status is pending", state_name=current_state.name)
             return NextDecision(state_name=current_state.name, router_message_for_node=None)
         
         if status == "DONE":
             if current_state.name is NoopDoneState.NAME:
+                log.debug("router kept done state because terminal node reached")
                 return NextDecision(state_name=NoopDoneState.NAME, router_message_for_node=None)  
             next_name = self._next_state_names_map.get(current_state.name)
             if next_name is None:
+                log.error(
+                    "router has no next state mapping for done state",
+                    state_name=current_state.name,
+                )
                 raise ValueError(f"Router has no next state defined for current state {current_state.name!r} with DONE status.")
+            log.info(
+                "router advanced from done state to next state",
+                current_state_name=current_state.name,
+                next_state_name=next_name,
+            )
             return NextDecision(
                     state_name=next_name,
                     router_message_for_node=None,
@@ -106,11 +126,17 @@ class LLMAssistedRouterRouter(Router):
             
             
         if status == "ABORTED":
+            log.info("router entered aborted recovery flow", state_name=current_state.name)
             return self._decision_on_aborted_state(
                 current_state=current_state,
                 messages_history=messages_history,
             )
             
+        log.error(
+            "router received unexpected state status",
+            state_name=current_state.name,
+            status=status,
+        )
         raise ValueError(f"Router: unexpected status={status!r} for state={current_state.name!r}")
     
     def _decision_on_aborted_state(
@@ -156,21 +182,42 @@ class LLMAssistedRouterRouter(Router):
 
         # ---- validation: must not be None ----
         if not chosen:
+            log.error(
+                "router llm returned empty state selection",
+                current_state_name=current_state.name,
+            )
             raise ValueError(f"LLM failed to select a state for aborted '{current_state.name}'. Got empty/null response.\n\nLLM message:\n{decision.router_message_for_node or ''}"
             )
 
         # ---- validation: membership ----
         if chosen not in self._node_name_to_description_map or chosen not in self._next_state_names_map:
+            log.error(
+                "router llm returned invalid state selection",
+                current_state_name=current_state.name,
+                selected_state_name=chosen,
+            )
             raise ValueError(f"LLM selected invalid state '{chosen}' for aborted '{current_state.name}'. It must be a key in next_state_names_map and node_name_to_description_map.\n\nLLM message:\n{decision.router_message_for_node or ''}"
             )
 
         # ---- validation: previous constraint ----
         if chosen not in allowed_prev:
+            log.error(
+                "router llm selected non-previous state",
+                current_state_name=current_state.name,
+                selected_state_name=chosen,
+                allowed_previous_states=sorted(allowed_prev),
+            )
             raise ValueError(f"LLM selected state '{chosen}' which is not a previous state of '{current_state.name}' for recovery. Allowed previous states are: {sorted(allowed_prev)}.\n\nLLM message:\n{decision.router_message_for_node or ''}"
             )
 
         next_states =  self.get_next_state_names(chosen)      
         decision.delete_next_states_names = next_states if next_states else None  
+        log.info(
+            "router selected fallback state for aborted recovery",
+            current_state_name=current_state.name,
+            selected_state_name=chosen,
+            delete_states_count=len(next_states),
+        )
         return decision
 
 

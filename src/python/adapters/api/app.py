@@ -24,6 +24,7 @@ from python.adapters.api.docs import (
     OPENAPI_TAGS,
 )
 from python.adapters.api.routes import api_router
+from python.implementation.service.logging.default_logging import configure_default_logging
 
 __all__ = [
     "app",
@@ -37,6 +38,11 @@ __all__ = [
     "AUTHENTICATED_USER_DEP",
     "WORKFLOW_APP_DEP",
 ]
+
+configure_default_logging(
+    service_name=os.getenv("SERVICE_NAME"),
+    level=os.getenv("LOG_LEVEL"),
+)
 
 
 app = FastAPI(
