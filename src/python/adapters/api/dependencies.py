@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+from python.implementation.service.logging.default_logging import get_logger
 from functools import lru_cache
 
 from fastapi import Depends, File, Header, HTTPException, Path, Security
@@ -16,7 +16,7 @@ from python.implementation.service.firebsae_auth_service import (
 from python.implementation.workflows.depinit import make_workflow_app
 from python.implementation.workflows.workflow_app import WorkflowApp
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 bearer_scheme = HTTPBearer(
     auto_error=False,
@@ -74,10 +74,10 @@ async def get_authenticated_user(
     except (InvalidTokenError, ValueError) as exc:
         raise _unauthorized("Invalid or expired bearer token.") from exc
     except AuthServiceError as exc:
-        log.exception("authentication failed")
+        log.exception("authentication failed", error=exc)
         raise HTTPException(status_code=500, detail="authentication service unavailable") from exc
     except Exception as exc:
-        log.exception("authentication failed")
+        log.exception("authentication failed", error=exc)
         raise HTTPException(status_code=500, detail="authentication service unavailable") from exc
 
 
