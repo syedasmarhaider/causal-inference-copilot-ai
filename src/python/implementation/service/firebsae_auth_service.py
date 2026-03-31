@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import logging
+from python.implementation.service.logging.default_logging import get_logger
 import os
 from uuid import UUID, uuid5
 
 import firebase_admin
 from firebase_admin import auth, credentials
 
-from python.domain.service.auth_service import AuthService, AuthenticatedUser
-
+from python.domain.service.auth_service import AuthenticatedUser, AuthService
 
 _FIREBASE_USER_ID_NAMESPACE = UUID("2d5c4b6d-7f6b-4d8e-9a2d-1f5e9d9d8c11")
+log = get_logger(__name__)
 
 
 class AuthServiceError(Exception):
@@ -37,7 +37,7 @@ class FirebaseAuthService(AuthService):
                 check_revoked=True,
             )
         except Exception as exc:
-            logging.warning("Failed to verify Firebase token: %s", exc)
+            log.warning("Failed to verify Firebase token", error=exc)
             raise InvalidTokenError("failed to verify Firebase token") from exc
         
         raw_uid = decoded.get("uid")
@@ -63,10 +63,14 @@ class FirebaseAuthService(AuthService):
         except ValueError:
             project_id = os.getenv("GOOGLE_CLOUD_PROJECT_ID", "").strip()
             if not project_id:
-                raise ValueError("GOOGLE_CLOUD_PROJECT_ID environment variable must be set for FirebaseAuthService")
+                raise ValueError(
+                    "GOOGLE_CLOUD_PROJECT_ID environment variable must be set for FirebaseAuthService"
+                ) from None
             database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
             if not database_url:
-                raise ValueError("FIREBASE_DATABASE_URL environment variable must be set for FirebaseAuthService")
+                raise ValueError(
+                    "FIREBASE_DATABASE_URL environment variable must be set for FirebaseAuthService"
+                ) from None
 
             options: dict[str, str] = {}
             options["projectId"] = project_id

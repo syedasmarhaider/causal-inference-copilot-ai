@@ -1,33 +1,32 @@
 from __future__ import annotations
 
+import inspect
+from python.implementation.service.logging.default_logging import get_logger
+import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-import inspect
-import logging
-from typing import Any, ClassVar, Dict, List, Optional, Sequence
+from typing import Any, ClassVar
 from uuid import UUID
-import warnings
 
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
-from scipy.sparse import issparse  # type: ignore[import]
-
 from econml.dr import ForestDRLearner, LinearDRLearner, SparseLinearDRLearner
 from econml.sklearn_extensions.linear_model import WeightedLassoCVWrapper
-
+from scipy.sparse import issparse  # type: ignore[import]
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.linear_model import LogisticRegressionCV, RidgeCV
 from sklearn.ensemble import (
     ExtraTreesClassifier,
     ExtraTreesRegressor,
-    RandomForestClassifier,
-    RandomForestRegressor,
     HistGradientBoostingClassifier,
     HistGradientBoostingRegressor,
+    RandomForestClassifier,
+    RandomForestRegressor,
 )
+from sklearn.linear_model import LogisticRegressionCV, RidgeCV
+from sklearn.pipeline import Pipeline
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
@@ -71,6 +70,7 @@ from python.implementation.workflows.tools.causal.encoding_plan import Transform
 from python.implementation.workflows.tools.causal.encoding_util import EncodingUtil
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
+log = get_logger(__name__)
 
 # =============================================================================
 # Helpers
@@ -88,7 +88,7 @@ class _ToDense(BaseEstimator, TransformerMixin):
         return np.asarray(X)
 
 
-def _shape_as_list(x: Any) -> Optional[List[int]]:
+def _shape_as_list(x: Any) -> list[int] | None:
     if x is None:
         return None
     if hasattr(x, "shape"):
@@ -117,7 +117,7 @@ def _to_jsonable(value: Any) -> Any:
     return value
 
 
-def _safe_required_init_keys(estimator_cls: Any, *, init_map: Dict[str, Any]) -> List[str]:
+def _safe_required_init_keys(estimator_cls: Any, *, init_map: dict[str, Any]) -> list[str]:
     """
     Reflection sometimes surfaces pseudo-parameters like args/kwargs.
     Filter them out so adapters don't fail spuriously.
@@ -126,13 +126,13 @@ def _safe_required_init_keys(estimator_cls: Any, *, init_map: Dict[str, Any]) ->
     return [k for k in keys if k not in ("args", "kwargs")]
 
 
-def _supports_param(init_map: Dict[str, Any], name: str) -> bool:
+def _supports_param(init_map: dict[str, Any], name: str) -> bool:
     return name in init_map
 
 
 def _set_if_supported(
-    defaults: Dict[str, Any],
-    init_map: Dict[str, Any],
+    defaults: dict[str, Any],
+    init_map: dict[str, Any],
     name: str,
     value: Any,
 ) -> None:
@@ -275,7 +275,7 @@ def _wrap_xw_model(
     require_dense: bool,
 ) -> BaseEstimator:
     """Wrapper for nuisance models trained on concat([X, W])."""
-    steps: List[tuple[str, BaseEstimator]] = [("pre", pre_XW)]
+    steps: list[tuple[str, BaseEstimator]] = [("pre", pre_XW)]
     if require_dense:
         steps.append(("dense", _ToDense()))
     steps.append(("model", model))
@@ -290,7 +290,7 @@ def _wrap_xw_plus_t_model(
     require_dense: bool,
 ) -> BaseEstimator:
     """Wrapper for nuisance models trained on concat([X, W, onehot(T_excl_baseline)])."""
-    steps: List[tuple[str, BaseEstimator]] = [
+    steps: list[tuple[str, BaseEstimator]] = [
         ("pre_xw_only", _TransformFirstBlockPassthroughTail(pre_XW=pre_XW, n_xw=n_xw))
     ]
     if require_dense:
@@ -307,8 +307,8 @@ def _build_propensity_candidates(
     *,
     pre_XW: ColumnTransformer,
     missingness_W: bool,
-    random_state: Optional[int],
-    n_jobs: Optional[int],
+    random_state: int | None,
+    n_jobs: int | None,
 ) -> Sequence[BaseEstimator]:
     """
     Propensity nuisance: classifier for Pr[T=t | X, W].
@@ -363,8 +363,8 @@ def _build_regression_candidates(
     n_xw: int,
     discrete_outcome: bool,
     missingness_W: bool,
-    random_state: Optional[int],
-    n_jobs: Optional[int],
+    random_state: int | None,
+    n_jobs: int | None,
 ) -> Sequence[BaseEstimator]:
     """
     Outcome nuisance: estimator for E[Y | X, W, T], trained on concat([X, W, onehot(T_excl_baseline)]).
@@ -515,7 +515,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 limit=None,
             )
         except Exception as e:
-            logging.exception(e)
+            log.exception("DRLearner command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started,
@@ -571,12 +571,12 @@ class _BaseDRLearnerAdapter(CausalModel):
         try:
             specs: CausalSpec = command.causal_specs
             data_summary: DatasetSummaryModel = command.data_summary
-            transformation_plan: Optional[TransformPlan] = command.transformation_plan
+            transformation_plan: TransformPlan | None = command.transformation_plan
 
-            effect_modifiers_order: List[str] = list(
+            effect_modifiers_order: list[str] = list(
                 command.order_effect_modifiers or specs.effect_modifiers or []
             )
-            covariates_order: List[str] = list(
+            covariates_order: list[str] = list(
                 command.order_covariates or specs.covariates or []
             )
 
@@ -672,7 +672,7 @@ class _BaseDRLearnerAdapter(CausalModel):
             )
             init_map = maps["init"]
 
-            defaults: Dict[str, Any] = {}
+            defaults: dict[str, Any] = {}
             discrete_outcome = specs.outcome_spec.kind == "binary"
 
             if discrete_outcome:
@@ -724,13 +724,13 @@ class _BaseDRLearnerAdapter(CausalModel):
 
             est = self.ESTIMATOR_CLS(**defaults)
 
-            fit_warnings: List[str] = []
+            fit_warnings: list[str] = []
             with warnings.catch_warnings(record=True) as ws:
                 warnings.simplefilter("always")
                 est.fit(Y=Y, T=T, X=X, W=W)  # pyright: ignore[reportUnknownMemberType]
             fit_warnings = [f"{w.category.__name__}: {str(w.message)}" for w in ws]
 
-            artifacts: Dict[str, Any] = {
+            artifacts: dict[str, Any] = {
                 "n": int(df.shape[0]),
                 "y_shape": _shape_as_list(Y),
                 "t_shape": _shape_as_list(T),
@@ -744,7 +744,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 except Exception:
                     pass
 
-            fit_meta: Dict[str, Any] = {
+            fit_meta: dict[str, Any] = {
                 "warnings": fit_warnings,
                 "meta": {
                     "backend": self.BACKEND_NAME,
@@ -786,7 +786,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 meta={},
             )
         except Exception as e:
-            logging.exception(e)
+            log.exception("DRLearner command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
@@ -814,12 +814,12 @@ class _BaseDRLearnerAdapter(CausalModel):
         started_at: datetime,
     ) -> CausalResult:
         try:
-            warnings_list: List[str] = []
+            warnings_list: list[str] = []
             spec: CausalSpec = command.causal_specs
-            effect_modifiers_order: List[str] = list(
+            effect_modifiers_order: list[str] = list(
                 command.order_effect_modifiers or spec.effect_modifiers or []
             )
-            covariates_order: List[str] = list(
+            covariates_order: list[str] = list(
                 command.order_covariates or spec.covariates or []
             )
 
@@ -852,7 +852,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                     f"Invalid contrast: t1 value {t1} is the same as t0 baseline {t0}."
                 )
 
-            item: Dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
+            item: dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
             item["ate"] = est.ate(X=X, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
 
             try:
@@ -901,7 +901,7 @@ class _BaseDRLearnerAdapter(CausalModel):
             )
 
         except Exception as e:
-            logging.exception(e)
+            log.exception("DRLearner command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
@@ -927,7 +927,7 @@ class _BaseDRLearnerAdapter(CausalModel):
         command: CATECommand,
         started_at: datetime,
     ) -> CausalResult:
-        warnings_list: List[str] = []
+        warnings_list: list[str] = []
         try:
             model_record: ModelRecord | None = self.models_repo.load_model(
                 user_id=user_id,
@@ -950,7 +950,7 @@ class _BaseDRLearnerAdapter(CausalModel):
 
             est = model_record.model
             spec: CausalSpec = command.causal_specs
-            effect_modifiers_order: List[str] = list(
+            effect_modifiers_order: list[str] = list(
                 command.order_effect_modifiers or spec.effect_modifiers or []
             )
 
@@ -980,7 +980,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 is_global_counter_factual=command.inputs.counterfactual,
             )
 
-            effects: Dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
+            effects: dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
 
             try:
                 effects["cate"] = est.effect(X_query, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
@@ -1064,7 +1064,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 meta={},
             )
         except Exception as e:
-            logging.exception(e)
+            log.exception("DRLearner command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,

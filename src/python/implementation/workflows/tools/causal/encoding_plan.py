@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Annotated, Dict, List, Literal, Optional, Union
+from typing import Annotated, Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from python.implementation.workflows.utils.validation import NonEmptyStr
@@ -46,12 +47,12 @@ class CatOneHotParams(_BaseParams):
     drop_first: bool = False
     handle_unknown: Literal["ignore", "error"] = "ignore"
     # truly optional (None means "no cap")
-    max_categories: Optional[PosInt] = None
+    max_categories: PosInt | None = None
     missing: Literal["impute_token", "dummy_na", "error"] = "impute_token"
     missing_token: NonEmptyStr = "__MISSING__"
 
     @model_validator(mode="after")
-    def _validate_cat_onehot(self) -> "CatOneHotParams":
+    def _validate_cat_onehot(self) -> CatOneHotParams:
         if self.missing in ("dummy_na", "error"):
             # token is ignored in these modes, but keep it non-empty anyway
             return self
@@ -75,7 +76,7 @@ class NumMinMaxParams(NumParams):
     eps: float = 1e-12
     
     @model_validator(mode="after")
-    def _validate_minmax(self) -> "NumMinMaxParams":
+    def _validate_minmax(self) -> NumMinMaxParams:
         if not (self.eps > 0.0):
             raise ValueError("num_minmax: eps must be > 0.")
         return self
@@ -96,16 +97,16 @@ class DateTimeEpochParams(_BaseParams):
 
 class MapBinaryParams(_BaseParams):
     preset: Literal["map_binary"]
-    mapping: Dict[NonEmptyStr, float] = Field(..., min_length=1)
+    mapping: dict[NonEmptyStr, float] = Field(..., min_length=1)
 
     allow_unknown: bool = True
-    unknown_value: Optional[float] = None
+    unknown_value: float | None = None
 
     missing: Literal["as_unknown", "impute_token", "error"] = "as_unknown"
-    missing_token: Optional[NonEmptyStr] = None  # required if missing="impute_token"
+    missing_token: NonEmptyStr | None = None  # required if missing="impute_token"
 
     @model_validator(mode="after")
-    def _validate_map_binary(self) -> "MapBinaryParams":
+    def _validate_map_binary(self) -> MapBinaryParams:
         if self.missing == "impute_token" and self.missing_token is None:
             raise ValueError("map_binary: missing_token required when missing='impute_token'.")
         # Strong safety: avoid NaNs escaping unless explicitly configured
@@ -118,25 +119,26 @@ class MapBinaryParams(_BaseParams):
 
 class MapOrdinalParams(_BaseParams):
     preset: Literal["map_ordinal"]
-    order: List[NonEmptyStr] = Field(..., min_length=1)
+    order: list[NonEmptyStr] = Field(..., min_length=1)
     start: int = 0
 
     allow_unknown: bool = True
-    unknown_value: Optional[int] = None
+    unknown_value: int | None = None
 
     missing: Literal["as_unknown", "impute_token", "error"] = "as_unknown"
-    missing_token: Optional[NonEmptyStr] = None
-    token_position: Optional[Literal["prepend", "append"]] = None  # required if missing="impute_token"
+    missing_token: NonEmptyStr | None = None
+    token_position: Literal["prepend", "append"] | None = None  # required if missing="impute_token"
 
     @model_validator(mode="after")
-    def _validate_map_ordinal(self) -> "MapOrdinalParams":
+    def _validate_map_ordinal(self) -> MapOrdinalParams:
         if len(self.order) != len(set(self.order)):
             raise ValueError("map_ordinal: 'order' must not contain duplicates.")
-        if self.missing == "impute_token":
-            if self.missing_token is None or self.token_position is None:
-                raise ValueError(
-                    "map_ordinal: missing_token and token_position required when missing='impute_token'."
-                )
+        if self.missing == "impute_token" and (
+            self.missing_token is None or self.token_position is None
+        ):
+            raise ValueError(
+                "map_ordinal: missing_token and token_position required when missing='impute_token'."
+            )
         # Strong safety: avoid NaNs escaping unless explicitly configured
         if self.allow_unknown and self.unknown_value is None:
             raise ValueError("map_ordinal: unknown_value required when allow_unknown=True (avoid NaNs).")
@@ -146,17 +148,7 @@ class MapOrdinalParams(_BaseParams):
 
 
 EncodingPresetSpec = Annotated[
-    Union[
-        DropParams,
-        PassthroughParams,
-        CatOneHotParams,
-        NumStandardParams,
-        NumMinMaxParams,
-        NumLog1pParams,
-        DateTimeEpochParams,
-        MapBinaryParams,
-        MapOrdinalParams,
-    ],
+    DropParams | PassthroughParams | CatOneHotParams | NumStandardParams | NumMinMaxParams | NumLog1pParams | DateTimeEpochParams | MapBinaryParams | MapOrdinalParams,
     Field(discriminator="preset"),
 ]
 
@@ -174,10 +166,10 @@ class ColumnEncodingPlan(BaseModel):
 class TransformPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    columns: List[ColumnEncodingPlan] = Field(..., min_length=1)
+    columns: list[ColumnEncodingPlan] = Field(..., min_length=1)
 
     @model_validator(mode="after")
-    def _validate_plan(self) -> "TransformPlan":
+    def _validate_plan(self) -> TransformPlan:
         cols = [c.column for c in self.columns]
         if len(cols) != len(set(cols)):
             dup = sorted({c for c in cols if cols.count(c) > 1})

@@ -1,25 +1,29 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict, List, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
-from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_deps import ValidateCleanProtocolDeps
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_deps import (
+    ValidateCleanProtocolDeps,
+)
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
 
 class ValidateCleanProtocolPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    issues: List[ValidationIssueModel] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
-    validation_error: Optional[str] = None
-    user_acceptance: Optional[bool] = None
-    user_message: Optional[str] = None
+    issues: list[ValidationIssueModel] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    validation_error: str | None = None
+    user_acceptance: bool | None = None
+    user_message: str | None = None
 
     @field_validator("validation_error", "user_message", mode="before")
     @classmethod
-    def _empty_str_to_none(cls, v: Any) -> Optional[str]:
+    def _empty_str_to_none(cls, v: Any) -> str | None:
         if v is None:
             return None
         if isinstance(v, str):
@@ -50,28 +54,30 @@ class ValidateCleanProtocolState(State):
     @property
     def message(self) -> StateMessage:
         if self.payload.user_message is None:
-            raise ValueError("ValidateCleanProtocolState message is required but missing. State must have user message. Dont call this property if this is not runned in the node context where user_message is guaranteed to be set.")
-        if self.status in ("ABORTED", "DONE"):
-            action = "NONE"
-        else:
-            action = "NEEDS_INPUT"
+            raise ValueError(
+                "ValidateCleanProtocolState message is required but missing. State must have a user message. "
+                "Don't access this property outside a node context where user_message is guaranteed to be set."
+            )
+        action = "NONE" if self.status in ("ABORTED", "DONE") else "NEEDS_INPUT"
         return StateMessage(txt_message=self.payload.user_message,action=action)
 
     @property
-    def error(self) -> Optional[str]:
-        return self.payload.validation_error
+    def error(self) -> NodeExecutionError | None:
+        if self.payload.validation_error is None:
+            return None
+        return NodeExecutionError(state_name=self.NAME, error=self.payload.validation_error)
 
     def pre_required_states_names(self) -> Sequence[str]:
         return ValidateCleanProtocolDeps.pre_required_states_names()
 
-    def to_json_dict(self) -> Dict[str, Any]:
+    def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json")
 
     @classmethod
-    def from_json_dict(cls, payload: Dict[str, Any]) -> "ValidateCleanProtocolState":
+    def from_json_dict(cls, payload: dict[str, Any]) -> ValidateCleanProtocolState:
         model = ValidateCleanProtocolPayloadModel.model_validate(payload)
         return cls(model)
     
     @classmethod
-    def init_empty(cls) -> "ValidateCleanProtocolState":
+    def init_empty(cls) -> ValidateCleanProtocolState:
         return cls(ValidateCleanProtocolPayloadModel())

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 
@@ -13,7 +14,7 @@ class ModelNotFoundError(FileNotFoundError):
 class ModelRecord:
     model_id: UUID
     model: Any
-    metadata: Dict[str, Any]
+    metadata: dict[str, Any]
 
 
 class ModelsRepo(Protocol):
@@ -28,7 +29,7 @@ class ModelsRepo(Protocol):
         conversation_id: UUID,
         model_id: UUID,
         model: Any,
-        metadata: Optional[Mapping[str, Any]] = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
         """
         Persist a model artifact and optional metadata.

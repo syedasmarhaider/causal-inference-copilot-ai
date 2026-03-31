@@ -1,6 +1,6 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -19,5 +19,5 @@ class GraphImage:
 class CohortCate:
     group_key: str
     cate: np.ndarray
-    lower: Optional[np.ndarray] = None
-    upper: Optional[np.ndarray] = None    
+    lower: np.ndarray | None = None
+    upper: np.ndarray | None = None    

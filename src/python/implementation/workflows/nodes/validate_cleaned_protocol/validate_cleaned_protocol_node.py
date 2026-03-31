@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-import logging
+from python.implementation.service.logging.default_logging import get_logger
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence
+from typing import Any, ClassVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -13,12 +14,12 @@ from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
+from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_deps import (
+    ValidateCleanProtocolDeps,
+)
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_prompts import (
     VALIDATE_CLEAN_PROTOCOL_PROMPT,
     validate_cleaned_protocol_get_info,
-)
-from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_deps import (
-    ValidateCleanProtocolDeps,
 )
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import (
     ValidateCleanProtocolPayloadModel,
@@ -26,26 +27,25 @@ from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cl
 )
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_utils import (
     ValidationIssue,
+    validate_covariate_and_effect_modifier_constantness,
+    validate_covariate_and_effect_modifier_high_cardinality_and_id_like,
+    validate_covariate_and_effect_modifier_missingness,
+    validate_covariate_and_effect_modifier_missingness_by_treatment,
+    # ---- covariates + effect modifiers ----
+    validate_covariate_and_effect_modifier_presence,
+    validate_covariate_and_effect_modifier_type_risks,
     # ---- structural / protocol invariants ----
     validate_min_rows,
     validate_outcome,
-    validate_protocol_role_columns_invariants,
-
-    # ---- covariates + effect modifiers ----
-    validate_covariate_and_effect_modifier_presence,
-    validate_covariate_and_effect_modifier_missingness,
-    validate_covariate_and_effect_modifier_missingness_by_treatment,
-    validate_covariate_and_effect_modifier_constantness,
-    validate_covariate_and_effect_modifier_high_cardinality_and_id_like,
-    validate_covariate_and_effect_modifier_type_risks,
     # ---- overlap / positivity ----
     validate_overlap_and_positivity,
+    validate_protocol_role_columns_invariants,
     validate_treatment,
 )
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -71,21 +71,13 @@ class ValidateCleanProtocolNode(Node):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
-        messages_history: Optional[Sequence[ChatMessage]]
+        messages_history: Sequence[ChatMessage] | None
     ) -> State:
+        last_4_messages = messages_history[-4:] if messages_history is not None else None
         try:
             deps = ValidateCleanProtocolDeps.from_loaded(previous_state_dependencies)
-
-            # ----------------------------
-            # Guardrails: upstream sanity
-            # ----------------------------
-            causal_specs = deps.clean_protocol.payload.compiled_causal_spec
-            assert causal_specs is not None, (
-                "CleanProtocolState must provide latest compiled_causal_spec for validation."
-            )
-
-            clean_id = deps.clean_protocol.payload.clean_dataset_id
-            assert clean_id is not None, "CleanProtocolState must provide a clean_dataset_id for validation."
+            causal_specs = deps.causal_spec
+            clean_id = deps.dataset_id
 
             # ----------------------------
             # Load cleaned dataframe
@@ -97,8 +89,8 @@ class ValidateCleanProtocolNode(Node):
                 limit=None,
             )
             
-            all_issues: List[ValidationIssue] = []
-            metrics: Dict[str, Any] = {
+            all_issues: list[ValidationIssue] = []
+            metrics: dict[str, Any] = {
                 "n_rows_df": int(df.shape[0]),
                 "n_cols_df": int(df.shape[1]),
                 "df_columns_unique": bool(df.columns.is_unique),
@@ -200,13 +192,13 @@ class ValidateCleanProtocolNode(Node):
             # ----------------------------
             # Normalize issues -> pydantic models
             # ----------------------------
-            issue_models: List[ValidationIssueModel] = [
+            issue_models: list[ValidationIssueModel] = [
                 ValidationIssueModel.model_validate(it) for it in all_issues
             ]
             has_fail = any(i.severity == "FAIL" for i in issue_models)
 
             msg = self._make_user_message(
-                messages_history=messages_history,
+                messages_history=last_4_messages,
                 protocol_summary=self._protocol_summary(causal_specs),
                 metrics=metrics,
                 issues=[i.model_dump(mode="json") for i in issue_models],
@@ -223,7 +215,7 @@ class ValidateCleanProtocolNode(Node):
 
         except ValidationError as e:
             return self._abort(
-                messages_history=messages_history,
+                messages_history=last_4_messages,
                 validation_error=f"Pydantic validation error: {e.errors()}",
                 issues=[
                     {
@@ -235,9 +227,9 @@ class ValidateCleanProtocolNode(Node):
                 ],
             )
         except Exception as e:
-            log.exception("Unexpected error in ValidateCleanProtocolNode: %s", repr(e))
+            log.exception("Unexpected error in ValidateCleanProtocolNode", error=repr(e))
             return self._abort(
-                messages_history=messages_history,
+                messages_history=last_4_messages,
                 validation_error=repr(e),
                 issues=[
                     {
@@ -255,9 +247,9 @@ class ValidateCleanProtocolNode(Node):
     def _abort(
         self,
         *,
-        messages_history: Optional[Sequence[ChatMessage]],
+        messages_history: Sequence[ChatMessage] | None,
         validation_error: str,
-        issues: List[Dict[str, Any]],
+        issues: list[dict[str, Any]],
     ) -> ValidateCleanProtocolState:
         safe_issues = issues or [
             {
@@ -284,10 +276,10 @@ class ValidateCleanProtocolNode(Node):
         )
         return ValidateCleanProtocolState(payload=payload)
 
-    def _protocol_summary(self, causal_spec: CausalSpec) -> Dict[str, Any]:
+    def _protocol_summary(self, causal_spec: CausalSpec) -> dict[str, Any]:
         # outcome cols summary
         ospec = getattr(causal_spec, "outcome_spec", None)
-        out_cols: List[str] = []
+        out_cols: list[str] = []
         if ospec is not None:
             if getattr(ospec, "kind", None) == "duration":
                 out_cols = [
@@ -316,10 +308,10 @@ class ValidateCleanProtocolNode(Node):
     def _make_user_message(
         self,
         *,
-        messages_history: Optional[Sequence[ChatMessage]],
-        protocol_summary: Optional[Dict[str, Any]],
-        metrics: Dict[str, Any],
-        issues: List[Dict[str, Any]],
+        messages_history: Sequence[ChatMessage] | None,
+        protocol_summary: dict[str, Any] | None,
+        metrics: dict[str, Any],
+        issues: list[dict[str, Any]],
         has_fail: bool,
     ) -> _UserAcceptanceModel:
             user_payload = { # pyright: ignore[reportUnknownVariableType]
@@ -340,4 +332,4 @@ class ValidateCleanProtocolNode(Node):
 class _UserAcceptanceModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     message_for_user: str
-    user_acceptance: Optional[bool] = None      
+    user_acceptance: bool | None = None      

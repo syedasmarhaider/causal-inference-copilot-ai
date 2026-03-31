@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
-from typing import Any, Mapping, Optional, Sequence, Type
+from typing import Any
 from uuid import UUID
 
 import firebase_admin
@@ -51,13 +52,13 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             if not project_id:
                 raise ValueError(
                     "GOOGLE_CLOUD_PROJECT_ID environment variable must be set"
-                )
+                ) from None
 
             database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
             if not database_url:
                 raise ValueError(
                     "FIREBASE_DATABASE_URL environment variable must be set"
-                )
+                ) from None
 
             return firebase_admin.initialize_app(
                 credentials.ApplicationDefault(),
@@ -71,7 +72,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         self,
         *,
         app: Any,
-        state_classes_by_name: Mapping[str, Type[State]],
+        state_classes_by_name: Mapping[str, type[State]],
     ) -> None:
         if app is None:
             raise ValueError("app must not be None")
@@ -167,7 +168,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         *,
         user_id: UUID,
         conversation_id: UUID,
-    ) -> Optional[str]:
+    ) -> str | None:
         value = (
             self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
             .child("active_state_name")
@@ -201,7 +202,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         user_id: UUID,
         conversation_id: UUID,
         state_name: str,
-    ) -> Optional[State]:
+    ) -> State | None:
         if not isinstance(state_name, str) or not state_name.strip():
             raise ValueError("state_name must be a non-empty string")
 

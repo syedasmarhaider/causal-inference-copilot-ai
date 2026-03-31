@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from typing import List, Tuple
-
-import pandas as pd
 import matplotlib.pyplot as plt
+import pandas as pd
 
 from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
-from python.implementation.workflows.tools.data_profiling.plots.utils import fig_to_png_bytes, fmt_pct, safe_missing_rate
-
+from python.implementation.workflows.tools.data_profiling.plots.utils import (
+    fig_to_png_bytes,
+    fmt_pct,
+    safe_missing_rate,
+)
 
 KEY = "missingness_by_column"
 
@@ -31,7 +32,7 @@ def generate_data_completeness_graph(
         raise ValueError("top_k must be > 0")
 
     n_rows = int(df.shape[0])
-    rows: List[Tuple[str, float]] = [(str(c), safe_missing_rate(df[c])) for c in df.columns]
+    rows: list[tuple[str, float]] = [(str(c), safe_missing_rate(df[c])) for c in df.columns]
     rows.sort(key=lambda x: x[1], reverse=True)
     shown = rows[:top_k]
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence, cast
+from typing import Any, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,9 +12,14 @@ from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
-
-from python.implementation.workflows.nodes.model_selection.mode_selection_state import ConfirmedModelSelectionPayload, ModelSelectionPayload, ModelSelectionState
-from python.implementation.workflows.nodes.model_selection.model_selection_deps import ModelSelectionDeps
+from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
+    ConfirmedModelSelectionPayload,
+    ModelSelectionPayload,
+    ModelSelectionState,
+)
+from python.implementation.workflows.nodes.model_selection.model_selection_deps import (
+    ModelSelectionDeps,
+)
 from python.implementation.workflows.nodes.model_selection.model_selection_prompts import (
     MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
     MODEL_SELECTION_NEGOTIATOR_USER_PROMPT_TEMPLATE,
@@ -21,7 +27,9 @@ from python.implementation.workflows.nodes.model_selection.model_selection_promp
     MODEL_SELECTION_RECOMMENDER_USER_PROMPT_TEMPLATE,
     get_model_selection_node_info,
 )
-from python.implementation.workflows.tools.causal.causal_model_factory_tool import CausalModelFactoryTool
+from python.implementation.workflows.tools.causal.causal_model_factory_tool import (
+    CausalModelFactoryTool,
+)
 
 
 # ----------------------------
@@ -34,7 +42,7 @@ class _RecommendationItem(BaseModel):
     title: str
     best_when: str
     why: str
-    tradeoffs: Optional[str] = None
+    tradeoffs: str | None = None
 
 
 class _ModelShortlist(BaseModel):
@@ -56,15 +64,15 @@ def _safe_model_dump(x: Any) -> Any:
     return x
 
 def _build_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
-    causal_specs = deps.clean_protocol.payload.compiled_causal_spec
-    cl = deps.clean_protocol.payload
-    vc = deps.validate_clean_protocol.payload
-
-    treatment_spec = getattr(causal_specs, "treatment_spec", None)
-    outcome_spec = getattr(causal_specs, "outcome_spec", None)
-    covariates = getattr(causal_specs, "covariates", None)
-    effect_modifiers = getattr(causal_specs, "effect_modifiers", None)
-    experiment_type = getattr(causal_specs, "experiment_type", None)
+    causal_specs = deps.compiled_causal_spec
+    validation_issues = deps.validation_errors
+    summary = deps.clean_dataset_summary
+    
+    treatment_spec = causal_specs.treatment_spec
+    outcome_spec = causal_specs.outcome_spec
+    covariates = causal_specs.covariates
+    effect_modifiers = causal_specs.effect_modifiers
+    experiment_type = causal_specs.experiment_type
 
     return {
     
@@ -73,10 +81,9 @@ def _build_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
         "covariates": _safe_model_dump(covariates),
         "effect_modifiers": _safe_model_dump(effect_modifiers),
         "experiment_type": _safe_model_dump(experiment_type),
-        "summary": _safe_model_dump(getattr(cl, "summary", None)),
+        "summary": _safe_model_dump(summary),
         "validate_clean_protocol": {
-            "validation_error": getattr(vc, "validation_error", None),
-            "issues": _safe_model_dump(getattr(vc, "issues", None)),
+            "issues": [_safe_model_dump(issue) for issue in validation_issues],
         },
     }
 
@@ -116,7 +123,7 @@ class ModelSelectionNode(Node):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Any,  # Mapping[str, State] (kept Any to match your ABC signature)
-        messages_history: Optional[Sequence[ChatMessage]]
+        messages_history: Sequence[ChatMessage] | None
     ) -> State:
         if not isinstance(state, ModelSelectionState):
             raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")
@@ -124,6 +131,7 @@ class ModelSelectionNode(Node):
         # deps
         deps = ModelSelectionDeps.from_loaded(previous_state_dependencies)
         context = _build_context(deps=deps)
+        last_5_messages = messages_history[-5:] if messages_history else None
         
         ci_tool_factory_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
         ci_tool_factory = cast(CausalModelFactoryTool, ci_tool_factory_raw)
@@ -145,7 +153,7 @@ class ModelSelectionNode(Node):
                     system_prompt=MODEL_SELECTION_RECOMMENDER_SYSTEM_PROMPT,
                     user_prompt=user_prompt,
                     config= LLMConfig(temperature=1.0, model="pro"),
-                    history=messages_history,
+                    history=last_5_messages,
                     max_attempts=3,
                 )
 
@@ -186,18 +194,16 @@ class ModelSelectionNode(Node):
         negotiator_user_prompt = MODEL_SELECTION_NEGOTIATOR_USER_PROMPT_TEMPLATE.format(
             recommended_message=state.payload.system_choice_message or "",
             supported_estimators_json=_dumps(supported_estimators),
-            estimators_info_json=_dumps(supported_estimators),
+            estimators_info_json=_dumps(supported_estimators_info),
             context_json=_dumps(context),
         )
         
-        last_12_messages = messages_history[-12:] if messages_history else None
-
         decision = self.llm.generate_json(
                 schema=ConfirmedModelSelectionPayload,
                 system_prompt=MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
                 user_prompt=negotiator_user_prompt,
                 config= LLMConfig(temperature=0.2, model="basic"),
-                history=last_12_messages,
+                history=last_5_messages,
                 max_attempts=3,
             )
       

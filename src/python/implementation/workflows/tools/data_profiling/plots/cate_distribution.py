@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-from typing import List, Sequence, Tuple
+from collections.abc import Sequence
 
-import numpy as np
 import matplotlib
+import numpy as np
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from python.implementation.workflows.tools.data_profiling.plots.utils import fig_to_png_bytes
 from python.implementation.workflows.tools.data_profiling.plots.model import CohortCate, GraphImage
-from python.implementation.workflows.tools.data_profiling.plots.utils import align_finite_triplet
+from python.implementation.workflows.tools.data_profiling.plots.utils import (
+    align_finite_triplet,
+    fig_to_png_bytes,
+)
 
 
 def plot_cate_distribution(
@@ -27,7 +30,7 @@ def plot_cate_distribution(
 
     Intervals are not required.
     """
-    cleaned: List[Tuple[str, np.ndarray]] = []
+    cleaned: list[tuple[str, np.ndarray]] = []
     for c in cohorts:
         cate_f, _, _ = align_finite_triplet(c.cate, None, None)
         if cate_f.size > 0:
@@ -66,7 +69,7 @@ def plot_cate_distribution(
     y_base = np.arange(len(cleaned), dtype=float)
     rng = np.random.default_rng(0)
 
-    for i, (name, x) in enumerate(cleaned):
+    for i, (_name, x) in enumerate(cleaned):
         n = int(x.size)
         if n <= 30:
             y = np.full(n, y_base[i]) + rng.normal(0.0, 0.08, size=n)

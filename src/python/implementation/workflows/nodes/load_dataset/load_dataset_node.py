@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 import json
-from typing import ClassVar, Optional, Sequence, cast
-from uuid import UUID
 import uuid
+from collections.abc import Mapping, Sequence
+from typing import ClassVar, cast
+from uuid import UUID
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
@@ -15,8 +15,14 @@ from python.implementation.workflows.nodes.load_dataset.load_dataset_prompts imp
     load_dataset_node_info,
     load_dataset_system_prompt,
 )
-from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetPayloadModel, LoadDatasetState
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingError, DatasetProfilingTool
+from python.implementation.workflows.nodes.load_dataset.load_dataset_state import (
+    LoadDatasetPayloadModel,
+    LoadDatasetState,
+)
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
+    DatasetProfilingError,
+    DatasetProfilingTool,
+)
 from python.implementation.workflows.utils.utils import JSONDict
 
 
@@ -24,7 +30,7 @@ def _llm_message_strict(
     llm: LLMService,
     *,
     snapshot: JSONDict,
-    history: Optional[Sequence[ChatMessage]],
+    history: Sequence[ChatMessage] | None,
 ) -> str:
     cfg = LLMConfig(model="basic", temperature=0.5)
     msg = llm.generate(
@@ -45,7 +51,7 @@ def _format_columns_block(cols: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _latest_user_question(messages_history: Optional[Sequence[ChatMessage]]) -> Optional[str]:
+def _latest_user_question(messages_history: Sequence[ChatMessage] | None) -> str | None:
     if not messages_history:
         return None
 
@@ -60,7 +66,7 @@ def _latest_user_question(messages_history: Optional[Sequence[ChatMessage]]) -> 
 
 def _missing_data_snapshot(
     *,
-    messages_history: Optional[Sequence[ChatMessage]],
+    messages_history: Sequence[ChatMessage] | None,
     error: str,
 ) -> JSONDict:
     return {
@@ -100,14 +106,14 @@ class LoadDatasetNode(Node):
         conversation_id: UUID,
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
-        messages_history: Optional[Sequence[ChatMessage]],
+        messages_history: Sequence[ChatMessage] | None,
         state: State,
     ) -> State:
         if not isinstance(state, LoadDatasetState):
-            raise TypeError(f"{self.name}: expected LoadDatasetState, got {type(state).__name__}")
-
+            raise TypeError(f"LoadDatasetNode: expected LoadDatasetState, got {type(state)}")
+        
         load_dataset_id = LoadDatasetState.INIT_DATA_ID
-
+        
         # ---- Load dataframe ----
         try:
             df = self._data_repo.get_csv_data(
@@ -137,9 +143,9 @@ class LoadDatasetNode(Node):
             data_profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))
             summary = data_profiling_tool.extract_dataset_summary(
                 df,
-                max_categories=1000,
-                sample_distinct=1000,
-                compute_quantiles=True,
+                max_categories=200,
+                sample_distinct=200,
+                compute_quantiles=False,
                 strict=True,
             )
             graphs_list = data_profiling_tool.generate_basic_stats_graphs(df=df)

@@ -10,8 +10,6 @@ DOCKER_CONFIG_EXAMPLE ?= .docker.env.example
 -include docker.env
 -include $(DOCKER_CONFIG)
 
-.PHONY: help venv install dev-tools lint lint-fix format format-fix test test-quick clean run-cli run-api run-api-prod run-api-local docker-image docker-build docker-push
-
 VENV ?= .venv
 PYBIN := $(VENV)/bin
 PYTHON := $(PYBIN)/python
@@ -35,15 +33,18 @@ IMAGE_URI := $(IMAGE_REPOSITORY):$(IMAGE_TAG)
 # Make Python see your src/ packages
 export PYTHONPATH := src
 
+.PHONY: help
 help:
 	@echo "make install             - create venv and install runtime deps"
-	@echo "make dev-tools           - install dev tools (ruff/black/pytest) if missing"
+	@echo "make install-test        - install runtime + test deps"
+	@echo "make install-dev         - install runtime + test + dev deps"
+	@echo "make dev-tools           - alias for install-dev"
 	@echo "make lint                - ruff check ."
 	@echo "make lint-fix            - ruff check . --fix"
 	@echo "make format              - black . --check"
 	@echo "make format-fix          - black ."
-	@echo "make test                - pytest with coverage"
-	@echo "make test-quick          - pytest (no coverage)"
+	@echo "make test                - run test suite"
+	@echo "make test-quick          - run test suite (fast fail)"
 	@echo "make run-cli ARGS='...'  - run console copilot CLI (args forwarded)"
 	@echo "make run-api             - run FastAPI (REST + WebSocket) with reload"
 	@echo "make run-api-prod        - run FastAPI (REST + WebSocket) without reload"
@@ -52,38 +53,63 @@ help:
 	@echo "make docker-push         - push Docker image to registry"
 	@echo "make clean               - remove venv + caches"
 
+.PHONY: venv
 venv:
 	@test -d $(VENV) || python3 -m venv $(VENV)
 	@$(PYTHON) -m pip install --upgrade pip setuptools wheel
 
+.PHONY: install
 install: venv
 	@$(PIP) install -r requirements.txt
 
-lint: install
+.PHONY: install-test
+install-test: venv
+	@$(PIP) install -r requirements-test.txt
+
+.PHONY: install-dev
+install-dev: venv
+	@$(PIP) install -r requirements-dev.txt
+
+.PHONY: test-tools
+test-tools: install-test
+
+.PHONY: dev-tools
+dev-tools: install-dev
+
+.PHONY: lint
+lint: dev-tools
 	@$(PYBIN)/ruff check .
 
-# lint-fix: install
-# 	@$(PYBIN)/ruff check . --fix
+.PHONY: lint-fix
+lint-fix: dev-tools
+	@$(PYBIN)/ruff check . --fix
 
-# format: install
-# 	@$(PYBIN)/black . --check
+.PHONY: format
+format: dev-tools
+	@$(PYBIN)/black . --check
 
-# format-fix: install
-# 	@$(PYBIN)/black .
+.PHONY: format-fix
+format-fix: dev-tools
+	@$(PYBIN)/black .
 
-# test: install
-# 	@$(PYBIN)/pytest -c pytest.ini --cov=python --cov-report=term-missing --maxfail=1 -q
-
-test: install
+.PHONY: test
+test: test-tools
 	@$(PYBIN)/pytest -c pytest.ini -q
 
+.PHONY: test-quick
+test-quick: test-tools
+	@$(PYBIN)/pytest -c pytest.ini --maxfail=1 -q
+
+.PHONY: run-cli
 run-cli: venv
 	@$(PYTHON) -m python.adapters.cli.main $(ARGS)
 
 # REST + WebSocket server (FastAPI)
+.PHONY: run-api
 run-api: venv
 	@$(PYBIN)/uvicorn $(API_APP) --host $(API_HOST) --port $(API_PORT) --reload
 
+.PHONY: run-api-local
 run-api-local: venv
 	@test -f $(ENV_FILE) || { echo "Missing $(ENV_FILE)"; exit 1; }
 	@set -a; \
@@ -94,20 +120,24 @@ run-api-local: venv
 		--port "$${API_PORT:-8080}" \
 		--reload
 
-
+.PHONY: run-api-prod
 run-api-prod: venv
 	@$(PYBIN)/uvicorn $(API_APP) --host $(API_HOST) --port $(API_PORT)
 
+.PHONY: docker-image
 docker-image:
 	@echo $(IMAGE_URI)
 
+.PHONY: docker-build
 docker-build:
 	@echo "Building image: $(IMAGE_URI)"
 	@docker build --platform linux/amd64 -t $(IMAGE_URI) -f Dockerfile .
 
+.PHONY: docker-push
 docker-push: docker-build
 	@echo "Pushing image: $(IMAGE_URI)"
 	@docker push $(IMAGE_URI)
 
+.PHONY: clean
 clean:
 	@rm -rf $(VENV) .pytest_cache .ruff_cache .coverage coverage.xml htmlcov __pycache__ **/__pycache__

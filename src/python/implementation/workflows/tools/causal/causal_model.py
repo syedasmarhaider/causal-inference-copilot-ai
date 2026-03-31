@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-from typing import Protocol, Union
+from typing import Protocol
 from uuid import UUID
 
-from python.implementation.workflows.tools.causal.causal_command import ATECommand, ATEResult, CATECommand, CATEResult, CommandType, FitCommand, FitResult
-
-CausalCommand = Union[
-    FitCommand,
+from python.implementation.workflows.tools.causal.causal_command import (
     ATECommand,
-    CATECommand,
-]
-
-CausalResult = Union[
-    FitResult,
     ATEResult,
+    CATECommand,
     CATEResult,
-]  
+    CommandType,
+    FitCommand,
+    FitResult,
+)
+
+CausalCommand = FitCommand | ATECommand | CATECommand
+
+CausalResult = FitResult | ATEResult | CATEResult
 
 class CausalModel(Protocol):
     def get_info(self) -> str: ...
@@ -27,4 +27,3 @@ class CausalModel(Protocol):
         conversation_id: UUID,
         command: CausalCommand,
     ) -> CausalResult: ...
-

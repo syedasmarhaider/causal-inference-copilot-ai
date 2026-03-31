@@ -1,16 +1,20 @@
 from __future__ import annotations
 
-from typing import List, Sequence, Tuple
+from collections.abc import Sequence
 
-import numpy as np
 import matplotlib
+import numpy as np
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from python.implementation.workflows.tools.data_profiling.plots.utils import fig_to_png_bytes
 from python.implementation.workflows.tools.data_profiling.plots.model import CohortCate, GraphImage
-from python.implementation.workflows.tools.data_profiling.plots.utils import align_finite_triplet, bootstrap_ci_mean
+from python.implementation.workflows.tools.data_profiling.plots.utils import (
+    align_finite_triplet,
+    bootstrap_ci_mean,
+    fig_to_png_bytes,
+)
 
 
 def plot_cate_forest_mean_ci(
@@ -29,7 +33,7 @@ def plot_cate_forest_mean_ci(
 
     This is the best “comparison” plot for multiple cohorts.
     """
-    rows: List[Tuple[str, float, float, float, int]] = []
+    rows: list[tuple[str, float, float, float, int]] = []
     for i, c in enumerate(cohorts):
         cate_f, _, _ = align_finite_triplet(c.cate, None, None)
         if cate_f.size == 0:
@@ -49,7 +53,7 @@ def plot_cate_forest_mean_ci(
     rows.sort(key=lambda r: r[1])
     names = [f"{nm} (n={n})" for nm, _, _, _, n in rows]
     means = np.array([m for _, m, _, _, _ in rows], dtype=float)
-    lows  = np.array([l for _, _, l, _, _ in rows], dtype=float)
+    lows = np.array([lo for _, _, lo, _, _ in rows], dtype=float)
     highs = np.array([h for _, _, _, h, _ in rows], dtype=float)
 
     y = np.arange(len(rows), dtype=float)

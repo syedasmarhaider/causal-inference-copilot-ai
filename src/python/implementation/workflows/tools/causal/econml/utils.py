@@ -1,16 +1,35 @@
 
 from __future__ import annotations
-from datetime import datetime, timezone
+
 import inspect
 import math
 import numbers
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Type
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
-from python.implementation.workflows.tools.causal.causal_spec import BinaryOutcomeSpecModel, BinaryTreatmentSpecModel, CausalSpec
+from python.implementation.workflows.tools.causal.causal_spec import (
+    BinaryOutcomeSpecModel,
+    BinaryTreatmentSpecModel,
+    CausalSpec,
+)
+from python.implementation.workflows.tools.causal.encoding_plan import (
+    CatOneHotParams,
+    DateTimeEpochParams,
+    DropParams,
+    EncodingPresetSpec,
+    MapBinaryParams,
+    MapOrdinalParams,
+    NumLog1pParams,
+    NumMinMaxParams,
+    NumStandardParams,
+    PassthroughParams,
+    TransformPlan,
+)
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
-from python.implementation.workflows.tools.causal.encoding_plan import CatOneHotParams, DateTimeEpochParams, DropParams, EncodingPresetSpec, MapBinaryParams, MapOrdinalParams, NumLog1pParams, NumMinMaxParams, NumStandardParams, PassthroughParams, TransformPlan
 
 
 class ModelSpecError(ValueError):
@@ -21,7 +40,7 @@ class ModelSpecError(ValueError):
 _EMPTY = inspect._empty # pyright: ignore[reportPrivateUsage]
 
 def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def jsonish_default(v: Any) -> Any:
@@ -37,7 +56,7 @@ def jsonish_default(v: Any) -> Any:
     if isinstance(v, dict):
         # keep dict only if it is JSON-ish
         ok = True
-        out: Dict[str, Any] = {}
+        out: dict[str, Any] = {}
         for k, vv in v.items(): # pyright: ignore[reportUnknownVariableType]
             if not isinstance(k, str):
                 ok = False
@@ -51,7 +70,7 @@ def jsonish_default(v: Any) -> Any:
     return repr(v) # pyright: ignore[reportUnknownArgumentType]
 
 
-def _param_meta(p: inspect.Parameter) -> Dict[str, Any]:
+def _param_meta(p: inspect.Parameter) -> dict[str, Any]:
     ann = None if p.annotation is _EMPTY else repr(p.annotation)
     return {
         "required": (p.default is _EMPTY),
@@ -62,10 +81,10 @@ def _param_meta(p: inspect.Parameter) -> Dict[str, Any]:
 
 
 def build_init_fit_options_param_maps(
-    cls: Type[Any],
+    cls: type[Any],
     *,
-    fit_include_names: Optional[Set[str]] = None,
-) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    fit_include_names: set[str] | None = None,
+) -> dict[str, dict[str, dict[str, Any]]]:
     """
     Returns:
       {
@@ -82,14 +101,14 @@ def build_init_fit_options_param_maps(
 
     # ---- __init__ map ----
     init_sig = inspect.signature(cls.__init__)
-    init_map: Dict[str, Dict[str, Any]] = {}
+    init_map: dict[str, dict[str, Any]] = {}
     for name, p in init_sig.parameters.items():
         if name == "self":
             continue
         init_map[name] = _param_meta(p)
 
     # ---- fit map ----
-    fit_map: Dict[str, Dict[str, Any]] = {}
+    fit_map: dict[str, dict[str, Any]] = {}
     if hasattr(cls, "fit"):
         fit_sig = inspect.signature(cls.fit)  # type: ignore[attr-defined]
         for name, p in fit_sig.parameters.items():
@@ -113,7 +132,7 @@ def validate_flat_options(
     Raise ValueError on unknown keys.
     """
     allowed = set(init_map.keys()) | set(fit_map.keys())
-    unknown = [k for k in options.keys() if k not in allowed]
+    unknown = [k for k in options if k not in allowed]
     if unknown:
         raise ValueError(f"Unknown option keys: {unknown}")
 
@@ -123,15 +142,15 @@ def split_flat_options(
     *,
     init_map: Mapping[str, Any],
     fit_map: Mapping[str, Any],
-) -> tuple[Dict[str, Any], Dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Split a flat options dict into:
       - init_kwargs (for cls(**init_kwargs))
       - fit_kwargs  (for est.fit(..., **fit_kwargs))
     """
     validate_flat_options(options, init_map=init_map, fit_map=fit_map)
-    init_kwargs: Dict[str, Any] = {}
-    fit_kwargs: Dict[str, Any] = {}
+    init_kwargs: dict[str, Any] = {}
+    fit_kwargs: dict[str, Any] = {}
 
     for k, v in options.items():
         if k in init_map:
@@ -142,7 +161,7 @@ def split_flat_options(
     return init_kwargs, fit_kwargs
 
 
-def required_init_keys(cls: Type[Any], init_map: Mapping[str, Any]) -> Set[str]:
+def required_init_keys(cls: type[Any], init_map: Mapping[str, Any]) -> set[str]:
         sig = inspect.signature(cls.__init__)
         required = {p.name for p in sig.parameters.values() if p.default is p.empty and p.name in init_map}
         return required  
@@ -162,7 +181,7 @@ def has_missing(arr: Any) -> bool:
         return bool(pd.isna(a).any())
 
 
-DiscreteKey = Tuple[str, Any]
+DiscreteKey = tuple[str, Any]
 
 
 def _normalize_discrete_literal(v: Any) -> DiscreteKey:
@@ -215,9 +234,9 @@ def get_input_params_from_spec(
     df: pd.DataFrame,
     specs: CausalSpec,
     *,
-    effect_modifiers_order: Optional[List[str]] = None,
-    covariates_order: Optional[List[str]] = None,
-) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, Any]]:
+    effect_modifiers_order: list[str] | None = None,
+    covariates_order: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, dict[str, Any]]:
 
     def _map_binary_series(
         ser: pd.Series,
@@ -319,7 +338,7 @@ def get_input_params_from_spec(
 
     overlap_XW = sorted(set(X_order).intersection(W_order))
 
-    meta: Dict[str, Any] = {
+    meta: dict[str, Any] = {
         "y": y_col,
         "t": t_col,
         "x_cols": x_cols,
@@ -362,7 +381,7 @@ def validate_semantic_consistency(spec: CausalSpec, init_kwargs: Mapping[str, An
 
 
 
-def serialize_inference_obj(obj: Any) -> Dict[str, Any]:
+def serialize_inference_obj(obj: Any) -> dict[str, Any]:
     # Try common econml inference surfaces; fall back to repr
     if hasattr(obj, "summary_frame"):
         try:
@@ -381,8 +400,8 @@ def serialize_inference_obj(obj: Any) -> Dict[str, Any]:
 
 def materialize_x_query(
     *,
-    x_rows: List[Dict[str, Any]],
-    x_cols: List[str],
+    x_rows: list[dict[str, Any]],
+    x_cols: list[str],
 ) -> np.ndarray:
     if not x_cols:
         raise ModelSpecError("CATE requires effect modifiers X; x_cols is empty.")
@@ -406,7 +425,7 @@ def materialize_x_query(
 def raise_if_x_rows_not_exactly_match_fit_x_cols(
     *,
     x_rows: pd.DataFrame,
-    x_cols: List[str],
+    x_cols: list[str],
     require_order: bool = True,
 ) -> None:
     """
@@ -451,16 +470,16 @@ def is_missing_handled(
     *,
     plan: TransformPlan,
     summary: DatasetSummaryModel,
-    col_name_list: List[str],
+    col_name_list: list[str],
     strict: bool = True,
 ) -> bool:
-    missing_by_col: Dict[str, int] = {p.name: int(p.n_missing) for p in summary.profiles}
+    missing_by_col: dict[str, int] = {p.name: int(p.n_missing) for p in summary.profiles}
 
     # Index plan by column for O(1) lookup
     plan_by_col = {cp.column: cp for cp in plan.columns}
 
-    forbidden: List[str] = []
-    needs_allow_missing: List[str] = []
+    forbidden: list[str] = []
+    needs_allow_missing: list[str] = []
 
     for col in col_name_list:
         col_plan = plan_by_col.get(col)

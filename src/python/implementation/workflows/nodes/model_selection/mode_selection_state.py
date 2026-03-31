@@ -1,27 +1,31 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar, Optional, Sequence
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
+from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
-from python.implementation.workflows.nodes.model_selection.model_selection_deps import ModelSelectionDeps
+from python.implementation.workflows.nodes.model_selection.model_selection_deps import (
+    ModelSelectionDeps,
+)
 
 
 class ConfirmedModelSelectionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    selected_model: Optional[str] = None
-    reasoning: Optional[str] = None
+    selected_model: str | None = None
+    reasoning: str | None = None
 
 
 class ModelSelectionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    confirmed_model_selection: Optional[ConfirmedModelSelectionPayload] = None
-    message: Optional[str] = None
-    error: Optional[str] = None
-    system_choice_message: Optional[str] = None
+    confirmed_model_selection: ConfirmedModelSelectionPayload | None = None
+    message: str | None = None
+    error: str | None = None
+    system_choice_message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,8 +38,10 @@ class ModelSelectionState(State):
         return self.NAME
 
     @property
-    def error(self) -> Optional[str]:
-        return self.payload.error
+    def error(self) -> NodeExecutionError | None:
+        if self.payload.error is not None:
+            return NodeExecutionError(state_name=self.NAME, error=self.payload.error)
+        return None
 
     @property
     def status(self) -> Status:

@@ -1,34 +1,35 @@
 from __future__ import annotations
 
 import math
-from typing import Any, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
-from  python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
+from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
 from python.implementation.workflows.tools.data_profiling.plots.utils import (
+    build_binary_treatment_from_protocol,
     coerce_numeric_ratio,
     fig_to_png_bytes,
-    protocol_WX_columns,
-    build_binary_treatment_from_protocol,
     fit_treatment_likelihood_scores,
+    protocol_WX_columns,
 )
 
 # ----------------------------
 # helpers
 # ----------------------------
 
-def _split_label(label: str) -> Tuple[str, str]:
+def _split_label(label: str) -> tuple[str, str]:
     parts = [p.strip() for p in label.split(" vs ")]
     if len(parts) == 2:
         return parts[0], parts[1]
     return "Control", "Treated"
 
 
-def _safe_cols_present(df: pd.DataFrame, cols: Sequence[str]) -> List[str]:
-    out: List[str] = []
+def _safe_cols_present(df: pd.DataFrame, cols: Sequence[str]) -> list[str]:
+    out: list[str] = []
     seen = set()
     for c in cols:
         if c in df.columns and c not in seen:
@@ -81,14 +82,11 @@ def _cramers_v(x: pd.Series, t: np.ndarray) -> float:
     return float(v) if math.isfinite(v) else 0.0
 
 
-def _rank_confounders(d: pd.DataFrame, t_bin: np.ndarray, candidates: Sequence[str]) -> List[Tuple[str, float]]:
-    scored: List[Tuple[str, float]] = []
+def _rank_confounders(d: pd.DataFrame, t_bin: np.ndarray, candidates: Sequence[str]) -> list[tuple[str, float]]:
+    scored: list[tuple[str, float]] = []
     for c in candidates:
         s = d[c]
-        if _is_numericish(s):
-            score = _abs_corr_with_t(s, t_bin)
-        else:
-            score = _cramers_v(s, t_bin)
+        score = _abs_corr_with_t(s, t_bin) if _is_numericish(s) else _cramers_v(s, t_bin)
         if math.isfinite(score) and score > 0:
             scored.append((c, float(score)))
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -186,10 +184,10 @@ def generate_propensity_vs_top_confounders_graphs(
     protocol: Any,
     *,
     top_k: int = 4,
-    confounders: Optional[Sequence[str]] = None,
+    confounders: Sequence[str] | None = None,
     include_effect_modifiers_in_propensity: bool = True,
     key_prefix: str = "causal_propensity_vs",
-) -> List[GraphImage]:
+) -> list[GraphImage]:
     """
     Graph (5) — but for multiple baseline drivers.
     Returns one GraphImage per confounder.
@@ -218,7 +216,7 @@ def generate_propensity_vs_top_confounders_graphs(
     if not picked:
         raise ValueError("No confounders available to plot (check protocol W columns).")
 
-    out: List[GraphImage] = []
+    out: list[GraphImage] = []
     for c in picked:
         fig = _plot_propensity_vs_confounder(
             d=d,

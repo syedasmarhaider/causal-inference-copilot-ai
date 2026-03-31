@@ -1,34 +1,35 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar, List, Optional, Sequence
+from typing import Any, ClassVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 
 
-
 class ModelTrainPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    trained_model_id: Optional[UUID] = None
+    trained_model_id: UUID | None = None
     
-    column_transformation_plan: Optional[TransformPlan] = None
-    training_warnings: Optional[str] = None
-    order_effect_modifiers: Optional[List[str]] = None
-    order_covariates: Optional[List[str]] = None
-    prev_training_errors: Optional[str] = None
-    no_of_times_trained: Optional[int] = None
+    column_transformation_plan: TransformPlan | None = None
+    training_warnings: str | None = None
+    order_effect_modifiers: list[str] | None = None
+    order_covariates: list[str] | None = None
+    prev_training_errors: str | None = None
+    no_of_times_trained: int | None = None
 
     # UI / node-local
-    user_message: Optional[str] = None
-    needs_user_input: Optional[bool] = None
+    user_message: str | None = None
+    needs_user_input: bool | None = None
     
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,8 +44,10 @@ class ModelTrainState(State):
         return self.NAME
 
     @property
-    def error(self) -> Optional[str]:
-        return self.payload.error
+    def error(self) -> NodeExecutionError | None:
+        if self.payload.error is not None:
+            return NodeExecutionError(state_name=self.NAME, error=self.payload.error)
+        return None
 
     @property
     def status(self) -> Status:
@@ -75,10 +78,10 @@ class ModelTrainState(State):
         return self.payload.model_dump(mode="json", exclude_none=True)
 
     @classmethod
-    def from_json_dict(cls, payload: dict[str, Any]) -> "ModelTrainState":
+    def from_json_dict(cls, payload: dict[str, Any]) -> ModelTrainState:
         model = ModelTrainPayload.model_validate(payload)
         return cls(payload=model)
 
     @classmethod
-    def init_empty(cls) -> "ModelTrainState":
+    def init_empty(cls) -> ModelTrainState:
         return cls(payload=ModelTrainPayload())

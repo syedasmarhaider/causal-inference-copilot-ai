@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Sequence
+from typing import ClassVar
 from uuid import UUID
-from collections.abc import Mapping
 
 from python.domain.service.llm_service import ChatMessage
 from python.domain.workflows.node import Node
@@ -35,6 +35,6 @@ class NoopDoneNode(Node):
         state: State,
         tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
-        messages_history: Optional[Sequence[ChatMessage]]
+        messages_history: Sequence[ChatMessage] | None
     ) -> State:
         return NoopDoneState()

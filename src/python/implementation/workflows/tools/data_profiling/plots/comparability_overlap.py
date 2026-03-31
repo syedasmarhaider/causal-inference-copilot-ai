@@ -1,23 +1,24 @@
 from __future__ import annotations
 
-from typing import Any, List, Sequence
+from collections.abc import Sequence
+from typing import Any
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
 from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
 from python.implementation.workflows.tools.data_profiling.plots.utils import (
-    fig_to_png_bytes,
-    fmt_pct,
-    fmt_k,
     build_binary_treatment_from_protocol,
-    protocol_WX_columns,
+    fig_to_png_bytes,
     fit_treatment_likelihood_scores,
+    fmt_k,
+    fmt_pct,
+    protocol_WX_columns,
 )
 
 
-def _require_columns(df: pd.DataFrame, cols: Sequence[str]) -> List[str]:
+def _require_columns(df: pd.DataFrame, cols: Sequence[str]) -> list[str]:
     return [c for c in cols if c not in df.columns]
 
 

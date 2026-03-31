@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Dict, Literal, Mapping, Optional
+from typing import Literal
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -45,7 +46,7 @@ class LLMServiceSettings:
     )
 
     timeout_s: float = 300.0
-    hard_deadline_s: Optional[float] = 300.0
+    hard_deadline_s: float | None = 300.0
     max_retries: int = 2
     executor_workers: int = 4
 
@@ -80,7 +81,7 @@ def _build_chat_models(
     provider: Provider,
     model_map: Mapping[AvailableModelsKey, str],
     timeout_s: float,
-) -> tuple[Dict[AvailableModelsKey, BaseChatModel], Dict[AvailableModelsKey, str]]:
+) -> tuple[dict[AvailableModelsKey, BaseChatModel], dict[AvailableModelsKey, str]]:
     """
     Build one LangChain chat model per unique concrete provider model name,
     then attach aliases to those instances.
@@ -96,9 +97,9 @@ def _build_chat_models(
     if not api_key:
         raise ValueError("Missing API key. Set GEMINI_API_KEY.")
 
-    unique_models: Dict[str, BaseChatModel] = {}
-    alias_models: Dict[AvailableModelsKey, BaseChatModel] = {}
-    alias_model_names: Dict[AvailableModelsKey, str] = {}
+    unique_models: dict[str, BaseChatModel] = {}
+    alias_models: dict[AvailableModelsKey, BaseChatModel] = {}
+    alias_model_names: dict[AvailableModelsKey, str] = {}
 
     for alias, concrete_model_name in model_map.items():
         name = concrete_model_name.strip()

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
+from python.implementation.service.logging.default_logging import get_logger
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Mapping, Optional, Protocol, cast
+from typing import Any, Final, Protocol, cast
 from uuid import UUID
 
 import joblib  # pyright: ignore[reportMissingTypeStubs]
@@ -25,7 +26,7 @@ DEFAULT_GCS_UPLOAD_RETRY_TIMEOUT_SECONDS: Final[float] = 900.0
 DEFAULT_GCS_UPLOAD_CHUNK_SIZE_BYTES: Final[int] = 8 * 1024 * 1024
 _UPLOAD_CHUNK_SIZE_GRANULARITY_BYTES: Final[int] = 256 * 1024
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 def _env_float_seconds(name: str, default: float) -> float:
@@ -59,16 +60,17 @@ def _env_int(name: str, default: int) -> int:
         return default
     try:
         value = int(raw)
-    except ValueError:
-        log.warning(
+    except ValueError as exc:
+        log.error(
             "Invalid %s value=%r. Falling back to default=%s.",
             name,
             raw,
             default,
+            error=exc,
         )
         return default
     if value <= 0:
-        log.warning(
+        log.error(
             "Non-positive %s value=%r. Falling back to default=%s.",
             name,
             raw,
@@ -108,7 +110,7 @@ def _gcs_upload_chunk_size_bytes() -> int:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _json_dumps(obj: Mapping[str, Any]) -> str:
@@ -124,7 +126,7 @@ class _JoblibLike(Protocol):
         protocol: int = ...,
     ) -> Any: ...
 
-    def load(self, filename: Any, mmap_mode: Optional[str] = ...) -> Any: ...
+    def load(self, filename: Any, mmap_mode: str | None = ...) -> Any: ...
 
 
 _joblib: _JoblibLike = cast(_JoblibLike, joblib)
@@ -217,7 +219,7 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
         model_id: UUID,
         artifact_bytes: int,
         artifact_sha256: str,
-        app_metadata: Optional[Mapping[str, Any]],
+        app_metadata: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         return {
             "model_id": str(model_id),
@@ -310,7 +312,7 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
         conversation_id: UUID,
         model_id: UUID,
         model: Any,
-        metadata: Optional[Mapping[str, Any]] = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
         artifact_blob = self._artifact_blob(
             user_id=user_id,
@@ -483,4 +485,3 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
                     blob.name,
                     exc_info=True,
                 )
-                pass

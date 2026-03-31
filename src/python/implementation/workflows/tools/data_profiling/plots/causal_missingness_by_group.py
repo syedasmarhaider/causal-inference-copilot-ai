@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-from typing import Any, List, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
 from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
 from python.implementation.workflows.tools.data_profiling.plots.utils import (
+    build_binary_treatment_from_protocol,
     fig_to_png_bytes,
     protocol_WX_columns,
-    build_binary_treatment_from_protocol,
 )
 
 
-def _split_label(label: str) -> Tuple[str, str]:
+def _split_label(label: str) -> tuple[str, str]:
     # label is produced by build_binary_treatment_from_protocol as: "control vs treated"
     parts = [p.strip() for p in label.split(" vs ")]
     if len(parts) == 2:
@@ -22,8 +23,8 @@ def _split_label(label: str) -> Tuple[str, str]:
     return "Control", "Treated"
 
 
-def _safe_cols_present(df: pd.DataFrame, cols: Sequence[str]) -> List[str]:
-    out: List[str] = []
+def _safe_cols_present(df: pd.DataFrame, cols: Sequence[str]) -> list[str]:
+    out: list[str] = []
     seen = set()
     for c in cols:
         if c in df.columns and c not in seen:
@@ -74,7 +75,6 @@ def generate_causal_missingness_by_group_graph(
     show = order[: max(1, min(int(top_k), len(order)))]
     miss_t_s = miss_t.reindex(show)
     miss_c_s = miss_c.reindex(show)
-    gap_s = gap.reindex(show)
 
     y = np.arange(len(show))
 
