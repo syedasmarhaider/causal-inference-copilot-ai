@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import math
 import numbers
 from collections.abc import Sequence
@@ -19,7 +18,6 @@ from python.implementation.workflows.tools.causal.causal_spec import (
 )
 from python.implementation.workflows.utils.utils import BOOL_FALSE, BOOL_TRUE
 from python.implementation.workflows.utils.validation import ValidationSeverity
-
 
 # TODO: move to tools
 class ValidationIssue(TypedDict):
@@ -207,7 +205,6 @@ def validate_treatment(
     # -------------------------
     tcol = causal_spec.treatment_spec.column
     if tcol not in df.columns:
-        logging.warning(f"Treatment column '{tcol}' not found in dataframe columns: {df.columns.tolist()}")
         metrics = {"treatment_col": tcol, "present": False}
         issues.append(
             _issue(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+from python.implementation.service.logging.default_logging import get_logger
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, UploadFile
@@ -25,7 +25,7 @@ from python.domain.models.errors import ConversationNotFoundError, StateNotFound
 from python.domain.service.auth_service import AuthenticatedUser
 from python.implementation.workflows.workflow_app import WorkflowApp, WorkflowRequest
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 api_router = APIRouter()
 
@@ -76,8 +76,8 @@ async def get_artifact(
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="artifact not found") from exc
     except Exception as exc:
-        log.exception("artifact download failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        log.exception("artifact download failed", error=exc)
+        raise HTTPException(status_code=500, detail="Internal error retrieving artifact") from exc
 
     return Response(
         content=ref.content,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-import logging
+from python.implementation.service.logging.default_logging import get_logger
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -68,6 +68,8 @@ from python.implementation.workflows.tools.causal.encoding_util import EncodingU
 from python.implementation.workflows.tools.common.model.data_summary import (
     DatasetSummaryModel,
 )
+
+log = get_logger(__name__)
 
 # =============================================================================
 # Model spec and options
@@ -325,7 +327,7 @@ class LinearDMLCausalModel(CausalModel):
                 limit=None,
             )
         except Exception as e:
-            logging.exception(e)
+            log.exception("LinearDML command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started,
@@ -559,7 +561,7 @@ class LinearDMLCausalModel(CausalModel):
                 meta={},
             )
         except Exception as e:
-            logging.exception(e)
+            log.exception("LinearDML command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
@@ -625,7 +627,7 @@ class LinearDMLCausalModel(CausalModel):
 
             item: dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
             item["ate"] = est.ate(X=X, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
-            logging.info("Computed ATE for contrast t0=%s vs t1=%s: %s", t0, t1, item["ate"])
+            log.info("Computed ATE for contrast t0=%s vs t1=%s: %s", t0, t1, item["ate"])
 
             try:
                 ate_interval = est.ate_interval(
@@ -687,7 +689,7 @@ class LinearDMLCausalModel(CausalModel):
             )
 
         except Exception as e:
-            logging.exception(e)
+            log.exception("LinearDML command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
@@ -850,7 +852,7 @@ class LinearDMLCausalModel(CausalModel):
                 meta={},
             )
         except Exception as e:
-            logging.exception(e)
+            log.exception("LinearDML command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,

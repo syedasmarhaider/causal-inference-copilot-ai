@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
+from python.implementation.service.logging.default_logging import get_logger
 import os
 import tempfile
 from collections.abc import Mapping
@@ -26,7 +26,7 @@ DEFAULT_GCS_UPLOAD_RETRY_TIMEOUT_SECONDS: Final[float] = 900.0
 DEFAULT_GCS_UPLOAD_CHUNK_SIZE_BYTES: Final[int] = 8 * 1024 * 1024
 _UPLOAD_CHUNK_SIZE_GRANULARITY_BYTES: Final[int] = 256 * 1024
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 def _env_float_seconds(name: str, default: float) -> float:
@@ -60,16 +60,17 @@ def _env_int(name: str, default: int) -> int:
         return default
     try:
         value = int(raw)
-    except ValueError:
-        log.warning(
+    except ValueError as exc:
+        log.error(
             "Invalid %s value=%r. Falling back to default=%s.",
             name,
             raw,
             default,
+            error=exc,
         )
         return default
     if value <= 0:
-        log.warning(
+        log.error(
             "Non-positive %s value=%r. Falling back to default=%s.",
             name,
             raw,

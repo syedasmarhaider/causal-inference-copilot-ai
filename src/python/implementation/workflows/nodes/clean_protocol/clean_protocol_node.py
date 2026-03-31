@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import logging
+from python.implementation.service.logging.default_logging import get_logger
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -54,7 +54,7 @@ from python.implementation.workflows.tools.data_profiling.data_profiling_tool im
 )
 from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 _CLEAN_PROTOCOL_INPUT_TABLE_NAME = "cohort_df"
 _EXPLICIT_MISSING_ROW_FILTER_PATTERNS = (
@@ -398,7 +398,7 @@ class CleanProtocolNode(Node):
             )
 
         except Exception as e:
-            log.exception("CleanProtocolNode failed unexpectedly")
+            log.exception("CleanProtocolNode failed unexpectedly", error = e)
             return self._abort_state(
                 payload=state.payload,
                 message=f"Clean protocol failed unexpectedly: {e!r}",
@@ -1331,8 +1331,8 @@ class CleanProtocolNode(Node):
                 )
                 artifacts.append(artifact_id)
             return artifacts
-        except Exception:
-            log.exception("CleanProtocolNode: final graph generation failed")
+        except Exception as e:
+            log.exception("CleanProtocolNode: final graph generation failed", error = e)
             return None
 
     @staticmethod

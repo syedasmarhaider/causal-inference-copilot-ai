@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import logging
+from python.implementation.service.logging.default_logging import get_logger
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, cast
@@ -40,7 +40,7 @@ from python.implementation.workflows.tools.data_profiling.data_profiling_tool im
 )
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 _ROLE_COVARIATE = "covariate"
 _ROLE_EFFECT_MODIFIER = "effect_modifier"
@@ -134,7 +134,7 @@ def _validate_plan_against_constraints(
     outcome_col: str | None,
 ) -> list[ValidationIssueModel]:
 
-    logging.warning(
+    log.info(
         "Validating encoding plan against constraints. Eligible cols: %s, expected covariates: %s, expected effect modifiers: %s, treatment_col: %s, outcome_col: %s. Plan columns: %s",
         eligible_cols,
         expected_covariate_cols,
@@ -143,7 +143,7 @@ def _validate_plan_against_constraints(
         outcome_col,
         [c.column for c in plan.columns],
     )
-    logging.warning("Plan details: %s", plan.model_dump_json(indent=2))
+    log.info("Plan details: %s", plan.model_dump_json(indent=2))
 
     validation_issues: list[ValidationIssueModel] = []
     cols = [c.column for c in plan.columns]
@@ -275,7 +275,7 @@ def _generate_encoding_plan(
         if out.needs_user_input:
             return out, None
 
-        logging.warning(
+        log.info(
             "causal specs and dataset summary for plan generation: causal_specs=%s dataset_summary=%s",
             causal_specs.model_dump_json(),
             dataset_summary.model_dump_json() if hasattr(dataset_summary, "model_dump_json") else _dumps(_safe_model_dump(dataset_summary)),
@@ -317,7 +317,7 @@ def _generate_encoding_plan(
         )
 
         if validation_issues:
-            log.warning(
+            log.info(
                 "Encoding plan validation issues found: %s",
                 [i.model_dump_json() for i in validation_issues],
             )
@@ -392,7 +392,7 @@ class ModelTrainNode(Node):
         has_any_adjustment_cols = bool(causal_specs.covariates or []) or bool(causal_specs.effect_modifiers or [])
         current_plan = state.payload.column_transformation_plan
 
-        log.warning(
+        log.info(
             "ModelTrainNode starting run. conversation_id=%s model=%s clean_dataset_id=%s has_existing_plan=%s has_adjustment_cols=%s",
             conversation_id,
             selected_estimator,
@@ -407,7 +407,7 @@ class ModelTrainNode(Node):
         if (
             current_plan is None and has_any_adjustment_cols
         ):
-            log.warning(
+            log.info(
                 "ModelTrainNode generating encoding plan before fit. conversation_id=%s model=%s",
                 conversation_id,
                 selected_estimator,
@@ -424,7 +424,7 @@ class ModelTrainNode(Node):
             )
 
             if user_discussion.needs_user_input:
-                log.warning(
+                log.info(
                     "ModelTrainNode: LLM indicated user input needed for encoding plan clarification."
                 )
                 payload = state.payload.model_copy(
@@ -441,7 +441,7 @@ class ModelTrainNode(Node):
                 raise ValueError("LLM indicated no user input needed but did not return a plan.")
 
             current_plan = plan
-            log.warning(
+            log.info(
                 "ModelTrainNode generated encoding plan and will continue to fit in same run. conversation_id=%s model=%s",
                 conversation_id,
                 selected_estimator,
@@ -482,7 +482,7 @@ class ModelTrainNode(Node):
             inputs=FitInputs(),
         )
 
-        log.warning(
+        log.info(
             "ModelTrainNode executing fit command. conversation_id=%s run_id=%s model=%s dataset_id=%s",
             conversation_id,
             run_id,
@@ -490,7 +490,7 @@ class ModelTrainNode(Node):
             clean_dataset_id,
         )
         res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)
-        log.warning("Model training command executed with result: %s", res)
+        log.info("Model training command executed with result: %s", res)
 
         if not isinstance(res, FitResult):
             raise ValueError(f"Expected FitResult from model execution, got {type(res).__name__}")
@@ -534,7 +534,7 @@ class ModelTrainNode(Node):
                     or str(err_obj)
                     or "Training failed for an unknown reason."
                 )
-                log.warning(
+                log.info(
                     "ModelTrainNode fit failed. conversation_id=%s run_id=%s model=%s error=%s",
                     conversation_id,
                     run_id,

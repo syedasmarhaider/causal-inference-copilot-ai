@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import logging
+from python.implementation.service.logging.default_logging import get_logger
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Literal, cast
 from uuid import UUID
@@ -29,7 +29,7 @@ from python.implementation.workflows.tools.data_profiling.data_profiling_tool im
 )
 from python.implementation.workflows.utils.utils import safe_err
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 Gate = Literal["READY", "PENDING", "ABORT"]
 
@@ -113,9 +113,8 @@ class ProtocolDiscussionNode(Node):
                 history=history,
             )
             return out.content.strip() if out.content else self._fallback_user_message(readiness=gate.readiness)
-        except Exception as e:
-            log.exception("PROTOCOL_DISCUSSION: user message generation failed; using fallback")
-            log.error("PROTOCOL_DISCUSSION: message generation error detail: %s", safe_err(e))
+        except Exception as e:          
+            log.exception("PROTOCOL_DISCUSSION: message generation error detail: %s", safe_err(e))
             return self._fallback_user_message(readiness=gate.readiness)
 
     def run(

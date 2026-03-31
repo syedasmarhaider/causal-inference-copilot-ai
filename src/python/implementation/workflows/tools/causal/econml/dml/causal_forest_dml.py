@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-import logging
+from python.implementation.service.logging.default_logging import get_logger
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -68,6 +68,8 @@ from python.implementation.workflows.tools.causal.econml.utils import (
 from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.encoding_util import EncodingUtil
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
+
+log = get_logger(__name__)
 
 # =============================================================================
 # Model spec and options (unchanged)
@@ -324,7 +326,7 @@ class CausalForestDMLCausalModel(CausalModel):
                 limit=None,
             )
         except Exception as e:
-            logging.exception(e)
+            log.exception("CausalForestDML command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started,
@@ -536,7 +538,7 @@ class CausalForestDMLCausalModel(CausalModel):
                 meta={},
             )
         except Exception as e:
-            logging.exception(e)
+            log.exception("CausalForestDML command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
@@ -588,7 +590,7 @@ class CausalForestDMLCausalModel(CausalModel):
             item: dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
             item["ate"] = est.ate(X=X, T0=t0, T1=t1)
             logging_info = f"Computed ATE for contrast t0={t0} vs t1={t1}: {item['ate']}"
-            logging.info(logging_info)
+            log.info(logging_info)
                 
             try:
                 ate_interval = est.ate_interval(X=X, T0=t0, T1=t1, alpha=command.inputs.alpha)  
@@ -641,7 +643,7 @@ class CausalForestDMLCausalModel(CausalModel):
             )
 
         except Exception as e:
-            logging.exception(e)
+            log.exception("CausalForestDML command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,

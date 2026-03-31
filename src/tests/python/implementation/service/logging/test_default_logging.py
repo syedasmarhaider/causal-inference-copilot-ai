@@ -202,3 +202,34 @@ def test_get_logger_uses_custom_factory() -> None:
         "type": "factory_type",
     }
     assert captured["info"] == ("hello", {"request_id": "r-1"})
+
+
+def test_default_app_logger_tolerates_bad_percent_format_args() -> None:
+    logger = _isolated_logger("tests.logging.bad_percent")
+    handler = _CaptureHandler()
+    logger.addHandler(handler)
+
+    app_logger = DefaultAppLogger(logger, tags={"component": "WorkflowApp"})
+    app_logger.error("message without placeholder", RuntimeError("boom"))
+
+    assert len(handler.records) == 1
+    record = handler.records[0]
+    assert "message without placeholder | args=boom" in record.getMessage()
+    assert record.fields["log_args"] == "boom"
+
+
+def test_default_app_logger_exception_accepts_exception_object_message() -> None:
+    logger = _isolated_logger("tests.logging.exception_obj")
+    handler = _CaptureHandler()
+    logger.addHandler(handler)
+
+    try:
+        raise ValueError("bad value")
+    except ValueError as exc:
+        app_logger = DefaultAppLogger(logger, tags={"component": "WorkflowApp"})
+        app_logger.exception(exc)
+
+    assert len(handler.records) == 1
+    record = handler.records[0]
+    assert record.getMessage() == "bad value"
+    assert record.exc_info is not None

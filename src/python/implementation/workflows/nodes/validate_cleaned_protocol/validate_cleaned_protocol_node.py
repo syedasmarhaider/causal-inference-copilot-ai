@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import logging
+from python.implementation.service.logging.default_logging import get_logger
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -45,7 +45,7 @@ from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cl
 from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -227,7 +227,7 @@ class ValidateCleanProtocolNode(Node):
                 ],
             )
         except Exception as e:
-            log.exception("Unexpected error in ValidateCleanProtocolNode: %s", repr(e))
+            log.exception("Unexpected error in ValidateCleanProtocolNode", error=repr(e))
             return self._abort(
                 messages_history=last_4_messages,
                 validation_error=repr(e),

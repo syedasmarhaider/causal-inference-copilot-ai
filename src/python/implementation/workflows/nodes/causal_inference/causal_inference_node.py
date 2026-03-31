@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import logging
+from python.implementation.service.logging.default_logging import get_logger
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast
@@ -62,6 +62,8 @@ from python.implementation.workflows.tools.data_profiling.causal_data_profiling_
 )
 from python.implementation.workflows.tools.data_profiling.plots.model import CohortCate, GraphImage
 from python.implementation.workflows.utils.validation import ValidationIssueModel
+
+app_log = get_logger(__name__)
 
 # ============================================================
 # Node
@@ -150,11 +152,11 @@ class CausalInferenceNode(Node):
                 options={},
             )
 
-            logging.warning(
+            app_log.warning(
                 f"Executing ATECommand: model={selected_model_fqcn} dataset_id={clean_dataset_id} fitted_model_id={trained_model_id}"
             )
             res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)
-            logging.warning(f"ATECommand executed with result: {res}")
+            app_log.warning(f"ATECommand executed with result: {res}")
 
             if not isinstance(res, ATEResult):
                 raise TypeError(f"Expected ATEResult from model.execute, got {type(res).__name__}")
@@ -425,8 +427,8 @@ def _extract_effect_fields(effect_obj: dict[CATEModelResult, Any]) -> tuple[np.n
     lo = None
     hi = None
     inf = None
-    logging.warning("effect_obj type=%s", type(effect_obj))
-    logging.warning("effect_obj class=%s", type(effect_obj).__name__)
+    app_log.info("effect_obj type=%s", type(effect_obj))
+    app_log.info("effect_obj class=%s", type(effect_obj).__name__)
     cate_raw = effect_obj["cate"]
     cate = _to_1d_float(cate_raw)
     
@@ -561,7 +563,7 @@ def _process_cate_question(
     plan: InclusionPlanModel | None = None
     
     effect_modifiers_summary = _filter_dataset_summary_to_effect_modifiers(summary=data_summary, effect_modifiers=causal_specs.effect_modifiers)
-    logging.warning(f"Effect modifiers summary for prompt: {effect_modifiers_summary.model_dump_json()}")
+    app_log.info(f"Effect modifiers summary for prompt: {effect_modifiers_summary.model_dump_json()}")
     plot_cohorts: list[CohortCate] = [] 
     for attempt in range(3):
         plan = llm.generate_json(
@@ -583,17 +585,17 @@ def _process_cate_question(
         if not issues or (len(issues) == 0 and len(plan.rules) > 0):
             break
 
-        logging.warning(f"Invalid inclusion plan (attempt {attempt + 1}): {plan}")
+        app_log.info(f"Invalid inclusion plan (attempt {attempt + 1}): {plan}")
         error_message = (
             "Your inclusion plan has the following issues or plan rules are empty:\n"
             + "\n".join(f"- {i.message}" for i in issues)
             + "\nFix them and output JSON only in the required schema."
         )  
     
-    logging.warning(f"Inclusion plan after validation attempts: {plan}")
-    is_valid, log = _validate_inclusion_plan(plan, effect_modifiers=causal_specs.effect_modifiers)
+    app_log.info(f"Inclusion plan after validation attempts: {plan}")
+    is_valid, validation_log = _validate_inclusion_plan(plan, effect_modifiers=causal_specs.effect_modifiers)
     if not is_valid:
-        logging.warning(f"Final inclusion plan is invalid: {log}")
+        app_log.info(f"Final inclusion plan is invalid: {validation_log}")
         invalid_plan_message = _invalid_plan_message(
             llm=llm,
             model_name="basic",

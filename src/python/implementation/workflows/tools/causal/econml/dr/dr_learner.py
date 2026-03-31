@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-import logging
+from python.implementation.service.logging.default_logging import get_logger
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -69,6 +69,8 @@ from python.implementation.workflows.tools.causal.econml.utils import (
 from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.encoding_util import EncodingUtil
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
+
+log = get_logger(__name__)
 
 # =============================================================================
 # Helpers
@@ -513,7 +515,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 limit=None,
             )
         except Exception as e:
-            logging.exception(e)
+            log.exception("DRLearner command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started,
@@ -784,7 +786,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 meta={},
             )
         except Exception as e:
-            logging.exception(e)
+            log.exception("DRLearner command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
@@ -899,7 +901,7 @@ class _BaseDRLearnerAdapter(CausalModel):
             )
 
         except Exception as e:
-            logging.exception(e)
+            log.exception("DRLearner command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
@@ -1062,7 +1064,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 meta={},
             )
         except Exception as e:
-            logging.exception(e)
+            log.exception("DRLearner command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,

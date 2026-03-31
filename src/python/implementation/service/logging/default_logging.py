@@ -21,15 +21,15 @@ _trace_sampled_ctx: ContextVar[bool | None] = ContextVar("trace_sampled", defaul
 class AppLogger(Protocol):
     def bind(self, **tags: Any) -> "AppLogger": ...
 
-    def debug(self, message: str, **fields: Any) -> None: ...
+    def debug(self, message: str, *args: Any, **fields: Any) -> None: ...
 
-    def info(self, message: str, **fields: Any) -> None: ...
+    def info(self, message: str, *args: Any, **fields: Any) -> None: ...
 
-    def warning(self, message: str, **fields: Any) -> None: ...
+    def warning(self, message: str, *args: Any, **fields: Any) -> None: ...
 
-    def error(self, message: str, **fields: Any) -> None: ...
+    def error(self, message: str, *args: Any, **fields: Any) -> None: ...
 
-    def exception(self, message: str, **fields: Any) -> None: ...
+    def exception(self, message: str, *args: Any, **fields: Any) -> None: ...
 
 
 LoggerFactory = Callable[[str, dict[str, Any]], AppLogger]
@@ -85,29 +85,32 @@ class DefaultAppLogger(AppLogger):
         merged.update(_normalize_fields(tags))
         return DefaultAppLogger(self._logger, tags=merged)
 
-    def debug(self, message: str, **fields: Any) -> None:
-        self._emit(logging.DEBUG, message, fields)
+    def debug(self, message: str, *args: Any, **fields: Any) -> None:
+        self._emit(logging.DEBUG, message, args=args, fields=fields)
 
-    def info(self, message: str, **fields: Any) -> None:
-        self._emit(logging.INFO, message, fields)
+    def info(self, message: str, *args: Any, **fields: Any) -> None:
+        self._emit(logging.INFO, message, args=args, fields=fields)
 
-    def warning(self, message: str, **fields: Any) -> None:
-        self._emit(logging.WARNING, message, fields)
+    def warning(self, message: str, *args: Any, **fields: Any) -> None:
+        self._emit(logging.WARNING, message, args=args, fields=fields)
 
-    def error(self, message: str, **fields: Any) -> None:
-        self._emit(logging.ERROR, message, fields)
+    def error(self, message: str, *args: Any, **fields: Any) -> None:
+        self._emit(logging.ERROR, message, args=args, fields=fields)
 
-    def exception(self, message: str, **fields: Any) -> None:
-        self._emit(logging.ERROR, message, fields, exc_info=True)
+    def exception(self, message: str, *args: Any, **fields: Any) -> None:
+        self._emit(logging.ERROR, message, args=args, fields=fields, exc_info=True)
 
     def _emit(
         self,
         level: int,
         message: str,
+        args: tuple[Any, ...],
         fields: dict[str, Any],
         *,
         exc_info: bool = False,
     ) -> None:
+        rendered_message, rendered_args, args_field = _coerce_message_and_args(message, args)
+
         kwargs: dict[str, Any] = {
             "stacklevel": 3,
         }
@@ -117,6 +120,8 @@ class DefaultAppLogger(AppLogger):
             extra["tags"] = dict(self._tags)
 
         normalized_fields = _normalize_fields(fields)
+        if args_field:
+            normalized_fields["log_args"] = args_field
         if normalized_fields:
             extra["fields"] = normalized_fields
 
@@ -130,7 +135,7 @@ class DefaultAppLogger(AppLogger):
         if exc_info:
             kwargs["exc_info"] = True
 
-        self._logger.log(level, message, **kwargs)
+        self._logger.log(level, rendered_message, *rendered_args, **kwargs)
 
 
 def set_app_logger_factory(factory: LoggerFactory | None) -> None:
@@ -253,6 +258,25 @@ def _normalize_fields(values: dict[str, Any]) -> dict[str, Any]:
         else:
             normalized[key] = str(value)
     return normalized
+
+
+def _coerce_message_and_args(
+    message: Any,
+    args: tuple[Any, ...],
+) -> tuple[str, tuple[Any, ...], str | None]:
+    message_str = message if isinstance(message, str) else str(message)
+    if not args:
+        return message_str, (), None
+
+    try:
+        message_str % args
+    except Exception:
+        args_text = ", ".join(str(arg) for arg in args)
+        if message_str:
+            return f"{message_str} | args={args_text}", (), args_text
+        return args_text, (), args_text
+
+    return message_str, args, None
 
 
 __all__ = [
