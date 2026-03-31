@@ -23,6 +23,7 @@ from python.adapters.api.docs import (
     API_VERSION,
     OPENAPI_TAGS,
 )
+from python.adapters.api.exception_handlers import register_exception_handlers
 from python.adapters.api.request_context_middleware import RequestContextMiddleware
 from python.adapters.api.routes import api_router
 from python.implementation.service.logging.default_logging import configure_default_logging
@@ -65,6 +66,7 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+register_exception_handlers(app)
 
 
 if __name__ == "__main__":

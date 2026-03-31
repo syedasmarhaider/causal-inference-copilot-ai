@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from python.implementation.service.logging.default_logging import get_logger
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, UploadFile
@@ -21,11 +20,9 @@ from python.adapters.api.schemas import (
     RevertStateRequest,
     UploadDatasetResponse,
 )
-from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
+from python.domain.models.errors import ConversationNotFoundError
 from python.domain.service.auth_service import AuthenticatedUser
 from python.implementation.workflows.workflow_app import WorkflowApp, WorkflowRequest
-
-log = get_logger(__name__)
 
 api_router = APIRouter()
 
@@ -69,15 +66,7 @@ async def get_artifact(
             artifact_id=artifact_id,
         )
 
-    try:
-        ref = await asyncio.to_thread(_load_artifact)
-    except ConversationNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="conversation not found") from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="artifact not found") from exc
-    except Exception as exc:
-        log.exception("artifact download failed", error=exc)
-        raise HTTPException(status_code=500, detail="Internal error retrieving artifact") from exc
+    ref = await asyncio.to_thread(_load_artifact)
 
     return Response(
         content=ref.content,
@@ -122,23 +111,17 @@ async def get_latest_conversation_state(
             )
         return resp
 
-    try:
-        resp = await asyncio.to_thread(_load_latest_state)
-        return InvokeResponse(
-            conversation_id=conversation_id,
-            user_id=authenticated_user.uid,
-            node_message=resp.node_message,
-            needs_input=resp.needs_input,
-            needs_data=resp.needs_data,
-            current_stage=str(resp.current_stage),
-            artifact_ids=resp.artifact_ids,
-            current_stage_status=str(resp.current_stage_status),
-        )
-    except ConversationNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="conversation not found") from exc
-    except Exception as exc:
-        log.exception("failed to get latest conversation state")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    resp = await asyncio.to_thread(_load_latest_state)
+    return InvokeResponse(
+        conversation_id=conversation_id,
+        user_id=authenticated_user.uid,
+        node_message=resp.node_message,
+        needs_input=resp.needs_input,
+        needs_data=resp.needs_data,
+        current_stage=str(resp.current_stage),
+        artifact_ids=resp.artifact_ids,
+        current_stage_status=str(resp.current_stage_status),
+    )
 
 
 @api_router.post(
@@ -190,15 +173,8 @@ async def upload_dataset_csv(
 
     try:
         dataset_id = await asyncio.to_thread(_upload_csv)
-    except ConversationNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="conversation not found") from exc
-    except FileExistsError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        log.exception("dataset upload failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return UploadDatasetResponse(
         user_id=authenticated_user.uid,
@@ -262,13 +238,7 @@ async def invoke_once(
             )
         )
 
-    try:
-        resp = await asyncio.to_thread(_invoke)
-    except ConversationNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="conversation not found") from exc
-    except Exception as exc:
-        log.exception("invoke failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    resp = await asyncio.to_thread(_invoke)
 
     return InvokeResponse(
         conversation_id=conversation_id,
@@ -315,14 +285,4 @@ async def revert_to_state(
             state_name=state_name,
         )
 
-    try:
-        await asyncio.to_thread(_revert)
-    except ConversationNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="conversation not found") from exc
-    except StateNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="state not found") from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="state not found") from exc
-    except Exception as exc:
-        log.exception("failed to revert conversation state")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    await asyncio.to_thread(_revert)
