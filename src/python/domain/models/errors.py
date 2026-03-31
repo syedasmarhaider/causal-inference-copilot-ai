@@ -115,10 +115,11 @@ class StateDependencyError(NodeExecutionError):
         return "state_dependency_error"
 
     def __init__(self, from_state: str, to_state: str, missing_dependencies: list[str]):
-        super().__init__(from_state, to_state)
-        self.missing_dependencies = missing_dependencies
-        self.message = (
+        detail_message = (
             f"Cannot transition from '{from_state}' to '{to_state}' due to missing dependencies: "
             f"{', '.join(missing_dependencies)}"
         )
-        self.args = (self.message,)
+        super().__init__(state_name=to_state, error=detail_message)
+        self.from_state = from_state
+        self.to_state = to_state
+        self.missing_dependencies = missing_dependencies

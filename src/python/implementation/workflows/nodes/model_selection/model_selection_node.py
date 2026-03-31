@@ -194,7 +194,7 @@ class ModelSelectionNode(Node):
         negotiator_user_prompt = MODEL_SELECTION_NEGOTIATOR_USER_PROMPT_TEMPLATE.format(
             recommended_message=state.payload.system_choice_message or "",
             supported_estimators_json=_dumps(supported_estimators),
-            estimators_info_json=_dumps(supported_estimators),
+            estimators_info_json=_dumps(supported_estimators_info),
             context_json=_dumps(context),
         )
         

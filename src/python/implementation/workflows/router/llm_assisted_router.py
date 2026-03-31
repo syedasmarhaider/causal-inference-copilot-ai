@@ -104,7 +104,7 @@ class LLMAssistedRouterRouter(Router):
             return NextDecision(state_name=current_state.name, router_message_for_node=None)
         
         if status == "DONE":
-            if current_state.name is NoopDoneState.NAME:
+            if current_state.name == NoopDoneState.NAME:
                 log.debug("router kept done state because terminal node reached")
                 return NextDecision(state_name=NoopDoneState.NAME, router_message_for_node=None)  
             next_name = self._next_state_names_map.get(current_state.name)

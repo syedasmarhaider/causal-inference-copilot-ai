@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
+from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
 
 
@@ -28,7 +29,7 @@ class NoopDoneState(State):
         return StateMessage(txt_message="done",action="NONE")
 
     @property
-    def error(self) -> str | None:
+    def error(self) -> NodeExecutionError | None:
         return None
 
     def pre_required_states_names(self) -> Sequence[str]:
