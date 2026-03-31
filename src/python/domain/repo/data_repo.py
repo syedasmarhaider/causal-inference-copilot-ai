@@ -48,45 +48,38 @@ class DataRepo(ABC):
         :param overwrite: If False, raise if the target already exists.
         :param include_index: If True, write the DataFrame index into the CSV.
         """
-
     @abstractmethod
-    def save_artifact(
+    def get_json_data(
         self,
         user_id: UUID,
         conversation_id: UUID,
-        artifact_id: UUID,
-        content: bytes,
+        dataset_id: UUID,
+    ) -> str:
+        """
+        Retrieve data for a dataset_id as a pandas DataFrame.
+
+        :param user_id: User UUID.
+        :param conversation_id: Conversation UUID.
+        :param dataset_id: Dataset UUID.
+        :param limit: Optional row limit (head).
+        """
+
+    @abstractmethod
+    def save_json_data(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+        json_data: str,
         *,
-        mime: ImageMime,
         overwrite: bool = True,
     ) -> None:
         """
-        Persist an image artifact to durable storage.
+        Persist data for a dataset_id to durable storage.
 
-        :param mime: MUST match content encoding (repo does not transcode).
-        :param overwrite: If False, raise if target exists.
-        """
-
-    @abstractmethod
-    def get_artifact_bytes(
-        self,
-        user_id: UUID,
-        conversation_id: UUID,
-        artifact_id: UUID,
-        *,
-        expected_mime: ImageMime | None = None,
-    ) -> bytes:
-        """
-        Return artifact bytes. If expected_mime is provided and mismatched, raise.
-        """
-
-    @abstractmethod
-    def get_artifact_mime(
-        self,
-        user_id: UUID,
-        conversation_id: UUID,
-        artifact_id: UUID,
-    ) -> ImageMime:
-        """
-        Return the artifact MIME type.
-        """
+        :param user_id: User UUID.
+        :param conversation_id: Conversation UUID.
+        :param dataset_id: Dataset UUID.
+        :param json_data: JSON string to persist.
+        :param overwrite: If False, raise if the target already exists.
+        """  
