@@ -379,6 +379,74 @@ def test_delete_state_and_message_history_workflow(monkeypatch: pytest.MonkeyPat
     assert repo.load_message_history(user_id=user_id, conversation_id=conversation_id, limit=10) == []
 
 
+def test_append_and_load_message_history_roundtrips_structured_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _ = _make_repo(monkeypatch)
+    user_id, conversation_id = _ids()
+    csv_id = uuid4()
+    json_id = uuid4()
+
+    repo.append_message(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        message=ChatMessage(
+            role="assistant",
+            content="dataset ready",
+            artifacts_ids=[
+                {"id": csv_id, "type": "csv"},
+                {"id": json_id, "type": "json"},
+            ],
+            id="msg-1",
+        ),
+    )
+
+    history = repo.load_message_history(user_id=user_id, conversation_id=conversation_id, limit=10)
+
+    assert len(history) == 1
+    assert history[0].content == "dataset ready"
+    assert history[0].artifacts_ids == [
+        {"id": csv_id, "type": "csv"},
+        {"id": json_id, "type": "json"},
+    ]
+    assert history[0].id == "msg-1"
+
+
+def test_load_message_history_ignores_malformed_artifact_refs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fake_db = _make_repo(monkeypatch)
+    user_id, conversation_id = _ids()
+    csv_id = uuid4()
+    json_id = uuid4()
+
+    fake_db.reference(f"/workflows/{user_id}/{conversation_id}/messages").set(
+        {
+            "p000001": {
+                "role": "assistant",
+                "message": "x",
+                "artifacts_ids": [
+                    {"id": str(csv_id), "type": "csv"},
+                    {"id": "", "type": "csv"},
+                    {"id": str(json_id), "type": "json"},
+                    {"id": "bad-1", "type": "png"},
+                    {"type": "csv"},
+                    "bad",
+                    1,
+                ],
+            }
+        }
+    )
+
+    history = repo.load_message_history(user_id=user_id, conversation_id=conversation_id, limit=10)
+
+    assert len(history) == 1
+    assert history[0].artifacts_ids == [
+        {"id": csv_id, "type": "csv"},
+        {"id": json_id, "type": "json"},
+    ]
+
+
 def test_get_default_firebase_database_app_returns_existing_app(monkeypatch: pytest.MonkeyPatch) -> None:
     existing_app = object()
     monkeypatch.setattr(repo_module.firebase_admin, "get_app", lambda: existing_app)
