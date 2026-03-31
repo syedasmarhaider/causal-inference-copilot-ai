@@ -11,7 +11,10 @@ import firebase_admin
 from firebase_admin import credentials, db
 
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
-from python.domain.service.llm_service import ChatMessage
+from python.domain.service.llm_service import (
+    ChatMessage,
+    get_chat_message_role_and_message_json,
+)
 from python.domain.workflows.state import State
 
 
@@ -418,9 +421,29 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         return f"{self._conversation_path(user_id=user_id, conversation_id=conversation_id)}/_meta"
 
     def _chat_message_to_dict(self, message: ChatMessage) -> dict[str, Any]:
+        base_payload: dict[str, Any] = json.loads(get_chat_message_role_and_message_json(message))
         if is_dataclass(message):
-            return asdict(message)
-        return {"role": message.role, "content": message.content}
+            raw_payload = asdict(message)
+            artifacts_ids = raw_payload.get("artifacts_ids")
+            message_id = raw_payload.get("id")
+            if artifacts_ids is not None:
+                base_payload["artifacts_ids"] = artifacts_ids
+            if message_id is not None:
+                base_payload["id"] = message_id
+        return base_payload
 
     def _chat_message_from_dict(self, payload: dict[str, Any]) -> ChatMessage:
-        return ChatMessage(**payload)
+        role = payload.get("role")
+        content = payload.get("message", payload.get("content"))
+        artifacts_ids = payload.get("artifacts_ids")
+        message_id = payload.get("id")
+
+        if not isinstance(role, str) or not isinstance(content, str):
+            raise ValueError("Invalid chat message payload: role/message must be strings")
+
+        return ChatMessage(
+            role=role,  # type: ignore[arg-type]
+            content=content,
+            artifacts_ids=artifacts_ids if isinstance(artifacts_ids, list) else None,
+            id=message_id if isinstance(message_id, str) else None,
+        )

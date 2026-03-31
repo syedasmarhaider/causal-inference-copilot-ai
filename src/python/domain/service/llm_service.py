@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypedDict, TypeVar
@@ -12,11 +13,28 @@ Role = Literal["user", "assistant","system"]
 AvailableModelsKey = Literal["mini","basic", "pro","thinking"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ChatMessage:
     role: Role
     content: str
+    artifacts_ids: Sequence[dict[str, str]] | None = None
+    id: str | None = None
 
+    @property
+    def message(self) -> str:
+        return self.content
+
+
+def get_chat_message_role_and_message_json(message: ChatMessage) -> str:
+    payload = {
+        "role": message.role,
+        "message": message.content,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def get_chat_messages_role_and_message_json(messages: Sequence[ChatMessage]) -> str:
+    return "\n".join(get_chat_message_role_and_message_json(msg) for msg in messages)
 
 ProviderExtra = dict[str, Any]
 
