@@ -37,13 +37,13 @@ class EncodingUtil:
 @dataclass(frozen=True)
 class CompiledTransformers:
     """
-    pre_X  : transformer that expects effect-modifier matrix (n, dx)
-             ordered as effect_modifiers_order
+    pre_X  : optional transformer for effect-modifier matrix (n, dx),
+             ordered as effect_modifiers_order. None when no effect modifiers exist.
     pre_XW : transformer that expects concatenated
              [effect_modifiers|covariates] matrix (n, dx+dw)
              ordered as (effect_modifiers_order + covariates_order)
     """
-    pre_X: ColumnTransformer
+    pre_X: ColumnTransformer | None
     pre_XW: ColumnTransformer
 
 CTTransformer = Union[BaseEstimator, Literal["passthrough"], Literal["drop"]]
@@ -525,29 +525,33 @@ def compile_plan_to_transformers(
             "At least one column must have role 'effect_modifier' or 'covariate' in the plan."
         )
     
-    # Ensure we have at least one non-dropped transformer in each view
+    # Ensure we have at least one non-dropped transformer in each active view
     def _has_non_drop(trs: list[tuple[str, CTTransformer, list[int]]]) -> bool:
         return any(t[1] != "drop" for t in trs)
 
-    if not x_trs:
-        raise ValueError("No effect_modifier transformers compiled (empty effect_modifiers_order?).")
     if not xw_trs:
         raise ValueError("No effect_modifier/covariate transformers compiled (empty effect_modifiers+covariates?).")
-    if not _has_non_drop(x_trs):
-        raise ValueError("All effect_modifier columns are dropped. At least one effect_modifier column must be kept.")
     if not _has_non_drop(xw_trs):
         raise ValueError("All effect_modifier/covariate columns are dropped. At least one column must be kept.")
+
+    if effect_modifiers_l:
+        if not x_trs:
+            raise ValueError("No effect_modifier transformers compiled (empty effect_modifiers_order?).")
+        if not _has_non_drop(x_trs):
+            raise ValueError("All effect_modifier columns are dropped. At least one effect_modifier column must be kept.")
 
     # If you requested dense output, force dense aggregation.
     # If not, allow sparse when beneficial (especially for one-hot).
     sparse_threshold = 0.0 if dense_output else 1.0
 
-    pre_X = ColumnTransformer(
-        transformers=x_trs,
-        remainder="drop",
-        sparse_threshold=sparse_threshold,
-        verbose_feature_names_out=True,
-    )
+    pre_X: ColumnTransformer | None = None
+    if x_trs:
+        pre_X = ColumnTransformer(
+            transformers=x_trs,
+            remainder="drop",
+            sparse_threshold=sparse_threshold,
+            verbose_feature_names_out=True,
+        )
 
     pre_XW = ColumnTransformer(
         transformers=xw_trs,
