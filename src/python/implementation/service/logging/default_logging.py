@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
 import json
 import logging
 import os
@@ -10,6 +12,10 @@ _DEFAULT_SERVICE_NAME = "causal-inference-copilot-ai"
 _LOG_LEVEL_ENV = "LOG_LEVEL"
 _SERVICE_NAME_ENV = "LOG_SERVICE_NAME"
 _logger_factory: "LoggerFactory | None" = None
+_request_id_ctx: ContextVar[str | None] = ContextVar("request_id", default=None)
+_trace_id_ctx: ContextVar[str | None] = ContextVar("trace_id", default=None)
+_span_id_ctx: ContextVar[str | None] = ContextVar("span_id", default=None)
+_trace_sampled_ctx: ContextVar[bool | None] = ContextVar("trace_sampled", default=None)
 
 
 class AppLogger(Protocol):
@@ -27,6 +33,14 @@ class AppLogger(Protocol):
 
 
 LoggerFactory = Callable[[str, dict[str, Any]], AppLogger]
+
+
+@dataclass(frozen=True)
+class LogContextTokens:
+    request_id: Token[str | None]
+    trace_id: Token[str | None]
+    span_id: Token[str | None]
+    trace_sampled: Token[bool | None]
 
 
 class JSONLogFormatter(logging.Formatter):
@@ -50,6 +64,10 @@ class JSONLogFormatter(logging.Formatter):
         fields = getattr(record, "fields", None)
         if isinstance(fields, dict) and fields:
             payload["fields"] = _normalize_fields(fields)
+
+        context = getattr(record, "context", None)
+        if isinstance(context, dict) and context:
+            payload.update(_normalize_fields(context))
 
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
@@ -102,6 +120,10 @@ class DefaultAppLogger(AppLogger):
         if normalized_fields:
             extra["fields"] = normalized_fields
 
+        context = get_log_context()
+        if context:
+            extra["context"] = context
+
         if extra:
             kwargs["extra"] = extra
 
@@ -114,6 +136,47 @@ class DefaultAppLogger(AppLogger):
 def set_app_logger_factory(factory: LoggerFactory | None) -> None:
     global _logger_factory
     _logger_factory = factory
+
+
+def set_log_context(
+    *,
+    request_id: str | None,
+    trace_id: str | None,
+    span_id: str | None = None,
+    trace_sampled: bool | None = None,
+) -> LogContextTokens:
+    return LogContextTokens(
+        request_id=_request_id_ctx.set(request_id),
+        trace_id=_trace_id_ctx.set(trace_id),
+        span_id=_span_id_ctx.set(span_id),
+        trace_sampled=_trace_sampled_ctx.set(trace_sampled),
+    )
+
+
+def reset_log_context(tokens: LogContextTokens) -> None:
+    _request_id_ctx.reset(tokens.request_id)
+    _trace_id_ctx.reset(tokens.trace_id)
+    _span_id_ctx.reset(tokens.span_id)
+    _trace_sampled_ctx.reset(tokens.trace_sampled)
+
+
+def get_log_context() -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    request_id = _request_id_ctx.get()
+    trace_id = _trace_id_ctx.get()
+    span_id = _span_id_ctx.get()
+    trace_sampled = _trace_sampled_ctx.get()
+
+    if request_id:
+        context["request_id"] = request_id
+    if trace_id:
+        context["trace_id"] = trace_id
+    if span_id:
+        context["span_id"] = span_id
+    if trace_sampled is not None:
+        context["trace_sampled"] = trace_sampled
+
+    return context
 
 
 def get_logger(
@@ -196,8 +259,12 @@ __all__ = [
     "JSONLogFormatter",
     "AppLogger",
     "DefaultAppLogger",
+    "LogContextTokens",
     "configure_default_logging",
+    "get_log_context",
     "get_logger",
     "get_app_logger",
+    "reset_log_context",
     "set_app_logger_factory",
+    "set_log_context",
 ]

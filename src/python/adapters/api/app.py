@@ -23,6 +23,7 @@ from python.adapters.api.docs import (
     API_VERSION,
     OPENAPI_TAGS,
 )
+from python.adapters.api.request_context_middleware import RequestContextMiddleware
 from python.adapters.api.routes import api_router
 from python.implementation.service.logging.default_logging import configure_default_logging
 
@@ -40,7 +41,7 @@ __all__ = [
 ]
 
 configure_default_logging(
-    service_name=os.getenv("SERVICE_NAME"),
+    service_name=os.getenv("LOG_SERVICE_NAME"),
     level=os.getenv("LOG_LEVEL"),
 )
 
@@ -52,6 +53,8 @@ app = FastAPI(
     description=API_DESCRIPTION,
     openapi_tags=OPENAPI_TAGS,
 )
+
+app.add_middleware(RequestContextMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
