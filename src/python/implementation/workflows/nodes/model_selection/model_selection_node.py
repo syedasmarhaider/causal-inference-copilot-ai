@@ -81,9 +81,9 @@ def _build_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
         "covariates": _safe_model_dump(covariates),
         "effect_modifiers": _safe_model_dump(effect_modifiers),
         "experiment_type": _safe_model_dump(experiment_type),
-        "summary": _safe_model_dump(getattr(summary, "summary", None)),
+        "summary": _safe_model_dump(summary),
         "validate_clean_protocol": {
-            "issues": _safe_model_dump(getattr(validation_issues, "issues", None)),
+            "issues": [_safe_model_dump(issue) for issue in validation_issues],
         },
     }
 
