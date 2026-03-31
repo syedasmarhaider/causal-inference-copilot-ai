@@ -37,7 +37,7 @@ class FirebaseAuthService(AuthService):
                 check_revoked=True,
             )
         except Exception as exc:
-            log.warning("Failed to verify Firebase token: %s", exc)
+            log.warning("Failed to verify Firebase token", error=exc)
             raise InvalidTokenError("failed to verify Firebase token") from exc
         
         raw_uid = decoded.get("uid")
