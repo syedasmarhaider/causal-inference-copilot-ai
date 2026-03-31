@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import pandas as pd
+import pytest
+
+from python.domain.repo.working_data_repo import WorkingDataSQLRequest
+from python.implementation.repo.duckdb_working_data_repo import DuckDBWorkingDatatRepo
+
+
+def test_execute_sql_returns_last_result_set_and_metadata() -> None:
+    repo = DuckDBWorkingDatatRepo()
+    df = pd.DataFrame([{"a": 1, "b": 2}, {"a": 3, "b": 4}, {"a": 5, "b": 6}])
+    request = WorkingDataSQLRequest(
+        table_name="input_table",
+        analytic_only=False,
+        statements=(
+            "SELECT a, b FROM input_table ORDER BY a DESC LIMIT 2",
+        ),
+    )
+
+    result = repo.execute_sql(dataframe=df, request=request)
+
+    assert result.table_name == "input_table"
+    assert result.executed_statements == (
+        "SELECT a, b FROM input_table ORDER BY a DESC LIMIT 2",
+    )
+    assert result.columns == ("a", "b")
+    assert result.row_count == 2
+    assert result.has_result_set is True
+    assert result.elapsed_ms >= 0.0
+    assert result.dataframe.to_dict(orient="records") == [{"a": 5, "b": 6}, {"a": 3, "b": 4}]
+
+
+def test_execute_sql_mutating_statement_returns_count_result_set() -> None:
+    repo = DuckDBWorkingDatatRepo()
+    df = pd.DataFrame([{"a": 1}, {"a": 2}])
+    request = WorkingDataSQLRequest(
+        table_name="t",
+        analytic_only=False,
+        statements=("DELETE FROM t WHERE a = 999",),
+    )
+
+    result = repo.execute_sql(dataframe=df, request=request)
+
+    assert result.has_result_set is True
+    assert result.columns == ("Count",)
+    assert result.row_count == 1
+    assert result.dataframe.to_dict(orient="records") == [{"Count": 0}]
+
+
+def test_execute_sql_rejects_invalid_table_name() -> None:
+    repo = DuckDBWorkingDatatRepo()
+    df = pd.DataFrame([{"a": 1}])
+    request = WorkingDataSQLRequest(
+        table_name="bad table",
+        analytic_only=False,
+        statements=("SELECT * FROM \"bad table\"",),
+    )
+
+    with pytest.raises(ValueError, match=r"Invalid table_name"):
+        repo.execute_sql(dataframe=df, request=request)
+
+
+def test_execute_sql_rejects_dataframe_with_duplicate_columns() -> None:
+    repo = DuckDBWorkingDatatRepo()
+    df = pd.DataFrame([[1, 2]], columns=["x", "x"])
+    request = WorkingDataSQLRequest(
+        table_name="t",
+        analytic_only=False,
+        statements=("SELECT * FROM t",),
+    )
+
+    with pytest.raises(ValueError, match=r"duplicate column names"):
+        repo.execute_sql(dataframe=df, request=request)
+
+
+def test_execute_sql_rejects_dataframe_without_columns() -> None:
+    repo = DuckDBWorkingDatatRepo()
+    df = pd.DataFrame(index=[0, 1, 2])
+    request = WorkingDataSQLRequest(
+        table_name="t",
+        analytic_only=False,
+        statements=("SELECT 1",),
+    )
+
+    with pytest.raises(ValueError, match=r"at least one column"):
+        repo.execute_sql(dataframe=df, request=request)
+
+
+def test_execute_sql_rejects_mutating_sql_when_analytic_only() -> None:
+    repo = DuckDBWorkingDatatRepo()
+    df = pd.DataFrame([{"a": 1}])
+    request = WorkingDataSQLRequest(
+        table_name="t",
+        analytic_only=True,
+        statements=("DELETE FROM t WHERE a = 1",),
+    )
+
+    with pytest.raises(ValueError, match=r"analytic_only request cannot include"):
+        repo.execute_sql(dataframe=df, request=request)
+
+
+def test_execute_sql_allows_select_when_analytic_only() -> None:
+    repo = DuckDBWorkingDatatRepo()
+    df = pd.DataFrame([{"a": 1}, {"a": 2}])
+    request = WorkingDataSQLRequest(
+        table_name="t",
+        analytic_only=True,
+        statements=("SELECT COUNT(*) AS n FROM t",),
+    )
+
+    result = repo.execute_sql(dataframe=df, request=request)
+
+    assert result.has_result_set is True
+    assert result.columns == ("n",)
+    assert result.dataframe.to_dict(orient="records") == [{"n": 2}]
