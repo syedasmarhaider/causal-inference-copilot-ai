@@ -15,7 +15,7 @@ ACTION = Literal["NONE", "NEEDS_INPUT","NEEDS_DATA"]
 class StateMessage:
     txt_message: str
     action: ACTION 
-    artifact_ids: Sequence[str] | None = None
+    artifacts: Sequence[dict[str, Any]] | None = None
 
 class State(ABC):
     @property
