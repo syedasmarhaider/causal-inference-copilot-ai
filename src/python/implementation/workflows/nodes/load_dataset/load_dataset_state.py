@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import Any, ClassVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
@@ -15,13 +15,19 @@ from python.implementation.workflows.tools.data_profiling.data_profiling_tool im
 from python.implementation.workflows.utils.utils import uuid_from_any
 
 
-class LoadDatasetPayloadModel(BaseModel):
+class DatasetIterationModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    
+    dataset_id: UUID
+    saved_vega_lite_specs_file_ids: Sequence[UUID] | None = None
+    summary: DatasetSummaryModel | None = None
+
+
+class DatasetPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    id: UUID | None = None
-    summary: DatasetSummaryModel | None = None
+    dataset_iterations: Sequence[DatasetIterationModel] = Field(min_length=1)
     load_error: str | None = None
-    graph_picture_ids: Sequence[UUID] | None = None
     user_message: str | None = "Not run yet"
 
     @field_validator("load_error", "user_message", mode="before")
