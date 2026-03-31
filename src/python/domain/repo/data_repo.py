@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Literal
 from uuid import UUID
 
 import pandas as pd
-
-ImageMime = Literal["image/png", "image/jpeg", "image/webp"]
-
 
 class DataRepo(ABC):
     @abstractmethod
