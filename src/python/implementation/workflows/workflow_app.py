@@ -312,7 +312,7 @@ class WorkflowApp:
             self._repo.append_message(
                     user_id=req.user_id,
                     conversation_id=req.conversation_id,
-                    message=ChatMessage(role="system", content=f"Error returned from node {new_state.name}: {new_state.error}"),
+                    message=ChatMessage(role="system", content=f"Error returned from node {new_state.error.error}"),
         )
             
         return WorkflowResponse(
