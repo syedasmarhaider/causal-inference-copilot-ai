@@ -57,6 +57,7 @@ app = FastAPI(
 
 app.add_middleware(RequestContextMiddleware)
 
+# TODO: for now no CORS but later I will add restrictions based on allowed origins for the frontend app(s) that will consume this API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
