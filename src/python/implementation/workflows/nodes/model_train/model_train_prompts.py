@@ -44,9 +44,17 @@ Inputs:
 (3) Dataset summary (types, unique counts, missingness, examples):
 {dataset_summary_json}
 
+Previous validation feedback from earlier attempts:
+{prev_training_errors_string}
+
+Model fit command notes:
+{documentation_string}
+
 Output format (STRICT JSON ONLY; no markdown; no extra keys):
+{{
   "needs_user_input": <bool>,
-  "user_message": "<clinician-friendly message. If needs_user_input=true, include the concrete questions, and name the exact columns. If false, briefly explain that you have comprehensive information to proceed and mention any non-blocking warnings.>"
+  "message": "<clinician-friendly message. If needs_user_input=true, include the concrete questions and exact column names. If false, briefly explain that planning can proceed and include only non-blocking warnings.>"
+}}
   
 """
 
@@ -74,6 +82,18 @@ Eligible columns:
 Eligible = `covariate` and `effect_modifier` only
 You MUST build the plan ONLY for eligible columns.
 
+Column-type contract (MANDATORY):
+- Use `dataset_summary.profiles[].inferred_kind` to pick presets, not intuition.
+- Allowed presets by inferred_kind:
+  - NUMERIC -> num_standard, num_minmax, num_log1p, drop, passthrough
+  - CATEGORICAL -> cat_onehot, map_binary, map_ordinal, drop, passthrough
+  - BOOLEAN -> cat_onehot, map_binary, map_ordinal, num_standard, num_minmax, num_log1p, drop, passthrough
+  - DATETIME -> datetime_epoch_seconds, drop, passthrough
+  - OTHER -> drop, passthrough
+- Never apply categorical presets to NUMERIC columns.
+- Never apply numeric presets to CATEGORICAL columns.
+- Do not guess semantic types from names; inferred_kind is the source of truth.
+
 Estimator-aware best practices:
 - If estimator is linear / GLM-like: scaling for numeric is typically useful; ensure stable baselines for one-hot
   (e.g., drop_first when appropriate) and avoid creating redundant columns with intercept.
@@ -94,6 +114,12 @@ Inputs:
 
 (3) Dataset summary (types, unique counts, missingness, examples):
 {dataset_summary_json}
+
+(4) Previous validation feedback from earlier attempts:
+{prev_training_errors_string}
+
+(5) Model fit command notes:
+{documentation_string}
 
 Your task:
 - Produce a TransformPlan JSON object that exactly matches the provided schema.

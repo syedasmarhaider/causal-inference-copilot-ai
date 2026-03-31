@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, cast
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
@@ -52,7 +52,12 @@ _ROLE_EFFECT_MODIFIER = "effect_modifier"
 class UserPlanInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    message: str = Field(..., min_length=1)
+    # Accept both "message" and legacy "user_message" outputs from prompt/model replies.
+    message: str = Field(
+        ...,
+        min_length=1,
+        validation_alias=AliasChoices("message", "user_message"),
+    )
     needs_user_input: bool
 
 
@@ -311,8 +316,8 @@ def _generate_encoding_plan(
     documentation: str | None = None,
     history: Sequence[ChatMessage] | None,
 ) -> tuple[UserPlanInput, TransformPlan | None]:
-
-    for _, _ in enumerate(range(2)):
+    max_outer_attempts = 2
+    for attempt in range(1, max_outer_attempts + 1):
         covariate_cols = set(causal_specs.covariates or [])
         effect_modifier_cols = set(causal_specs.effect_modifiers or [])
 
@@ -407,14 +412,23 @@ def _generate_encoding_plan(
                 )
                 + "\nPlease review the issues and adjust the encoding plan accordingly."
             )
-            continue
+            if attempt < max_outer_attempts:
+                continue
+            break
 
         return out, plan
 
-    raise ValueError(
-        "Failed to generate encoding plan after multiple attempts. "
-        "LLM output did not meet expected format or constraints."
+    guidance_message = (
+        "I couldn't generate a valid encoding plan that matches the current dataset column "
+        "types after multiple attempts. Please review the suggested encodings and confirm "
+        "how each numeric/categorical field should be handled."
     )
+    if prev_training_error:
+        guidance_message = (
+            f"{guidance_message}\n\nLatest validation feedback:\n{prev_training_error}"
+        )
+
+    return UserPlanInput(message=guidance_message, needs_user_input=True), None
 
 
 @dataclass(frozen=True, slots=True)
@@ -490,16 +504,38 @@ class ModelTrainNode(Node):
                 conversation_id,
                 selected_estimator,
             )
-
-            user_discussion, plan = _generate_encoding_plan(
-                llm=self.llm,
-                causal_specs=causal_specs,
-                selected_model=selected_estimator,
-                dataset_summary=dataset_summary,
-                history=last_4_messages,
-                prev_training_error=state.payload.prev_training_errors,
-                documentation=model.get_command_info("FIT"),
-            )
+            try:
+                user_discussion, plan = _generate_encoding_plan(
+                    llm=self.llm,
+                    causal_specs=causal_specs,
+                    selected_model=selected_estimator,
+                    dataset_summary=dataset_summary,
+                    history=last_4_messages,
+                    prev_training_error=state.payload.prev_training_errors,
+                    documentation=model.get_command_info("FIT"),
+                )
+            except Exception as exc:
+                error_text = str(exc).strip() or type(exc).__name__
+                log.exception(
+                    "ModelTrainNode failed while generating encoding plan",
+                    conversation_id=conversation_id,
+                    model=selected_estimator,
+                    error_detail=error_text,
+                )
+                payload = state.payload.model_copy(
+                    update={
+                        "needs_user_input": True,
+                        "error": None,
+                        "user_message": (
+                            "I could not generate a safe encoding plan right now. "
+                            "Please confirm the expected encoding for your column types "
+                            "and try again."
+                        ),
+                        "prev_training_errors": error_text,
+                        "column_transformation_plan": None,
+                    }
+                )
+                return ModelTrainState(payload=payload)
 
             if user_discussion.needs_user_input:
                 log.info(
