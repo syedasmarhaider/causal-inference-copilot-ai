@@ -35,7 +35,7 @@ class DataManipulationService:
     llm: LLMService
     working_data_repo: WorkingDatatRepo
     model: AvailableModelsKey = "basic"
-    max_attempts: int = 3
+    max_attempts: int = 2
 
     def __post_init__(self) -> None:
         if self.max_attempts <= 0:

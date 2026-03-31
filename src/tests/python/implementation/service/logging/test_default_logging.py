@@ -233,3 +233,24 @@ def test_default_app_logger_exception_accepts_exception_object_message() -> None
     record = handler.records[0]
     assert record.getMessage() == "bad value"
     assert record.exc_info is not None
+
+
+def test_get_logger_reuses_cached_default_logger_for_same_key() -> None:
+    logger_a = logging_module.get_logger(
+        "tests.logging.cached",
+        component="ComponentA",
+        log_type="service",
+    )
+    logger_b = logging_module.get_logger(
+        "tests.logging.cached",
+        component="ComponentA",
+        log_type="service",
+    )
+    logger_c = logging_module.get_logger(
+        "tests.logging.cached",
+        component="ComponentB",
+        log_type="service",
+    )
+
+    assert logger_a is logger_b
+    assert logger_a is not logger_c

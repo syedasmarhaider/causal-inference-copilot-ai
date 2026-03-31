@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-from contextvars import ContextVar, Token
-from dataclasses import dataclass
 import json
 import logging
 import os
-from datetime import datetime, timezone
-from typing import Any, Callable, Protocol
+from collections.abc import Callable
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from functools import lru_cache
+from typing import Any, Protocol
 
 _DEFAULT_SERVICE_NAME = "causal-inference-copilot-ai"
 _LOG_LEVEL_ENV = "LOG_LEVEL"
 _SERVICE_NAME_ENV = "LOG_SERVICE_NAME"
-_logger_factory: "LoggerFactory | None" = None
+_logger_factory: LoggerFactory | None = None
 _request_id_ctx: ContextVar[str | None] = ContextVar("request_id", default=None)
 _trace_id_ctx: ContextVar[str | None] = ContextVar("trace_id", default=None)
 _span_id_ctx: ContextVar[str | None] = ContextVar("span_id", default=None)
@@ -21,7 +23,7 @@ _http_route_ctx: ContextVar[str | None] = ContextVar("http_route", default=None)
 
 
 class AppLogger(Protocol):
-    def bind(self, **tags: Any) -> "AppLogger": ...
+    def bind(self, **tags: Any) -> AppLogger: ...
 
     def debug(self, message: str, *args: Any, **fields: Any) -> None: ...
 
@@ -54,7 +56,7 @@ class JSONLogFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "service": self._service_name,
             "logger": record.name,
@@ -145,6 +147,7 @@ class DefaultAppLogger(AppLogger):
 def set_app_logger_factory(factory: LoggerFactory | None) -> None:
     global _logger_factory
     _logger_factory = factory
+    _get_default_logger_cached.cache_clear()
 
 
 def set_log_context(
@@ -206,16 +209,16 @@ def get_logger(
     component: str | None = None,
     log_type: str | None = None,
 ) -> AppLogger:
-    tags: dict[str, Any] = {}
-    if component:
-        tags["component"] = component
-    if log_type:
-        tags["type"] = log_type
+    tags = _build_logger_tags(component=component, log_type=log_type)
 
     if _logger_factory is not None:
         return _logger_factory(logger_name, tags)
 
-    return DefaultAppLogger(logging.getLogger(logger_name), tags=tags)
+    return _get_default_logger_cached(
+        logger_name=logger_name,
+        component=component,
+        log_type=log_type,
+    )
 
 
 def get_app_logger(
@@ -293,6 +296,28 @@ def _coerce_message_and_args(
         return args_text, (), args_text
 
     return message_str, args, None
+
+
+def _build_logger_tags(*, component: str | None, log_type: str | None) -> dict[str, Any]:
+    tags: dict[str, Any] = {}
+    if component:
+        tags["component"] = component
+    if log_type:
+        tags["type"] = log_type
+    return tags
+
+
+@lru_cache(maxsize=512)
+def _get_default_logger_cached(
+    *,
+    logger_name: str,
+    component: str | None,
+    log_type: str | None,
+) -> DefaultAppLogger:
+    return DefaultAppLogger(
+        logging.getLogger(logger_name),
+        tags=_build_logger_tags(component=component, log_type=log_type),
+    )
 
 
 __all__ = [
