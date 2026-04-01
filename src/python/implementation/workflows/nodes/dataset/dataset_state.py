@@ -19,12 +19,12 @@ class DatasetIterationModel(BaseModel):
 
     dataset_id: UUID
     summary: DatasetSummaryModel | None = None
-    saved_vega_lite_specs_file_ids: list[] = Field(default_factory=list)
+    saved_vega_lite_specs_file_ids: list[Artifact_Id] = Field(default_factory=lambda: [])
 
 
 class DatasetPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    dataset_iterations: list[DatasetIterationModel] = Field(default_factory=list)
+    dataset_iterations: list[DatasetIterationModel] = Field(default_factory=lambda: [])
     user_message: str = (
         "I do not have your dataset yet. Please upload a CSV dataset so I can analyze it."
     )
@@ -47,17 +47,11 @@ class DatasetState(State):
 
     @property
     def message(self) -> StateMessage:
-        latest_iteration = self.latest_iteration
-        artifact_ids: list[Artifact_Id] | None = None
-        if latest_iteration is not None:
-            artifact_ids = [
-                {"type": "csv", "id": latest_iteration.dataset_id},
-                *[
-                    {"type": "json", "id": file_id}
-                    for file_id in latest_iteration.saved_vega_lite_specs_file_ids
-                ],
-            ]
-
+        latest_iteration = self.latest_iteration 
+        artifact_ids: list[Artifact_Id] = []
+        if latest_iteration:
+            artifact_ids.append(Artifact_Id(id = latest_iteration.dataset_id, type="csv"))
+            artifact_ids.extend(latest_iteration.saved_vega_lite_specs_file_ids)
         return StateMessage(
             txt_message=self.payload.user_message,
             action="NEEDS_DATA" if latest_iteration is None else "NONE",

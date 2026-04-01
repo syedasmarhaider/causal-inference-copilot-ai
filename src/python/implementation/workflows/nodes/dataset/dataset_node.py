@@ -9,9 +9,9 @@ from uuid import UUID
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from python.domain.models.models import Artifact_Id
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import (
-    AvailableModelsKey,
     ChatMessage,
     LLMConfig,
     LLMService,
@@ -52,12 +52,12 @@ class DatasetIntentModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     intent_data_question: bool = False
-    intent_data_question_brief: str 
+    intent_data_question_brief: str = ""
     intent_manupulation_question: bool = False
-    intent_manupulation_question_brief: str 
+    intent_manupulation_question_brief: str = ""
     intent_manupulation_is_analytical_query: bool = False
     intent_chart: bool = False
-    intent_chart_brief: str 
+    intent_chart_brief: str = ""
 
     @field_validator(
         "intent_data_question_brief",
@@ -66,11 +66,11 @@ class DatasetIntentModel(BaseModel):
         mode="before",
     )
     @classmethod
-    def _normalize_brief(cls, value: Any) -> str | None:
+    def _normalize_brief(cls, value: Any) -> str:
         if value is None:
-            return None
+            return ""
         text = str(value).strip()
-        return text or None
+        return text
 
     @model_validator(mode="after")
     def _validate(self) -> DatasetIntentModel:
@@ -86,6 +86,13 @@ class DatasetIntentModel(BaseModel):
             raise ValueError("intent_chart_brief is required")
         return self
 
+    def has_any_intent(self) -> bool:
+        return (
+            self.intent_data_question
+            or self.intent_manupulation_question
+            or self.intent_chart
+        )
+
 
 class DatasetNode(Node):
     NAME: ClassVar[str] = DatasetState.NAME
@@ -95,15 +102,13 @@ class DatasetNode(Node):
         *,
         data_repo: DataRepo,
         llm: LLMService,
-        data_manipulation_service: DataManipulationService | None = None,
-        plot_specs_service: PlotSpecsService | None = None,
-        model_name: AvailableModelsKey = "basic",
+        data_manipulation_service: DataManipulationService,
+        plot_specs_service: PlotSpecsService,
     ) -> None:
         self._data_repo = data_repo
         self._llm = llm
         self._data_manipulation_service = data_manipulation_service
         self._plot_specs_service = plot_specs_service
-        self._model_name = model_name
 
     @property
     def name(self) -> str:
@@ -133,8 +138,7 @@ class DatasetNode(Node):
             return self._handle_revert(dataset_iterations=dataset_iterations)
 
         profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))
-        history_text = _serialize_history(messages_history)
-
+        
         current_df: pd.DataFrame
         current_summary: DatasetSummaryModel
         current_summary_json: str
@@ -203,6 +207,7 @@ class DatasetNode(Node):
                     summary=current_summary,
                 )
             )
+            
             loaded_this_turn = True
 
         latest_user_message = _latest_user_message(messages_history)
@@ -215,11 +220,16 @@ class DatasetNode(Node):
                     ),
                 )
             )
+            
+        last_4_messages_history = messages_history[-5:-1] if messages_history and len(messages_history) > 1 else None
+        last_4_messages_history_text: str | None = None
+        if last_4_messages_history:
+             last_4_messages_history_text = get_chat_messages_role_and_message_json(last_4_messages_history)   
 
         try:
             intent = self._classify_intent(
                 latest_user_message=latest_user_message,
-                chat_history=history_text,
+                chat_history=last_4_messages_history_text,
                 dataset_summary=current_summary_json,
             )
         except Exception as exc:
@@ -233,6 +243,16 @@ class DatasetNode(Node):
                 )
             )
 
+        if not intent.has_any_intent():
+            return DatasetState(
+                DatasetPayloadModel(
+                    dataset_iterations=dataset_iterations,
+                    user_message=self._build_off_topic_message(
+                        latest_user_message=latest_user_message,
+                    ),
+                )
+            )
+
         summary_answer: str | None = None
         manipulation_result: JSONDict | None = None
         chart_result: JSONDict | None = None
@@ -241,7 +261,7 @@ class DatasetNode(Node):
             summary_answer = self._answer_summary_question(
                 intent_brief=intent.intent_data_question_brief or latest_user_message,
                 dataset_summary=current_summary_json,
-                chat_history=history_text,
+                chat_history=last_4_messages_history_text,
             )
 
         working_df = current_df
@@ -283,7 +303,12 @@ class DatasetNode(Node):
             chart_result=chart_result,
             dataset_context={
                 "dataset_loaded_this_turn": loaded_this_turn,
-                "active_dataset_id": str(dataset_iterations[-1].dataset_id),
+                "original_user_message": latest_user_message,
+                "handled_intents": {
+                    "data_question": intent.intent_data_question,
+                    "manipulation_question": intent.intent_manupulation_question,
+                    "chart": intent.intent_chart,
+                },
                 "active_dataset_rows": int(len(working_df)),
                 "active_dataset_columns": [str(column) for column in working_df.columns],
             },
@@ -321,23 +346,22 @@ class DatasetNode(Node):
         *,
         messages_history: Sequence[ChatMessage] | None,
     ) -> str:
-        payload = {
-            "latest_user_message": _latest_user_message(messages_history),
-            "chat_history": _serialize_history(messages_history),
-        }
-        try:
             response = self._llm.generate(
-                system_prompt=dataset_missing_data_system_prompt(),
-                user_prompt=json.dumps(payload, ensure_ascii=False),
-                config=LLMConfig(model=self._model_name, temperature=0.4),
-                history=None,
+                system_prompt=None,
+                user_prompt=dataset_missing_data_system_prompt(),
+                config=LLMConfig(model="mini", temperature=0.4),
+                history=messages_history,
             )
-        except Exception as exc:
-            log.exception("failed to build missing-data message", error=safe_err(exc))
-            return "Please upload a CSV dataset so I can analyze your data."
+            return response.content.strip() 
+            
 
-        text = response.content.strip() if response.content else ""
-        return text or "Please upload a CSV dataset so I can analyze your data."
+    def _build_off_topic_message(self, *, latest_user_message: str) -> str:
+        return (
+            "I cannot help with that from the dataset stage. Here I only handle dataset "
+            "understanding, data manipulation, and chart generation. If you want downstream "
+            "workflow steps, continue through the pipeline after the data is ready."
+        )
+        
 
     def _classify_intent(
         self,
@@ -346,7 +370,7 @@ class DatasetNode(Node):
         chat_history: str | None,
         dataset_summary: str,
     ) -> DatasetIntentModel:
-        payload = {
+        payload: JSONDict = {
             "latest_user_message": latest_user_message,
             "chat_history": chat_history,
             "dataset_summary": dataset_summary,
@@ -355,7 +379,7 @@ class DatasetNode(Node):
             schema=DatasetIntentModel,
             system_prompt=dataset_intent_classification_system_prompt(),
             user_prompt=json.dumps(payload, ensure_ascii=False),
-            config=LLMConfig(model=self._model_name, temperature=0.0, top_p=1.0),
+            config=LLMConfig(model="basic", temperature=0.0, top_p=1.0),
             history=None,
             max_attempts=2,
         )
@@ -367,7 +391,7 @@ class DatasetNode(Node):
         dataset_summary: str,
         chat_history: str | None,
     ) -> str:
-        payload = {
+        payload: JSONDict = {
             "user_intent_brief": intent_brief,
             "dataset_summary": dataset_summary,
             "chat_history": chat_history,
@@ -376,7 +400,7 @@ class DatasetNode(Node):
             response = self._llm.generate(
                 system_prompt=dataset_summary_answer_system_prompt(),
                 user_prompt=json.dumps(payload, ensure_ascii=False),
-                config=LLMConfig(model=self._model_name, temperature=0.2),
+                config=LLMConfig(model="basic", temperature=0.2),
                 history=None,
             )
         except Exception as exc:
@@ -399,18 +423,6 @@ class DatasetNode(Node):
         instructions: str,
         analytical_query: bool,
     ) -> tuple[JSONDict, list[DatasetIterationModel], pd.DataFrame, DatasetSummaryModel, str]:
-        if self._data_manipulation_service is None:
-            return (
-                {
-                    "status": "unavailable",
-                    "message": "Data manipulation service is not configured.",
-                },
-                dataset_iterations,
-                dataframe,
-                summary_model,
-                summary_json,
-            )
-
         result_df = self._data_manipulation_service.manipulate(
             dataframe=dataframe,
             conversation_id=str(conversation_id),
@@ -477,21 +489,12 @@ class DatasetNode(Node):
         summary_json: str,
         instructions: str,
     ) -> tuple[JSONDict, list[DatasetIterationModel]]:
-        if self._plot_specs_service is None:
-            return (
-                {
-                    "status": "unavailable",
-                    "message": "Plot specs service is not configured.",
-                },
-                dataset_iterations,
-            )
-
         specs = self._plot_specs_service.generate_specs(
             dataframe=dataframe,
             data_summary=summary_json,
             user_intent=instructions,
         )
-        saved_ids: list[UUID] = []
+        saved_ids: list[Artifact_Id] = []
         for spec in specs:
             saved_id = uuid.uuid4()
             self._data_repo.save_json_data(
@@ -501,8 +504,11 @@ class DatasetNode(Node):
                 json_data=json.dumps(spec, ensure_ascii=False),
                 overwrite=True,
             )
-            saved_ids.append(saved_id)
-
+            saved_ids.append(Artifact_Id(
+                id=saved_id,
+                type="json"
+            ))
+            
         latest_iteration = dataset_iterations[-1]
         dataset_iterations[-1] = latest_iteration.model_copy(
             update={"saved_vega_lite_specs_file_ids": saved_ids}
@@ -525,37 +531,19 @@ class DatasetNode(Node):
         chart_result: JSONDict | None,
         dataset_context: JSONDict,
     ) -> str:
-        payload = {
+        payload: JSONDict = {
             "summary_answer": summary_answer,
             "manipulation_result": manipulation_result,
             "chart_result": chart_result,
             "dataset_context": dataset_context,
         }
-        try:
-            response = self._llm.generate(
+        response = self._llm.generate(
                 system_prompt=dataset_final_response_system_prompt(),
                 user_prompt=json.dumps(payload, ensure_ascii=False),
-                config=LLMConfig(model=self._model_name, temperature=0.3),
+                config=LLMConfig(model="basic", temperature=0.3),
                 history=None,
             )
-        except Exception as exc:
-            log.exception("failed to build final dataset response", error=safe_err(exc))
-            return _fallback_final_message(
-                summary_answer=summary_answer,
-                manipulation_result=manipulation_result,
-                chart_result=chart_result,
-                dataset_context=dataset_context,
-            )
-
-        text = response.content.strip() if response.content else ""
-        if text:
-            return text
-        return _fallback_final_message(
-            summary_answer=summary_answer,
-            manipulation_result=manipulation_result,
-            chart_result=chart_result,
-            dataset_context=dataset_context,
-        )
+        return response.content
 
 
 def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
@@ -570,19 +558,13 @@ def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str 
     return None
 
 
-def _serialize_history(messages_history: Sequence[ChatMessage] | None, *, limit: int = 8) -> str | None:
-    if not messages_history:
-        return None
-    return get_chat_messages_role_and_message_json(list(messages_history[-limit:]))
-
-
 def _is_revert_request(messages_history: Sequence[ChatMessage] | None) -> bool:
     if not messages_history:
         return False
     last_message = messages_history[-1]
-    if last_message.role != "system":
+    if last_message.role != "user":
         return False
-    return "revert_changes" in last_message.content.lower()
+    return "revert_data_changes" in last_message.content.lower()
 
 
 def _dataframe_preview(dataframe: pd.DataFrame, *, row_limit: int = 10) -> JSONDict:
@@ -596,50 +578,5 @@ def _dataframe_preview(dataframe: pd.DataFrame, *, row_limit: int = 10) -> JSOND
         "columns": [str(column) for column in dataframe.columns],
         "preview_rows": preview_df.to_dict(orient="records"),
     }
-
-
-def _fallback_final_message(
-    *,
-    summary_answer: str | None,
-    manipulation_result: JSONDict | None,
-    chart_result: JSONDict | None,
-    dataset_context: JSONDict,
-) -> str:
-    parts: list[str] = []
-    if summary_answer:
-        parts.append(summary_answer)
-
-    if manipulation_result is not None:
-        status = str(manipulation_result.get("status") or "")
-        if status == "dataset_updated":
-            parts.append(
-                "Saved a new working dataset version "
-                f"({manipulation_result.get('new_dataset_id')})."
-            )
-        elif status == "analytical_query":
-            result = manipulation_result.get("result")
-            row_count = result.get("row_count") if isinstance(result, dict) else None
-            parts.append(f"Analytical query completed with {row_count} rows.")
-        elif status == "unavailable":
-            parts.append(str(manipulation_result.get("message")))
-
-    if chart_result is not None:
-        status = str(chart_result.get("status") or "")
-        if status == "charts_saved":
-            parts.append(
-                f"Saved {chart_result.get('saved_chart_count')} chart specification file(s)."
-            )
-        elif status == "unavailable":
-            parts.append(str(chart_result.get("message")))
-
-    if not parts:
-        if dataset_context.get("dataset_loaded_this_turn"):
-            return (
-                "Dataset loaded and ready. Ask about the data, request a transformation, or ask for charts."
-            )
-        return "Dataset is ready. Ask about the data, request a transformation, or ask for charts."
-
-    return "\n\n".join(parts)
-
 
 __all__ = ["DatasetIntentModel", "DatasetNode"]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any, ClassVar, Literal
+from typing import  Any, ClassVar, Literal
 
 import pandas as pd
 from pandas.api.types import (
@@ -29,14 +29,6 @@ from python.implementation.workflows.tools.common.model.data_summary import (
     OtherColumnProfileModel,
     OtherSummaryModel,
 )
-from python.implementation.workflows.tools.data_profiling.plots.data_missingness import (
-    generate_data_completeness_graph,
-)
-from python.implementation.workflows.tools.data_profiling.plots.measure_relationships import (
-    generate_measure_relationships_graph,
-)
-from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
-
 InferredKind = Literal["NUMERIC", "DATETIME", "BOOLEAN", "CATEGORICAL", "OTHER"]
 
 # =============================================================================
@@ -83,17 +75,6 @@ class DatasetProfilingTool(Tool):
     def get_tool_info(self) -> str:
         return "Tool for profiling datasets for summary statistics and data quality insights."
     
-    
-    def generate_basic_stats_graphs(
-        self,
-        *,
-        df: pd.DataFrame,
-    ) -> list[GraphImage]:  
-        return [
-             generate_data_completeness_graph(df),
-             generate_measure_relationships_graph(df),
-         ]
-
     def extract_dataset_summary(
         self,
         df: pd.DataFrame,
