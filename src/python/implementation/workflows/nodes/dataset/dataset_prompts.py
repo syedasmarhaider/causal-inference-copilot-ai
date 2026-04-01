@@ -5,8 +5,7 @@ def dataset_node_info() -> str:
     return (
         "Persistent dataset stage. If a dataset is missing, ask the user to upload CSV data. "
         "If a dataset exists, classify the user request into summary, manipulation, and chart intents, "
-        "run the relevant services, persist any new working dataset or chart JSON files, and return a "
-        "single user-facing message while keeping the state pending."
+        "run the relevant services, persist any new working dataset or chart JSON files "
     )
 
 
@@ -36,20 +35,23 @@ Classify the latest user request for the DATASET node.
 Return JSON that exactly matches the schema.
 
 Intent rules:
-- intent_data_question: true only when the request can be answered from dataset summary alone else empty.
-- intent_manupulation_question: true when the request needs SQL-like data querying or transformation else empty.
+- intent_data_question: true only when the request can be answered from dataset summary alone.
+- intent_manupulation_question: true when the request needs SQL-like data querying or transformation.
 - intent_manupulation_is_analytical_query: true only when the manipulation is read-only and should not create a new dataset version.
-- intent_chart: true when the user wants one or more charts else empty.
+- intent_chart: true when the user wants one or more charts.
+- It is valid for all three intents to be false when the request belongs to another workflow stage not specific to this dataset stage.
 
 Brief rules:
-- Every brief must be comprehensive covering user full intent.
-- If an intent is false, its brief must be empty.
+- Every brief must be comprehensive covering full user intent for specific case
+- If an intent is false, its brief must be an empty string.
 
 General rules:
 - Multiple intents may be true together.
 - If the user asks for filtering, deriving columns, cleaning, renaming, or reshaping, that is manipulation.
 - If the user asks for counts, aggregates, grouped comparisons, or query-style inspection without changing the working dataset, set manipulation true and analytical_query true.
 - If the user asks a plain descriptive question answerable from summary, set only intent_data_question true unless another intent is clearly needed.
+- If the user asks for model training, model selection, causal estimation, or other downstream workflow stages, do not force a dataset intent for that part.
+- If the request mixes dataset work with downstream workflow requests, mark only the dataset-relevant intents and ignore the rest.
 """.strip()
 
 
@@ -85,6 +87,8 @@ Rules:
 - Merge the available outputs into one concise answer.
 - Mention dataset updates only when a new working dataset version was saved.
 - Mention chart generation only when chart files were saved.
+- The original user message may also contain requests for later workflow stages such as model training.
+- If only the dataset-related part was handled, say that clearly and note that downstream modeling should happen later once the data is ready.
 - Do not mention internal JSON or implementation details.
 - Keep the response practical and direct.
 - Return only the final user-facing message text.
