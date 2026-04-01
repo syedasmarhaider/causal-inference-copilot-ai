@@ -31,8 +31,8 @@ from python.implementation.workflows.utils.validation import ValidationIssueMode
 class ValidationBackdoorReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    issues: list[ValidationIssueModel] = Field(default_factory=lambda: [])
-    metrics: dict[str, Any] = Field(default_factory=lambda: {})
+    issues: list[ValidationIssueModel] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def status(self) -> ValidationStatus:
@@ -136,6 +136,7 @@ class ValidationBackdoorTool(Tool):
                 step_name="transform plan",
                 validator=lambda: _validate_transform_plan(
                     dataframe=dataframe,
+                    treatment_spec=causal_spec.treatment_spec,
                     transform_plan=transform_plan,
                     covariates=covariates,
                     effect_modifiers=effect_modifiers,
@@ -445,22 +446,13 @@ def _validate_outcome_column(
     series = dataframe[outcome_col]
 
     missing_rate = float(series.isna().mean()) if len(series) else 0.0
-    if missing_rate >= 0.0:
+    if missing_rate > 0.0:
         issues.append(
             _issue(
                 severity="FAIL",
                 message="Outcome column has missingness.",
                 evidence={"outcome_col": outcome_col, "missing_rate": missing_rate},
                 fix_hint="Redefine the cohort before estimation or impute outcome value in data set state.",
-            )
-        )
-    elif missing_rate > 0.0:
-        issues.append(
-            _issue(
-                severity="WARN",
-                message="Outcome column has missing values.",
-                evidence={"outcome_col": outcome_col, "missing_rate": missing_rate},
-                fix_hint="Inspect whether outcome missingness could bias the analysis.",
             )
         )
 
@@ -611,6 +603,7 @@ def _validate_binary_outcome_column(
 def _validate_transform_plan(
     *,
     dataframe: pd.DataFrame,
+    treatment_spec: BinaryTreatmentSpecModel,
     transform_plan: TransformPlan | None,
     covariates: list[str],
     effect_modifiers: list[str],
@@ -723,7 +716,10 @@ def _validate_transform_plan(
         issues.extend(
             _validate_encoding_semantics(
                 dataframe=dataframe,
+                treatment_spec=treatment_spec,
                 column=column_plan.column,
+                role=column_plan.role,
+                inferred_kind=inferred_kind,
                 encoding=column_plan.encoding,
             )
         )
@@ -755,12 +751,51 @@ def _validate_transform_plan(
 def _validate_encoding_semantics(
     *,
     dataframe: pd.DataFrame,
+    treatment_spec: BinaryTreatmentSpecModel,
     column: str,
+    role: Literal["covariate", "effect_modifier"],
+    inferred_kind: str,
     encoding: Any,
 ) -> list[ValidationIssueModel]:
     issues: list[ValidationIssueModel] = []
     series = dataframe[column]
     non_missing = series.dropna()
+    preset = str(encoding.preset)
+
+    if preset == "drop":
+        return issues
+
+    if preset == "passthrough":
+        issues.extend(
+            _maybe_issue_for_unhandled_missingness(
+                series=series,
+                column=column,
+                role=role,
+                preset=preset,
+            )
+        )
+        issues.extend(
+            _maybe_issue_for_low_cardinality_numeric(
+                series=series,
+                column=column,
+                role=role,
+                preset=preset,
+                inferred_kind=inferred_kind,
+            )
+        )
+        return issues
+
+    if preset in {"num_standard", "num_minmax"}:
+        issues.extend(
+            _maybe_issue_for_low_cardinality_numeric(
+                series=series,
+                column=column,
+                role=role,
+                preset=preset,
+                inferred_kind=inferred_kind,
+            )
+        )
+        return issues
 
     if isinstance(encoding, NumLog1pParams):
         numeric = pd.to_numeric(non_missing, errors="coerce")
@@ -792,9 +827,26 @@ def _validate_encoding_semantics(
                     fix_hint="Enable allow_negative or choose a different numeric preset.",
                 )
             )
+        issues.extend(
+            _maybe_issue_for_low_cardinality_numeric(
+                series=series,
+                column=column,
+                role=role,
+                preset=preset,
+                inferred_kind=inferred_kind,
+            )
+        )
         return issues
 
     if isinstance(encoding, DateTimeEpochParams):
+        issues.extend(
+            _maybe_issue_for_unhandled_missingness(
+                series=series,
+                column=column,
+                role=role,
+                preset=preset,
+            )
+        )
         parsed = pd.to_datetime(non_missing, errors="coerce")
         parse_failures = int(parsed.isna().sum())
         if parse_failures > 0 and encoding.errors == "raise":
@@ -818,13 +870,13 @@ def _validate_encoding_semantics(
         return issues
 
     if isinstance(encoding, CatOneHotParams):
-        if encoding.missing == "error" and series.isna().any():
-            issues.append(
-                _issue(
-                    severity="FAIL",
-                    message="cat_onehot preset is configured to error on missing values, but missing values are present.",
-                    evidence={"column": column, "missing_count": int(series.isna().sum())},
-                    fix_hint="Allow missing handling in the preset or clean the column first.",
+        if encoding.missing == "error":
+            issues.extend(
+                _maybe_issue_for_unhandled_missingness(
+                    series=series,
+                    column=column,
+                    role=role,
+                    preset=preset,
                 )
             )
         distinct = int(non_missing.astype(str).nunique())
@@ -841,32 +893,83 @@ def _validate_encoding_semantics(
                     fix_hint="Expect grouped or truncated categories, or increase max_categories.",
                 )
             )
+        issues.extend(
+            _maybe_issue_for_single_arm_levels(
+                dataframe=dataframe,
+                treatment_spec=treatment_spec,
+                column=column,
+                role=role,
+                preset=preset,
+            )
+        )
         return issues
 
     if isinstance(encoding, MapBinaryParams):
-        return _validate_mapping_encoding(
-            column=column,
-            series=series,
-            allowed_keys=set(encoding.mapping.keys()),
-            allow_unknown=encoding.allow_unknown,
-            missing_mode=encoding.missing,
-            missing_token=encoding.missing_token,
-            preset_name="map_binary",
+        if encoding.missing == "error":
+            issues.extend(
+                _maybe_issue_for_unhandled_missingness(
+                    series=series,
+                    column=column,
+                    role=role,
+                    preset=preset,
+                )
+            )
+        issues.extend(
+            _validate_mapping_encoding(
+                column=column,
+                series=series,
+                allowed_keys=set(encoding.mapping.keys()),
+                allow_unknown=encoding.allow_unknown,
+                missing_mode=encoding.missing,
+                missing_token=encoding.missing_token,
+                preset_name="map_binary",
+            )
         )
+        issues.extend(
+            _maybe_issue_for_single_arm_levels(
+                dataframe=dataframe,
+                treatment_spec=treatment_spec,
+                column=column,
+                role=role,
+                preset=preset,
+            )
+        )
+        return issues
 
     if isinstance(encoding, MapOrdinalParams):
         allowed_keys = set(encoding.order)
         if encoding.missing == "impute_token" and encoding.missing_token is not None:
             allowed_keys.add(encoding.missing_token)
-        return _validate_mapping_encoding(
-            column=column,
-            series=series,
-            allowed_keys=allowed_keys,
-            allow_unknown=encoding.allow_unknown,
-            missing_mode=encoding.missing,
-            missing_token=encoding.missing_token,
-            preset_name="map_ordinal",
+        if encoding.missing == "error":
+            issues.extend(
+                _maybe_issue_for_unhandled_missingness(
+                    series=series,
+                    column=column,
+                    role=role,
+                    preset=preset,
+                )
+            )
+        issues.extend(
+            _validate_mapping_encoding(
+                column=column,
+                series=series,
+                allowed_keys=allowed_keys,
+                allow_unknown=encoding.allow_unknown,
+                missing_mode=encoding.missing,
+                missing_token=encoding.missing_token,
+                preset_name="map_ordinal",
+            )
         )
+        issues.extend(
+            _maybe_issue_for_single_arm_levels(
+                dataframe=dataframe,
+                treatment_spec=treatment_spec,
+                column=column,
+                role=role,
+                preset=preset,
+            )
+        )
+        return issues
 
     return issues
 
@@ -882,17 +985,6 @@ def _validate_mapping_encoding(
     preset_name: str,
 ) -> list[ValidationIssueModel]:
     issues: list[ValidationIssueModel] = []
-
-    missing_count = int(series.isna().sum())
-    if missing_mode == "error" and missing_count > 0:
-        issues.append(
-            _issue(
-                severity="FAIL",
-                message=f"{preset_name} is configured to error on missing values, but missing values are present.",
-                evidence={"column": column, "missing_count": missing_count},
-                fix_hint="Handle missing values explicitly or change the preset configuration.",
-            )
-        )
 
     observed_keys = {str(value) for value in series.dropna().tolist()}
     if missing_mode == "impute_token" and missing_token is not None and missing_token not in allowed_keys:
@@ -925,6 +1017,149 @@ def _validate_mapping_encoding(
             )
         )
 
+    return issues
+
+
+def _maybe_issue_for_unhandled_missingness(
+    *,
+    series: pd.Series,
+    column: str,
+    role: Literal["covariate", "effect_modifier"],
+    preset: str,
+) -> list[ValidationIssueModel]:
+    issues: list[ValidationIssueModel] = []
+    missing_count = int(series.isna().sum())
+    if missing_count == 0:
+        return issues
+
+    missing_rate = float(series.isna().mean()) if len(series) else 0.0
+    severity: Literal["WARN", "FAIL"] = "FAIL" if role == "effect_modifier" else "WARN"
+    issues.append(
+        _issue(
+            severity=severity,
+            message=(
+                "Effect modifier has missing values but the transform preset does not explicitly handle them."
+                if role == "effect_modifier"
+                else "Covariate has missing values but the transform preset does not explicitly handle them. but its ok because later it will be handled by the estimator's internal imputation. Still, review the missingness and consider cleaning or encoding the column with explicit missing handling for more stable estimates."
+            ),
+            evidence={
+                "column": column,
+                "role": role,
+                "missing_count": missing_count,
+                "missing_rate": missing_rate,
+                "preset": preset,
+            },
+            fix_hint=(
+                "Choose a preset with explicit missing handling or clean the effect modifier before estimation."
+                if role == "effect_modifier"
+                else "Choose a preset with explicit missing handling or clean the covariate before fitting."
+            ),
+        )
+    )
+    return issues
+
+
+def _maybe_issue_for_single_arm_levels(
+    *,
+    dataframe: pd.DataFrame,
+    treatment_spec: BinaryTreatmentSpecModel,
+    column: str,
+    role: Literal["covariate", "effect_modifier"],
+    preset: str,
+) -> list[ValidationIssueModel]:
+    issues: list[ValidationIssueModel] = []
+
+    treatment_col = str(treatment_spec.column)
+    if treatment_col not in dataframe.columns or column not in dataframe.columns:
+        return issues
+
+    treated_key = _normalize_discrete_value(treatment_spec.treated)
+    control_key = _normalize_discrete_value(treatment_spec.control)
+
+    counts_by_level: dict[str, dict[str, int]] = {}
+    for treatment_value, raw_value in dataframe[[treatment_col, column]].dropna().itertuples(index=False):
+        treatment_key = _normalize_discrete_value(treatment_value)
+        if treatment_key not in {treated_key, control_key}:
+            continue
+        level_key = _normalize_discrete_value(raw_value)
+        level_text = _discrete_key_text(level_key)
+        level_counts = counts_by_level.setdefault(level_text, {"treated": 0, "control": 0})
+        if treatment_key == treated_key:
+            level_counts["treated"] += 1
+        elif treatment_key == control_key:
+            level_counts["control"] += 1
+
+    levels_missing_by_arm: list[dict[str, Any]] = []
+    for level_text, level_counts in counts_by_level.items():
+        missing_arms: list[str] = []
+        if level_counts["treated"] == 0:
+            missing_arms.append("treated")
+        if level_counts["control"] == 0:
+            missing_arms.append("control")
+        if missing_arms:
+            levels_missing_by_arm.append(
+                {
+                    "level": level_text,
+                    "missing_arms": missing_arms,
+                    "treated_count": level_counts["treated"],
+                    "control_count": level_counts["control"],
+                }
+            )
+
+    if levels_missing_by_arm:
+        issues.append(
+            _issue(
+                severity="WARN",
+                message="Categorical or mapped column has levels observed in only one treatment arm.",
+                evidence={
+                    "column": column,
+                    "role": role,
+                    "preset": preset,
+                    "levels_missing_by_arm": levels_missing_by_arm,
+                    "counts_by_level": counts_by_level,
+                },
+                fix_hint="Review sparse categories and consider regrouping rare levels before estimation.",
+            )
+        )
+
+    return issues
+
+
+def _maybe_issue_for_low_cardinality_numeric(
+    *,
+    series: pd.Series,
+    column: str,
+    role: Literal["covariate", "effect_modifier"],
+    preset: str,
+    inferred_kind: str,
+) -> list[ValidationIssueModel]:
+    issues: list[ValidationIssueModel] = []
+    if inferred_kind != "NUMERIC" or preset not in {"num_standard", "num_minmax", "num_log1p", "passthrough"}:
+        return issues
+
+    non_missing = series.dropna()
+    if non_missing.empty:
+        return issues
+
+    distinct_values = sorted({float(value) for value in pd.to_numeric(non_missing, errors="coerce").dropna().tolist()})
+    distinct_count = len(distinct_values)
+    if distinct_count > 20:
+        return issues
+
+    issues.append(
+        _issue(
+            severity="WARN",
+            message="Numeric column has low cardinality and may actually represent coded categories.",
+            evidence={
+                "column": column,
+                "role": role,
+                "preset": preset,
+                "distinct_non_null_count": distinct_count,
+                "distinct_values_sample": distinct_values[:20],
+            },
+            fix_hint="Review whether this numeric column should use a categorical encoding strategy instead.",
+        )
+    )
     return issues
 
 
