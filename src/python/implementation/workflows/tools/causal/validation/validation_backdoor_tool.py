@@ -10,13 +10,13 @@ import pandas.api.types as ptypes
 from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.workflows.tool import Tool
-from python.implementation.workflows.tools.causal.causal_spec import (
+from python.implementation.workflows.tools.causal.specs.causal_spec import (
     BinaryOutcomeSpecModel,
     BinaryTreatmentSpecModel,
     CausalSpec,
     ContinuousOutcomeSpecModel,
 )
-from python.implementation.workflows.tools.causal.encoding_plan import (
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     CatOneHotParams,
     DateTimeEpochParams,
     MapBinaryParams,
@@ -24,7 +24,7 @@ from python.implementation.workflows.tools.causal.encoding_plan import (
     NumLog1pParams,
     TransformPlan,
 )
-from python.implementation.workflows.tools.causal.encoding_util import compile_plan_to_transformers
+from python.implementation.workflows.tools.causal.encoding.encoding_util import compile_plan_to_transformers
 from python.implementation.workflows.utils.validation import ValidationIssueModel, ValidationStatus
 
 

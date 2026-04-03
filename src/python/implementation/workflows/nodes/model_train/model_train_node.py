@@ -23,18 +23,18 @@ from python.implementation.workflows.nodes.model_train.model_train_prompts impor
 from python.implementation.workflows.nodes.model_train.model_train_state import (
     ModelTrainState,
 )
-from python.implementation.workflows.tools.causal.causal_command import (
+from python.implementation.workflows.tools.causal.inference.causal_command import (
     CommandFailure,
     FitCommand,
     FitInputs,
     FitResult,
     FitSuccess,
 )
-from python.implementation.workflows.tools.causal.causal_model_factory_tool import (
+from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
 )
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetSummaryModel,
 )

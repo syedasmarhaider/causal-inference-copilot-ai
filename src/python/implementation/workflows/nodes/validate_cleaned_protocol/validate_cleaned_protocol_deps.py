@@ -9,7 +9,7 @@ from python.domain.workflows.state import State
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import (
     CleanProtocolState,
 )
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 
 
 @dataclass(frozen=True)

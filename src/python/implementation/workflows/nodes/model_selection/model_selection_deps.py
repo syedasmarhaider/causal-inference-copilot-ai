@@ -13,7 +13,7 @@ from python.implementation.workflows.nodes.load_dataset.load_dataset_state impor
 from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import (
     ValidateCleanProtocolState,
 )
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 

@@ -30,7 +30,7 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_pro
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
     CausalInferenceState,
 )
-from python.implementation.workflows.tools.causal.causal_command import (
+from python.implementation.workflows.tools.causal.inference.causal_command import (
     ATECommand,
     ATEInputsModel,
     ATEResult,
@@ -42,16 +42,16 @@ from python.implementation.workflows.tools.causal.causal_command import (
     CATESuccess,
     CommandFailure,
 )
-from python.implementation.workflows.tools.causal.causal_model import CausalModel
-from python.implementation.workflows.tools.causal.causal_model_factory_tool import (
+from python.implementation.workflows.tools.causal.inference.causal_model import CausalModel
+from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
 )
-from python.implementation.workflows.tools.causal.causal_spec import (
+from python.implementation.workflows.tools.causal.specs.causal_spec import (
     BinaryOutcomeSpecModel,
     CausalSpec,
     ContinuousOutcomeSpecModel,
 )
-from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.tools.data_processing.data_processing_tool import (
     DuckDBInMemorySQLTool,

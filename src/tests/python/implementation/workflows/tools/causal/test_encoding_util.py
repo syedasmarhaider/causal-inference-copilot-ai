@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.causal.encoding_util import compile_plan_to_transformers
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.causal.encoding.encoding_util import compile_plan_to_transformers
 
 
 def test_compile_allows_empty_effect_modifiers_when_covariates_exist() -> None:

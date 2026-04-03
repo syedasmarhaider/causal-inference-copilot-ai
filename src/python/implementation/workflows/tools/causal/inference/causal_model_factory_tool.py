@@ -6,24 +6,24 @@ from typing import ClassVar
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
 from python.domain.workflows.tool import Tool
-from python.implementation.workflows.tools.causal.causal_model import CausalModel
-from python.implementation.workflows.tools.causal.econml.dml.causal_forest_dml import (
+from python.implementation.workflows.tools.causal.inference.causal_model import CausalModel
+from python.implementation.workflows.tools.causal.inference.econml.dml.causal_forest_dml import (
     CausalForestDMLCausalModel,
 )
-from python.implementation.workflows.tools.causal.econml.dml.kernal_dml import KernelDMLCausalModel
-from python.implementation.workflows.tools.causal.econml.dml.linear_dml import LinearDMLCausalModel
-from python.implementation.workflows.tools.causal.econml.dml.sparse_linear_dml import (
+from python.implementation.workflows.tools.causal.inference.econml.dml.kernal_dml import KernelDMLCausalModel
+from python.implementation.workflows.tools.causal.inference.econml.dml.linear_dml import LinearDMLCausalModel
+from python.implementation.workflows.tools.causal.inference.econml.dml.sparse_linear_dml import (
     SparseLinearDMLCausalModel,
 )
-from python.implementation.workflows.tools.causal.econml.dr.dr_learner import (
+from python.implementation.workflows.tools.causal.inference.econml.dr.dr_learner import (
     ForestDRLearnerCausalModel,
     LinearDRLearnerCausalModel,
     SparseLinearDRLearnerCausalModel,
 )
-from python.implementation.workflows.tools.causal.econml.models_meta import (
+from python.implementation.workflows.tools.causal.inference.econml.models_meta import (
     SupportedModelsLiteralType,
 )
-from python.implementation.workflows.tools.causal.encoding_util import EncodingUtil
+from python.implementation.workflows.tools.causal.encoding.encoding_util import EncodingUtil
 
 
 @dataclass

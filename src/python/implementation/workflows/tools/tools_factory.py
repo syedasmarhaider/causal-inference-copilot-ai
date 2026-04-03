@@ -9,7 +9,7 @@ from python.domain.repo.working_data_repo import WorkingDataRepo
 from python.domain.service.llm_service import LLMService
 from python.domain.workflows.tool import Tool
 from python.domain.workflows.tool_factory import ToolFactory
-from python.implementation.workflows.tools.causal.causal_model_factory_tool import (
+from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
 )
 from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import DataManipulationTool

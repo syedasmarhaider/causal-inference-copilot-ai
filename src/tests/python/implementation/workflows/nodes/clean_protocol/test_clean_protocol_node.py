@@ -8,7 +8,7 @@ import pandas as pd
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_node import (
     CleanProtocolNode,
 )
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
 
 

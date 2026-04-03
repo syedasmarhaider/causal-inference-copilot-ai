@@ -11,12 +11,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from python.implementation.workflows.tools.causal.causal_spec import (
+from python.implementation.workflows.tools.causal.specs.causal_spec import (
     BinaryOutcomeSpecModel,
     BinaryTreatmentSpecModel,
     CausalSpec,
 )
-from python.implementation.workflows.tools.causal.encoding_plan import (
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     CatOneHotParams,
     DateTimeEpochParams,
     DropParams,

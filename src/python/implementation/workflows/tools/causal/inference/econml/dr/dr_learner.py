@@ -30,7 +30,7 @@ from sklearn.pipeline import Pipeline
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
-from python.implementation.workflows.tools.causal.causal_command import (
+from python.implementation.workflows.tools.causal.inference.causal_command import (
     ATECommand,
     ATEModelResult,
     ATESuccess,
@@ -43,18 +43,18 @@ from python.implementation.workflows.tools.causal.causal_command import (
     FitCommand,
     FitSuccess,
 )
-from python.implementation.workflows.tools.causal.causal_model import (
+from python.implementation.workflows.tools.causal.inference.causal_model import (
     CausalCommand,
     CausalModel,
     CausalResult,
 )
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-from python.implementation.workflows.tools.causal.econml.models_info import (
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.inference.econml.models_info import (
     get_forest_dr_learner_causal_model_info,
     get_linear_dr_learner_causal_model_info,
     get_sparse_linear_dr_learner_causal_model_info,
 )
-from python.implementation.workflows.tools.causal.econml.utils import (
+from python.implementation.workflows.tools.causal.inference.econml.utils import (
     ModelSpecError,
     build_init_fit_options_param_maps,
     get_input_params_from_spec,
@@ -66,8 +66,8 @@ from python.implementation.workflows.tools.causal.econml.utils import (
     required_init_keys,
     serialize_inference_obj,
 )
-from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.causal.encoding_util import EncodingUtil
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.causal.encoding.encoding_util import EncodingUtil
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 log = get_logger(__name__)

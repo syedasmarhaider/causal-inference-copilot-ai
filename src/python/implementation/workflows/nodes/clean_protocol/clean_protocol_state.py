@@ -11,7 +11,7 @@ from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.clean_protocol.clean_protocol_deps import (
     CleanProtocolDeps,
 )
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.data_processing.data_processing_tool import (
     SQLStatements,
 )

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
-from python.implementation.workflows.tools.causal.causal_command import (
+from python.implementation.workflows.tools.causal.inference.causal_command import (
     ATECommand,
     ATEResult,
     CATECommand,

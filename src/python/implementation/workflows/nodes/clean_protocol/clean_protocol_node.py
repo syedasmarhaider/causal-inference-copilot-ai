@@ -41,7 +41,7 @@ from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state i
     CleanProtocolState,
     SQLHistoryItemModel,
 )
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.data_processing.data_processing_tool import (
     DuckDBInMemorySQLTool,
     SQLStatements,

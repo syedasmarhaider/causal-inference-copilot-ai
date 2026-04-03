@@ -13,7 +13,7 @@ from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state i
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
     ModelSelectionState,
 )
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 T = TypeVar("T", bound=State)

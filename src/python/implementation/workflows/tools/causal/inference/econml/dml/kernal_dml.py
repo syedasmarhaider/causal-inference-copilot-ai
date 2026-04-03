@@ -10,11 +10,12 @@ from uuid import UUID
 
 import numpy as np
 import pandas as pd
-from econml.dml import SparseLinearDML
+from econml.dml import KernelDML
+from pandas.api.types import is_numeric_dtype
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
-from python.implementation.workflows.tools.causal.causal_command import (
+from python.implementation.workflows.tools.causal.inference.causal_command import (
     ATECommand,
     ATEModelResult,
     ATESuccess,
@@ -27,19 +28,19 @@ from python.implementation.workflows.tools.causal.causal_command import (
     FitCommand,
     FitSuccess,
 )
-from python.implementation.workflows.tools.causal.causal_model import (
+from python.implementation.workflows.tools.causal.inference.causal_model import (
     CausalCommand,
     CausalModel,
     CausalResult,
 )
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-from python.implementation.workflows.tools.causal.econml.models_info import (
-    get_sparse_linear_dml_causal_model_info,
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.inference.econml.models_info import (
+    get_kernel_dml_causal_model_info,
 )
-from python.implementation.workflows.tools.causal.econml.dml.shared_nuisance_models import (
+from python.implementation.workflows.tools.causal.inference.econml.dml.shared_nuisance_models import (
     get_default_models_for_t_and_y as _get_default_models_for_t_and_y,
 )
-from python.implementation.workflows.tools.causal.econml.utils import (
+from python.implementation.workflows.tools.causal.inference.econml.utils import (
     ModelSpecError,
     build_init_fit_options_param_maps,
     get_input_params_from_spec,
@@ -51,36 +52,63 @@ from python.implementation.workflows.tools.causal.econml.utils import (
     required_init_keys,
     serialize_inference_obj,
 )
-from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.causal.encoding_util import EncodingUtil
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.causal.encoding.encoding_util import EncodingUtil
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 log = get_logger(__name__)
 
+def _raise_if_x_not_numeric(X: Any) -> None:
+    """
+    KernelDML requires numeric X because its final stage uses random Fourier features.
+    """
+    if X is None:
+        return
+
+    if isinstance(X, pd.DataFrame):
+        bad = [c for c in X.columns if not is_numeric_dtype(X[c])]
+        if bad:
+            raise ModelSpecError(
+                "KernelDML requires numeric X (no strings/datetimes). "
+                f"Non-numeric X columns: {bad}. Encode/transform X upstream."
+            )
+        return
+
+    arr = np.asarray(X)
+    if arr.dtype == object:
+        raise ModelSpecError(
+            "KernelDML requires numeric X; got object dtype. Encode/transform X upstream."
+        )
+    if not np.issubdtype(arr.dtype, np.number):
+        raise ModelSpecError(
+            f"KernelDML requires numeric X; got dtype={arr.dtype}."
+        )
+
+
 # =============================================================================
-# SparseLinearDML adapter
+# KernelDML adapter
 # =============================================================================
 
 @dataclass(frozen=True, slots=True)
-class SparseLinearDMLCausalModel(CausalModel):
+class KernelDMLCausalModel(CausalModel):
     data_repo: DataRepo
     models_repo: ModelsRepo
     encoding_util: EncodingUtil
 
     def get_info(self) -> str:
-        return get_sparse_linear_dml_causal_model_info()
+        return get_kernel_dml_causal_model_info()
 
     def get_command_info(self, command: CommandType) -> str | None:
         match command:
             case "FIT":
-                fit_doc = inspect.getdoc(SparseLinearDML.fit) or ""  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-                base_doc = inspect.getdoc(SparseLinearDML) or ""
+                fit_doc = inspect.getdoc(KernelDML.fit) or ""  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                base_doc = inspect.getdoc(KernelDML) or ""
                 return base_doc + fit_doc
             case "ATE":
-                ate_doc = inspect.getdoc(SparseLinearDML.ate) or ""  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                ate_doc = inspect.getdoc(KernelDML.ate) or ""  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
                 return ate_doc
             case "CATE":
-                effect_doc = inspect.getdoc(SparseLinearDML.effect) or ""  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                effect_doc = inspect.getdoc(KernelDML.effect) or ""  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
                 return effect_doc
             case _:
                 return None
@@ -101,7 +129,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 limit=None,
             )
         except Exception as e:
-            log.exception("SparseLinearDML command failed", error=e)
+            log.exception("KernelDML command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started,
@@ -178,11 +206,11 @@ class SparseLinearDMLCausalModel(CausalModel):
 
             if pre_x is None and len(specs.effect_modifiers or []) > 0:
                 raise ModelSpecError(
-                    "Spec declares effect modifiers (spec.effect_modifiers) but no pre_X transformer was provided."
+                    "Spec declares effect modifiers (spec.X) but no pre_X transformer provided in inputs."
                 )
             if pre_xw is None and (len(specs.covariates or []) + len(specs.effect_modifiers or [])) > 0:
                 raise ModelSpecError(
-                    "Spec declares covariates and/or effect modifiers but no pre_XW transformer was provided."
+                    "Spec declares controls (spec.W) and/or effect modifiers (spec.X) but no pre_XW transformer provided in inputs."
                 )
 
             Y, T, X, W, col_meta = get_input_params_from_spec(
@@ -228,20 +256,15 @@ class SparseLinearDMLCausalModel(CausalModel):
 
             if missingness_X:
                 raise ModelSpecError(
-                    "SparseLinearDML does not support missing values in X via allow_missing "
+                    "KernelDML does not support missing values in X via allow_missing "
                     "(only W is allowed). Impute/clean X upstream before fit."
                 )
 
+            _raise_if_x_not_numeric(X)
+
             maps = build_init_fit_options_param_maps(
-                SparseLinearDML,
-                fit_include_names={
-                    "cache_values",
-                    "inference",
-                    "sample_weight",
-                    "freq_weight",
-                    "sample_var",
-                    "groups",
-                },
+                KernelDML,
+                fit_include_names={"cache_values", "inference", "sample_weight", "groups"},
             )
             init_map = maps["init"]
 
@@ -249,13 +272,12 @@ class SparseLinearDMLCausalModel(CausalModel):
 
             disc_t = specs.treatment_spec.kind in ("binary", "categorical")
             disc_y = specs.outcome_spec.kind == "binary"
-
             if disc_t:
                 defaults["discrete_treatment"] = True
             if disc_y:
                 defaults["discrete_outcome"] = True
 
-            # Same contract you used elsewhere: allow_missing only relaxes W.
+            # KernelDML's allow_missing only relaxes W, not X.
             defaults["allow_missing"] = missingness_W
 
             if pre_xw is not None:
@@ -267,18 +289,18 @@ class SparseLinearDMLCausalModel(CausalModel):
                     )
                 )
 
-            if pre_x is not None:
-                defaults["featurizer"] = pre_x
+            # Intentionally do not set featurizer=pre_x.
+            # KernelDML handles its own kernel/random Fourier feature stage internally.
 
-            required_keys = required_init_keys(SparseLinearDML, init_map=init_map)
+            required_keys = required_init_keys(KernelDML, init_map=init_map)
             missing_required = [k for k in required_keys if k not in defaults]
             if missing_required:
                 raise ModelSpecError(
-                    f"Missing required SparseLinearDML __init__ parameters: {missing_required}. "
+                    f"Missing required KernelDML __init__ parameters: {missing_required}. "
                     f"(Adapter is not exposing command.options yet.)"
                 )
 
-            est = SparseLinearDML(**defaults)
+            est = KernelDML(**defaults)
 
             fit_warnings: list[str] = []
             with warnings.catch_warnings(record=True) as ws:
@@ -290,11 +312,14 @@ class SparseLinearDMLCausalModel(CausalModel):
             fit_meta: dict[str, Any] = {
                 "warnings": fit_warnings,
                 "meta": {
-                    "backend": "econml.dml.SparseLinearDML",
+                    "backend": "econml.dml.KernelDML",
                     "n": n,
                     "columns": col_meta,
                     "used_init_kwargs": defaults,
                     "spec_semantics_applied": sorted(list(required_keys)),
+                    "kernel_final_stage": {
+                        "uses_random_fourier_features": True,
+                    },
                 },
                 "artifacts": {
                     "n": n,
@@ -335,14 +360,14 @@ class SparseLinearDMLCausalModel(CausalModel):
                 meta={},
             )
         except Exception as e:
-            log.exception("SparseLinearDML command failed", error=e)
+            log.exception("KernelDML command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
                 finished_at=now_utc(),
                 error=ErrorInfo(
                     code="ESTIMATOR_ERROR",
-                    message="EconML SparseLinearDML.fit failed.",
+                    message="EconML KernelDML.fit failed.",
                     details={"exception": repr(e)},
                 ),
                 warnings=[],
@@ -380,7 +405,7 @@ class SparseLinearDMLCausalModel(CausalModel):
             if model_record is None:
                 raise ModelSpecError(f"Fitted model with id {command.fitted_model_id} not found.")
 
-            est: SparseLinearDML = model_record.model
+            est: KernelDML = model_record.model
 
             t0, t1 = get_treatment_t0_t1_from_spec(
                 spec,
@@ -393,6 +418,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 effect_modifiers_order=order_effect_modifiers,
                 covariates_order=order_covariates,
             )
+            _raise_if_x_not_numeric(X)
 
             if t1 == t0:
                 raise ModelSpecError(f"Invalid contrast: t1 value {t1} is the same as t0 baseline {t0}.")
@@ -451,7 +477,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 finished_at=finished,
                 warnings=warnings_list,
                 meta={
-                    "backend": "econml.dml.SparseLinearDML",
+                    "backend": "econml.dml.KernelDML",
                     "n": int(df.shape[0]),
                     "x_cols": spec.effect_modifiers if spec.effect_modifiers else None,
                     "contrast_kind": "baseline_vs_all",
@@ -463,7 +489,7 @@ class SparseLinearDMLCausalModel(CausalModel):
             )
 
         except Exception as e:
-            log.exception("SparseLinearDML command failed", error=e)
+            log.exception("KernelDML command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,
@@ -510,7 +536,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                     meta={},
                 )
 
-            est: SparseLinearDML = model_record.model
+            est: KernelDML = model_record.model
             spec: CausalSpec = command.causal_specs
             effect_modifiers_order: list[str] = list(
                 command.order_effect_modifiers or spec.effect_modifiers or []
@@ -520,10 +546,8 @@ class SparseLinearDMLCausalModel(CausalModel):
             x_cols = spec.effect_modifiers
             raise_if_x_rows_not_exactly_match_fit_x_cols(x_rows=X_df, x_cols=x_cols)
 
-            # Keep DataFrame columns intact for featurizer=pre_X.
-            X_query = X_df[effect_modifiers_order].copy() if effect_modifiers_order else None
-
-            if X_query is None or X_query.shape[1] == 0:
+            X_query_df = X_df[effect_modifiers_order] if effect_modifiers_order else None
+            if X_query_df is None or X_query_df.shape[1] == 0:
                 return CommandFailure(
                     run_id=command.run_id,
                     started_at=started_at,
@@ -536,6 +560,9 @@ class SparseLinearDMLCausalModel(CausalModel):
                     warnings=[],
                     meta={},
                 )
+
+            _raise_if_x_not_numeric(X_query_df)
+            X_query = X_query_df.to_numpy()
 
             t0, t1 = get_treatment_t0_t1_from_spec(
                 spec,
@@ -608,7 +635,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 finished_at=finished,
                 warnings=warnings_list,
                 meta={
-                    "backend": "econml.dml.SparseLinearDML",
+                    "backend": "econml.dml.KernelDML",
                     "row_count": int(getattr(X_query, "shape", [len(command.inputs.x_rows)])[0]),
                 },
                 fitted_model_id=command.fitted_model_id,
@@ -626,7 +653,7 @@ class SparseLinearDMLCausalModel(CausalModel):
                 meta={},
             )
         except Exception as e:
-            log.exception("SparseLinearDML command failed", error=e)
+            log.exception("KernelDML command failed", error=e)
             return CommandFailure(
                 run_id=command.run_id,
                 started_at=started_at,

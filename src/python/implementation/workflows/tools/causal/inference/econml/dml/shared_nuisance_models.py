@@ -19,7 +19,7 @@ from sklearn.ensemble import (
 from sklearn.linear_model import LogisticRegressionCV, RidgeCV
 from sklearn.pipeline import Pipeline
 
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 
 
 class _ToDense(BaseEstimator, TransformerMixin):

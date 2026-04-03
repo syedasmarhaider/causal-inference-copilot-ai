@@ -27,7 +27,7 @@ from python.implementation.workflows.nodes.model_selection.model_selection_promp
     MODEL_SELECTION_RECOMMENDER_USER_PROMPT_TEMPLATE,
     get_model_selection_node_info,
 )
-from python.implementation.workflows.tools.causal.causal_model_factory_tool import (
+from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
 )
 

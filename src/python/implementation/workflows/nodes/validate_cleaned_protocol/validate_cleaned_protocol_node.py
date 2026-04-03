@@ -42,7 +42,7 @@ from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cl
     validate_protocol_role_columns_invariants,
     validate_treatment,
 )
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.utils.validation import ValidationIssueModel
 
 log = get_logger(__name__)
