@@ -6,7 +6,7 @@ from typing import Any, ClassVar
 
 from python.domain.workflows.tool import Tool
 from python.implementation.service.logging.default_logging import get_app_logger
-from python.implementation.workflows.tools.encoding.encoding_plan import (
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     TransformPlan,
     validate_transform_payload_structured,
 )
