@@ -116,6 +116,77 @@ class Log1pSafeTransformer(BaseEstimator, TransformerMixin):
         return np.asarray([str(input_features[0])], dtype=object)
 
 
+class NumLog1pTransformer(BaseEstimator, TransformerMixin):
+    """
+    Apply imputation, log1p, optional scaling, and optional missing-indicator
+    while preserving a stable output contract for a single numeric column.
+    """
+
+    def __init__(
+        self,
+        *,
+        impute: Literal["median", "mean"],
+        add_missing_indicator: bool,
+        allow_negative: bool,
+        then_scale: Literal["none", "standard", "minmax"],
+    ):
+        self.impute = impute
+        self.add_missing_indicator = bool(add_missing_indicator)
+        self.allow_negative = bool(allow_negative)
+        self.then_scale = then_scale
+        self._imputer: SimpleImputer | None = None
+        self._scaler: BaseEstimator | None = None
+
+    def fit(self, X, y=None):
+        arr = np.asarray(X, dtype="float64")
+        if arr.ndim != 2 or arr.shape[1] != 1:
+            raise ValueError(f"num_log1p: expected shape (n,1), got {arr.shape}.")
+
+        self._imputer = SimpleImputer(strategy=self.impute, add_indicator=False)
+        imputed = self._imputer.fit_transform(arr)
+        logged = Log1pSafeTransformer(allow_negative=self.allow_negative).transform(imputed)
+
+        if self.then_scale == "standard":
+            scaler: BaseEstimator | None = StandardScaler()
+        elif self.then_scale == "minmax":
+            scaler = MinMaxEpsScaler(eps=1e-12)
+        else:
+            scaler = None
+
+        if scaler is not None:
+            scaler.fit(logged)
+        self._scaler = scaler
+        return self
+
+    def transform(self, X) -> np.ndarray:
+        if self._imputer is None:
+            raise ValueError("num_log1p: transformer is not fitted.")
+
+        arr = np.asarray(X, dtype="float64")
+        if arr.ndim != 2 or arr.shape[1] != 1:
+            raise ValueError(f"num_log1p: expected shape (n,1), got {arr.shape}.")
+
+        missing_indicator = pd.isna(arr[:, 0]).astype("float64").reshape(-1, 1)
+        imputed = self._imputer.transform(arr)
+        out = Log1pSafeTransformer(allow_negative=self.allow_negative).transform(imputed)
+
+        if self._scaler is not None:
+            out = np.asarray(self._scaler.transform(out), dtype="float64")
+
+        if not self.add_missing_indicator:
+            return out
+
+        return np.concatenate([out, missing_indicator], axis=1)
+
+    def get_feature_names_out(self, input_features=None):
+        base = "log1p"
+        if input_features is not None and len(input_features) > 0:
+            base = str(input_features[0])
+        if not self.add_missing_indicator:
+            return np.asarray([base], dtype=object)
+        return np.asarray([base, f"{base}_missing"], dtype=object)
+
+
 class MinMaxEpsScaler(BaseEstimator, TransformerMixin):
     """
     Min-max scaling with epsilon-clamped denominator to avoid divide-by-zero explosions
@@ -158,8 +229,9 @@ class BinaryMapTransformer(BaseEstimator, TransformerMixin):
         missing: Literal["as_unknown", "impute_token", "error"],
         missing_token: str | None,
     ):
-        self.mapping = dict(mapping)
-        self.allow_unknown = bool(allow_unknown)
+        # Keep constructor parameters clone-stable for sklearn.
+        self.mapping = mapping
+        self.allow_unknown = allow_unknown
         self.unknown_value = unknown_value
         self.missing = missing
         self.missing_token = missing_token
@@ -224,9 +296,10 @@ class OrdinalMapTransformer(BaseEstimator, TransformerMixin):
         missing_token: str | None,
         token_position: Literal["prepend", "append"] | None,
     ):
-        self.order = list(order)
-        self.start = int(start)
-        self.allow_unknown = bool(allow_unknown)
+        # Keep constructor parameters clone-stable for sklearn.
+        self.order = order
+        self.start = start
+        self.allow_unknown = allow_unknown
         self.unknown_value = unknown_value
         self.missing = missing
         self.missing_token = missing_token
@@ -311,16 +384,16 @@ class DateTimeToEpochSecondsTransformer(BaseEstimator, TransformerMixin):
             raise ValueError(f"datetime_epoch_seconds: expected shape (n,1), got {arr.shape}.")
 
         s = pd.Series(arr[:, 0])
-        dt = pd.to_datetime(s, errors="coerce")
+        # Normalize to UTC up front so mixed-offset timezone strings do not
+        # degrade to object dtype or emit pandas mixed-timezone warnings.
+        dt = pd.to_datetime(s, errors="coerce", utc=True)
 
         invalid_mask = (~s.isna()) & dt.isna()
         if self.errors == "raise" and bool(invalid_mask.any()):
             sample = s.loc[invalid_mask].astype(str).head(25).tolist()
             raise ValueError(f"datetime_epoch_seconds: unparseable values found. sample={sample}")
 
-        # timezone-aware -> UTC naive
-        if getattr(dt.dtype, "tz", None) is not None:
-            dt = dt.dt.tz_convert("UTC").dt.tz_localize(None)
+        dt = dt.dt.tz_convert("UTC").dt.tz_localize(None)
 
         ns = dt.values.view("int64").astype("float64")
         out = pd.Series(ns).where(~dt.isna(), np.nan).to_numpy()
@@ -448,16 +521,12 @@ def compile_plan_to_transformers(
             ])
 
         if preset == "num_log1p":
-            steps2: list[tuple[str, BaseEstimator]] = [
-                ("impute", SimpleImputer(strategy=enc.impute, add_indicator=enc.add_missing_indicator)),
-                ("log1p", Log1pSafeTransformer(allow_negative=enc.allow_negative)),
-            ]
-            if enc.then_scale == "standard":
-                steps2.append(("scale", StandardScaler()))
-            elif enc.then_scale == "minmax":
-                # default eps for log1p branch; keep consistent behavior
-                steps2.append(("scale", MinMaxEpsScaler(eps=1e-12)))
-            return Pipeline(steps2)
+            return NumLog1pTransformer(
+                impute=enc.impute,
+                add_missing_indicator=enc.add_missing_indicator,
+                allow_negative=enc.allow_negative,
+                then_scale=enc.then_scale,
+            )
 
         if preset == "datetime_epoch_seconds":
             return DateTimeToEpochSecondsTransformer(
