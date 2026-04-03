@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 import uuid
 from collections.abc import Mapping, Sequence
@@ -47,6 +49,10 @@ from python.implementation.workflows.tools.data_profiling.data_profiling_tool im
 from python.implementation.workflows.utils.utils import JSONDict, safe_err
 
 log = get_app_logger(__name__, component="dataset_node", log_type="node")
+
+_DATA_MANIPULATION_RETRY_ATTEMPTS = 3
+_WORKING_TABLE_PREFIX = "df_"
+_WORKING_TABLE_HASH_HEX_LEN = 16
 
 
 
@@ -296,7 +302,7 @@ class DatasetNode(Node):
                 conversation_id=conversation_id,
                 dataset_iterations=dataset_iterations,
                 dataframe=working_df,
-                summary_json=working_summary_json,
+                summary_model=working_summary,
                 instructions=intent.intent_chart_brief or latest_user_message,
             )
 
@@ -426,10 +432,10 @@ class DatasetNode(Node):
         instructions: str,
         analytical_query: bool,
     ) -> tuple[JSONDict, list[DatasetIterationModel], pd.DataFrame, DatasetSummaryModel, str]:
-        result_df = self._data_manipulation_tool.manipulate(
+        result_df = self._run_data_manipulation_tool(
             dataframe=dataframe,
-            conversation_id=str(conversation_id),
-            data_summary=summary_json,
+            conversation_id=conversation_id,
+            summary_json=summary_json,
             instructions=instructions,
         )
 
@@ -489,12 +495,12 @@ class DatasetNode(Node):
         conversation_id: UUID,
         dataset_iterations: list[DatasetIterationModel],
         dataframe: pd.DataFrame,
-        summary_json: str,
+        summary_model: DatasetSummaryModel,
         instructions: str,
     ) -> tuple[JSONDict, list[DatasetIterationModel]]:
         specs = self._plot_tool.generate_specs(
             dataframe=dataframe,
-            data_summary=summary_json,
+            data_summary=summary_model,
             user_intent=instructions,
         )
         saved_ids: list[Artifact_Id] = []
@@ -548,6 +554,37 @@ class DatasetNode(Node):
             )
         return response.content
 
+    def _run_data_manipulation_tool(
+        self,
+        *,
+        dataframe: pd.DataFrame,
+        conversation_id: UUID,
+        summary_json: str,
+        instructions: str,
+    ) -> pd.DataFrame:
+        manipulate = self._data_manipulation_tool.manipulate
+        params = inspect.signature(manipulate).parameters
+
+        kwargs: dict[str, Any] = {
+            "dataframe": dataframe,
+            "data_summary": summary_json,
+            "instructions": instructions,
+        }
+
+        if "table_name" in params:
+            kwargs["table_name"] = _conversation_id_to_table_name(conversation_id)
+        elif "conversation_id" in params:
+            kwargs["conversation_id"] = str(conversation_id)
+        else:
+            raise TypeError(
+                "data manipulation tool must accept either 'table_name' or 'conversation_id'"
+            )
+
+        if "retry_attempts" in params:
+            kwargs["retry_attempts"] = _DATA_MANIPULATION_RETRY_ATTEMPTS
+
+        return manipulate(**kwargs)
+
 
 def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
     if not messages_history:
@@ -581,5 +618,10 @@ def _dataframe_preview(dataframe: pd.DataFrame, *, row_limit: int = 10) -> JSOND
         "columns": [str(column) for column in dataframe.columns],
         "preview_rows": preview_df.to_dict(orient="records"),
     }
+
+
+def _conversation_id_to_table_name(conversation_id: UUID) -> str:
+    digest = hashlib.sha256(str(conversation_id).encode("ascii")).hexdigest()
+    return f"{_WORKING_TABLE_PREFIX}{digest[:_WORKING_TABLE_HASH_HEX_LEN]}"
 
 __all__ = ["DatasetIntentModel", "DatasetNode"]

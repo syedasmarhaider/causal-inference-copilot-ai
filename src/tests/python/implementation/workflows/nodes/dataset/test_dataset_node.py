@@ -22,6 +22,7 @@ from python.implementation.workflows.nodes.dataset.dataset_state import (
 )
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
+    DatasetSummaryModel,
 )
 
 
@@ -180,13 +181,13 @@ class _FakePlotTool:
         self,
         *,
         dataframe: pd.DataFrame,
-        data_summary: str,
+        data_summary: DatasetSummaryModel,
         user_intent: str,
     ) -> list[dict[str, object]]:
         self.calls.append(
             {
                 "dataframe": dataframe.copy(),
-                "data_summary": data_summary,
+                "data_summary": data_summary.model_dump(mode="python"),
                 "user_intent": user_intent,
             }
         )
