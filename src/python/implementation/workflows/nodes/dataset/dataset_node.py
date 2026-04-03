@@ -29,7 +29,7 @@ from python.implementation.workflows.nodes.dataset.dataset_prompts import (
     dataset_missing_data_system_prompt,
     dataset_node_info,
     dataset_summary_answer_system_prompt,
-    prev_state_revert_message
+    prev_state_revert_message,
 )
 from python.implementation.workflows.nodes.dataset.dataset_state import (
     DatasetIterationModel,
@@ -39,13 +39,11 @@ from python.implementation.workflows.nodes.dataset.dataset_state import (
 from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import (
     DataManipulationTool,
 )
-from python.implementation.workflows.tools.plot_tool.plot_tool import (
-    PlotTool,
-)
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
     DatasetSummaryModel,
 )
+from python.implementation.workflows.tools.plot_tool.plot_tool import PlotTool
 from python.implementation.workflows.utils.utils import JSONDict, safe_err
 
 log = get_app_logger(__name__, component="dataset_node", log_type="node")
@@ -53,7 +51,21 @@ log = get_app_logger(__name__, component="dataset_node", log_type="node")
 _DATA_MANIPULATION_RETRY_ATTEMPTS = 3
 _WORKING_TABLE_PREFIX = "df_"
 _WORKING_TABLE_HASH_HEX_LEN = 16
-
+_FREEZED_DATASET_BLOCKED_MESSAGE = (
+    "Sorry, this dataset is freezed. I cannot modify the data or revert to a previous "
+    "dataset version in this workflow. You can still ask questions about the data, run "
+    "analytical queries, and generate charts. To change the data, start a new conversation "
+    "from scratch."
+)
+_FREEZED_DATASET_READY_MESSAGE = (
+    "Dataset is freezed. You can ask questions about the data, run analytical queries, "
+    "and generate charts, but you cannot modify or revert the data. To change the data, "
+    "start a new conversation from scratch."
+)
+_READY_DATASET_MESSAGE = (
+    "Dataset is ready. Ask about the data, request an analytical query or transformation, "
+    "or ask for charts."
+)
 
 
 class DatasetIntentModel(BaseModel):
@@ -77,8 +89,7 @@ class DatasetIntentModel(BaseModel):
     def _normalize_brief(cls, value: Any) -> str:
         if value is None:
             return ""
-        text = str(value).strip()
-        return text
+        return str(value).strip()
 
     @model_validator(mode="after")
     def _validate(self) -> DatasetIntentModel:
@@ -117,9 +128,13 @@ class DatasetNode(Node):
     ) -> None:
         self._data_repo = data_repo
         self._llm = llm
-        self._data_manipulation_tool = cast(DataManipulationTool, tools_factory.get_tool(DataManipulationTool.NAME))
+        self._data_manipulation_tool = cast(
+            DataManipulationTool, tools_factory.get_tool(DataManipulationTool.NAME)
+        )
         self._plot_tool = cast(PlotTool, tools_factory.get_tool(PlotTool.NAME))
-        self._profiling_tool = cast(DatasetProfilingTool, tools_factory.get_tool(DatasetProfilingTool.NAME))
+        self._profiling_tool = cast(
+            DatasetProfilingTool, tools_factory.get_tool(DatasetProfilingTool.NAME)
+        )
 
     @property
     def name(self) -> str:
@@ -139,14 +154,21 @@ class DatasetNode(Node):
         state: State,
     ) -> State:
         del previous_state_dependencies
-        
+
         if not isinstance(state, DatasetState):
             raise TypeError(f"{self.name}: expected DatasetState, got {type(state).__name__}")
 
         dataset_iterations = [item.model_copy(deep=True) for item in state.payload.dataset_iterations]
-        if _is_revert_request(messages_history):
-            return self._handle_revert(dataset_iterations=dataset_iterations)
+        is_freezed = bool(state.payload.freezed)
 
+        if _is_revert_request(messages_history):
+            if is_freezed:
+                return self._build_state(
+                    dataset_iterations=dataset_iterations,
+                    freezed=True,
+                    user_message=_FREEZED_DATASET_BLOCKED_MESSAGE,
+                )
+            return self._handle_revert(dataset_iterations=dataset_iterations)
 
         current_df: pd.DataFrame
         current_summary: DatasetSummaryModel
@@ -168,14 +190,13 @@ class DatasetNode(Node):
                     dataset_id=str(latest_iteration.dataset_id),
                     error=safe_err(exc),
                 )
-                return DatasetState(
-                    DatasetPayloadModel(
-                        dataset_iterations=dataset_iterations,
-                        user_message=(
-                            "I could not load the current working dataset. Please re-upload the CSV "
-                            "or try again."
-                        ),
-                    )
+                return self._build_state(
+                    dataset_iterations=dataset_iterations,
+                    freezed=is_freezed,
+                    user_message=(
+                        "I could not load the current working dataset. Please re-upload the CSV "
+                        "or try again."
+                    ),
                 )
 
             current_summary = latest_iteration.summary or self._profiling_tool.extract_dataset_summary(
@@ -196,10 +217,9 @@ class DatasetNode(Node):
                     limit=1_000_000,
                 )
             except Exception:
-                return DatasetState(
-                    DatasetPayloadModel(
-                        user_message=self._build_missing_data_message(messages_history=messages_history),
-                    )
+                return self._build_state(
+                    freezed=is_freezed,
+                    user_message=self._build_missing_data_message(messages_history=messages_history),
                 )
 
             current_summary = self._profiling_tool.extract_dataset_summary(
@@ -216,24 +236,24 @@ class DatasetNode(Node):
                     summary=current_summary,
                 )
             )
-            
             loaded_this_turn = True
 
         latest_user_message = _latest_user_message(messages_history)
         if not latest_user_message:
-            return DatasetState(
-                DatasetPayloadModel(
-                    dataset_iterations=dataset_iterations,
-                    user_message=(
-                        "Dataset is ready. Ask about the data, request a transformation, or ask for charts."
-                    ),
-                )
+            return self._build_state(
+                dataset_iterations=dataset_iterations,
+                freezed=is_freezed,
+                user_message=self._build_ready_message(freezed=is_freezed),
             )
-            
-        last_4_messages_history = messages_history[-5:-1] if messages_history and len(messages_history) > 1 else None
+
+        last_4_messages_history = (
+            messages_history[-5:-1] if messages_history and len(messages_history) > 1 else None
+        )
         last_4_messages_history_text: str | None = None
         if last_4_messages_history:
-             last_4_messages_history_text = get_chat_messages_role_and_message_json(last_4_messages_history)   
+            last_4_messages_history_text = get_chat_messages_role_and_message_json(
+                last_4_messages_history
+            )
 
         try:
             intent = self._classify_intent(
@@ -243,23 +263,27 @@ class DatasetNode(Node):
             )
         except Exception as exc:
             log.exception("failed to classify dataset intent", error=safe_err(exc))
-            return DatasetState(
-                DatasetPayloadModel(
-                    dataset_iterations=dataset_iterations,
-                    user_message=(
-                        "Dataset is loaded, but I could not classify your request. Please ask again more directly."
-                    ),
-                )
+            return self._build_state(
+                dataset_iterations=dataset_iterations,
+                freezed=is_freezed,
+                user_message=(
+                    "Dataset is loaded, but I could not classify your request. Please ask again "
+                    "more directly."
+                ),
             )
 
         if not intent.has_any_intent():
-            return DatasetState(
-                DatasetPayloadModel(
-                    dataset_iterations=dataset_iterations,
-                    user_message=self._build_off_topic_message(
-                        latest_user_message=latest_user_message,
-                    ),
-                )
+            return self._build_state(
+                dataset_iterations=dataset_iterations,
+                freezed=is_freezed,
+                user_message=self._build_off_topic_message(),
+            )
+
+        if is_freezed and intent.intent_manupulation_question and not intent.intent_manupulation_is_analytical_query:
+            return self._build_state(
+                dataset_iterations=dataset_iterations,
+                freezed=True,
+                user_message=_FREEZED_DATASET_BLOCKED_MESSAGE,
             )
 
         summary_answer: str | None = None
@@ -312,6 +336,7 @@ class DatasetNode(Node):
             chart_result=chart_result,
             dataset_context={
                 "dataset_loaded_this_turn": loaded_this_turn,
+                "dataset_freezed": is_freezed,
                 "original_user_message": latest_user_message,
                 "handled_intents": {
                     "data_question": intent.intent_data_question,
@@ -322,55 +347,69 @@ class DatasetNode(Node):
                 "active_dataset_columns": [str(column) for column in working_df.columns],
             },
         )
-        return DatasetState(
+        return self._build_state(
+            dataset_iterations=dataset_iterations,
+            freezed=is_freezed,
+            user_message=final_message,
+        )
+
+    def _build_state(
+        self,
+        *,
+        user_message: str,
+        dataset_iterations: Sequence[DatasetIterationModel] | None = None,
+        freezed: bool = False,
+    ) -> DatasetState:
+        state = DatasetState(
             DatasetPayloadModel(
-                dataset_iterations=dataset_iterations,
-                user_message=final_message,
+                dataset_iterations=[
+                    iteration.model_copy(deep=True) for iteration in (dataset_iterations or [])
+                ],
+                freezed=freezed,
             )
         )
+        state.user_message = user_message
+        return state
 
     def _handle_revert(self, *, dataset_iterations: list[DatasetIterationModel]) -> DatasetState:
         if not dataset_iterations:
-            return DatasetState(
-                DatasetPayloadModel(
-                    user_message="There is no working dataset to revert. Please upload a CSV dataset.",
-                )
+            return self._build_state(
+                user_message="There is no working dataset to revert. Please upload a CSV dataset.",
             )
         if len(dataset_iterations) == 1:
-            return DatasetState(
-                DatasetPayloadModel(
-                    dataset_iterations=dataset_iterations,
-                    user_message="There is no previous dataset version to revert to.",
-                )
+            return self._build_state(
+                dataset_iterations=dataset_iterations,
+                user_message="There is no previous dataset version to revert to.",
             )
-        return DatasetState(
-            DatasetPayloadModel(
-                dataset_iterations=dataset_iterations[:-1],
-                user_message="Reverted to the previous working dataset version.",
-            )
+        return self._build_state(
+            dataset_iterations=dataset_iterations[:-1],
+            user_message="Reverted to the previous working dataset version.",
         )
+
+    def _build_ready_message(self, *, freezed: bool) -> str:
+        if freezed:
+            return _FREEZED_DATASET_READY_MESSAGE
+        return _READY_DATASET_MESSAGE
 
     def _build_missing_data_message(
         self,
         *,
         messages_history: Sequence[ChatMessage] | None,
     ) -> str:
-            response = self._llm.generate(
-                system_prompt=None,
-                user_prompt=dataset_missing_data_system_prompt(),
-                config=LLMConfig(model="mini", temperature=0.4),
-                history=messages_history,
-            )
-            return response.content.strip() 
-            
+        response = self._llm.generate(
+            system_prompt=None,
+            user_prompt=dataset_missing_data_system_prompt(),
+            config=LLMConfig(model="mini", temperature=0.4),
+            history=messages_history,
+        )
+        return response.content.strip()
 
-    def _build_off_topic_message(self, *, latest_user_message: str) -> str:
+    def _build_off_topic_message(self) -> str:
         return (
             "I cannot help with that from the dataset stage. Here I only handle dataset "
             "understanding, data manipulation, and chart generation. If you want downstream "
             "workflow steps, continue through the pipeline after the data is ready."
         )
-        
 
     def _classify_intent(
         self,
@@ -488,6 +527,35 @@ class DatasetNode(Node):
             new_summary_json,
         )
 
+    def _run_data_manipulation_tool(
+        self,
+        *,
+        dataframe: pd.DataFrame,
+        conversation_id: UUID,
+        summary_json: str,
+        instructions: str,
+    ) -> pd.DataFrame:
+        manipulate = self._data_manipulation_tool.manipulate
+        params = inspect.signature(manipulate).parameters
+
+        kwargs: dict[str, Any] = {
+            "dataframe": dataframe,
+            "data_summary": summary_json,
+            "instructions": instructions,
+        }
+        if "table_name" in params:
+            kwargs["table_name"] = _conversation_id_to_table_name(conversation_id)
+        elif "conversation_id" in params:
+            kwargs["conversation_id"] = str(conversation_id)
+        else:
+            raise TypeError(
+                "data manipulation tool must accept either 'table_name' or 'conversation_id'"
+            )
+        if "retry_attempts" in params:
+            kwargs["retry_attempts"] = _DATA_MANIPULATION_RETRY_ATTEMPTS
+
+        return manipulate(**kwargs)
+
     def _run_chart_intent(
         self,
         *,
@@ -513,11 +581,8 @@ class DatasetNode(Node):
                 json_data=json.dumps(spec, ensure_ascii=False),
                 overwrite=True,
             )
-            saved_ids.append(Artifact_Id(
-                id=saved_id,
-                type="json"
-            ))
-            
+            saved_ids.append(Artifact_Id(id=saved_id, type="json"))
+
         latest_iteration = dataset_iterations[-1]
         dataset_iterations[-1] = latest_iteration.model_copy(
             update={"saved_vega_lite_specs_file_ids": saved_ids}
@@ -547,43 +612,12 @@ class DatasetNode(Node):
             "dataset_context": dataset_context,
         }
         response = self._llm.generate(
-                system_prompt=dataset_final_response_system_prompt(),
-                user_prompt=json.dumps(payload, ensure_ascii=False),
-                config=LLMConfig(model="basic", temperature=0.3),
-                history=None,
-            )
+            system_prompt=dataset_final_response_system_prompt(),
+            user_prompt=json.dumps(payload, ensure_ascii=False),
+            config=LLMConfig(model="basic", temperature=0.3),
+            history=None,
+        )
         return response.content
-
-    def _run_data_manipulation_tool(
-        self,
-        *,
-        dataframe: pd.DataFrame,
-        conversation_id: UUID,
-        summary_json: str,
-        instructions: str,
-    ) -> pd.DataFrame:
-        manipulate = self._data_manipulation_tool.manipulate
-        params = inspect.signature(manipulate).parameters
-
-        kwargs: dict[str, Any] = {
-            "dataframe": dataframe,
-            "data_summary": summary_json,
-            "instructions": instructions,
-        }
-
-        if "table_name" in params:
-            kwargs["table_name"] = _conversation_id_to_table_name(conversation_id)
-        elif "conversation_id" in params:
-            kwargs["conversation_id"] = str(conversation_id)
-        else:
-            raise TypeError(
-                "data manipulation tool must accept either 'table_name' or 'conversation_id'"
-            )
-
-        if "retry_attempts" in params:
-            kwargs["retry_attempts"] = _DATA_MANIPULATION_RETRY_ATTEMPTS
-
-        return manipulate(**kwargs)
 
 
 def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
@@ -623,5 +657,6 @@ def _dataframe_preview(dataframe: pd.DataFrame, *, row_limit: int = 10) -> JSOND
 def _conversation_id_to_table_name(conversation_id: UUID) -> str:
     digest = hashlib.sha256(str(conversation_id).encode("ascii")).hexdigest()
     return f"{_WORKING_TABLE_PREFIX}{digest[:_WORKING_TABLE_HASH_HEX_LEN]}"
+
 
 __all__ = ["DatasetIntentModel", "DatasetNode"]

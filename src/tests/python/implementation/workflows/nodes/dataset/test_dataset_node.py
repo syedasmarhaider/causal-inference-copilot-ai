@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
@@ -8,6 +9,7 @@ import pandas as pd
 import pytest
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMResponse
+from python.domain.workflows.state import StateMessage
 from python.implementation.workflows.nodes.dataset.dataset_node import (
     DatasetIntentModel,
     DatasetNode,
@@ -157,16 +159,18 @@ class _FakeDataManipulationTool:
         self,
         *,
         dataframe: pd.DataFrame,
-        conversation_id: str,
+        table_name: str,
         data_summary: str,
         instructions: str | None = None,
+        retry_attempts: int | None = None,
     ) -> pd.DataFrame:
         self.calls.append(
             {
                 "dataframe": dataframe.copy(),
-                "conversation_id": conversation_id,
+                "table_name": table_name,
                 "data_summary": data_summary,
                 "instructions": instructions,
+                "retry_attempts": retry_attempts,
             }
         )
         return self.result_dataframe.copy()
@@ -240,7 +244,9 @@ def _make_node_and_tools(
         generate_outputs=list(generate_outputs or []),
     )
     manipulation_tool = _FakeDataManipulationTool(
-        result_dataframe=(manipulation_df.copy() if manipulation_df is not None else pd.DataFrame([{"x": 1}]))
+        result_dataframe=(
+            manipulation_df.copy() if manipulation_df is not None else pd.DataFrame([{"x": 1}])
+        )
     )
     plot_tool = _FakePlotTool(specs=list(plot_specs or []))
     tool_factory = _FakeToolFactory(
@@ -252,8 +258,25 @@ def _make_node_and_tools(
     return node, data_repo, llm, manipulation_tool, plot_tool, tool_factory
 
 
-def _base_dataset_state(*, iterations: list[DatasetIterationModel] | None = None) -> DatasetState:
-    return DatasetState(DatasetPayloadModel(dataset_iterations=list(iterations or [])))
+def _base_dataset_state(
+    *,
+    iterations: list[DatasetIterationModel] | None = None,
+    freezed: bool = False,
+) -> DatasetState:
+    return DatasetState(
+        DatasetPayloadModel(
+            dataset_iterations=[item.model_copy(deep=True) for item in (iterations or [])],
+            freezed=freezed,
+        )
+    )
+
+
+def _message(state: DatasetState) -> StateMessage:
+    return state.message()
+
+
+def _status(state: DatasetState) -> str:
+    return state.status()
 
 
 def test_dataset_intent_model_allows_all_false_with_empty_briefs() -> None:
@@ -342,8 +365,8 @@ def test_dataset_node_returns_missing_data_message_when_dataset_is_unavailable()
         state=DatasetState.init_empty(),
     )
 
-    assert state.message.action == "NEEDS_DATA"
-    assert state.message.txt_message == "Please upload a CSV first."
+    assert _message(state).action == "NEEDS_DATA"
+    assert _message(state).txt_message == "Please upload a CSV first."
     assert len(llm.generate_calls) == 1
 
 
@@ -360,10 +383,29 @@ def test_dataset_node_returns_ready_message_when_dataset_loaded_and_no_user_mess
         state=DatasetState.init_empty(),
     )
 
-    assert state.message.action == "NONE"
-    assert "ask about the data" in state.message.txt_message.lower()
+    assert _message(state).action == "NONE"
+    assert "ask about the data" in _message(state).txt_message.lower()
     assert state.latest_iteration is not None
     assert state.latest_iteration.dataset_id == DatasetState.INIT_DATA_ID
+
+
+def test_dataset_node_returns_freezed_ready_message_when_no_user_message() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, _, _, _, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}]),
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=None,
+        state=_base_dataset_state(iterations=[init_iteration], freezed=True),
+    )
+
+    assert _status(state) == "FREEZED"
+    assert "dataset is freezed" in _message(state).txt_message.lower()
+    assert "cannot modify or revert" in _message(state).txt_message.lower()
 
 
 def test_dataset_node_returns_off_topic_message_for_model_training_request() -> None:
@@ -390,10 +432,10 @@ def test_dataset_node_returns_off_topic_message_for_model_training_request() -> 
         state=DatasetState.init_empty(),
     )
 
-    assert state.status == "PENDING"
-    assert state.message.action == "NONE"
-    assert "dataset stage" in state.message.txt_message.lower()
-    assert "chart generation" in state.message.txt_message.lower()
+    assert _status(state) == "PENDING"
+    assert _message(state).action == "NONE"
+    assert "dataset stage" in _message(state).txt_message.lower()
+    assert "chart generation" in _message(state).txt_message.lower()
     assert len(llm.generate_json_calls) == 1
 
 
@@ -420,7 +462,39 @@ def test_dataset_node_reverts_to_previous_dataset_iteration() -> None:
 
     assert reverted_state.latest_iteration is not None
     assert reverted_state.latest_iteration.dataset_id == first_id
-    assert "reverted" in reverted_state.message.txt_message.lower()
+    assert "reverted" in _message(reverted_state).txt_message.lower()
+
+
+def test_dataset_node_blocks_revert_when_dataset_is_freezed() -> None:
+    first_id = uuid4()
+    second_id = uuid4()
+    node, data_repo, llm, manipulation_tool, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"x": 1}]),
+    )
+
+    blocked_state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content=prev_state_revert_message)],
+        state=_base_dataset_state(
+            iterations=[
+                DatasetIterationModel(dataset_id=first_id),
+                DatasetIterationModel(dataset_id=second_id),
+            ],
+            freezed=True,
+        ),
+    )
+
+    assert _status(blocked_state) == "FREEZED"
+    assert blocked_state.latest_iteration is not None
+    assert blocked_state.latest_iteration.dataset_id == second_id
+    assert "dataset is freezed" in _message(blocked_state).txt_message.lower()
+    assert llm.generate_json_calls == []
+    assert manipulation_tool.calls == []
+    assert plot_tool.calls == []
+    assert data_repo.saved_csv_calls == []
+    assert data_repo.saved_json_calls == []
 
 
 def test_dataset_node_answers_summary_question_and_uses_final_llm_message() -> None:
@@ -448,7 +522,7 @@ def test_dataset_node_answers_summary_question_and_uses_final_llm_message() -> N
         state=DatasetState.init_empty(),
     )
 
-    assert state.message.txt_message == "Final dataset response."
+    assert _message(state).txt_message == "Final dataset response."
     assert len(llm.generate_calls) == 2
     assert manipulation_tool.calls == []
     assert plot_tool.calls == []
@@ -457,6 +531,7 @@ def test_dataset_node_answers_summary_question_and_uses_final_llm_message() -> N
 
 
 def test_dataset_node_runs_analytical_manipulation_without_saving_new_dataset() -> None:
+    conversation_id = uuid4()
     node, data_repo, llm, manipulation_tool, _, _ = _make_node_and_tools(
         dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
         manipulation_df=pd.DataFrame([{"outcome": 1, "count": 1}, {"outcome": 0, "count": 1}]),
@@ -476,14 +551,17 @@ def test_dataset_node_runs_analytical_manipulation_without_saving_new_dataset() 
 
     state = node.run(
         user_id=uuid4(),
-        conversation_id=uuid4(),
+        conversation_id=conversation_id,
         previous_state_dependencies={},
         messages_history=[ChatMessage(role="user", content="count outcome values")],
         state=DatasetState.init_empty(),
     )
 
-    assert state.message.txt_message == "Query complete."
+    assert _message(state).txt_message == "Query complete."
     assert len(manipulation_tool.calls) == 1
+    assert manipulation_tool.calls[0]["retry_attempts"] == 3
+    assert manipulation_tool.calls[0]["table_name"].startswith("df_")
+    assert re.fullmatch(r"df_[0-9a-f]{16}", str(manipulation_tool.calls[0]["table_name"]))
     assert data_repo.saved_csv_calls == []
     assert state.latest_iteration is not None
     assert state.latest_iteration.dataset_id == DatasetState.INIT_DATA_ID
@@ -523,6 +601,74 @@ def test_dataset_node_saves_new_dataset_for_mutating_manipulation() -> None:
     assert list(data_repo.saved_csv_calls[0]["df"].columns) == ["age"]
 
 
+def test_dataset_node_blocks_mutating_manipulation_when_dataset_is_freezed() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, data_repo, llm, manipulation_tool, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}]),
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=True,
+                intent_manupulation_question_brief="drop outcome column",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=False,
+                intent_chart_brief="",
+            )
+        ],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="drop outcome column")],
+        state=_base_dataset_state(iterations=[init_iteration], freezed=True),
+    )
+
+    assert _status(state) == "FREEZED"
+    assert "cannot modify the data or revert" in _message(state).txt_message.lower()
+    assert manipulation_tool.calls == []
+    assert plot_tool.calls == []
+    assert data_repo.saved_csv_calls == []
+    assert data_repo.saved_json_calls == []
+    assert len(llm.generate_json_calls) == 1
+    assert len(llm.generate_calls) == 0
+
+
+def test_dataset_node_allows_analytical_manipulation_when_dataset_is_freezed() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, data_repo, llm, manipulation_tool, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
+        manipulation_df=pd.DataFrame([{"outcome": 1, "count": 1}, {"outcome": 0, "count": 1}]),
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=True,
+                intent_manupulation_question_brief="count outcome values",
+                intent_manupulation_is_analytical_query=True,
+                intent_chart=False,
+                intent_chart_brief="",
+            )
+        ],
+        generate_outputs=["Analytical query complete on frozen dataset."],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="count outcome values")],
+        state=_base_dataset_state(iterations=[init_iteration], freezed=True),
+    )
+
+    assert _status(state) == "FREEZED"
+    assert _message(state).txt_message == "Analytical query complete on frozen dataset."
+    assert len(manipulation_tool.calls) == 1
+    assert data_repo.saved_csv_calls == []
+
+
 def test_dataset_node_saves_chart_specs_and_adds_artifact_ids() -> None:
     node, data_repo, _, _, plot_tool, _ = _make_node_and_tools(
         dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
@@ -556,8 +702,43 @@ def test_dataset_node_saves_chart_specs_and_adds_artifact_ids() -> None:
     assert len(data_repo.saved_json_calls) == 2
     assert state.latest_iteration is not None
     assert len(state.latest_iteration.saved_vega_lite_specs_file_ids) == 2
-    assert state.message.artifact_ids is not None
-    assert len(state.message.artifact_ids) == 3
+    assert _message(state).artifact_ids is not None
+    assert len(_message(state).artifact_ids or []) == 3
+
+
+def test_dataset_node_allows_chart_generation_when_dataset_is_freezed() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, data_repo, _, _, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}]),
+        plot_specs=[
+            {"mark": "bar", "data": {"values": [{"age": 65}]}, "encoding": {"x": {"field": "age"}}},
+        ],
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=False,
+                intent_manupulation_question_brief="",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=True,
+                intent_chart_brief="plot age",
+            )
+        ],
+        generate_outputs=["Frozen chart saved."],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="plot age")],
+        state=_base_dataset_state(iterations=[init_iteration], freezed=True),
+    )
+
+    assert _status(state) == "FREEZED"
+    assert _message(state).txt_message == "Frozen chart saved."
+    assert len(plot_tool.calls) == 1
+    assert len(data_repo.saved_json_calls) == 1
 
 
 def test_dataset_node_returns_classification_failure_message_when_intent_call_raises() -> None:
@@ -574,4 +755,4 @@ def test_dataset_node_returns_classification_failure_message_when_intent_call_ra
         state=DatasetState.init_empty(),
     )
 
-    assert "could not classify" in state.message.txt_message.lower()
+    assert "could not classify" in _message(state).txt_message.lower()
