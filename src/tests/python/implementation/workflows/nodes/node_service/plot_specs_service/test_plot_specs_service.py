@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMResponse
-from python.implementation.workflows.nodes.node_service.plot_specs_service.plot_specs_service import (
+from python.implementation.workflows.tools.plot_tool.plot_tool import (
     PlotSpecsPlan,
     PlotSpecsService,
 )

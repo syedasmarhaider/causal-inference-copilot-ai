@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from python.domain.models.models import NonEmptyStr
 from python.domain.service.llm_service import AvailableModelsKey, LLMConfig, LLMService
+from python.domain.workflows.tool import Tool
 from python.implementation.service.logging.default_logging import get_app_logger
-from python.implementation.workflows.nodes.node_service.plot_specs_service.plot_specs_prompts import (
+from python.implementation.workflows.tools.plot_tool.plot_tool_prompts import (
     PLOT_SPECS_SYSTEM_PROMPT,
     PLOT_SPECS_USER_PROMPT_TEMPLATE,
 )
@@ -36,9 +36,14 @@ class PlotSpecsPlan(BaseModel):
             raise ValueError("charts must contain at least one chart spec")
         return self
 
-
-@dataclass(frozen=True)
-class PlotSpecsService:
+class PlotTool(Tool):
+    NAME: ClassVar[str] = "PLOT_TOOL"
+    def get_tool_name(self) -> str:
+        return self.NAME
+    
+    def get_tool_info(self) -> str:
+        return "Tool for generating Vega-Lite visualization specifications based on a given dataframe and user intent. The tool uses an LLM to create template specs that reference the dataframe's fields, then injects actual data values into the specs while ensuring they are valid Vega-Lite specifications ready for rendering."
+    
     llm: LLMService
     model: AvailableModelsKey = "basic"
     max_attempts: int = 2

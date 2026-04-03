@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -14,30 +14,7 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
 
 class ProtocolDiscussionPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    discussion: str = ""
-    readiness: Literal["READY", "PENDING", "ABORT"] = "PENDING"
-    node_message: str | None = None
-    error_message: str | None = None
-
-    @field_validator("discussion", mode="before")
-    @classmethod
-    def _ensure_discussion_str(cls, v: Any) -> str:
-        if v is None:
-            return ""
-        if not isinstance(v, str):
-            raise TypeError("discussion must be str")
-        return v
-
-    @field_validator("node_message", "error_message", mode="before")
-    @classmethod
-    def _empty_str_to_none(cls, v: Any) -> str | None:
-        if v is None:
-            return None
-        if isinstance(v, str):
-            s = v.strip()
-            return s if s else None
-        raise TypeError("message fields must be str|null")
+    
 
 
 # =============================================================================

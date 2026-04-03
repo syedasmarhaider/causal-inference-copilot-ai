@@ -36,7 +36,7 @@ from python.implementation.workflows.nodes.dataset.dataset_state import (
 from python.implementation.workflows.nodes.node_service.data_manupulation_service.data_manipulation_service import (
     DataManipulationService,
 )
-from python.implementation.workflows.nodes.node_service.plot_specs_service.plot_specs_service import (
+from python.implementation.workflows.tools.plot_tool.plot_tool import (
     PlotSpecsService,
 )
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
