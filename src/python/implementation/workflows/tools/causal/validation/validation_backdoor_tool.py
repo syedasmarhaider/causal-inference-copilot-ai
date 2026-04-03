@@ -31,7 +31,7 @@ from python.implementation.workflows.utils.validation import ValidationIssueMode
 class ValidationBackdoorReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    issues: list[ValidationIssueModel] = Field(default_factory=list)
+    issues: list[ValidationIssueModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
     metrics: dict[str, Any] = Field(default_factory=dict)
 
     @property
@@ -1206,7 +1206,7 @@ def _normalize_discrete_value(value: Any) -> tuple[str, Any]:
 
     if isinstance(value, bool):
         return ("bool", bool(value))
-    if isinstance(value, numbers.Real) and not isinstance(value, bool):
+    if isinstance(value, numbers.Real):
         return ("num", float(value))
     if isinstance(value, str):
         stripped = value.strip()
