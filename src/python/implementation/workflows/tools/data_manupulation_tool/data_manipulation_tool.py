@@ -79,7 +79,6 @@ class DataManipulationTool(Tool):
     llm: LLMService
     working_data_repo: WorkingDataRepo
     model: AvailableModelsKey = "basic"
-    max_attempts: int = 2
 
     NAME: ClassVar[str] = "DATA_MANIPULATION"
 
@@ -89,10 +88,6 @@ class DataManipulationTool(Tool):
     def get_tool_info(self) -> str:
         return "Tool for manipulating tabular data via natural language instructions. The tool generates SQL statements to perform the requested manipulations and executes them against the provided dataframe. The output is a new dataframe resulting from the SQL operations."
 
-    def __post_init__(self) -> None:
-        if self.max_attempts <= 0:
-            raise ValueError("max_attempts must be >= 1")
-
     def manipulate(
         self,
         *,
@@ -100,12 +95,12 @@ class DataManipulationTool(Tool):
         table_name: str,
         data_summary: str,
         instructions: str,
-        retry_attempts: int | None = None,
+        retry_attempts: int = 3,
     ) -> pd.DataFrame:
         normalized_table_name = table_name.strip()
         normalized_data_summary = data_summary.strip()
         normalized_instructions = instructions.strip() if instructions and instructions.strip() else ""
-        effective_retry_attempts = retry_attempts if retry_attempts is not None else self.max_attempts
+        effective_retry_attempts = retry_attempts
 
         if not normalized_table_name:
             raise ValueError("table_name must be non-empty")

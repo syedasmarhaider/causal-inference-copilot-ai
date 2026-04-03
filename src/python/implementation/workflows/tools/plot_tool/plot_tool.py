@@ -11,6 +11,7 @@ from python.domain.models.models import NonEmptyStr
 from python.domain.service.llm_service import AvailableModelsKey, LLMConfig, LLMService
 from python.domain.workflows.tool import Tool
 from python.implementation.service.logging.default_logging import get_app_logger
+from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.tools.plot_tool.plot_tool_prompts import (
     PLOT_SPECS_SYSTEM_PROMPT,
     PLOT_SPECS_USER_PROMPT_TEMPLATE,
@@ -29,13 +30,54 @@ class VegaLiteSpecTemplate(BaseModel):
 class PlotSpecsPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    ALLOWED_FIELD_NAMES: ClassVar[tuple[str, ...] | None] = None
+    FIELD_KINDS: ClassVar[dict[str, str] | None] = None
+
     charts: list[VegaLiteSpecTemplate] = Field(min_length=1, max_length=4)
 
     @model_validator(mode="after")
     def _validate_chart_count(self) -> PlotSpecsPlan:
         if not self.charts:
             raise ValueError("charts must contain at least one chart spec")
+
+        allowed_field_names = type(self).ALLOWED_FIELD_NAMES
+        if allowed_field_names is None:
+            return self
+
+        for idx, chart in enumerate(self.charts, start=1):
+            _validate_template_spec(spec=chart.spec, chart_index=idx)
+            if not _has_visual_definition(chart.spec):
+                raise ValueError(
+                    f"chart {idx} must define a visual grammar "
+                    "(mark or composition keys like layer/vconcat/hconcat/concat/facet/repeat)"
+                )
+            _validate_fields_exist(
+                used_fields=_collect_field_names(chart.spec),
+                dataframe_columns=allowed_field_names,
+                chart_index=idx,
+            )
+            _validate_encoding_types_against_summary(
+                spec=chart.spec,
+                field_kinds=type(self).FIELD_KINDS or {},
+                chart_index=idx,
+            )
         return self
+
+    @classmethod
+    def for_summary(cls, summary: DatasetSummaryModel) -> type[PlotSpecsPlan]:
+        normalized_field_names = _extract_summary_field_names(summary)
+        if not normalized_field_names:
+            raise ValueError("data_summary must contain at least one non-empty header")
+
+        return type(
+            f"{cls.__name__}ForFields_{len(normalized_field_names)}",
+            (cls,),
+            {
+                "__module__": cls.__module__,
+                "ALLOWED_FIELD_NAMES": normalized_field_names,
+                "FIELD_KINDS": _extract_summary_field_kinds(summary),
+            },
+        )
 
 @dataclass(frozen=True)
 class PlotTool(Tool):
@@ -52,69 +94,63 @@ class PlotTool(Tool):
 
     llm: LLMService
     model: AvailableModelsKey = "basic"
-    max_attempts: int = 2
-    max_rows_for_values: int = 2000
+    warn_max_rows_for_values: int = 2000
     vega_schema_url: NonEmptyStr = "https://vega.github.io/schema/vega-lite/v5.json"
-
-    def __post_init__(self) -> None:
-        if self.max_attempts <= 0:
-            raise ValueError("max_attempts must be >= 1")
-        if self.max_rows_for_values <= 0:
-            raise ValueError("max_rows_for_values must be >= 1")
 
     def generate_specs(
         self,
         *,
         dataframe: pd.DataFrame,
-        data_summary: str,
+        data_summary: DatasetSummaryModel,
         user_intent: str,
+        max_attempts: int = 3,
     ) -> list[dict[str, Any]]:
-        normalized_summary = data_summary.strip()
         normalized_intent = user_intent.strip()
-        if not normalized_summary:
-            raise ValueError("data_summary must be non-empty")
         if not normalized_intent:
             raise ValueError("user_intent must be non-empty")
         if len(dataframe.columns) == 0:
             raise ValueError("dataframe must have at least one column")
 
+        dataframe_columns = tuple(str(c) for c in dataframe.columns)
+        summary_field_names = _extract_summary_field_names(data_summary)
+        _validate_summary_headers_against_dataframe(
+            summary_field_names=summary_field_names,
+            dataframe_columns=dataframe_columns,
+        )
+        summary_json = data_summary.model_dump_json()
+
         user_prompt = PLOT_SPECS_USER_PROMPT_TEMPLATE.format(
             user_intent=normalized_intent,
-            data_summary=normalized_summary,
+            data_summary=summary_json,
         )
 
-        log.info(
+        log.debug(
             "generating vega-lite spec templates",
             rows=len(dataframe),
             columns=len(dataframe.columns),
         )
+        plan_schema = PlotSpecsPlan.for_summary(data_summary)
         plan = self.llm.generate_json(
-            schema=PlotSpecsPlan,
+            schema=plan_schema,
             system_prompt=PLOT_SPECS_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             config=LLMConfig(model=self.model, temperature=0.0, top_p=1.0),
             history=None,
-            max_attempts=self.max_attempts,
+            max_attempts=max_attempts,
         )
 
-        records_df = dataframe.head(self.max_rows_for_values).copy()
-        if len(dataframe) > self.max_rows_for_values:
+        records_df = dataframe.copy()
+        if len(dataframe) > self.warn_max_rows_for_values:
             log.warning(
-                "truncating dataframe rows for vega-lite values injection",
-                original_rows=len(dataframe),
-                truncated_rows=len(records_df),
+                "vega-lite values injection exceeds warning threshold; injecting all rows",
+                row_count=len(dataframe),
+                warning_threshold=self.warn_max_rows_for_values,
             )
 
         final_specs: list[dict[str, Any]] = []
         for idx, chart in enumerate(plan.charts, start=1):
             spec = dict(chart.spec)
-            self._validate_template_spec(spec=spec, chart_index=idx)
             used_fields = self._collect_field_names(spec)
-            self._validate_fields_exist(
-                used_fields=used_fields,
-                dataframe_columns=tuple(str(c) for c in dataframe.columns),
-                chart_index=idx,
-            )
             values = self._build_values(records_df=records_df, used_fields=used_fields)
             final_spec = self._inject_values(spec=spec, values=values, title=chart.title)
             self._validate_final_spec_without_render(
@@ -126,21 +162,14 @@ class PlotTool(Tool):
         log.info(
             "vega-lite specs ready",
             charts_count=len(final_specs),
-            rows_injected=min(len(dataframe), self.max_rows_for_values),
+            rows_injected=len(dataframe),
         )
+        
         return final_specs
 
     @staticmethod
     def _validate_template_spec(*, spec: dict[str, Any], chart_index: int) -> None:
-        if "datasets" in spec:
-            raise ValueError(f"chart {chart_index} must not contain datasets")
-
-        data_obj = spec.get("data")
-        if isinstance(data_obj, dict):
-            if "values" in data_obj:
-                raise ValueError(f"chart {chart_index} must not contain data.values in template")
-            if "url" in data_obj:
-                raise ValueError(f"chart {chart_index} must not contain external data.url")
+        _validate_template_spec(spec=spec, chart_index=chart_index)
 
     def _inject_values(
         self,
@@ -182,10 +211,7 @@ class PlotTool(Tool):
 
     @staticmethod
     def _has_visual_definition(spec: dict[str, Any]) -> bool:
-        if "mark" in spec:
-            return True
-        composition_keys = ("layer", "vconcat", "hconcat", "concat", "facet", "repeat")
-        return any(key in spec for key in composition_keys)
+        return _has_visual_definition(spec)
 
     def _validate_encoding_types(
         self,
@@ -270,22 +296,7 @@ class PlotTool(Tool):
 
     @staticmethod
     def _collect_field_names(spec: dict[str, Any]) -> tuple[str, ...]:
-        fields: list[str] = []
-
-        def _walk(node: Any) -> None:
-            if isinstance(node, dict):
-                field_name = node.get("field")
-                if isinstance(field_name, str) and field_name.strip():
-                    fields.append(field_name.strip())
-                for value in node.values():
-                    _walk(value)
-            elif isinstance(node, list):
-                for item in node:
-                    _walk(item)
-
-        _walk(spec)
-        deduped = tuple(dict.fromkeys(fields))
-        return deduped
+        return _collect_field_names(spec)
 
     @staticmethod
     def _validate_fields_exist(
@@ -294,15 +305,11 @@ class PlotTool(Tool):
         dataframe_columns: tuple[str, ...],
         chart_index: int,
     ) -> None:
-        if not used_fields:
-            return
-
-        columns_set = set(dataframe_columns)
-        missing = [field for field in used_fields if field not in columns_set]
-        if missing:
-            raise ValueError(
-                f"chart {chart_index} references unknown dataframe fields: {missing}"
-            )
+        _validate_fields_exist(
+            used_fields=used_fields,
+            dataframe_columns=dataframe_columns,
+            chart_index=chart_index,
+        )
 
     def _build_values(
         self,
@@ -321,3 +328,117 @@ class PlotTool(Tool):
 
         selected_df = selected_df.where(pd.notnull(selected_df), None)
         return selected_df.to_dict(orient="records")
+
+
+def _validate_template_spec(*, spec: dict[str, Any], chart_index: int) -> None:
+    if "datasets" in spec:
+        raise ValueError(f"chart {chart_index} must not contain datasets")
+
+    data_obj = spec.get("data")
+    if isinstance(data_obj, dict):
+        if "values" in data_obj:
+            raise ValueError(f"chart {chart_index} must not contain data.values in template")
+        if "url" in data_obj:
+            raise ValueError(f"chart {chart_index} must not contain external data.url")
+
+
+def _has_visual_definition(spec: dict[str, Any]) -> bool:
+    if "mark" in spec:
+        return True
+    composition_keys = ("layer", "vconcat", "hconcat", "concat", "facet", "repeat")
+    return any(key in spec for key in composition_keys)
+
+
+def _collect_field_names(spec: dict[str, Any]) -> tuple[str, ...]:
+    fields: list[str] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            field_name = node.get("field")
+            if isinstance(field_name, str) and field_name.strip():
+                fields.append(field_name.strip())
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(spec)
+    return tuple(dict.fromkeys(fields))
+
+
+def _validate_fields_exist(
+    *,
+    used_fields: tuple[str, ...],
+    dataframe_columns: tuple[str, ...],
+    chart_index: int,
+) -> None:
+    if not used_fields:
+        return
+
+    columns_set = set(dataframe_columns)
+    missing = [field for field in used_fields if field not in columns_set]
+    if missing:
+        raise ValueError(f"chart {chart_index} references unknown data_summary fields: {missing}")
+
+
+def _validate_encoding_types_against_summary(
+    *,
+    spec: dict[str, Any],
+    field_kinds: dict[str, str],
+    chart_index: int,
+) -> None:
+    for encoding in PlotTool._collect_encoding_nodes(spec):
+        field_name = encoding.get("field")
+        field_type = encoding.get("type")
+        if not isinstance(field_name, str) or not isinstance(field_type, str):
+            continue
+
+        inferred_kind = field_kinds.get(field_name.strip())
+        if inferred_kind is None:
+            continue
+
+        normalized_type = field_type.strip().lower()
+        if normalized_type == "quantitative" and inferred_kind != "NUMERIC":
+            raise ValueError(
+                f"chart {chart_index} field '{field_name}' declared quantitative "
+                f"but data_summary inferred kind is {inferred_kind}"
+            )
+        if normalized_type == "temporal" and inferred_kind != "DATETIME":
+            raise ValueError(
+                f"chart {chart_index} field '{field_name}' declared temporal "
+                f"but data_summary inferred kind is {inferred_kind}"
+            )
+
+
+def _extract_summary_field_names(summary: DatasetSummaryModel) -> tuple[str, ...]:
+    field_names = tuple(
+        dict.fromkeys(
+            str(profile.name).strip()
+            for profile in summary.profiles
+            if str(profile.name).strip()
+        )
+    )
+    return field_names
+
+
+def _extract_summary_field_kinds(summary: DatasetSummaryModel) -> dict[str, str]:
+    return {
+        str(profile.name).strip(): str(profile.inferred_kind)
+        for profile in summary.profiles
+        if str(profile.name).strip()
+    }
+
+
+def _validate_summary_headers_against_dataframe(
+    *,
+    summary_field_names: tuple[str, ...],
+    dataframe_columns: tuple[str, ...],
+) -> None:
+    if not summary_field_names:
+        raise ValueError("data_summary must contain at least one non-empty header")
+
+    dataframe_columns_set = set(dataframe_columns)
+    missing = [field_name for field_name in summary_field_names if field_name not in dataframe_columns_set]
+    if missing:
+        raise ValueError(f"data_summary references unknown dataframe headers: {missing}")
