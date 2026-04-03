@@ -9,9 +9,9 @@ from python.implementation.workflows.tools.causal.encoding_plan import (
     TransformPlan,
 )
 from python.implementation.workflows.tools.causal.validation import (
-    validation_backdoor as validator_module,
+    validation_backdoor_tool as validator_module,
 )
-from python.implementation.workflows.tools.causal.validation.validation_backdoor import (
+from python.implementation.workflows.tools.causal.validation.validation_backdoor_tool import (
     validate_backdoor,
 )
 
