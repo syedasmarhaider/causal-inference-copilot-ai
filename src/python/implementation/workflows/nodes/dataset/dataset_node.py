@@ -27,6 +27,7 @@ from python.implementation.workflows.nodes.dataset.dataset_prompts import (
     dataset_missing_data_system_prompt,
     dataset_node_info,
     dataset_summary_answer_system_prompt,
+    prev_state_revert_message
 )
 from python.implementation.workflows.nodes.dataset.dataset_state import (
     DatasetIterationModel,
