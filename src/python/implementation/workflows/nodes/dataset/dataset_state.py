@@ -25,27 +25,26 @@ class DatasetIterationModel(BaseModel):
 class DatasetPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     dataset_iterations: list[DatasetIterationModel] = Field(default_factory=lambda: [])
-    user_message: str = (
-        "I do not have your dataset yet. Please upload a CSV dataset so I can analyze it."
-    )
-
+    freezed: bool = False
 
 class DatasetState(State):
     INIT_DATA_ID = uuid.UUID("486f4975-6cd9-4261-a122-e6b0fc46462d")
     NAME: ClassVar[str] = "DATASET"
+    user_message: str = (
+        "I do not have your dataset yet. Please upload a CSV dataset so I can analyze it."
+    )
 
     def __init__(self, payload: DatasetPayloadModel) -> None:
         self.payload = payload
 
-    @property
     def name(self) -> str:
         return self.NAME
 
-    @property
     def status(self) -> Status:
+        if self.payload.freezed:
+            return "FREEZED"
         return "PENDING"
 
-    @property
     def message(self) -> StateMessage:
         latest_iteration = self.latest_iteration 
         artifact_ids: list[Artifact_Id] = []
@@ -53,12 +52,14 @@ class DatasetState(State):
             artifact_ids.append(Artifact_Id(id = latest_iteration.dataset_id, type="csv"))
             artifact_ids.extend(latest_iteration.saved_vega_lite_specs_file_ids)
         return StateMessage(
-            txt_message=self.payload.user_message,
+            txt_message=self.user_message,
             action="NEEDS_DATA" if latest_iteration is None else "NONE",
             artifact_ids=artifact_ids or None,
         )
+    
+    def freeze_status(self) -> None:
+        self.payload.freezed = True    
 
-    @property
     def error(self) -> None:
         return None
 

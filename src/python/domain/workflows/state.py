@@ -8,7 +8,7 @@ from typing import Any, Literal
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import Artifact_Id
 
-Status = Literal["PENDING", "DONE", "ABORTED"]
+Status = Literal["PENDING", "DONE", "ABORTED","FREEZED"]
 ACTION = Literal["NONE", "NEEDS_INPUT","NEEDS_DATA"]
 
 
@@ -19,22 +19,23 @@ class StateMessage:
     artifact_ids: Sequence[Artifact_Id] | None = None
 
 class State(ABC):
-    @property
     @abstractmethod
     def name(self) -> str:
         raise NotImplementedError
 
-    @property
     @abstractmethod
     def status(self) -> Status:
         raise NotImplementedError
-
-    @property
+    
+    # TODO: no unfreez for now as we dont need it
+    @abstractmethod
+    def freeze_status(self) -> None:
+        raise NotImplementedError
+        
     @abstractmethod
     def message(self) -> StateMessage:
         raise NotImplementedError
-
-    @property
+    
     @abstractmethod
     def error(self) -> NodeExecutionError | None:
         raise NotImplementedError
