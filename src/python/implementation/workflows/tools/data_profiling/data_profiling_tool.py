@@ -487,8 +487,18 @@ def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummaryModel:
         s = series.dropna() if hasattr(series, "dropna") else [x for x in list(series) if x is not None]
 
         if hasattr(s, "unique"):
-            uniq: list[Any] = list(s.unique()) # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownArgumentType]
-            distinct = [str(x) for x in uniq[:sample_distinct]]
+            try:
+                uniq: list[Any] = list(s.unique()) # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownArgumentType]
+                distinct = [str(x) for x in uniq[:sample_distinct]]
+            except Exception:
+                seen: list[str] = []
+                for x in list(s):
+                    sx = str(x)
+                    if sx not in seen:
+                        seen.append(sx)
+                    if len(seen) >= sample_distinct:
+                        break
+                distinct = seen
         else:
             seen: list[str] = []
             for x in list(s):
@@ -549,7 +559,7 @@ def _infer_kind(
         return "NUMERIC"
 
     # 6) Datetime-like strings
-    dt = pd.to_datetime(s, errors="coerce")
+    dt = pd.to_datetime(s, errors="coerce", format="mixed")
     if float(dt.notna().mean()) >= datetime_coerce_threshold:
         return "DATETIME"
 
