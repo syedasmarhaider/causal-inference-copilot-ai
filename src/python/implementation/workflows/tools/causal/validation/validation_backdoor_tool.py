@@ -613,16 +613,6 @@ def _validate_transform_plan(
     outcome_col: str,
 ) -> list[ValidationIssueModel]:
     issues: list[ValidationIssueModel] = []
-    inferred_kind_by_eligible_column = {
-        column: _infer_kind_from_series(dataframe[column])
-        for column in eligible_cols
-        if column in dataframe.columns
-    }
-    non_numeric_eligible_columns = sorted(
-        column
-        for column, inferred_kind in inferred_kind_by_eligible_column.items()
-        if inferred_kind != "NUMERIC"
-    )
 
     if not eligible_cols:
         if transform_plan is not None:
@@ -637,23 +627,14 @@ def _validate_transform_plan(
         return issues
 
     if transform_plan is None:
-        if non_numeric_eligible_columns:
-            issues.append(
-                _issue(
-                    severity="FAIL",
-                    message="Transform plan is required for non-numeric covariates or effect modifiers.",
-                    evidence={
-                        "non_numeric_columns": [
-                            {
-                                "column": column,
-                                "inferred_kind": inferred_kind_by_eligible_column[column],
-                            }
-                            for column in non_numeric_eligible_columns
-                        ]
-                    },
-                    fix_hint="Generate a transform plan that covers every non-numeric covariate and effect modifier.",
-                )
+        issues.append(
+            _issue(
+                severity="FAIL",
+                message="Transform plan is required when covariates or effect modifiers are present.",
+                evidence={"eligible_columns": eligible_cols},
+                fix_hint="Generate a transform plan that covers every covariate and effect modifier.",
             )
+        )
         return issues
 
     plan_columns = [column_plan.column for column_plan in transform_plan.columns]
@@ -671,7 +652,7 @@ def _validate_transform_plan(
             )
         )
 
-    missing_columns = sorted(set(non_numeric_eligible_columns) - plan_set)
+    missing_columns = sorted(eligible_set - plan_set)
     if missing_columns:
         issues.append(
             _issue(
@@ -753,7 +734,7 @@ def _validate_transform_plan(
             effect_modifiers=effect_modifiers,
             covariates=covariates,
             dense_output=True,
-            require_full_coverage=False,
+            require_full_coverage=True,
         )
     except Exception as exc:
         issues.append(
