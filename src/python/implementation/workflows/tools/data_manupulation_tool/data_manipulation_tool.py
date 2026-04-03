@@ -24,6 +24,7 @@ log = get_app_logger(__name__, component="data_manipulation_tool", log_type="too
 
 class DataManipulationSQLPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    _expected_table_name: ClassVar[str | None] = None
 
     statements: list[NonEmptyStr] = Field(min_length=1)
     table_name: NonEmptyStr
@@ -32,7 +33,33 @@ class DataManipulationSQLPlan(BaseModel):
     def _validate_statements(self) -> DataManipulationSQLPlan:
         if not self.statements:
             raise ValueError("statements must contain at least one SQL statement")
+
+        expected_table_name = type(self)._expected_table_name
+        if expected_table_name is not None:
+            if str(self.table_name).strip() != expected_table_name:
+                raise ValueError(
+                    "sql plan table_name mismatch: "
+                    f"expected='{expected_table_name}' got='{self.table_name}'"
+                )
+
+            for idx, statement in enumerate(self.statements, start=1):
+                if not _statement_references_table(
+                    statement=str(statement).strip(),
+                    table_name=expected_table_name,
+                ):
+                    raise ValueError(
+                        "sql statement does not reference expected table_name "
+                        f"(index={idx}, table_name='{expected_table_name}')"
+                    )
         return self
+
+    @classmethod
+    def for_table_name(cls, table_name: str) -> type[DataManipulationSQLPlan]:
+        return type(
+            f"{cls.__name__}_{table_name}",
+            (cls,),
+            {"_expected_table_name": table_name},
+        )
 
 
 @dataclass(frozen=True)
@@ -60,47 +87,45 @@ class DataManipulationTool(Tool):
         dataframe: pd.DataFrame,
         conversation_id: str,
         data_summary: str,
-        instructions: str | None = None,
+        instructions: str,
+        retry_attempts: int | None = None,
     ) -> pd.DataFrame:
         normalized_conversation_id = conversation_id.strip()
         normalized_data_summary = data_summary.strip()
         normalized_table_name = self._sanitize_table_name(normalized_conversation_id)
         normalized_instructions = instructions.strip() if instructions and instructions.strip() else ""
+        effective_retry_attempts = retry_attempts if retry_attempts is not None else self.max_attempts
 
         if not normalized_conversation_id:
             raise ValueError("conversation_id must be non-empty")
         if not normalized_data_summary:
             raise ValueError("data_summary must be non-empty")
+        if not normalized_instructions:
+            raise ValueError("instructions must be non-empty")
+        if effective_retry_attempts <= 0:
+            raise ValueError("retry_attempts must be >= 1")
 
         user_prompt = DATA_MANIPULATION_SQL_USER_PROMPT_TEMPLATE.format(
             table_name=normalized_table_name,
             user_intent=(
                 normalized_instructions
-                if normalized_instructions
-                else "No explicit user instruction provided."
             ),
             data_summary=normalized_data_summary,
         )
+        plan_schema = DataManipulationSQLPlan.for_table_name(normalized_table_name)
 
         log.info(
             "generating data manipulation sql plan",
             table_name=normalized_table_name,
         )
         sql_plan = self.llm.generate_json(
-            schema=DataManipulationSQLPlan,
+            schema=plan_schema,
             system_prompt=DATA_MANIPULATION_SQL_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             config=LLMConfig(model=self.model, temperature=0.0, top_p=1.0),
             history=None,
-            max_attempts=self.max_attempts,
+            max_attempts=effective_retry_attempts,
         )
-
-        returned_table_name = str(sql_plan.table_name).strip()
-        if returned_table_name != normalized_table_name:
-            raise ValueError(
-                "sql plan table_name mismatch: "
-                f"expected='{normalized_table_name}' got='{returned_table_name}'"
-            )
 
         statements = tuple(str(statement).strip() for statement in sql_plan.statements)
         self._assert_table_presence_in_statements(
@@ -156,9 +181,13 @@ class DataManipulationTool(Tool):
 
     @staticmethod
     def _statement_references_table(*, statement: str, table_name: str) -> bool:
-        bare_pattern = re.compile(
-            rf"(?<![A-Za-z0-9_]){re.escape(table_name)}(?![A-Za-z0-9_])",
-            re.IGNORECASE,
-        )
-        quoted_pattern = re.compile(rf'"{re.escape(table_name)}"', re.IGNORECASE)
-        return bool(bare_pattern.search(statement) or quoted_pattern.search(statement))
+        return _statement_references_table(statement=statement, table_name=table_name)
+
+
+def _statement_references_table(*, statement: str, table_name: str) -> bool:
+    bare_pattern = re.compile(
+        rf"(?<![A-Za-z0-9_]){re.escape(table_name)}(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    )
+    quoted_pattern = re.compile(rf'"{re.escape(table_name)}"', re.IGNORECASE)
+    return bool(bare_pattern.search(statement) or quoted_pattern.search(statement))
