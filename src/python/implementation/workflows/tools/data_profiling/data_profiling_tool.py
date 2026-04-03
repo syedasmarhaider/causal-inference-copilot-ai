@@ -61,19 +61,14 @@ class DatasetProfilingError(RuntimeError):
 # =============================================================================
 class DatasetProfilingTool(Tool):
     NAME: ClassVar[str] = "DATA_PROFILING"
-    """
-    "State tool" API:
-      - extract_dataset_summary(df, ...) -> DatasetSummaryModel
-      - dataset_summary_to_json(summary, ...) -> strict JSON (no NaN/Inf)
-      - dataset_summary_from_json(payload) -> DatasetSummaryModel
-    """
-    
-
     def get_tool_name(self) -> str:
         return self.NAME
     
     def get_tool_info(self) -> str:
-        return "Tool for profiling datasets for summary statistics and data quality insights."
+        return (
+            "Tool for profiling tabular datasets. Analyzes each column to determine data types, missingness, distinct counts, and provides summaries such as numeric stats, category frequencies, and sample distinct values. "
+            "Designed to handle a variety of DataFrame-like inputs with robust error handling and informative reporting."
+        )
     
     def extract_dataset_summary(
         self,

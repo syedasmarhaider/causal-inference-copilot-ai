@@ -171,6 +171,32 @@ def test_manipulate_allows_missing_instructions_and_uses_fallback_prompt_intent(
     assert "No explicit user instruction provided." in str(llm.calls[0]["user_prompt"])
 
 
+def test_manipulate_supports_multiple_statements_when_each_references_table() -> None:
+    llm = _FakeLLMService(
+        plan=DataManipulationSQLPlan(
+            statements=[
+                f"CREATE TEMP TABLE tmp AS SELECT a FROM {_SHORT_TABLE}",
+                f"SELECT a FROM {_SHORT_TABLE}",
+            ],
+            table_name=_SHORT_TABLE,
+        )
+    )
+    repo = _FakeWorkingDataRepo()
+    tool = DataManipulationTool(llm=llm, working_data_repo=repo)
+
+    _ = tool.manipulate(
+        dataframe=pd.DataFrame([{"a": 1}]),
+        conversation_id=_UUID,
+        instructions="show a",
+        data_summary='{"n_rows": 1}',
+    )
+
+    assert repo.calls[0]["request"].statements == (
+        f"CREATE TEMP TABLE tmp AS SELECT a FROM {_SHORT_TABLE}",
+        f"SELECT a FROM {_SHORT_TABLE}",
+    )
+
+
 @pytest.mark.parametrize(
     ("conversation_id", "expected_table_name"),
     [
@@ -184,6 +210,16 @@ def test_sanitize_table_name_handles_non_uuid_inputs(
     expected_table_name: str,
 ) -> None:
     assert DataManipulationTool._sanitize_table_name(conversation_id) == expected_table_name
+
+
+def test_statement_references_table_rejects_partial_identifier_matches() -> None:
+    assert (
+        DataManipulationTool._statement_references_table(
+            statement="SELECT * FROM conv_2ebc18a33777_suffix",
+            table_name=_SHORT_TABLE,
+        )
+        is False
+    )
 
 
 @pytest.mark.parametrize(
@@ -211,4 +247,18 @@ def test_manipulate_validates_required_inputs(
             dataframe=pd.DataFrame([{"a": 1}]),
             conversation_id=conversation_id,
             data_summary=data_summary,
+        )
+
+
+def test_data_manipulation_tool_validates_max_attempts() -> None:
+    with pytest.raises(ValueError, match=r"max_attempts must be >= 1"):
+        DataManipulationTool(
+            llm=_FakeLLMService(
+                plan=DataManipulationSQLPlan(
+                    statements=[f"SELECT a FROM {_SHORT_TABLE}"],
+                    table_name=_SHORT_TABLE,
+                )
+            ),
+            working_data_repo=_FakeWorkingDataRepo(),
+            max_attempts=0,
         )

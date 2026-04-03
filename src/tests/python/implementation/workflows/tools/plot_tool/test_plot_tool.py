@@ -142,6 +142,32 @@ def test_generate_specs_rejects_unknown_fields_from_template() -> None:
         )
 
 
+def test_generate_specs_rejects_external_data_urls() -> None:
+    llm = _FakeLLMService(
+        plan=PlotSpecsPlan.model_validate(
+            {
+                "charts": [
+                    {
+                        "spec": {
+                            "mark": "bar",
+                            "data": {"url": "https://example.com/data.json"},
+                            "encoding": {"x": {"field": "x", "type": "quantitative"}},
+                        }
+                    }
+                ]
+            }
+        )
+    )
+    tool = PlotTool(llm=llm)
+
+    with pytest.raises(ValueError, match=r"must not contain external data.url"):
+        _ = tool.generate_specs(
+            dataframe=pd.DataFrame([{"x": 1}]),
+            data_summary='{"n_rows": 1, "profiles": [{"name": "x"}]}',
+            user_intent="bar chart",
+        )
+
+
 def test_generate_specs_converts_datetime_to_iso_strings() -> None:
     llm = _FakeLLMService(
         plan=PlotSpecsPlan.model_validate(
@@ -202,6 +228,59 @@ def test_generate_specs_respects_max_rows_for_values() -> None:
     )
 
     assert specs[0]["data"]["values"] == [{"x": 1}]
+
+
+def test_generate_specs_rejects_quantitative_encoding_when_values_are_not_numeric() -> None:
+    llm = _FakeLLMService(
+        plan=PlotSpecsPlan.model_validate(
+            {
+                "charts": [
+                    {
+                        "spec": {
+                            "mark": "bar",
+                            "encoding": {"x": {"field": "label", "type": "quantitative"}},
+                        }
+                    }
+                ]
+            }
+        )
+    )
+    tool = PlotTool(llm=llm)
+
+    with pytest.raises(ValueError, match=r"declared quantitative"):
+        _ = tool.generate_specs(
+            dataframe=pd.DataFrame([{"label": "not-a-number"}]),
+            data_summary='{"n_rows": 1, "profiles": [{"name": "label"}]}',
+            user_intent="plot label",
+        )
+
+
+def test_generate_specs_preserves_existing_spec_title_over_plan_title() -> None:
+    llm = _FakeLLMService(
+        plan=PlotSpecsPlan.model_validate(
+            {
+                "charts": [
+                    {
+                        "title": "Plan Title",
+                        "spec": {
+                            "title": "Spec Title",
+                            "mark": "bar",
+                            "encoding": {"x": {"field": "x", "type": "quantitative"}},
+                        },
+                    }
+                ]
+            }
+        )
+    )
+    tool = PlotTool(llm=llm)
+
+    specs = tool.generate_specs(
+        dataframe=pd.DataFrame([{"x": 1}]),
+        data_summary='{"n_rows": 1, "profiles": [{"name": "x"}]}',
+        user_intent="plot x",
+    )
+
+    assert specs[0]["title"] == "Spec Title"
 
 
 @pytest.mark.parametrize(
