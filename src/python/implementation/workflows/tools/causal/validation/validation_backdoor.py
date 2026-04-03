@@ -52,8 +52,9 @@ class ValidationBackdoorTool(Tool):
 
     def get_tool_info(self) -> str:
         return (
-            "Validate causal specs, dataset readiness, and transform-plan consistency for "
-            "causal estimation. Returns WARN/FAIL issues instead of raising validation errors."
+            "Tool for validating the suitability of a dataset and causal specification for causal effect estimation. "
+            "Checks for common issues such as missing values, class imbalance, and consistency between the dataset and causal spec. "
+            "Returns a report detailing any detected issues along with relevant metrics about the dataset and spec."
         )
 
     def validate(
