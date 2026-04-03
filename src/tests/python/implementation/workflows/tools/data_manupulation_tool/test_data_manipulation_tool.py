@@ -12,8 +12,7 @@ from python.implementation.workflows.tools.data_manupulation_tool.data_manipulat
     DataManipulationTool,
 )
 
-_UUID = "2ebc18a3-3777-44f0-9698-715d4f0ae454"
-_SHORT_TABLE = "conv_2ebc18a33777"
+_TABLE = "valid_table"
 
 
 @dataclass
@@ -40,7 +39,7 @@ class _FakeLLMService:
         user_prompt: str,
         config: LLMConfig,
         history: list[ChatMessage] | None,
-        max_attempts: int = 3,
+        max_attempts: int = 1,
     ) -> DataManipulationSQLPlan:
         self.calls.append(
             {
@@ -52,25 +51,13 @@ class _FakeLLMService:
                 "max_attempts": max_attempts,
             }
         )
-
-        last_error: Exception | None = None
-        for _attempt in range(max_attempts):
-            if not self.plans:
-                raise AssertionError("unexpected generate_json attempt")
-
-            next_plan = self.plans.pop(0)
-            if isinstance(next_plan, Exception):
-                raise next_plan
-
-            try:
-                return schema.model_validate(next_plan.model_dump())
-            except Exception as exc:  # mirrors real generate_json retry-on-validation
-                last_error = exc
-
-        raise RuntimeError(
-            f"Failed JSON schema={schema.__name__} after {max_attempts} attempts. "
-            f"Last error: {last_error or 'unknown'}"
-        )
+        if not self.plans:
+            raise AssertionError("unexpected generate_json call")
+        next_plan = self.plans.pop(0)
+        if isinstance(next_plan, Exception):
+            raise next_plan
+        assert isinstance(next_plan, DataManipulationSQLPlan)
+        return next_plan
 
 
 @dataclass
@@ -90,12 +77,12 @@ class _FakeWorkingDataRepo:
         )
 
 
-def test_manipulate_executes_sql_with_shortened_uuid_table_name() -> None:
+def test_manipulate_executes_sql_with_passed_table_name() -> None:
     llm = _FakeLLMService(
         plans=[
             DataManipulationSQLPlan(
-                statements=[f"SELECT a FROM {_SHORT_TABLE} ORDER BY a DESC"],
-                table_name=_SHORT_TABLE,
+                statements=[f"SELECT a FROM {_TABLE} ORDER BY a DESC"],
+                table_name=_TABLE,
             )
         ]
     )
@@ -104,16 +91,16 @@ def test_manipulate_executes_sql_with_shortened_uuid_table_name() -> None:
 
     output_df = tool.manipulate(
         dataframe=pd.DataFrame([{"a": 1}, {"a": 3}, {"a": 2}]),
-        conversation_id=_UUID,
+        table_name=_TABLE,
         instructions="sort a descending",
         data_summary='{"n_rows": 3}',
     )
 
     assert len(llm.calls) == 1
-    assert _SHORT_TABLE in str(llm.calls[0]["user_prompt"])
+    assert _TABLE in str(llm.calls[0]["user_prompt"])
     assert len(repo.calls) == 1
-    assert repo.calls[0]["request"].table_name == _SHORT_TABLE
-    assert repo.calls[0]["request"].statements == (f"SELECT a FROM {_SHORT_TABLE} ORDER BY a DESC",)
+    assert repo.calls[0]["request"].table_name == _TABLE
+    assert repo.calls[0]["request"].statements == (f"SELECT a FROM {_TABLE} ORDER BY a DESC",)
     assert output_df.to_dict(orient="records") == [{"a": 1}, {"a": 3}, {"a": 2}]
 
 
@@ -121,8 +108,8 @@ def test_manipulate_accepts_quoted_table_references() -> None:
     llm = _FakeLLMService(
         plans=[
             DataManipulationSQLPlan(
-                statements=[f'SELECT a FROM "{_SHORT_TABLE}"'],
-                table_name=_SHORT_TABLE,
+                statements=[f'SELECT a FROM "{_TABLE}"'],
+                table_name=_TABLE,
             )
         ]
     )
@@ -131,15 +118,15 @@ def test_manipulate_accepts_quoted_table_references() -> None:
 
     _ = tool.manipulate(
         dataframe=pd.DataFrame([{"a": 1}]),
-        conversation_id=_UUID,
+        table_name=_TABLE,
         instructions="show a",
         data_summary='{"n_rows": 1}',
     )
 
-    assert repo.calls[0]["request"].statements == (f'SELECT a FROM "{_SHORT_TABLE}"',)
+    assert repo.calls[0]["request"].statements == (f'SELECT a FROM "{_TABLE}"',)
 
 
-def test_manipulate_retries_within_same_generate_json_call_on_table_name_mismatch() -> None:
+def test_manipulate_retries_on_table_name_mismatch() -> None:
     llm = _FakeLLMService(
         plans=[
             DataManipulationSQLPlan(
@@ -147,8 +134,8 @@ def test_manipulate_retries_within_same_generate_json_call_on_table_name_mismatc
                 table_name="wrong_table",
             ),
             DataManipulationSQLPlan(
-                statements=[f"SELECT a FROM {_SHORT_TABLE}"],
-                table_name=_SHORT_TABLE,
+                statements=[f"SELECT a FROM {_TABLE}"],
+                table_name=_TABLE,
             ),
         ]
     )
@@ -157,27 +144,28 @@ def test_manipulate_retries_within_same_generate_json_call_on_table_name_mismatc
 
     _ = tool.manipulate(
         dataframe=pd.DataFrame([{"a": 1}]),
-        conversation_id=_UUID,
+        table_name=_TABLE,
         instructions="show a",
         data_summary='{"n_rows": 1}',
         retry_attempts=2,
     )
 
-    assert len(llm.calls) == 1
-    assert llm.calls[0]["max_attempts"] == 2
-    assert repo.calls[0]["request"].table_name == _SHORT_TABLE
+    assert len(llm.calls) == 2
+    assert llm.calls[0]["max_attempts"] == 1
+    assert "Previous invalid plan" in str(llm.calls[1]["user_prompt"])
+    assert repo.calls[0]["request"].table_name == _TABLE
 
 
-def test_manipulate_retries_within_same_generate_json_call_on_missing_table_reference() -> None:
+def test_manipulate_retries_on_missing_table_reference() -> None:
     llm = _FakeLLMService(
         plans=[
             DataManipulationSQLPlan(
                 statements=["SELECT a FROM another_table"],
-                table_name=_SHORT_TABLE,
+                table_name=_TABLE,
             ),
             DataManipulationSQLPlan(
-                statements=[f"SELECT a FROM {_SHORT_TABLE}"],
-                table_name=_SHORT_TABLE,
+                statements=[f"SELECT a FROM {_TABLE}"],
+                table_name=_TABLE,
             ),
         ]
     )
@@ -186,13 +174,15 @@ def test_manipulate_retries_within_same_generate_json_call_on_missing_table_refe
 
     _ = tool.manipulate(
         dataframe=pd.DataFrame([{"a": 1}]),
-        conversation_id=_UUID,
+        table_name=_TABLE,
         instructions="show a",
         data_summary='{"n_rows": 1}',
         retry_attempts=2,
     )
 
-    assert repo.calls[0]["request"].statements == (f"SELECT a FROM {_SHORT_TABLE}",)
+    assert len(llm.calls) == 2
+    assert repo.calls[0]["request"].statements == (f"SELECT a FROM {_TABLE}",)
+    assert "at least once" in str(llm.calls[1]["user_prompt"])
 
 
 def test_manipulate_raises_runtime_error_after_retry_budget_is_exhausted() -> None:
@@ -206,25 +196,25 @@ def test_manipulate_raises_runtime_error_after_retry_budget_is_exhausted() -> No
     )
     tool = DataManipulationTool(llm=llm, working_data_repo=_FakeWorkingDataRepo())
 
-    with pytest.raises(RuntimeError, match=r"Failed JSON schema=.*after 1 attempts"):
+    with pytest.raises(RuntimeError, match=r"Failed data manipulation plan after 1 attempts"):
         _ = tool.manipulate(
             dataframe=pd.DataFrame([{"a": 1}]),
-            conversation_id=_UUID,
+            table_name=_TABLE,
             instructions="show a",
             data_summary='{"n_rows": 1}',
             retry_attempts=1,
         )
 
 
-def test_manipulate_supports_multiple_statements_when_each_references_table() -> None:
+def test_manipulate_supports_multiple_statements_with_temp_table_flow() -> None:
     llm = _FakeLLMService(
         plans=[
             DataManipulationSQLPlan(
                 statements=[
-                    f"CREATE TEMP TABLE tmp AS SELECT a FROM {_SHORT_TABLE}",
-                    f"SELECT a FROM {_SHORT_TABLE}",
+                    f"CREATE TEMP TABLE tmp AS SELECT a FROM {_TABLE}",
+                    "SELECT a FROM tmp",
                 ],
-                table_name=_SHORT_TABLE,
+                table_name=_TABLE,
             )
         ]
     )
@@ -233,63 +223,34 @@ def test_manipulate_supports_multiple_statements_when_each_references_table() ->
 
     _ = tool.manipulate(
         dataframe=pd.DataFrame([{"a": 1}]),
-        conversation_id=_UUID,
+        table_name=_TABLE,
         instructions="show a",
         data_summary='{"n_rows": 1}',
     )
 
     assert repo.calls[0]["request"].statements == (
-        f"CREATE TEMP TABLE tmp AS SELECT a FROM {_SHORT_TABLE}",
-        f"SELECT a FROM {_SHORT_TABLE}",
+        f"CREATE TEMP TABLE tmp AS SELECT a FROM {_TABLE}",
+        "SELECT a FROM tmp",
     )
 
 
 @pytest.mark.parametrize(
-    ("conversation_id", "expected_table_name"),
+    ("table_name", "error_pattern"),
     [
-        ("my convo", "my_convo"),
-        ("123-run", "t_123_run"),
-        ("@@@", "working_data"),
+        ("", r"table_name must be non-empty"),
+        ("bad table", r"Invalid table_name"),
+        ("123table", r"Invalid table_name"),
     ],
 )
-def test_sanitize_table_name_handles_non_uuid_inputs(
-    conversation_id: str,
-    expected_table_name: str,
-) -> None:
-    assert DataManipulationTool._sanitize_table_name(conversation_id) == expected_table_name
-
-
-def test_statement_references_table_rejects_partial_identifier_matches() -> None:
-    assert (
-        DataManipulationTool._statement_references_table(
-            statement="SELECT * FROM conv_2ebc18a33777_suffix",
-            table_name=_SHORT_TABLE,
-        )
-        is False
-    )
-
-
-@pytest.mark.parametrize(
-    ("conversation_id", "data_summary", "instructions", "retry_attempts", "error_pattern"),
-    [
-        ("", '{"n_rows": 1}', "select a", None, r"conversation_id must be non-empty"),
-        (_UUID, "", "select a", None, r"data_summary must be non-empty"),
-        (_UUID, '{"n_rows": 1}', "", None, r"instructions must be non-empty"),
-        (_UUID, '{"n_rows": 1}', "select a", 0, r"retry_attempts must be >= 1"),
-    ],
-)
-def test_manipulate_validates_required_inputs(
-    conversation_id: str,
-    data_summary: str,
-    instructions: str,
-    retry_attempts: int | None,
+def test_manipulate_validates_table_name(
+    table_name: str,
     error_pattern: str,
 ) -> None:
     llm = _FakeLLMService(
         plans=[
             DataManipulationSQLPlan(
-                statements=[f"SELECT a FROM {_SHORT_TABLE}"],
-                table_name=_SHORT_TABLE,
+                statements=[f"SELECT a FROM {_TABLE}"],
+                table_name=_TABLE,
             )
         ]
     )
@@ -298,7 +259,50 @@ def test_manipulate_validates_required_inputs(
     with pytest.raises(ValueError, match=error_pattern):
         _ = tool.manipulate(
             dataframe=pd.DataFrame([{"a": 1}]),
-            conversation_id=conversation_id,
+            table_name=table_name,
+            data_summary='{"n_rows": 1}',
+            instructions="select a",
+        )
+
+
+def test_statement_references_table_rejects_partial_identifier_matches() -> None:
+    assert (
+        DataManipulationTool._statement_references_table(
+            statement="SELECT * FROM valid_table_suffix",
+            table_name=_TABLE,
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("data_summary", "instructions", "retry_attempts", "error_pattern"),
+    [
+        ("", "select a", None, r"data_summary must be non-empty"),
+        ('{"n_rows": 1}', "", None, r"instructions must be non-empty"),
+        ('{"n_rows": 1}', "select a", 0, r"retry_attempts must be >= 1"),
+    ],
+)
+def test_manipulate_validates_required_inputs(
+    data_summary: str,
+    instructions: str,
+    retry_attempts: int | None,
+    error_pattern: str,
+) -> None:
+    llm = _FakeLLMService(
+        plans=[
+            DataManipulationSQLPlan(
+                statements=[f"SELECT a FROM {_TABLE}"],
+                table_name=_TABLE,
+            )
+        ]
+    )
+    tool = DataManipulationTool(llm=llm, working_data_repo=_FakeWorkingDataRepo())
+
+    with pytest.raises(ValueError, match=error_pattern):
+        _ = tool.manipulate(
+            dataframe=pd.DataFrame([{"a": 1}]),
+            table_name=_TABLE,
             data_summary=data_summary,
             instructions=instructions,
             retry_attempts=retry_attempts,
@@ -311,8 +315,8 @@ def test_data_manipulation_tool_validates_constructor_max_attempts() -> None:
             llm=_FakeLLMService(
                 plans=[
                     DataManipulationSQLPlan(
-                        statements=[f"SELECT a FROM {_SHORT_TABLE}"],
-                        table_name=_SHORT_TABLE,
+                        statements=[f"SELECT a FROM {_TABLE}"],
+                        table_name=_TABLE,
                     )
                 ]
             ),

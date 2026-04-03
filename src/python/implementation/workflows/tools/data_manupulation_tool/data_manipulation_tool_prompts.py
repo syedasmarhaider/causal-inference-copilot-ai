@@ -14,8 +14,9 @@ Hard rules:
     "table_name": "<input table name>"
   }
 - `table_name` MUST exactly match the provided input table name.
-- Every SQL statement MUST reference that same table name.
-- Do not reference unknown tables, files, URLs, or external databases.
+- At least one SQL statement MUST reference that input table name directly.
+- Statements may use temp tables or CTEs derived from that input table to do further transformations.
+- Do not reference files, URLs, or external databases.
 - The final SQL statement MUST return a result set.
 - Keep SQL deterministic and concise.
 - Do not include markdown, comments, or extra keys.

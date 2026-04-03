@@ -1,10 +1,8 @@
 from __future__ import annotations
-
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import ClassVar
-from uuid import UUID
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -21,10 +19,11 @@ from python.implementation.workflows.tools.data_manupulation_tool.data_manipulat
 
 log = get_app_logger(__name__, component="data_manipulation_tool", log_type="tool")
 
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 class DataManipulationSQLPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    _expected_table_name: ClassVar[str | None] = None
 
     statements: list[NonEmptyStr] = Field(min_length=1)
     table_name: NonEmptyStr
@@ -33,33 +32,7 @@ class DataManipulationSQLPlan(BaseModel):
     def _validate_statements(self) -> DataManipulationSQLPlan:
         if not self.statements:
             raise ValueError("statements must contain at least one SQL statement")
-
-        expected_table_name = type(self)._expected_table_name
-        if expected_table_name is not None:
-            if str(self.table_name).strip() != expected_table_name:
-                raise ValueError(
-                    "sql plan table_name mismatch: "
-                    f"expected='{expected_table_name}' got='{self.table_name}'"
-                )
-
-            for idx, statement in enumerate(self.statements, start=1):
-                if not _statement_references_table(
-                    statement=str(statement).strip(),
-                    table_name=expected_table_name,
-                ):
-                    raise ValueError(
-                        "sql statement does not reference expected table_name "
-                        f"(index={idx}, table_name='{expected_table_name}')"
-                    )
         return self
-
-    @classmethod
-    def for_table_name(cls, table_name: str) -> type[DataManipulationSQLPlan]:
-        return type(
-            f"{cls.__name__}_{table_name}",
-            (cls,),
-            {"_expected_table_name": table_name},
-        )
 
 
 @dataclass(frozen=True)
@@ -85,19 +58,19 @@ class DataManipulationTool(Tool):
         self,
         *,
         dataframe: pd.DataFrame,
-        conversation_id: str,
+        table_name: str,
         data_summary: str,
         instructions: str,
         retry_attempts: int | None = None,
     ) -> pd.DataFrame:
-        normalized_conversation_id = conversation_id.strip()
+        normalized_table_name = table_name.strip()
         normalized_data_summary = data_summary.strip()
-        normalized_table_name = self._sanitize_table_name(normalized_conversation_id)
         normalized_instructions = instructions.strip() if instructions and instructions.strip() else ""
         effective_retry_attempts = retry_attempts if retry_attempts is not None else self.max_attempts
 
-        if not normalized_conversation_id:
-            raise ValueError("conversation_id must be non-empty")
+        if not normalized_table_name:
+            raise ValueError("table_name must be non-empty")
+        self._validate_table_name(normalized_table_name)
         if not normalized_data_summary:
             raise ValueError("data_summary must be non-empty")
         if not normalized_instructions:
@@ -105,79 +78,151 @@ class DataManipulationTool(Tool):
         if effective_retry_attempts <= 0:
             raise ValueError("retry_attempts must be >= 1")
 
-        user_prompt = DATA_MANIPULATION_SQL_USER_PROMPT_TEMPLATE.format(
+        base_user_prompt = DATA_MANIPULATION_SQL_USER_PROMPT_TEMPLATE.format(
             table_name=normalized_table_name,
-            user_intent=(
-                normalized_instructions
-            ),
+            user_intent=normalized_instructions,
             data_summary=normalized_data_summary,
         )
-        plan_schema = DataManipulationSQLPlan.for_table_name(normalized_table_name)
 
-        log.info(
-            "generating data manipulation sql plan",
-            table_name=normalized_table_name,
-        )
-        sql_plan = self.llm.generate_json(
-            schema=plan_schema,
-            system_prompt=DATA_MANIPULATION_SQL_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            config=LLMConfig(model=self.model, temperature=0.0, top_p=1.0),
-            history=None,
-            max_attempts=effective_retry_attempts,
-        )
+        current_user_prompt = base_user_prompt
+        last_error: Exception | None = None
+        last_plan: DataManipulationSQLPlan | None = None
 
-        statements = tuple(str(statement).strip() for statement in sql_plan.statements)
-        self._assert_table_presence_in_statements(
-            statements=statements,
-            table_name=normalized_table_name,
-        )
+        for attempt in range(1, effective_retry_attempts + 1):
+            log.info(
+                "generating data manipulation sql plan",
+                table_name=normalized_table_name,
+                attempt=attempt,
+                max_attempts=effective_retry_attempts,
+            )
+            try:
+                sql_plan = self.llm.generate_json(
+                    schema=DataManipulationSQLPlan,
+                    system_prompt=DATA_MANIPULATION_SQL_SYSTEM_PROMPT,
+                    user_prompt=current_user_prompt,
+                    config=LLMConfig(model=self.model, temperature=0.0, top_p=1.0),
+                    history=None,
+                    max_attempts=1,
+                )
+                last_plan = sql_plan
 
-        sql_request = WorkingDataSQLRequest(
-            statements=statements,
-            table_name=normalized_table_name,
-        )
-        sql_result = self.working_data_repo.execute_sql(
-            dataframe=dataframe,
-            request=sql_request,
-        )
+                statements = tuple(str(statement).strip() for statement in sql_plan.statements)
+                self._validate_plan(
+                    plan=sql_plan,
+                    statements=statements,
+                    expected_table_name=normalized_table_name,
+                )
 
-        log.info(
-            "data manipulation sql executed",
-            table_name=sql_request.table_name,
-            statements_count=len(sql_request.statements),
-            row_count=sql_result.row_count,
-            has_result_set=sql_result.has_result_set,
-        )
-        return sql_result.dataframe
+                sql_request = WorkingDataSQLRequest(
+                    statements=statements,
+                    table_name=normalized_table_name,
+                )
+                sql_result = self.working_data_repo.execute_sql(
+                    dataframe=dataframe,
+                    request=sql_request,
+                )
+
+                log.info(
+                    "data manipulation sql executed",
+                    table_name=sql_request.table_name,
+                    statements_count=len(sql_request.statements),
+                    row_count=sql_result.row_count,
+                    has_result_set=sql_result.has_result_set,
+                    attempt=attempt,
+                )
+                return sql_result.dataframe
+            except Exception as exc:
+                last_error = exc
+                if attempt >= effective_retry_attempts:
+                    break
+
+                log.warning(
+                    "retrying invalid data manipulation sql plan",
+                    table_name=normalized_table_name,
+                    attempt=attempt,
+                    max_attempts=effective_retry_attempts,
+                    error=str(exc),
+                )
+                current_user_prompt = self._build_retry_user_prompt(
+                    base_user_prompt=base_user_prompt,
+                    expected_table_name=normalized_table_name,
+                    error=exc,
+                    invalid_plan=last_plan,
+                )
+
+        assert last_error is not None
+        raise RuntimeError(
+            f"Failed data manipulation plan after {effective_retry_attempts} attempts. "
+            f"Last error: {last_error}"
+        ) from last_error
 
     @staticmethod
-    def _sanitize_table_name(value: str) -> str:
-        try:
-            parsed_uuid = UUID(value)
-            return f"conv_{parsed_uuid.hex[:12]}"
-        except ValueError:
-            pass
+    def _validate_table_name(table_name: str) -> None:
+        if not _IDENT_RE.fullmatch(table_name):
+            raise ValueError(
+                f"Invalid table_name '{table_name}'. "
+                "Allowed pattern: [A-Za-z_][A-Za-z0-9_]*"
+            )
 
-        sanitized = re.sub(r"[^A-Za-z0-9_]+", "_", value).strip("_")
-        if not sanitized:
-            return "working_data"
-        if not re.match(r"^[A-Za-z_]", sanitized):
-            sanitized = f"t_{sanitized}"
-        return sanitized
+    def _validate_plan(
+        self,
+        *,
+        plan: DataManipulationSQLPlan,
+        statements: Sequence[str],
+        expected_table_name: str,
+    ) -> None:
+        returned_table_name = str(plan.table_name).strip()
+        if returned_table_name != expected_table_name:
+            raise ValueError(
+                "sql plan table_name mismatch: "
+                f"expected='{expected_table_name}' got='{returned_table_name}'"
+            )
+        self._assert_plan_references_source_table(
+            statements=statements,
+            table_name=expected_table_name,
+        )
 
-    def _assert_table_presence_in_statements(
+    @staticmethod
+    def _build_retry_user_prompt(
+        *,
+        base_user_prompt: str,
+        expected_table_name: str,
+        error: Exception,
+        invalid_plan: DataManipulationSQLPlan | None,
+    ) -> str:
+        invalid_plan_text = (
+            invalid_plan.model_dump_json(indent=2)
+            if invalid_plan is not None
+            else "<no valid JSON plan was produced>"
+        )
+        return (
+            f"{base_user_prompt}\n\n"
+            "Your previous SQL plan was invalid. Fix it and return a corrected JSON plan.\n\n"
+            "Additional hard rules:\n"
+            f"- table_name MUST be exactly '{expected_table_name}'\n"
+            f"- The SQL plan MUST reference '{expected_table_name}' at least once\n"
+            "- Temp tables or CTEs derived from that input table are allowed\n"
+            "- Output ONLY strict JSON matching the schema\n\n"
+            f"Validation error:\n{error}\n\n"
+            f"Previous invalid plan:\n{invalid_plan_text}"
+        )
+
+    def _assert_plan_references_source_table(
         self,
         *,
         statements: Sequence[str],
         table_name: str,
     ) -> None:
-        for idx, statement in enumerate(statements, start=1):
-            if not self._statement_references_table(statement=statement, table_name=table_name):
-                raise ValueError(
-                    "sql statement does not reference expected table_name "
-                    f"(index={idx}, table_name='{table_name}')"
-                )
+        if any(
+            self._statement_references_table(statement=statement, table_name=table_name)
+            for statement in statements
+        ):
+            return
+
+        raise ValueError(
+            "sql plan does not reference expected table_name "
+            f"(table_name='{table_name}')"
+        )
 
     @staticmethod
     def _statement_references_table(*, statement: str, table_name: str) -> bool:
