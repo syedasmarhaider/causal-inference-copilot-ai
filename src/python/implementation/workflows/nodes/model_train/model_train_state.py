@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from python.domain.models.errors import NodeExecutionError
 from python.domain.workflows.state import State, StateMessage, Status
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
-from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.encoding.encoding_plan import TransformPlan
 
 
 class ModelTrainPayload(BaseModel):

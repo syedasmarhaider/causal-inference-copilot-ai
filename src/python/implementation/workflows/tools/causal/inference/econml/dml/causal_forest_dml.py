@@ -53,8 +53,8 @@ from python.implementation.workflows.tools.causal.inference.econml.utils import 
     required_init_keys,
     serialize_inference_obj,
 )
-from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.causal.encoding.encoding_util import EncodingUtil
+from python.implementation.workflows.tools.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.encoding.encoding_util import EncodingUtil
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 log = get_logger(__name__)

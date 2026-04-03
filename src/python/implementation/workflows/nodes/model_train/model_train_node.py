@@ -34,7 +34,7 @@ from python.implementation.workflows.tools.causal.inference.causal_model_factory
     CausalModelFactoryTool,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
-from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetSummaryModel,
 )

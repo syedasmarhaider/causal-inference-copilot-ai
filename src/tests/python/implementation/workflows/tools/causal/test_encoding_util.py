@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.causal.encoding.encoding_util import (
+from python.implementation.workflows.tools.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.encoding.encoding_util import (
     BinaryMapTransformer,
     DateTimeToEpochSecondsTransformer,
     Log1pSafeTransformer,

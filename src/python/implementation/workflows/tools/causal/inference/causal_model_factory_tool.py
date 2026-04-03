@@ -23,7 +23,7 @@ from python.implementation.workflows.tools.causal.inference.econml.dr.dr_learner
 from python.implementation.workflows.tools.causal.inference.econml.models_meta import (
     SupportedModelsLiteralType,
 )
-from python.implementation.workflows.tools.causal.encoding.encoding_util import EncodingUtil
+from python.implementation.workflows.tools.encoding.encoding_util import EncodingUtil
 
 
 @dataclass

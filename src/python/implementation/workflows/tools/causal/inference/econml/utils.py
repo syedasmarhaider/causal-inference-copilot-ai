@@ -16,7 +16,7 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import (
     BinaryTreatmentSpecModel,
     CausalSpec,
 )
-from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
+from python.implementation.workflows.tools.encoding.encoding_plan import (
     CatOneHotParams,
     DateTimeEpochParams,
     DropParams,

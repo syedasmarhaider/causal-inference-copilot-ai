@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
-from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
+from python.implementation.workflows.tools.encoding.encoding_plan import (
     DateTimeEpochParams,
     TransformPlan,
 )
@@ -474,7 +474,33 @@ def test_validate_backdoor_reports_empty_dataframe_and_missing_columns() -> None
     assert any(issue.message == "Dataframe has no rows." for issue in report.issues)
     assert any(issue.message == "Dataset has very few rows for causal estimation." for issue in report.issues)
     assert any(issue.message == "Dataframe is missing columns referenced by the causal spec." for issue in report.issues)
-    assert any(issue.message == "Transform plan is required when covariates or effect modifiers are present." for issue in report.issues)
+
+
+def test_validate_backdoor_allows_missing_transform_plan_for_numeric_only_eligible_columns() -> None:
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        dataframe=_build_dataframe(),
+        transform_plan=None,
+    )
+
+    assert not any(
+        issue.message == "Transform plan is required for non-numeric covariates or effect modifiers."
+        for issue in report.issues
+    )
+
+
+def test_validate_backdoor_requires_transform_plan_for_non_numeric_eligible_columns() -> None:
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["segment"], effect_modifiers=[]),
+        dataframe=_build_dataframe(),
+        transform_plan=None,
+    )
+
+    issue = _get_issue(report, "Transform plan is required for non-numeric covariates or effect modifiers.")
+    assert issue.severity == "FAIL"
+    assert issue.evidence["non_numeric_columns"] == [
+        {"column": "segment", "inferred_kind": "CATEGORICAL"}
+    ]
 
 
 def test_validate_backdoor_reports_duplicate_dataframe_columns() -> None:
@@ -694,6 +720,71 @@ def test_validate_backdoor_reports_plan_structure_errors() -> None:
     assert any(issue.message == "Transform plan is missing eligible columns." for issue in report.issues)
     assert any(issue.message == "Transform plan contains non-eligible columns." for issue in report.issues)
     assert any(issue.message == "Transform plan assigns the wrong role to a column." for issue in report.issues)
+
+
+def test_validate_backdoor_accepts_partial_transform_plan_when_only_non_numeric_columns_are_covered() -> None:
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=["segment"]),
+        dataframe=_build_dataframe(),
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {
+                        "column": "segment",
+                        "role": "effect_modifier",
+                        "encoding": {"preset": "cat_onehot"},
+                    }
+                ]
+            }
+        ),
+    )
+
+    assert not any(issue.message == "Transform plan is missing eligible columns." for issue in report.issues)
+    assert not any(issue.message == "Transform plan failed transformer compilation." for issue in report.issues)
+
+
+def test_validate_backdoor_fails_when_partial_transform_plan_omits_non_numeric_covariate() -> None:
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["segment"], effect_modifiers=["age"]),
+        dataframe=_build_dataframe(),
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {
+                        "column": "age",
+                        "role": "effect_modifier",
+                        "encoding": {"preset": "num_standard"},
+                    }
+                ]
+            }
+        ),
+    )
+
+    issue = _get_issue(report, "Transform plan is missing eligible columns.")
+    assert issue.severity == "FAIL"
+    assert issue.evidence["missing_columns"] == ["segment"]
+
+
+def test_validate_backdoor_fails_when_partial_transform_plan_omits_non_numeric_effect_modifier() -> None:
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=["segment"]),
+        dataframe=_build_dataframe(),
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {
+                        "column": "age",
+                        "role": "covariate",
+                        "encoding": {"preset": "num_standard"},
+                    }
+                ]
+            }
+        ),
+    )
+
+    issue = _get_issue(report, "Transform plan is missing eligible columns.")
+    assert issue.severity == "FAIL"
+    assert issue.evidence["missing_columns"] == ["segment"]
 
 
 def test_validate_backdoor_fails_for_num_log1p_invalid_values() -> None:
