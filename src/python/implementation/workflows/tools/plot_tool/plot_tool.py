@@ -45,7 +45,10 @@ class PlotTool(Tool):
         return self.NAME
 
     def get_tool_info(self) -> str:
-        return "Tool for generating Vega-Lite visualization specifications based on a given dataframe and user intent. The tool uses an LLM to create template specs that reference the dataframe's fields, then injects actual data values into the specs while ensuring they are valid Vega-Lite specifications ready for rendering."
+        return """Tool for generating Vega-Lite visualization specifications
+    based on a given dataframe and user intent. The tool uses an LLM to create template specs 
+    that reference the dataframe's fields, then injects actual data values into the specs 
+    while ensuring they are valid Vega-Lite specifications ready for rendering.""".strip()
 
     llm: LLMService
     model: AvailableModelsKey = "basic"
