@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, TypedDict, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel
+from typing_extensions import TypedDict
 
 from python.domain.models.models import Artifact_Id
 

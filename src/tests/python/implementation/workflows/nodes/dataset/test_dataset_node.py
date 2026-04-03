@@ -137,6 +137,33 @@ class _FakeToolFactory:
         return self.profiling_tool
 
 
+@dataclass
+class _UnusedDataManipulationTool:
+    def manipulate(
+        self,
+        *,
+        dataframe: pd.DataFrame,
+        conversation_id: str,
+        data_summary: str,
+        instructions: str | None = None,
+    ) -> pd.DataFrame:
+        del conversation_id, data_summary, instructions
+        return dataframe.copy()
+
+
+@dataclass
+class _UnusedPlotTool:
+    def generate_specs(
+        self,
+        *,
+        dataframe: pd.DataFrame,
+        data_summary: str,
+        user_intent: str,
+    ) -> list[dict[str, object]]:
+        del dataframe, data_summary, user_intent
+        return []
+
+
 def test_dataset_intent_model_allows_all_false_with_empty_briefs() -> None:
     intent = DatasetIntentModel(
         intent_data_question=False,
@@ -172,6 +199,8 @@ def test_dataset_node_returns_off_topic_message_for_model_training_request() -> 
                 intent_chart_brief="",
             )
         ),
+        data_manipulation_tool=_UnusedDataManipulationTool(),
+        plot_tool=_UnusedPlotTool(),
     )
 
     state = node.run(
@@ -186,5 +215,5 @@ def test_dataset_node_returns_off_topic_message_for_model_training_request() -> 
     assert isinstance(state, DatasetState)
     assert state.status == "PENDING"
     assert state.message.action == "NONE"
-    assert state.message.txt_message.lower().find("model") >= 0
     assert state.message.txt_message.lower().find("dataset stage") >= 0
+    assert state.message.txt_message.lower().find("chart generation") >= 0

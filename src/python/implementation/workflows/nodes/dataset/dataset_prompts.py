@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 
+prev_state_revert_message: str = "revert_data_changes"
+
 def dataset_node_info() -> str:
     return (
         "Persistent dataset stage. If a dataset is missing, ask the user to upload CSV data. "
         "If a dataset exists, classify the user request into summary, manipulation, and chart intents, "
         "run the relevant services, persist any new working dataset or chart JSON files "
+        f"for reverting to prev dataset pass '{prev_state_revert_message}'"
     )
 
 

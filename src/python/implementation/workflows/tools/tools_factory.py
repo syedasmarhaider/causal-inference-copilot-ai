@@ -5,29 +5,30 @@ from typing import Any
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
+from python.domain.repo.working_data_repo import WorkingDataRepo
+from python.domain.service.llm_service import LLMService
 from python.domain.workflows.tool import Tool
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.tools.causal.causal_model_factory_tool import (
     CausalModelFactoryTool,
 )
-from python.implementation.workflows.tools.data_processing.data_processing_tool import (
-    DuckDBInMemorySQLTool,
-)
-from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import (
-    CausalDataProfilingTool,
-)
+from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import DataManipulationTool
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
 )
+from python.implementation.workflows.tools.plot_tool.plot_tool import PlotTool
 
 
 class DefaultToolFactory(ToolFactory):
     _tools: dict[str, Tool]
-    def __init__(self, data_repo: DataRepo, models_repo: ModelsRepo) -> None:
+    def __init__(self, data_repo: DataRepo, models_repo: ModelsRepo, working_data_repo: WorkingDataRepo, llm_service: LLMService) -> None:
         self._tools = {
             DatasetProfilingTool.NAME: DatasetProfilingTool(),
-            DuckDBInMemorySQLTool.NAME: DuckDBInMemorySQLTool(),
-            CausalDataProfilingTool.NAME: CausalDataProfilingTool(),
+            DataManipulationTool.NAME: DataManipulationTool(
+                llm=llm_service,
+                working_data_repo=working_data_repo,
+            ),
+            PlotTool.NAME: PlotTool(llm=llm_service),
             CausalModelFactoryTool.NAME: CausalModelFactoryTool.create_default(data_repo=data_repo, models_repo=models_repo),
         }
 

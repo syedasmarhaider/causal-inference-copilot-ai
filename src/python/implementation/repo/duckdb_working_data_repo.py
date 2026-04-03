@@ -12,7 +12,7 @@ import pandas as pd
 from python.domain.repo.working_data_repo import (
     WorkingDataSQLRequest,
     WorkingDataSQLResult,
-    WorkingDatatRepo,
+    WorkingDataRepo,
 )
 
 _REGISTERED_DF_NAME = "__working_input_dataframe"
@@ -20,7 +20,7 @@ _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
-class DuckDBWorkingDatatRepo(WorkingDatatRepo):
+class DuckDBWorkingDataRepo(WorkingDataRepo):
     database: str = ":memory:"
     _connection: duckdb.DuckDBPyConnection = field(init=False, repr=False)
     _lock: threading.RLock = field(init=False, repr=False, default_factory=threading.RLock)

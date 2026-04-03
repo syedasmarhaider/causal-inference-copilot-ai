@@ -8,7 +8,7 @@ import pytest
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMResponse
 from python.implementation.workflows.tools.plot_tool.plot_tool import (
     PlotSpecsPlan,
-    PlotSpecsService,
+    PlotTool,
 )
 
 
@@ -51,14 +51,13 @@ class _FakeLLMService:
         return self.plan
 
 
-def test_generate_specs_injects_values_from_dataframe() -> None:
+def test_generate_specs_injects_values_and_title_from_dataframe() -> None:
     llm = _FakeLLMService(
         plan=PlotSpecsPlan.model_validate(
             {
                 "charts": [
                     {
                         "title": "Age vs Outcome",
-                        "rationale": "Relationship chart",
                         "spec": {
                             "mark": "line",
                             "encoding": {
@@ -71,10 +70,10 @@ def test_generate_specs_injects_values_from_dataframe() -> None:
             }
         )
     )
-    service = PlotSpecsService(llm=llm)
+    tool = PlotTool(llm=llm)
 
     df = pd.DataFrame([{"age": 40, "outcome": 1.0}, {"age": 41, "outcome": 1.2}])
-    specs = service.generate_specs(
+    specs = tool.generate_specs(
         dataframe=df,
         data_summary='{"n_rows": 2, "profiles": [{"name": "age"}, {"name": "outcome"}]}',
         user_intent="show trend between age and outcome",
@@ -83,6 +82,7 @@ def test_generate_specs_injects_values_from_dataframe() -> None:
     assert len(specs) == 1
     spec = specs[0]
     assert spec["$schema"] == "https://vega.github.io/schema/vega-lite/v5.json"
+    assert spec["title"] == "Age vs Outcome"
     assert spec["data"]["values"] == [
         {"age": 40, "outcome": 1.0},
         {"age": 41, "outcome": 1.2},
@@ -107,10 +107,10 @@ def test_generate_specs_rejects_llm_data_values_in_template() -> None:
             }
         )
     )
-    service = PlotSpecsService(llm=llm)
+    tool = PlotTool(llm=llm)
 
     with pytest.raises(ValueError, match=r"must not contain data.values"):
-        _ = service.generate_specs(
+        _ = tool.generate_specs(
             dataframe=pd.DataFrame([{"x": 1}]),
             data_summary='{"n_rows": 1, "profiles": [{"name": "x"}]}',
             user_intent="bar chart",
@@ -132,10 +132,10 @@ def test_generate_specs_rejects_unknown_fields_from_template() -> None:
             }
         )
     )
-    service = PlotSpecsService(llm=llm)
+    tool = PlotTool(llm=llm)
 
     with pytest.raises(ValueError, match=r"unknown dataframe fields"):
-        _ = service.generate_specs(
+        _ = tool.generate_specs(
             dataframe=pd.DataFrame([{"x": 1}]),
             data_summary='{"n_rows": 1, "profiles": [{"name": "x"}]}',
             user_intent="scatter",
@@ -160,7 +160,7 @@ def test_generate_specs_converts_datetime_to_iso_strings() -> None:
             }
         )
     )
-    service = PlotSpecsService(llm=llm)
+    tool = PlotTool(llm=llm)
 
     df = pd.DataFrame(
         {
@@ -168,7 +168,7 @@ def test_generate_specs_converts_datetime_to_iso_strings() -> None:
             "value": [10, 12],
         }
     )
-    specs = service.generate_specs(
+    specs = tool.generate_specs(
         dataframe=df,
         data_summary='{"n_rows": 2, "profiles": [{"name": "ts"}, {"name": "value"}]}',
         user_intent="line plot over time",
@@ -178,16 +178,44 @@ def test_generate_specs_converts_datetime_to_iso_strings() -> None:
     assert specs[0]["data"]["values"][1]["ts"] == "2026-01-02T00:00:00"
 
 
+def test_generate_specs_respects_max_rows_for_values() -> None:
+    llm = _FakeLLMService(
+        plan=PlotSpecsPlan.model_validate(
+            {
+                "charts": [
+                    {
+                        "spec": {
+                            "mark": "bar",
+                            "encoding": {"x": {"field": "x", "type": "quantitative"}},
+                        }
+                    }
+                ]
+            }
+        )
+    )
+    tool = PlotTool(llm=llm, max_rows_for_values=1)
+
+    specs = tool.generate_specs(
+        dataframe=pd.DataFrame([{"x": 1}, {"x": 2}]),
+        data_summary='{"n_rows": 2, "profiles": [{"name": "x"}]}',
+        user_intent="show x",
+    )
+
+    assert specs[0]["data"]["values"] == [{"x": 1}]
+
+
 @pytest.mark.parametrize(
-    ("data_summary", "user_intent", "error_pattern"),
+    ("data_summary", "user_intent", "dataframe", "error_pattern"),
     [
-        ("", "plot", r"data_summary must be non-empty"),
-        ('{"n_rows": 1}', "", r"user_intent must be non-empty"),
+        ("", "plot", pd.DataFrame([{"x": 1}]), r"data_summary must be non-empty"),
+        ('{"n_rows": 1}', "", pd.DataFrame([{"x": 1}]), r"user_intent must be non-empty"),
+        ('{"n_rows": 0}', "plot", pd.DataFrame(), r"dataframe must have at least one column"),
     ],
 )
 def test_generate_specs_validates_required_inputs(
     data_summary: str,
     user_intent: str,
+    dataframe: pd.DataFrame,
     error_pattern: str,
 ) -> None:
     llm = _FakeLLMService(
@@ -204,12 +232,11 @@ def test_generate_specs_validates_required_inputs(
             }
         )
     )
-    service = PlotSpecsService(llm=llm)
+    tool = PlotTool(llm=llm)
 
     with pytest.raises(ValueError, match=error_pattern):
-        _ = service.generate_specs(
-            dataframe=pd.DataFrame([{"x": 1}]),
+        _ = tool.generate_specs(
+            dataframe=dataframe,
             data_summary=data_summary,
             user_intent=user_intent,
         )
-

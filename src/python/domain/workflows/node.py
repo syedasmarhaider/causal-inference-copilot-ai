@@ -6,7 +6,6 @@ from uuid import UUID
 
 from python.domain.service.llm_service import ChatMessage
 from python.domain.workflows.state import State
-from python.domain.workflows.tool_factory import ToolFactory
 
 
 class Node(ABC):
@@ -27,7 +26,6 @@ class Node(ABC):
         user_id: UUID,
         conversation_id: UUID,
         state: State,
-        tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
         messages_history: Sequence[ChatMessage] | None
     ) -> State:

@@ -1,7 +1,8 @@
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import StringConstraints
+from typing_extensions import TypedDict
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 

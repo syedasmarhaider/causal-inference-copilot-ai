@@ -33,11 +33,11 @@ from python.implementation.workflows.nodes.dataset.dataset_state import (
     DatasetPayloadModel,
     DatasetState,
 )
-from python.implementation.workflows.nodes.node_service.data_manupulation_service.data_manipulation_service import (
-    DataManipulationService,
+from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import (
+    DataManipulationTool,
 )
 from python.implementation.workflows.tools.plot_tool.plot_tool import (
-    PlotSpecsService,
+    PlotTool,
 )
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
@@ -46,6 +46,7 @@ from python.implementation.workflows.tools.data_profiling.data_profiling_tool im
 from python.implementation.workflows.utils.utils import JSONDict, safe_err
 
 log = get_app_logger(__name__, component="dataset_node", log_type="node")
+
 
 
 class DatasetIntentModel(BaseModel):
@@ -96,19 +97,22 @@ class DatasetIntentModel(BaseModel):
 
 class DatasetNode(Node):
     NAME: ClassVar[str] = DatasetState.NAME
+    _data_manipulation_tool: DataManipulationTool
+    _plot_tool: PlotTool
+    _profiling_tool: DatasetProfilingTool
 
     def __init__(
         self,
         *,
         data_repo: DataRepo,
         llm: LLMService,
-        data_manipulation_service: DataManipulationService,
-        plot_specs_service: PlotSpecsService,
+        tools_factory: ToolFactory,
     ) -> None:
         self._data_repo = data_repo
         self._llm = llm
-        self._data_manipulation_service = data_manipulation_service
-        self._plot_specs_service = plot_specs_service
+        self._data_manipulation_tool = cast(DataManipulationTool, tools_factory.get_tool(DataManipulationTool.NAME))
+        self._plot_tool = cast(PlotTool, tools_factory.get_tool(PlotTool.NAME))
+        self._profiling_tool = cast(DatasetProfilingTool, tools_factory.get_tool(DatasetProfilingTool.NAME))
 
     @property
     def name(self) -> str:
@@ -123,13 +127,12 @@ class DatasetNode(Node):
         *,
         user_id: UUID,
         conversation_id: UUID,
-        tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
         messages_history: Sequence[ChatMessage] | None,
         state: State,
     ) -> State:
         del previous_state_dependencies
-
+        
         if not isinstance(state, DatasetState):
             raise TypeError(f"{self.name}: expected DatasetState, got {type(state).__name__}")
 
@@ -137,8 +140,7 @@ class DatasetNode(Node):
         if _is_revert_request(messages_history):
             return self._handle_revert(dataset_iterations=dataset_iterations)
 
-        profiling_tool = cast(DatasetProfilingTool, tool_factory.get_tool(DatasetProfilingTool.NAME))
-        
+
         current_df: pd.DataFrame
         current_summary: DatasetSummaryModel
         current_summary_json: str
@@ -169,7 +171,7 @@ class DatasetNode(Node):
                     )
                 )
 
-            current_summary = latest_iteration.summary or profiling_tool.extract_dataset_summary(
+            current_summary = latest_iteration.summary or self._profiling_tool.extract_dataset_summary(
                 current_df,
                 max_categories=200,
                 sample_distinct=200,
@@ -177,7 +179,7 @@ class DatasetNode(Node):
                 strict=True,
             )
             dataset_iterations[-1] = latest_iteration.model_copy(update={"summary": current_summary})
-            current_summary_json = profiling_tool.dataset_summary_to_json(current_summary)
+            current_summary_json = self._profiling_tool.dataset_summary_to_json(current_summary)
         else:
             try:
                 current_df = self._data_repo.get_csv_data(
@@ -193,14 +195,14 @@ class DatasetNode(Node):
                     )
                 )
 
-            current_summary = profiling_tool.extract_dataset_summary(
+            current_summary = self._profiling_tool.extract_dataset_summary(
                 current_df,
                 max_categories=200,
                 sample_distinct=200,
                 compute_quantiles=False,
                 strict=True,
             )
-            current_summary_json = profiling_tool.dataset_summary_to_json(current_summary)
+            current_summary_json = self._profiling_tool.dataset_summary_to_json(current_summary)
             dataset_iterations.append(
                 DatasetIterationModel(
                     dataset_id=DatasetState.INIT_DATA_ID,
@@ -282,7 +284,7 @@ class DatasetNode(Node):
                 dataframe=working_df,
                 summary_model=working_summary,
                 summary_json=working_summary_json,
-                profiling_tool=profiling_tool,
+                profiling_tool=self._profiling_tool,
                 instructions=intent.intent_manupulation_question_brief or latest_user_message,
                 analytical_query=intent.intent_manupulation_is_analytical_query,
             )
@@ -423,7 +425,7 @@ class DatasetNode(Node):
         instructions: str,
         analytical_query: bool,
     ) -> tuple[JSONDict, list[DatasetIterationModel], pd.DataFrame, DatasetSummaryModel, str]:
-        result_df = self._data_manipulation_service.manipulate(
+        result_df = self._data_manipulation_tool.manipulate(
             dataframe=dataframe,
             conversation_id=str(conversation_id),
             data_summary=summary_json,
@@ -489,7 +491,7 @@ class DatasetNode(Node):
         summary_json: str,
         instructions: str,
     ) -> tuple[JSONDict, list[DatasetIterationModel]]:
-        specs = self._plot_specs_service.generate_specs(
+        specs = self._plot_tool.generate_specs(
             dataframe=dataframe,
             data_summary=summary_json,
             user_intent=instructions,
@@ -564,7 +566,7 @@ def _is_revert_request(messages_history: Sequence[ChatMessage] | None) -> bool:
     last_message = messages_history[-1]
     if last_message.role != "user":
         return False
-    return "revert_data_changes" in last_message.content.lower()
+    return prev_state_revert_message == last_message.content.lower()
 
 
 def _dataframe_preview(dataframe: pd.DataFrame, *, row_limit: int = 10) -> JSONDict:

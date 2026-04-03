@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, ClassVar
 
@@ -15,7 +16,7 @@ from python.implementation.workflows.tools.plot_tool.plot_tool_prompts import (
     PLOT_SPECS_USER_PROMPT_TEMPLATE,
 )
 
-log = get_app_logger(__name__, component="plot_specs_service", log_type="service")
+log = get_app_logger(__name__, component="plot_tool", log_type="tool")
 
 
 class VegaLiteSpecTemplate(BaseModel):
@@ -36,14 +37,16 @@ class PlotSpecsPlan(BaseModel):
             raise ValueError("charts must contain at least one chart spec")
         return self
 
+@dataclass(frozen=True)
 class PlotTool(Tool):
     NAME: ClassVar[str] = "PLOT_TOOL"
+
     def get_tool_name(self) -> str:
         return self.NAME
-    
+
     def get_tool_info(self) -> str:
         return "Tool for generating Vega-Lite visualization specifications based on a given dataframe and user intent. The tool uses an LLM to create template specs that reference the dataframe's fields, then injects actual data values into the specs while ensuring they are valid Vega-Lite specifications ready for rendering."
-    
+
     llm: LLMService
     model: AvailableModelsKey = "basic"
     max_attempts: int = 2
@@ -110,7 +113,7 @@ class PlotTool(Tool):
                 chart_index=idx,
             )
             values = self._build_values(records_df=records_df, used_fields=used_fields)
-            final_spec = self._inject_values(spec=spec, values=values)
+            final_spec = self._inject_values(spec=spec, values=values, title=chart.title)
             self._validate_final_spec_without_render(
                 spec=final_spec,
                 chart_index=idx,
@@ -136,9 +139,17 @@ class PlotTool(Tool):
             if "url" in data_obj:
                 raise ValueError(f"chart {chart_index} must not contain external data.url")
 
-    def _inject_values(self, *, spec: dict[str, Any], values: list[dict[str, Any]]) -> dict[str, Any]:
+    def _inject_values(
+        self,
+        *,
+        spec: dict[str, Any],
+        values: list[dict[str, Any]],
+        title: str | None,
+    ) -> dict[str, Any]:
         out = dict(spec)
         out.setdefault("$schema", str(self.vega_schema_url))
+        if title:
+            out.setdefault("title", title)
         out["data"] = {"values": values}
         return out
 

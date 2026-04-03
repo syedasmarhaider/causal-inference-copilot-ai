@@ -35,7 +35,7 @@ class WorkingDataSQLResult:
     dataframe: pd.DataFrame
 
 
-class WorkingDatatRepo(Protocol):
+class WorkingDataRepo(Protocol):
     """
     Analytical SQL execution over tabular data.
 

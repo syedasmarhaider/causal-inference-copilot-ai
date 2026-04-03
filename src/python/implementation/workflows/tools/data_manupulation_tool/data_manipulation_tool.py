@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-
+from dataclasses import dataclass
 from typing import ClassVar
 from uuid import UUID
 
@@ -10,11 +10,14 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from python.domain.models.models import NonEmptyStr
-from python.domain.repo.working_data_repo import WorkingDataSQLRequest, WorkingDatatRepo
+from python.domain.repo.working_data_repo import WorkingDataRepo, WorkingDataSQLRequest
 from python.domain.service.llm_service import AvailableModelsKey, LLMConfig, LLMService
 from python.domain.workflows.tool import Tool
 from python.implementation.service.logging.default_logging import get_app_logger
-from python.implementation.workflows.nodes.node_service.data_manupulation_service.data_manipulation_prompts import DATA_MANIPULATION_SQL_SYSTEM_PROMPT, DATA_MANIPULATION_SQL_USER_PROMPT_TEMPLATE
+from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool_prompts import (
+    DATA_MANIPULATION_SQL_SYSTEM_PROMPT,
+    DATA_MANIPULATION_SQL_USER_PROMPT_TEMPLATE,
+)
 
 log = get_app_logger(__name__, component="data_manipulation_tool", log_type="tool")
 
@@ -32,15 +35,18 @@ class DataManipulationSQLPlan(BaseModel):
         return self
 
 
+@dataclass(frozen=True)
 class DataManipulationTool(Tool):
     llm: LLMService
-    working_data_repo: WorkingDatatRepo
+    working_data_repo: WorkingDataRepo
     model: AvailableModelsKey = "basic"
     max_attempts: int = 2
-    
-    NAME: ClassVar[str] = "DATA_MANIPULATION"    
+
+    NAME: ClassVar[str] = "DATA_MANIPULATION"
+
     def get_tool_name(self) -> str:
         return self.NAME
+
     def get_tool_info(self) -> str:
         return "Tool for manipulating tabular data via natural language instructions. The tool generates SQL statements to perform the requested manipulations and executes them against the provided dataframe. The output is a new dataframe resulting from the SQL operations."
 
