@@ -198,6 +198,24 @@ class InferenceReadyCausalSpec(BaseModel):
     def get_effect_modifiers_with_forbidden_missing(self) -> list[str]:
         return self._classify_missing_columns(self.get_effect_modifiers_order())[_MISSINGNESS_FORBIDS]
 
+    def assert_covariates_missingness_is_allowed(self) -> None:
+        self._assert_missingness_is_not_forbidden(
+            columns=self.get_covariates_with_forbidden_missing(),
+            label="Covariates",
+        )
+
+    def assert_effect_modifiers_missingness_is_allowed(self) -> None:
+        self._assert_missingness_is_not_forbidden(
+            columns=self.get_effect_modifiers_with_forbidden_missing(),
+            label="Effect modifiers",
+        )
+
+    def requires_allow_missing_for_covariates(self) -> bool:
+        return bool(self.get_covariates_with_unhandled_missing())
+
+    def has_unhandled_missing_effect_modifiers(self) -> bool:
+        return bool(self.get_effect_modifiers_with_unhandled_missing())
+
     def _columns_with_missing(self, columns: list[str]) -> list[str]:
         profile_by_name = self._profile_by_name()
         return [column for column in columns if profile_by_name[column].n_missing > 0]
@@ -221,6 +239,18 @@ class InferenceReadyCausalSpec(BaseModel):
             classified[status].append(column)
 
         return classified
+
+    def _assert_missingness_is_not_forbidden(
+        self,
+        *,
+        columns: list[str],
+        label: str,
+    ) -> None:
+        if columns:
+            raise ValueError(
+                f"{label} contain missing values that the transformation plan forbids: "
+                f"{columns}"
+            )
 
     def _missingness_status(self, encoding: EncodingPresetSpec) -> str:
         if isinstance(encoding, DropParams):

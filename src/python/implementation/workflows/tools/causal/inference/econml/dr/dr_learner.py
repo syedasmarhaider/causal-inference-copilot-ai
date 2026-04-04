@@ -566,22 +566,14 @@ class _BaseDRLearnerAdapter(CausalModel):
                 covariates_order=covariates_order,
             )
 
-            forbidden_missing_x = inference_ready_spec.get_effect_modifiers_with_forbidden_missing()
-            if forbidden_missing_x:
-                raise ModelSpecError(
-                    "Effect modifiers contain missing values that the transformation plan forbids: "
-                    f"{forbidden_missing_x}"
-                )
+            try:
+                inference_ready_spec.assert_effect_modifiers_missingness_is_allowed()
+                inference_ready_spec.assert_covariates_missingness_is_allowed()
+            except ValueError as exc:
+                raise ModelSpecError(str(exc)) from exc
 
-            forbidden_missing_w = inference_ready_spec.get_covariates_with_forbidden_missing()
-            if forbidden_missing_w:
-                raise ModelSpecError(
-                    "Covariates contain missing values that the transformation plan forbids: "
-                    f"{forbidden_missing_w}"
-                )
-
-            missingness_X = bool(inference_ready_spec.get_effect_modifiers_with_unhandled_missing())
-            missingness_W = bool(inference_ready_spec.get_covariates_with_unhandled_missing())
+            missingness_X = inference_ready_spec.has_unhandled_missing_effect_modifiers()
+            missingness_W = inference_ready_spec.requires_allow_missing_for_covariates()
 
             if missingness_X:
                 raise ModelSpecError(

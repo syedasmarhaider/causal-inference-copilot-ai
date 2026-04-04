@@ -356,3 +356,43 @@ def test_wrapper_classifies_missingness_handling_from_summary_and_plan() -> None
     assert wrapper.get_covariates_with_forbidden_missing() == []
     assert wrapper.get_effect_modifiers_with_unhandled_missing() == []
     assert wrapper.get_effect_modifiers_with_forbidden_missing() == ["segment"]
+    assert wrapper.requires_allow_missing_for_covariates() is True
+    assert wrapper.has_unhandled_missing_effect_modifiers() is False
+
+
+def test_wrapper_asserts_forbidden_missingness_via_high_level_methods() -> None:
+    wrapper = InferenceReadyCausalSpec(
+        causal_spec=_build_causal_spec(),
+        transformation_plan=_build_transform_plan(
+            columns=[
+                {
+                    "column": "segment",
+                    "role": "effect_modifier",
+                    "encoding": {"preset": "cat_onehot", "missing": "error"},
+                },
+                {
+                    "column": "income",
+                    "role": "covariate",
+                    "encoding": {"preset": "passthrough"},
+                },
+                {
+                    "column": "age",
+                    "role": "covariate",
+                    "encoding": {"preset": "cat_onehot", "missing": "error"},
+                },
+            ]
+        ),
+        data_summary=_summary_model(
+            _categorical_profile("treatment", ["drug", "placebo"]),
+            _numeric_profile("outcome"),
+            _categorical_profile("age", ["young", "old"], n_missing=1),
+            _numeric_profile("income", n_missing=2),
+            _categorical_profile("segment", ["A", "B"], n_missing=3),
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"Covariates contain missing values"):
+        wrapper.assert_covariates_missingness_is_allowed()
+
+    with pytest.raises(ValueError, match=r"Effect modifiers contain missing values"):
+        wrapper.assert_effect_modifiers_missingness_is_allowed()
