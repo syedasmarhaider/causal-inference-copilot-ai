@@ -12,6 +12,7 @@ from python.implementation.workflows.tools.causal.encoding.encoding_plan import 
     TransformPlan,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 
 def _causal_spec_payload(
@@ -39,6 +40,39 @@ def _causal_spec_payload(
 
 def _transform_plan_payload(*, columns: list[dict[str, Any]]) -> dict[str, Any]:
     return {"columns": columns}
+
+
+def _numeric_profile(name: str, *, n_missing: int = 0) -> dict[str, Any]:
+    return {
+        "name": name,
+        "dtype": "float64",
+        "n_rows": 10,
+        "n_missing": n_missing,
+        "missing_rate": n_missing / 10,
+        "distinct_count": 10,
+        "inferred_kind": "NUMERIC",
+        "summary": {"min": 0.0, "max": 1.0, "mean": 0.5, "std": 0.1, "quantiles": None},
+    }
+
+
+def _categorical_profile(name: str, values: list[str], *, n_missing: int = 0) -> dict[str, Any]:
+    return {
+        "name": name,
+        "dtype": "object",
+        "n_rows": 10,
+        "n_missing": n_missing,
+        "missing_rate": n_missing / 10,
+        "distinct_count": len(values),
+        "inferred_kind": "CATEGORICAL",
+        "summary": {
+            "top_categories": [{"value": value, "count": 5} for value in values],
+            "other_count": 0,
+        },
+    }
+
+
+def _summary_model(*profiles: dict[str, Any]) -> DatasetSummaryModel:
+    return DatasetSummaryModel.model_validate({"n_rows": 10, "profiles": list(profiles)})
 
 
 def _num_standard(column: str, role: str) -> dict[str, Any]:
@@ -74,6 +108,23 @@ def _build_transform_plan(*, columns: list[dict[str, Any]]) -> TransformPlan:
     return TransformPlan.model_validate(_transform_plan_payload(columns=columns))
 
 
+def _build_data_summary(
+    *,
+    age_missing: int = 0,
+    income_missing: int = 0,
+    include_income: bool = True,
+) -> DatasetSummaryModel:
+    profiles: list[dict[str, Any]] = [
+        _categorical_profile("treatment", ["drug", "placebo"]),
+        _numeric_profile("outcome"),
+        _numeric_profile("age", n_missing=age_missing),
+        _categorical_profile("segment", ["A", "B"]),
+    ]
+    if include_income:
+        profiles.insert(3, _numeric_profile("income", n_missing=income_missing))
+    return _summary_model(*profiles)
+
+
 def test_valid_wrapper_derives_orders_from_transformation_plan() -> None:
     wrapper = InferenceReadyCausalSpec(
         causal_spec=_build_causal_spec(),
@@ -84,10 +135,12 @@ def test_valid_wrapper_derives_orders_from_transformation_plan() -> None:
                 _num_standard("age", "covariate"),
             ]
         ),
+        data_summary=_build_data_summary(),
     )
 
     assert wrapper.get_effect_modifiers_order() == ["segment"]
     assert wrapper.get_covariates_order() == ["income", "age"]
+    assert wrapper.is_covariates_missing() is False
 
 
 def test_valid_wrapper_allows_only_covariates() -> None:
@@ -96,6 +149,7 @@ def test_valid_wrapper_allows_only_covariates() -> None:
         transformation_plan=_build_transform_plan(
             columns=[_num_standard("age", "covariate")]
         ),
+        data_summary=_build_data_summary(include_income=False),
     )
 
     assert wrapper.get_covariates_order() == ["age"]
@@ -110,6 +164,12 @@ def test_valid_wrapper_allows_only_effect_modifiers() -> None:
                 _cat_onehot("tier", "effect_modifier"),
                 _cat_onehot("segment", "effect_modifier"),
             ]
+        ),
+        data_summary=_summary_model(
+            _categorical_profile("treatment", ["drug", "placebo"]),
+            _numeric_profile("outcome"),
+            _categorical_profile("segment", ["A", "B"]),
+            _categorical_profile("tier", ["gold", "silver"]),
         ),
     )
 
@@ -127,6 +187,7 @@ def test_wrapper_rejects_missing_covariate_in_plan() -> None:
                     _num_standard("age", "covariate"),
                 ]
             ),
+            data_summary=_build_data_summary(),
         )
 
 
@@ -140,6 +201,7 @@ def test_wrapper_rejects_missing_effect_modifier_in_plan() -> None:
                     _num_standard("income", "covariate"),
                 ]
             ),
+            data_summary=_build_data_summary(),
         )
 
 
@@ -155,6 +217,7 @@ def test_wrapper_rejects_extra_plan_columns() -> None:
                     _num_standard("score", "covariate"),
                 ]
             ),
+            data_summary=_build_data_summary(),
         )
 
 
@@ -170,6 +233,7 @@ def test_wrapper_rejects_plan_including_treatment_or_outcome() -> None:
                     _cat_onehot("treatment", "covariate"),
                 ]
             ),
+            data_summary=_build_data_summary(),
         )
 
     with pytest.raises(ValidationError, match=r"must not include treatment or outcome"):
@@ -183,6 +247,7 @@ def test_wrapper_rejects_plan_including_treatment_or_outcome() -> None:
                     _num_standard("outcome", "covariate"),
                 ]
             ),
+            data_summary=_build_data_summary(),
         )
 
 
@@ -197,6 +262,7 @@ def test_wrapper_rejects_wrong_plan_roles() -> None:
                     _num_standard("age", "effect_modifier"),
                 ]
             ),
+            data_summary=_build_data_summary(),
         )
 
 
@@ -210,4 +276,36 @@ def test_wrapper_rejects_empty_adjustment_set() -> None:
             transformation_plan=_build_transform_plan(
                 columns=[_num_standard("age", "covariate")]
             ),
+            data_summary=_build_data_summary(include_income=False),
+        )
+
+
+def test_is_covariates_missing_returns_true_when_any_covariate_profile_has_missing_values() -> None:
+    wrapper = InferenceReadyCausalSpec(
+        causal_spec=_build_causal_spec(),
+        transformation_plan=_build_transform_plan(
+            columns=[
+                _cat_onehot("segment", "effect_modifier"),
+                _num_standard("income", "covariate"),
+                _num_standard("age", "covariate"),
+            ]
+        ),
+        data_summary=_build_data_summary(age_missing=2),
+    )
+
+    assert wrapper.is_covariates_missing() is True
+
+
+def test_wrapper_rejects_data_summary_missing_referenced_columns() -> None:
+    with pytest.raises(ValidationError, match=r"data_summary is missing causal_spec/transformation_plan columns"):
+        InferenceReadyCausalSpec(
+            causal_spec=_build_causal_spec(),
+            transformation_plan=_build_transform_plan(
+                columns=[
+                    _cat_onehot("segment", "effect_modifier"),
+                    _num_standard("income", "covariate"),
+                    _num_standard("age", "covariate"),
+                ]
+            ),
+            data_summary=_build_data_summary(include_income=False),
         )
