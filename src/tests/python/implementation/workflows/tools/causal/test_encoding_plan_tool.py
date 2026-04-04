@@ -5,10 +5,10 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from python.implementation.workflows.tools.encoding.encoding_plan import (
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     TransformPlan,
 )
-from python.implementation.workflows.tools.encoding.encoding_plan_tool import (
+from python.implementation.workflows.tools.causal.encoding.encoding_plan_tool import (
     EncodingPlanTool,
 )
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel

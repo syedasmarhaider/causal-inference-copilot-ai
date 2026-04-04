@@ -16,7 +16,7 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import (
     CausalSpec,
     ContinuousOutcomeSpecModel,
 )
-from python.implementation.workflows.tools.encoding.encoding_plan import (
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     CatOneHotParams,
     DateTimeEpochParams,
     MapBinaryParams,
@@ -24,7 +24,7 @@ from python.implementation.workflows.tools.encoding.encoding_plan import (
     NumLog1pParams,
     TransformPlan,
 )
-from python.implementation.workflows.tools.encoding.encoding_util import compile_plan_to_transformers
+from python.implementation.workflows.tools.causal.encoding.encoding_util import compile_plan_to_transformers
 from python.implementation.workflows.utils.validation import ValidationIssueModel, ValidationStatus
 
 
