@@ -13,7 +13,6 @@ from python.implementation.workflows.tools.causal.common.inference_ready_causal_
 
 CommandType = Literal["FIT", "ATE", "CATE"]
 ResultStatus = Literal["SUCCEEDED", "FAILED"]
-MissingnessMode = Literal["none", "present"]
 ATEModelResult = Literal["for_treatment", "ate", "ate_interval", "ate_inference"]
 CATEModelResult = Literal["for_treatment", "cate", "cate_interval", "cate_inference"]
 
