@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from uuid import UUID
 
-from python.domain.service.llm_service import ChatMessage
+from python.domain.models.models import ChatMessage
 from python.domain.workflows.state import State
 
 

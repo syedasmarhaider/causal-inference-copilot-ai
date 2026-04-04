@@ -2,21 +2,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Any, Literal
 
 from python.domain.models.errors import NodeExecutionError
-from python.domain.models.models import Artifact_Id
+from python.domain.models.models import ChatMessage
 
 Status = Literal["PENDING", "DONE", "ABORTED","FREEZED"]
 ACTION = Literal["NONE", "NEEDS_INPUT","NEEDS_DATA"]
 
-
-@dataclass(frozen=True, slots=True)
-class StateMessage:
-    txt_message: str
-    action: ACTION
-    artifact_ids: Sequence[Artifact_Id] | None = None
 
 class State(ABC):
     @abstractmethod
@@ -27,13 +20,16 @@ class State(ABC):
     def status(self) -> Status:
         raise NotImplementedError
     
-    # TODO: no unfreez for now as we dont need it
     @abstractmethod
-    def freeze_status(self) -> None:
+    def set_status_freez(self) -> None:
+        raise NotImplementedError
+    
+    @abstractmethod
+    def set_status_pending(self) -> None:
         raise NotImplementedError
         
     @abstractmethod
-    def message(self) -> StateMessage:
+    def messages(self) -> Sequence[ChatMessage]:
         raise NotImplementedError
     
     @abstractmethod

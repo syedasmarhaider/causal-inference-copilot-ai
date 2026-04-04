@@ -7,8 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from python.domain.models.models import Artifact_Id
-from python.domain.workflows.state import State, StateMessage, Status
+from python.domain.workflows.state import State
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetSummaryModel,
 )
@@ -16,10 +15,10 @@ from python.implementation.workflows.tools.data_profiling.data_profiling_tool im
 
 class DatasetIterationModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
+    
     dataset_id: UUID
     summary: DatasetSummaryModel | None = None
-    saved_vega_lite_specs_file_ids: list[Artifact_Id] = Field(default_factory=lambda: [])
+    saved_vega_lite_specs: list[dict[str, Any]] = Field(default_factory=lambda: [])
 
 
 class DatasetPayloadModel(BaseModel):
@@ -40,12 +39,12 @@ class DatasetState(State):
     def name(self) -> str:
         return self.NAME
 
-    def status(self) -> Status:
+    def status(self) -> str:
         if self.payload.freezed:
             return "FREEZED"
         return "PENDING"
 
-    def message(self) -> StateMessage:
+    def messages(self) -> Sequence[ChatMessage]:
         latest_iteration = self.latest_iteration 
         artifact_ids: list[Artifact_Id] = []
         if latest_iteration:

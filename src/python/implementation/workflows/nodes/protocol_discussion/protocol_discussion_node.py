@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from python.implementation.service.logging.default_logging import get_logger
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Literal, cast
 from uuid import UUID
@@ -12,6 +11,7 @@ from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
+from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import (
     ProtocolDiscussionDeps,
 )
@@ -22,6 +22,7 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     get_questions,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
+    ProtocolDiscussionPayloadModel,
     ProtocolDiscussionState,
 )
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
@@ -74,6 +75,35 @@ class ProtocolDiscussionNode(Node):
             "prev_questions_answers_discussion_state": list(questions),
             "dataset_columns_summary": summary_string,
         }
+
+    @staticmethod
+    def _initial_discussion(*, questions: Sequence[str]) -> str:
+        return "\n".join(str(question).strip() for question in questions if str(question).strip())
+
+    def _bind_payload_to_dataset(
+        self,
+        *,
+        payload: ProtocolDiscussionPayloadModel,
+        deps: ProtocolDiscussionDeps,
+        questions: Sequence[str],
+        reset_discussion: bool,
+    ) -> ProtocolDiscussionPayloadModel:
+        updates: dict[str, Any] = {
+            "dataset_id": deps.dataset_id,
+            "dataset_summary": deps.dataset_summary,
+        }
+        if reset_discussion:
+            updates.update(
+                {
+                    "discussion": self._initial_discussion(questions=questions),
+                    "readiness": "PENDING",
+                    "node_message": None,
+                    "error_message": None,
+                }
+            )
+        elif payload.dataset_summary is None:
+            updates["dataset_summary"] = deps.dataset_summary
+        return payload.model_copy(update=updates)
 
     def _call_update_and_gate(
         self,
@@ -135,20 +165,30 @@ class ProtocolDiscussionNode(Node):
             raise TypeError(f"{self.name}: expected ProtocolDiscussionState, got {type(state).__name__}")
 
         deps = ProtocolDiscussionDeps.from_loaded(previous_state_dependencies)
-        summary = deps.dataset_summary
-        summary_string = data_set_profiling_tool.dataset_summary_to_json(summary)
         questions = get_questions()
+        prior_dataset_id = state.payload.dataset_id
+        payload = state.payload.model_copy(deep=True)
+        dataset_changed = prior_dataset_id != deps.dataset_id
+        needs_initialization = not payload.discussion.strip()
+        payload = self._bind_payload_to_dataset(
+            payload=payload,
+            deps=deps,
+            questions=questions,
+            reset_discussion=(dataset_changed or needs_initialization),
+        )
+
+        summary_string = data_set_profiling_tool.dataset_summary_to_json(deps.dataset_summary)
         last_6_messages = messages_history[-6:] if messages_history else None
         base_payload = self._base_payload(questions=questions, summary_string=summary_string)
 
         try:
             gate = self._call_update_and_gate(
                 base_payload=base_payload,
-                protocol_discussion=state.payload.discussion,
+                protocol_discussion=payload.discussion,
                 history=last_6_messages,
             )
         except Exception as e:
-            new_payload = state.payload.model_copy(
+            new_payload = payload.model_copy(
                 update={
                     "error_message": f"Protocol discussion update+gate failed: {safe_err(e)}",
                     "node_message": "Protocol discussion update failed. Retrying...",
@@ -157,15 +197,25 @@ class ProtocolDiscussionNode(Node):
             )
             return ProtocolDiscussionState(new_payload)
 
-        state.payload.discussion = gate.protocol_discussion
-        state.payload.readiness = gate.readiness
-
         user_message = self._call_user_message(
             base_payload=base_payload,
             gate=gate,
             history=last_6_messages,
         )
-        state.payload.node_message = user_message
-        state.payload.error_message = user_message if gate.readiness == "ABORT" else None
-        state.payload.readiness = gate.readiness
-        return ProtocolDiscussionState(state.payload)
+
+        effective_readiness: Gate = "PENDING" if dataset_changed else gate.readiness
+        if dataset_changed and prior_dataset_id is not None:
+            user_message = (
+                "The active dataset changed, so I reset protocol discussion against the latest data. "
+                f"{user_message}"
+            )
+
+        payload = payload.model_copy(
+            update={
+                "discussion": gate.protocol_discussion,
+                "readiness": effective_readiness,
+                "node_message": user_message,
+                "error_message": user_message if effective_readiness == "ABORT" else None,
+            }
+        )
+        return ProtocolDiscussionState(payload)
