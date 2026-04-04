@@ -86,7 +86,13 @@ class DataManipulationTool(Tool):
         return self.NAME
 
     def get_tool_info(self) -> str:
-        return "Tool for manipulating tabular data via natural language instructions. The tool generates SQL statements to perform the requested manipulations and executes them against the provided dataframe. The output is a new dataframe resulting from the SQL operations."
+        return (
+            "Tool for manipulating or analytically querying tabular data via natural language "
+            "instructions. The tool generates DuckDB SQL and executes it against the provided "
+            "dataframe. It supports both dataset-changing transformations and read-only "
+            "analytical result sets, including grouped statistics, chart-ready aggregations, "
+            "windowed calculations, reshaping, and other multi-step SQL workflows."
+        )
 
     def manipulate(
         self,

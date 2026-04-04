@@ -54,17 +54,17 @@ _WORKING_TABLE_HASH_HEX_LEN = 16
 _FREEZED_DATASET_BLOCKED_MESSAGE = (
     "Sorry, this dataset is freezed. I cannot modify the data or revert to a previous "
     "dataset version in this workflow. You can still ask questions about the data, run "
-    "analytical queries, and generate charts. To change the data, start a new conversation "
-    "from scratch."
+    "read-only analytical queries including statistical summaries, and generate charts. "
+    "To change the data, start a new conversation from scratch."
 )
 _FREEZED_DATASET_READY_MESSAGE = (
-    "Dataset is freezed. You can ask questions about the data, run analytical queries, "
-    "and generate charts, but you cannot modify or revert the data. To change the data, "
-    "start a new conversation from scratch."
+    "Dataset is freezed. You can ask questions about the data, run read-only analytical "
+    "queries including statistics and summaries, and generate charts, but you cannot "
+    "modify or revert the data. To change the data, start a new conversation from scratch."
 )
 _READY_DATASET_MESSAGE = (
-    "Dataset is ready. Ask about the data, request an analytical query or transformation, "
-    "or ask for charts."
+    "Dataset is ready. Ask about the data, request analytical or statistical queries, ask "
+    "for transformations, or ask for charts."
 )
 
 
