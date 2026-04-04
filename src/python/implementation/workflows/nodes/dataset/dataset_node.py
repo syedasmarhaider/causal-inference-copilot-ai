@@ -50,6 +50,9 @@ log = get_app_logger(__name__, component="dataset_node", log_type="node")
 _DATA_MANIPULATION_RETRY_ATTEMPTS = 3
 _WORKING_TABLE_PREFIX = "df_"
 _WORKING_TABLE_HASH_HEX_LEN = 16
+_ARTIFACT_KIND_WORKING_DATASET = "working_dataset"
+_ARTIFACT_KIND_ANALYTICAL_RESULT = "analytical_result"
+_ARTIFACT_KIND_CHART_SPEC = "chart_spec"
 _FREEZED_DATASET_BLOCKED_MESSAGE = (
     "Sorry, this dataset is freezed. I cannot modify the data or revert to a previous "
     "dataset version in this workflow. You can still ask questions about the data, run "
@@ -288,7 +291,8 @@ class DatasetNode(Node):
         summary_answer: str | None = None
         manipulation_result: JSONDict | None = None
         chart_result: JSONDict | None = None
-        chart_artifact_refs: list[ArtifactRef] | None = None
+        manipulation_artifact_refs: list[ArtifactRef] = []
+        chart_artifact_refs: list[ArtifactRef] = []
 
         if intent.intent_data_question:
             summary_answer = self._answer_summary_question(
@@ -305,6 +309,7 @@ class DatasetNode(Node):
             try:
                 (
                     manipulation_result,
+                    manipulation_artifact_refs,
                     dataset_iterations,
                     working_df,
                     working_summary,
@@ -381,7 +386,7 @@ class DatasetNode(Node):
             dataset_iterations=dataset_iterations,
             freezed=is_freezed,
             user_message=final_message,
-            message_artifact_refs=chart_artifact_refs,
+            message_artifact_refs=[*manipulation_artifact_refs, *chart_artifact_refs],
         )
 
     def _build_state(
@@ -505,7 +510,14 @@ class DatasetNode(Node):
         instructions: str,
         analytical_query: bool,
         prepare_chart_data: bool,
-    ) -> tuple[JSONDict, list[DatasetIterationModel], pd.DataFrame, DatasetSummaryModel, str]:
+    ) -> tuple[
+        JSONDict,
+        list[ArtifactRef],
+        list[DatasetIterationModel],
+        pd.DataFrame,
+        DatasetSummaryModel,
+        str,
+    ]:
         result_df = self._run_data_manipulation_tool(
             dataframe=dataframe,
             conversation_id=conversation_id,
@@ -514,6 +526,20 @@ class DatasetNode(Node):
         )
 
         if analytical_query:
+            analytical_result_id = uuid.uuid4()
+            self._data_repo.save_csv_data(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                dataset_id=analytical_result_id,
+                df=result_df,
+                overwrite=True,
+                include_index=False,
+            )
+            analytical_artifact_ref = _build_data_artifact_ref(
+                artifact_id=analytical_result_id,
+                artifact_format="csv",
+                artifact_kind=_ARTIFACT_KIND_ANALYTICAL_RESULT,
+            )
             if prepare_chart_data:
                 analytical_summary = profiling_tool.extract_dataset_summary(
                     result_df,
@@ -534,8 +560,10 @@ class DatasetNode(Node):
                 {
                     "status": "analytical_query",
                     "instruction": instructions,
+                    "analytical_result_id": str(analytical_result_id),
                     "result": _dataframe_preview(result_df),
                 },
+                [analytical_artifact_ref],
                 dataset_iterations,
                 next_dataframe,
                 next_summary,
@@ -572,6 +600,13 @@ class DatasetNode(Node):
                 "new_dataset_id": str(new_dataset_id),
                 "result": _dataframe_preview(result_df),
             },
+            [
+                _build_data_artifact_ref(
+                    artifact_id=new_dataset_id,
+                    artifact_format="csv",
+                    artifact_kind=_ARTIFACT_KIND_WORKING_DATASET,
+                )
+            ],
             dataset_iterations,
             result_df,
             new_summary,
@@ -631,7 +666,13 @@ class DatasetNode(Node):
                 json_data=json.dumps(spec, ensure_ascii=False),
                 overwrite=True,
             )
-            saved_ids.append({"id": saved_id, "kind": "data", "format": "json"})
+            saved_ids.append(
+                _build_data_artifact_ref(
+                    artifact_id=saved_id,
+                    artifact_format="json",
+                    artifact_kind=_ARTIFACT_KIND_CHART_SPEC,
+                )
+            )
 
         return (
             {
@@ -735,6 +776,20 @@ def _dataframe_preview(dataframe: pd.DataFrame, *, row_limit: int = 10) -> JSOND
 def _conversation_id_to_table_name(conversation_id: UUID) -> str:
     digest = hashlib.sha256(str(conversation_id).encode("ascii")).hexdigest()
     return f"{_WORKING_TABLE_PREFIX}{digest[:_WORKING_TABLE_HASH_HEX_LEN]}"
+
+
+def _build_data_artifact_ref(
+    *,
+    artifact_id: UUID,
+    artifact_format: str,
+    artifact_kind: str,
+) -> ArtifactRef:
+    return {
+        "id": artifact_id,
+        "kind": "data",
+        "format": cast(Any, artifact_format),
+        "artifact_meta": {"kind": artifact_kind},
+    }
 
 
 __all__ = ["DatasetIntentModel", "DatasetNode"]

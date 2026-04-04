@@ -289,7 +289,12 @@ def test_dataset_state_init_empty_and_roundtrip_preserve_message_and_artifact_re
             ],
             user_message="Charts saved.",
             message_artifact_refs=[
-                {"id": chart_id, "kind": "data", "format": "json"}
+                {
+                    "id": chart_id,
+                    "kind": "data",
+                    "format": "json",
+                    "artifact_meta": {"kind": "chart_spec"},
+                }
             ],
         )
     )
@@ -302,7 +307,12 @@ def test_dataset_state_init_empty_and_roundtrip_preserve_message_and_artifact_re
 
     assert message.content == "Charts saved."
     assert message.artifact_refs == [
-        {"id": chart_id, "kind": "data", "format": "json"}
+        {
+            "id": chart_id,
+            "kind": "data",
+            "format": "json",
+            "artifact_meta": {"kind": "chart_spec"},
+        }
     ]
 
 
@@ -587,9 +597,17 @@ def test_dataset_node_runs_analytical_manipulation_without_saving_new_dataset() 
     assert manipulation_tool.calls[0]["retry_attempts"] == 3
     assert manipulation_tool.calls[0]["table_name"].startswith("df_")
     assert re.fullmatch(r"df_[0-9a-f]{16}", str(manipulation_tool.calls[0]["table_name"]))
-    assert data_repo.saved_csv_calls == []
+    assert len(data_repo.saved_csv_calls) == 1
     assert state.latest_iteration is not None
     assert state.latest_iteration.dataset_id == DatasetState.INIT_DATA_ID
+    assert _message(state).artifact_refs == [
+        {
+            "id": data_repo.saved_csv_calls[0]["dataset_id"],
+            "kind": "data",
+            "format": "csv",
+            "artifact_meta": {"kind": "analytical_result"},
+        }
+    ]
 
 
 def test_dataset_node_saves_new_dataset_for_mutating_manipulation() -> None:
@@ -624,6 +642,14 @@ def test_dataset_node_saves_new_dataset_for_mutating_manipulation() -> None:
     assert state.latest_iteration is not None
     assert state.latest_iteration.dataset_id != DatasetState.INIT_DATA_ID
     assert list(data_repo.saved_csv_calls[0]["df"].columns) == ["age"]
+    assert _message(state).artifact_refs == [
+        {
+            "id": state.latest_iteration.dataset_id,
+            "kind": "data",
+            "format": "csv",
+            "artifact_meta": {"kind": "working_dataset"},
+        }
+    ]
 
 
 def test_dataset_node_blocks_mutating_manipulation_when_dataset_is_freezed() -> None:
@@ -691,7 +717,15 @@ def test_dataset_node_allows_analytical_manipulation_when_dataset_is_freezed() -
     assert _status(state) == "FREEZED"
     assert _message(state).content == "Analytical query complete on frozen dataset."
     assert len(manipulation_tool.calls) == 1
-    assert data_repo.saved_csv_calls == []
+    assert len(data_repo.saved_csv_calls) == 1
+    assert _message(state).artifact_refs == [
+        {
+            "id": data_repo.saved_csv_calls[0]["dataset_id"],
+            "kind": "data",
+            "format": "csv",
+            "artifact_meta": {"kind": "analytical_result"},
+        }
+    ]
 
 
 def test_dataset_node_saves_chart_specs_and_adds_artifact_ids() -> None:
@@ -730,6 +764,20 @@ def test_dataset_node_saves_chart_specs_and_adds_artifact_ids() -> None:
     assert len(state.payload.message_artifact_refs) == 2
     assert _message(state).artifact_refs is not None
     assert len(_message(state).artifact_refs or []) == 2
+    assert _message(state).artifact_refs == [
+        {
+            "id": data_repo.saved_json_calls[0]["dataset_id"],
+            "kind": "data",
+            "format": "json",
+            "artifact_meta": {"kind": "chart_spec"},
+        },
+        {
+            "id": data_repo.saved_json_calls[1]["dataset_id"],
+            "kind": "data",
+            "format": "json",
+            "artifact_meta": {"kind": "chart_spec"},
+        },
+    ]
 
 
 def test_dataset_node_allows_chart_generation_when_dataset_is_freezed() -> None:
@@ -766,6 +814,14 @@ def test_dataset_node_allows_chart_generation_when_dataset_is_freezed() -> None:
     assert len(plot_tool.calls) == 1
     assert len(data_repo.saved_json_calls) == 1
     assert len(state.payload.message_artifact_refs) == 1
+    assert _message(state).artifact_refs == [
+        {
+            "id": data_repo.saved_json_calls[0]["dataset_id"],
+            "kind": "data",
+            "format": "json",
+            "artifact_meta": {"kind": "chart_spec"},
+        }
+    ]
 
 
 def test_dataset_node_uses_analytical_query_result_as_chart_input_without_new_iteration() -> None:
@@ -802,12 +858,26 @@ def test_dataset_node_uses_analytical_query_result_as_chart_input_without_new_it
     assert len(manipulation_tool.calls) == 1
     assert len(plot_tool.calls) == 1
     assert plot_tool.calls[0]["dataframe"].to_dict(orient="records") == analytical_df.to_dict(orient="records")
-    assert data_repo.saved_csv_calls == []
+    assert len(data_repo.saved_csv_calls) == 1
     assert len(data_repo.saved_json_calls) == 1
     assert state.latest_iteration is not None
     assert state.latest_iteration.dataset_id == DatasetState.INIT_DATA_ID
     assert len(state.payload.dataset_iterations) == 1
-    assert len(state.payload.message_artifact_refs) == 1
+    assert len(state.payload.message_artifact_refs) == 2
+    assert _message(state).artifact_refs == [
+        {
+            "id": data_repo.saved_csv_calls[0]["dataset_id"],
+            "kind": "data",
+            "format": "csv",
+            "artifact_meta": {"kind": "analytical_result"},
+        },
+        {
+            "id": data_repo.saved_json_calls[0]["dataset_id"],
+            "kind": "data",
+            "format": "json",
+            "artifact_meta": {"kind": "chart_spec"},
+        },
+    ]
 
 
 def test_dataset_node_falls_back_when_final_response_llm_fails() -> None:
@@ -841,6 +911,14 @@ def test_dataset_node_falls_back_when_final_response_llm_fails() -> None:
     assert len(plot_tool.calls) == 1
     assert "generated 1 chart" in _message(state).content.lower()
     assert len(state.payload.message_artifact_refs) == 1
+    assert _message(state).artifact_refs == [
+        {
+            "id": state.payload.message_artifact_refs[0]["id"],
+            "kind": "data",
+            "format": "json",
+            "artifact_meta": {"kind": "chart_spec"},
+        }
+    ]
 
 
 def test_dataset_node_returns_classification_failure_message_when_intent_call_raises() -> None:
