@@ -18,6 +18,7 @@ DEFAULT_GCS_DATA_PREFIX: Final[str] = "data"
 DEFAULT_GCS_TIMEOUT_SECONDS: Final[float] = 60.0
 
 CSV_FILENAME: Final[str] = "data.csv"
+JSON_FILENAME: Final[str] = "data.json"
 DATASETS_DIRNAME: Final[str] = "datasets"
 ARTIFACTS_DIRNAME: Final[str] = "artifacts"
 ARTIFACT_META_FILENAME: Final[str] = "meta.json"
@@ -74,6 +75,29 @@ class GoogleCloudStorageDataRepo(DataRepo):
         return "/".join(part.strip("/") for part in parts if part and part.strip("/"))
 
     def _dataset_blob_name(self, user_id: UUID, conversation_id: UUID, dataset_id: UUID) -> str:
+        return self._dataset_file_blob_name(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            dataset_id=dataset_id,
+            filename=CSV_FILENAME,
+        )
+
+    def _json_blob_name(self, user_id: UUID, conversation_id: UUID, dataset_id: UUID) -> str:
+        return self._dataset_file_blob_name(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            dataset_id=dataset_id,
+            filename=JSON_FILENAME,
+        )
+
+    def _dataset_file_blob_name(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+        filename: str,
+    ) -> str:
         return self._join(
             DEFAULT_GCS_DATA_PREFIX,
             "users",
@@ -82,7 +106,7 @@ class GoogleCloudStorageDataRepo(DataRepo):
             str(conversation_id),
             DATASETS_DIRNAME,
             str(dataset_id),
-            CSV_FILENAME,
+            filename,
         )
 
     def _artifact_dir_prefix(self, user_id: UUID, conversation_id: UUID, artifact_id: UUID) -> str:
@@ -187,6 +211,61 @@ class GoogleCloudStorageDataRepo(DataRepo):
             raise FileExistsError(f"Refusing to overwrite existing CSV for dataset_id={dataset_id}") from exc
         except Exception as exc:
             raise ValueError(f"Failed to write CSV for dataset_id={dataset_id}: {exc}") from exc
+
+    def get_json_data(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+    ) -> str:
+        blob = self._blob(
+            self._json_blob_name(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                dataset_id=dataset_id,
+            )
+        )
+        if not blob.exists(timeout=DEFAULT_GCS_TIMEOUT_SECONDS):
+            raise FileNotFoundError(f"JSON not found for dataset_id={dataset_id}")
+
+        try:
+            return blob.download_as_bytes(timeout=DEFAULT_GCS_TIMEOUT_SECONDS).decode("utf-8")
+        except FileNotFoundError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"Failed to read JSON for dataset_id={dataset_id}: {exc}") from exc
+
+    def save_json_data(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+        json_data: str,
+        *,
+        overwrite: bool = True,
+    ) -> None:
+        blob = self._blob(
+            self._json_blob_name(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                dataset_id=dataset_id,
+            )
+        )
+
+        upload_kwargs: dict[str, object] = {
+            "data": json_data,
+            "content_type": "application/json; charset=utf-8",
+            "timeout": DEFAULT_GCS_TIMEOUT_SECONDS,
+        }
+        if not overwrite:
+            upload_kwargs["if_generation_match"] = 0
+
+        try:
+            blob.upload_from_string(**upload_kwargs)
+        except PreconditionFailed as exc:
+            raise FileExistsError(f"Refusing to overwrite existing JSON for dataset_id={dataset_id}") from exc
+        except Exception as exc:
+            raise ValueError(f"Failed to write JSON for dataset_id={dataset_id}: {exc}") from exc
 
     def save_artifact(
         self,

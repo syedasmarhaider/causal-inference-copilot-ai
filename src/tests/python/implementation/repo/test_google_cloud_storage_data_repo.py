@@ -200,6 +200,41 @@ def test_save_csv_data_maps_precondition_failed_to_file_exists() -> None:
         repo.save_csv_data(user_id, conversation_id, dataset_id, pd.DataFrame([{"x": 1}]))
 
 
+def test_get_and_save_json_data_roundtrip_and_respect_overwrite_flag() -> None:
+    user_id, conversation_id, dataset_id = _ids()
+    bucket = _FakeBucket(name="bucket")
+    repo = GoogleCloudStorageDataRepo(bucket=bucket)
+
+    repo.save_json_data(
+        user_id,
+        conversation_id,
+        dataset_id,
+        json.dumps({"chart": "ok"}),
+        overwrite=False,
+    )
+
+    blob_name = repo._json_blob_name(user_id, conversation_id, dataset_id)  # noqa: SLF001
+    call = bucket.blobs[blob_name].upload_calls[0]
+    assert call["content_type"] == "application/json; charset=utf-8"
+    assert call["if_generation_match"] == 0
+    assert repo.get_json_data(user_id, conversation_id, dataset_id) == '{"chart": "ok"}'
+
+
+def test_get_and_save_json_data_map_missing_and_precondition_errors() -> None:
+    user_id, conversation_id, dataset_id = _ids()
+    bucket = _FakeBucket(name="bucket")
+    repo = GoogleCloudStorageDataRepo(bucket=bucket)
+
+    with pytest.raises(FileNotFoundError, match=r"JSON not found"):
+        repo.get_json_data(user_id, conversation_id, dataset_id)
+
+    blob_name = repo._json_blob_name(user_id, conversation_id, dataset_id)  # noqa: SLF001
+    bucket.blob(blob_name).next_upload_errors.append(PreconditionFailed("exists"))
+
+    with pytest.raises(FileExistsError, match=r"Refusing to overwrite existing JSON"):
+        repo.save_json_data(user_id, conversation_id, dataset_id, "{}")
+
+
 @pytest.mark.parametrize(
     ("mime", "content", "error_pattern"),
     [

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Literal
 from uuid import UUID
 
 import pandas as pd
+
+
+ImageMime = Literal["image/png", "image/jpeg", "image/webp"]
 
 class DataRepo(ABC):
     @abstractmethod
@@ -78,4 +82,43 @@ class DataRepo(ABC):
         :param dataset_id: Dataset UUID.
         :param json_data: JSON string to persist.
         :param overwrite: If False, raise if the target already exists.
-        """  
+        """
+
+    @abstractmethod
+    def save_artifact(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        artifact_id: UUID,
+        content: bytes,
+        *,
+        mime: ImageMime,
+        overwrite: bool = True,
+    ) -> None:
+        """
+        Persist a binary artifact for a conversation.
+        """
+
+    @abstractmethod
+    def get_artifact_mime(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        artifact_id: UUID,
+    ) -> ImageMime:
+        """
+        Resolve the stored mime type for an artifact.
+        """
+
+    @abstractmethod
+    def get_artifact_bytes(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        artifact_id: UUID,
+        *,
+        expected_mime: ImageMime | None = None,
+    ) -> bytes:
+        """
+        Retrieve artifact content, optionally validating the expected mime type.
+        """

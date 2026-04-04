@@ -43,7 +43,7 @@ class DuckDBWorkingDataRepo(WorkingDataRepo):
 
         with self._lock:
             if self._closed:
-                raise RuntimeError("DuckDBWorkingDatatRepo is closed")
+                raise RuntimeError("DuckDBWorkingDataRepo is closed")
 
             self._register_dataframe_as_table(
                 con=self._connection,

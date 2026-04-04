@@ -4,11 +4,11 @@ import pandas as pd
 import pytest
 
 from python.domain.repo.working_data_repo import WorkingDataSQLRequest
-from python.implementation.repo.duckdb_working_data_repo import DuckDBWorkingDatatRepo
+from python.implementation.repo.duckdb_working_data_repo import DuckDBWorkingDataRepo
 
 
 def test_execute_sql_returns_last_result_set_and_metadata() -> None:
-    repo = DuckDBWorkingDatatRepo()
+    repo = DuckDBWorkingDataRepo()
     df = pd.DataFrame([{"a": 1, "b": 2}, {"a": 3, "b": 4}, {"a": 5, "b": 6}])
     request = WorkingDataSQLRequest(
         table_name="input_table",
@@ -31,7 +31,7 @@ def test_execute_sql_returns_last_result_set_and_metadata() -> None:
 
 
 def test_execute_sql_mutating_statement_returns_count_result_set() -> None:
-    repo = DuckDBWorkingDatatRepo()
+    repo = DuckDBWorkingDataRepo()
     df = pd.DataFrame([{"a": 1}, {"a": 2}])
     request = WorkingDataSQLRequest(
         table_name="t",
@@ -47,7 +47,7 @@ def test_execute_sql_mutating_statement_returns_count_result_set() -> None:
 
 
 def test_execute_sql_rejects_invalid_table_name() -> None:
-    repo = DuckDBWorkingDatatRepo()
+    repo = DuckDBWorkingDataRepo()
     df = pd.DataFrame([{"a": 1}])
     request = WorkingDataSQLRequest(
         table_name="bad table",
@@ -59,7 +59,7 @@ def test_execute_sql_rejects_invalid_table_name() -> None:
 
 
 def test_execute_sql_rejects_dataframe_with_duplicate_columns() -> None:
-    repo = DuckDBWorkingDatatRepo()
+    repo = DuckDBWorkingDataRepo()
     df = pd.DataFrame([[1, 2]], columns=["x", "x"])
     request = WorkingDataSQLRequest(
         table_name="t",
@@ -71,7 +71,7 @@ def test_execute_sql_rejects_dataframe_with_duplicate_columns() -> None:
 
 
 def test_execute_sql_rejects_dataframe_without_columns() -> None:
-    repo = DuckDBWorkingDatatRepo()
+    repo = DuckDBWorkingDataRepo()
     df = pd.DataFrame(index=[0, 1, 2])
     request = WorkingDataSQLRequest(
         table_name="t",
@@ -83,7 +83,7 @@ def test_execute_sql_rejects_dataframe_without_columns() -> None:
 
 
 def test_execute_sql_reloads_table_when_new_dataframe_is_passed() -> None:
-    repo = DuckDBWorkingDatatRepo()
+    repo = DuckDBWorkingDataRepo()
     request = WorkingDataSQLRequest(table_name="t", statements=("SELECT SUM(a) AS total FROM t",))
 
     result_1 = repo.execute_sql(
