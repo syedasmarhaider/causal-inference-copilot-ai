@@ -61,7 +61,6 @@ from python.implementation.workflows.tools.causal.inference.econml.utils import 
     build_init_fit_options_param_maps,
     get_input_params_from_spec,
     get_treatment_t0_t1_from_spec,
-    has_missing,
     now_utc,
     raise_if_x_rows_not_exactly_match_fit_x_cols,
     required_init_keys,
@@ -143,11 +142,13 @@ def _set_if_supported(
 
 def _treatment_categories_from_spec(specs: CausalSpec) -> Any:
     """
-    Build explicit category order so EconML's baseline matches the causal spec.
-    First entry is control/baseline.
+    Build explicit category order for the encoded treatment array that reaches
+    EconML. `get_input_params_from_spec` normalizes binary treatment to
+    {control: 0.0, treated: 1.0}, so categories must match those encoded
+    values rather than the original string labels from the causal spec.
     """
-    ts = specs.treatment_spec
-    return [ts.control, ts.treated]
+    _ = specs
+    return [0.0, 1.0]
 
 
 def _split_first_block_and_tail(
