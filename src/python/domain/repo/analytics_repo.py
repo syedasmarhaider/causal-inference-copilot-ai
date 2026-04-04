@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
 
 import pandas as pd
 
@@ -36,13 +36,14 @@ class AnalyticsSQLResult:
     dataframe: pd.DataFrame
 
 
-class AnalyticsRepo(Protocol):
+class AnalyticsRepo(ABC):
     """
     Analytical SQL execution over tabular data.
 
     Implementations may execute in memory (DuckDB) or via external engines.
     """
-
+    
+    @abstractmethod
     def execute_sql(
         self,
         *,

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, TypeVar
+from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel
 from typing_extensions import TypedDict
@@ -39,7 +40,8 @@ class LLMResponse:
     raw: Any = None
 
 
-class LLMService(Protocol):
+class LLMService(ABC):
+    @abstractmethod
     def generate(
         self,
         *,
@@ -49,6 +51,7 @@ class LLMService(Protocol):
         history: Sequence[ChatMessage] | None,
     ) -> LLMResponse: ...
 
+    @abstractmethod
     def generate_json(
         self,
         *,

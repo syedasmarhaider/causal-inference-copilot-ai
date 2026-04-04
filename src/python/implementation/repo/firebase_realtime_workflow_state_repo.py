@@ -12,9 +12,7 @@ from firebase_admin import credentials, db
 
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import (
-    Artifact_Id,
     ChatMessage,
-    get_chat_message_role_and_message_json,
 )
 from python.domain.workflows.state import State
 
@@ -80,8 +78,6 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     ) -> None:
         if app is None:
             raise ValueError("app must not be None")
-        if not isinstance(state_classes_by_name, Mapping):
-            raise ValueError("state_classes_by_name must be a mapping")
 
         self._root_ref = db.reference("/", app=app)
         self._workflows_root_ref = db.reference(self._WORKFLOWS_ROOT, app=app)
@@ -461,11 +457,11 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         ]
 
     @staticmethod
-    def _normalize_artifacts_ids(value: Any) -> list[Artifact_Id] | None:
+    def _normalize_artifacts_ids(value: Any) -> list[artifact_id] | None:
         if not isinstance(value, list):
             return None
 
-        normalized: list[Artifact_Id] = []
+        normalized: list[artifact_id] = []
         for item in value:
             if not isinstance(item, dict):
                 continue
