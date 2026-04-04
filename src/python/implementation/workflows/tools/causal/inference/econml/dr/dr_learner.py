@@ -28,7 +28,6 @@ from sklearn.ensemble import (
 from sklearn.linear_model import LogisticRegressionCV, RidgeCV
 from sklearn.pipeline import Pipeline
 
-from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
 from python.implementation.workflows.tools.causal.inference.causal_command import (
     ATECommand,
@@ -48,6 +47,9 @@ from python.implementation.workflows.tools.causal.inference.causal_model import 
     CausalModel,
     CausalResult,
 )
+from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
+    InferenceReadyCausalSpec,
+)
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.inference.econml.models_info import (
     get_forest_dr_learner_causal_model_info,
@@ -60,15 +62,12 @@ from python.implementation.workflows.tools.causal.inference.econml.utils import 
     get_input_params_from_spec,
     get_treatment_t0_t1_from_spec,
     has_missing,
-    is_missing_handled,
     now_utc,
     raise_if_x_rows_not_exactly_match_fit_x_cols,
     required_init_keys,
     serialize_inference_obj,
 )
-from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.encoding.encoding_util import EncodingUtil
-from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 log = get_logger(__name__)
 
@@ -148,40 +147,7 @@ def _treatment_categories_from_spec(specs: CausalSpec) -> Any:
     First entry is control/baseline.
     """
     ts = specs.treatment_spec
-    kind = getattr(ts, "kind", None)
-
-    if kind == "binary":
-        control = getattr(ts, "control", None)
-        treated = getattr(ts, "treated", None)
-        if control is not None and treated is not None:
-            return [control, treated]
-
-        control_values = list(getattr(ts, "control_values", []) or [])
-        treated_values = list(getattr(ts, "treated_values", []) or [])
-        if len(control_values) == 1 and len(treated_values) == 1:
-            return [control_values[0], treated_values[0]]
-
-        return "auto"
-
-    if kind == "categorical":
-        baseline = getattr(ts, "baseline", None)
-        levels = list(getattr(ts, "levels", []) or [])
-        if baseline is not None:
-            if baseline in levels:
-                return [baseline] + [v for v in levels if v != baseline]
-            if levels:
-                return [baseline] + levels
-
-        control_values = list(getattr(ts, "control_values", []) or [])
-        treated_values = list(getattr(ts, "treated_values", []) or [])
-        if control_values:
-            baseline2 = control_values[0]
-            rest = [v for v in treated_values if v != baseline2]
-            return [baseline2] + rest if rest else [baseline2]
-
-        return "auto"
-
-    return "auto"
+    return [ts.control, ts.treated]
 
 
 def _split_first_block_and_tail(
@@ -472,8 +438,27 @@ def _build_regression_candidates(
 # =============================================================================
 
 @dataclass(frozen=True, slots=True)
+class _ResolvedInferenceContext:
+    inference_ready_spec: InferenceReadyCausalSpec
+    specs: CausalSpec
+    effect_modifiers_order: list[str]
+    covariates_order: list[str]
+
+
+def _resolve_inference_context(
+    command: FitCommand | ATECommand | CATECommand,
+) -> _ResolvedInferenceContext:
+    inference_ready_spec = command.inference_ready_spec
+    return _ResolvedInferenceContext(
+        inference_ready_spec=inference_ready_spec,
+        specs=inference_ready_spec.causal_spec,
+        effect_modifiers_order=inference_ready_spec.get_effect_modifiers_order(),
+        covariates_order=inference_ready_spec.get_covariates_order(),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class _BaseDRLearnerAdapter(CausalModel):
-    data_repo: DataRepo
     models_repo: ModelsRepo
     encoding_util: EncodingUtil
 
@@ -507,27 +492,7 @@ class _BaseDRLearnerAdapter(CausalModel):
         command: CausalCommand,
     ) -> CausalResult:
         started = now_utc()
-        try:
-            df = self.data_repo.get_csv_data(
-                user_id,
-                conversation_id,
-                command.dataset_id,
-                limit=None,
-            )
-        except Exception as e:
-            log.exception("DRLearner command failed", error=e)
-            return CommandFailure(
-                run_id=command.run_id,
-                started_at=started,
-                finished_at=now_utc(),
-                error=ErrorInfo(
-                    code="DATASET_NOT_FOUND",
-                    message="Failed to load dataset.",
-                    details={"dataset_id": str(command.dataset_id), "exception": repr(e)},
-                ),
-                warnings=[],
-                meta={},
-            )
+        df = command.df
 
         if isinstance(command, FitCommand):
             return self._fit(
@@ -569,41 +534,27 @@ class _BaseDRLearnerAdapter(CausalModel):
         started_at: datetime,
     ) -> CausalResult:
         try:
-            specs: CausalSpec = command.causal_specs
-            data_summary: DatasetSummaryModel = command.data_summary
-            transformation_plan: TransformPlan | None = command.transformation_plan
+            ctx = _resolve_inference_context(command)
+            inference_ready_spec = ctx.inference_ready_spec
+            specs = ctx.specs
+            effect_modifiers_order = ctx.effect_modifiers_order
+            covariates_order = ctx.covariates_order
 
-            effect_modifiers_order: list[str] = list(
-                command.order_effect_modifiers or specs.effect_modifiers or []
-            )
-            covariates_order: list[str] = list(
-                command.order_covariates or specs.covariates or []
-            )
-
-            if specs.treatment_spec.kind not in ("binary", "categorical"):
-                raise ModelSpecError(
-                    f"{self.BACKEND_NAME} supports only binary/categorical treatments."
-                )
-
-            plan = (
-                self.encoding_util.compile(
-                    plan=transformation_plan,
-                    effect_modifiers_order=effect_modifiers_order,
-                    covariates_order=covariates_order,
-                    dense_output=True,
-                )
-                if transformation_plan is not None
-                else None
+            plan = self.encoding_util.compile(
+                plan=inference_ready_spec.transformation_plan,
+                effect_modifiers_order=effect_modifiers_order,
+                covariates_order=covariates_order,
+                dense_output=True,
             )
 
-            pre_x = plan.pre_X if plan is not None else None
-            pre_xw = plan.pre_XW if plan is not None else None
+            pre_x = plan.pre_X
+            pre_xw = plan.pre_XW
 
-            if pre_x is None and len(specs.effect_modifiers or []) > 0:
+            if pre_x is None and inference_ready_spec.has_effect_modifiers():
                 raise ModelSpecError(
                     "Spec declares effect modifiers but no pre_X transformer was provided."
                 )
-            if pre_xw is None and (len(specs.covariates or []) + len(specs.effect_modifiers or [])) > 0:
+            if pre_xw is None and inference_ready_spec.has_adjustment_columns():
                 raise ModelSpecError(
                     "Spec declares covariates and/or effect modifiers but no pre_XW transformer was provided."
                 )
@@ -615,41 +566,22 @@ class _BaseDRLearnerAdapter(CausalModel):
                 covariates_order=covariates_order,
             )
 
-            miss = {
-                "Y": has_missing(Y),
-                "T": has_missing(T),
-                "X": has_missing(X),
-                "W": has_missing(W),
-            }
-            if miss["Y"] or miss["T"]:
+            forbidden_missing_x = inference_ready_spec.get_effect_modifiers_with_forbidden_missing()
+            if forbidden_missing_x:
                 raise ModelSpecError(
-                    f"Y/T contain missing values; must be fixed upstream. missing={miss}"
+                    "Effect modifiers contain missing values that the transformation plan forbids: "
+                    f"{forbidden_missing_x}"
                 )
 
-            missingness_X = (
-                len(specs.effect_modifiers or []) > 0
-                and miss["X"]
-                and (
-                    transformation_plan is None
-                    or not is_missing_handled(
-                        plan=transformation_plan,
-                        summary=data_summary,
-                        col_name_list=specs.effect_modifiers,
-                    )
+            forbidden_missing_w = inference_ready_spec.get_covariates_with_forbidden_missing()
+            if forbidden_missing_w:
+                raise ModelSpecError(
+                    "Covariates contain missing values that the transformation plan forbids: "
+                    f"{forbidden_missing_w}"
                 )
-            )
-            missingness_W = (
-                len(specs.covariates or []) > 0
-                and miss["W"]
-                and (
-                    transformation_plan is None
-                    or not is_missing_handled(
-                        plan=transformation_plan,
-                        summary=data_summary,
-                        col_name_list=specs.covariates,
-                    )
-                )
-            )
+
+            missingness_X = bool(inference_ready_spec.get_effect_modifiers_with_unhandled_missing())
+            missingness_W = bool(inference_ready_spec.get_covariates_with_unhandled_missing())
 
             if missingness_X:
                 raise ModelSpecError(
@@ -815,13 +747,10 @@ class _BaseDRLearnerAdapter(CausalModel):
     ) -> CausalResult:
         try:
             warnings_list: list[str] = []
-            spec: CausalSpec = command.causal_specs
-            effect_modifiers_order: list[str] = list(
-                command.order_effect_modifiers or spec.effect_modifiers or []
-            )
-            covariates_order: list[str] = list(
-                command.order_covariates or spec.covariates or []
-            )
+            ctx = _resolve_inference_context(command)
+            spec = ctx.specs
+            effect_modifiers_order = ctx.effect_modifiers_order
+            covariates_order = ctx.covariates_order
 
             model_record: ModelRecord | None = self.models_repo.load_model(
                 user_id=user_id,
@@ -846,11 +775,6 @@ class _BaseDRLearnerAdapter(CausalModel):
                 effect_modifiers_order=effect_modifiers_order,
                 covariates_order=covariates_order,
             )
-
-            if t1 == t0:
-                raise ModelSpecError(
-                    f"Invalid contrast: t1 value {t1} is the same as t0 baseline {t0}."
-                )
 
             item: dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
             item["ate"] = est.ate(X=X, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
@@ -891,7 +815,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 meta={
                     "backend": self.BACKEND_NAME,
                     "n": int(df.shape[0]),
-                    "x_cols": spec.effect_modifiers if spec.effect_modifiers else None,
+                    "x_cols": effect_modifiers_order or None,
                     "contrast_kind": "single_pair",
                     "t0": t0,
                 },
@@ -949,13 +873,12 @@ class _BaseDRLearnerAdapter(CausalModel):
                 )
 
             est = model_record.model
-            spec: CausalSpec = command.causal_specs
-            effect_modifiers_order: list[str] = list(
-                command.order_effect_modifiers or spec.effect_modifiers or []
-            )
+            ctx = _resolve_inference_context(command)
+            spec = ctx.specs
+            effect_modifiers_order = ctx.effect_modifiers_order
 
             X_df = command.inputs.x_rows
-            x_cols = spec.effect_modifiers
+            x_cols = effect_modifiers_order
             raise_if_x_rows_not_exactly_match_fit_x_cols(x_rows=X_df, x_cols=x_cols)
 
             # Keep DataFrame columns intact for featurizer=pre_X.

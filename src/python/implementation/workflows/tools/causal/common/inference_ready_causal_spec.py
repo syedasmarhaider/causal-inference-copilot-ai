@@ -3,6 +3,16 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
+    CatOneHotParams,
+    DateTimeEpochParams,
+    DropParams,
+    EncodingPresetSpec,
+    MapBinaryParams,
+    MapOrdinalParams,
+    NumLog1pParams,
+    NumMinMaxParams,
+    NumStandardParams,
+    PassthroughParams,
     TransformPlan,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
@@ -10,6 +20,10 @@ from python.implementation.workflows.tools.common.model.data_summary import (
     ColumnProfileModel,
     DatasetSummaryModel,
 )
+
+_MISSINGNESS_HANDLED = "HANDLED"
+_MISSINGNESS_UNHANDLED = "UNHANDLED"
+_MISSINGNESS_FORBIDS = "FORBIDS"
 
 
 class InferenceReadyCausalSpec(BaseModel):
@@ -151,12 +165,85 @@ class InferenceReadyCausalSpec(BaseModel):
             if str(column_plan.role) == "effect_modifier"
         ]
 
+    def has_covariates(self) -> bool:
+        return bool(self.get_covariates_order())
+
+    def has_effect_modifiers(self) -> bool:
+        return bool(self.get_effect_modifiers_order())
+
+    def has_adjustment_columns(self) -> bool:
+        return self.has_covariates() or self.has_effect_modifiers()
+
+    def get_covariates_with_missing(self) -> list[str]:
+        return self._columns_with_missing(self.get_covariates_order())
+
+    def get_effect_modifiers_with_missing(self) -> list[str]:
+        return self._columns_with_missing(self.get_effect_modifiers_order())
+
     def is_covariates_missing(self) -> bool:
+        return bool(self.get_covariates_with_missing())
+
+    def is_effect_modifiers_missing(self) -> bool:
+        return bool(self.get_effect_modifiers_with_missing())
+
+    def get_covariates_with_unhandled_missing(self) -> list[str]:
+        return self._classify_missing_columns(self.get_covariates_order())[_MISSINGNESS_UNHANDLED]
+
+    def get_effect_modifiers_with_unhandled_missing(self) -> list[str]:
+        return self._classify_missing_columns(self.get_effect_modifiers_order())[_MISSINGNESS_UNHANDLED]
+
+    def get_covariates_with_forbidden_missing(self) -> list[str]:
+        return self._classify_missing_columns(self.get_covariates_order())[_MISSINGNESS_FORBIDS]
+
+    def get_effect_modifiers_with_forbidden_missing(self) -> list[str]:
+        return self._classify_missing_columns(self.get_effect_modifiers_order())[_MISSINGNESS_FORBIDS]
+
+    def _columns_with_missing(self, columns: list[str]) -> list[str]:
         profile_by_name = self._profile_by_name()
-        return any(
-            profile_by_name[column].n_missing > 0
-            for column in self.get_covariates_order()
-        )
+        return [column for column in columns if profile_by_name[column].n_missing > 0]
+
+    def _classify_missing_columns(self, columns: list[str]) -> dict[str, list[str]]:
+        profile_by_name = self._profile_by_name()
+        plan_by_column = {
+            str(column_plan.column): column_plan
+            for column_plan in self.transformation_plan.columns
+        }
+        classified: dict[str, list[str]] = {
+            _MISSINGNESS_HANDLED: [],
+            _MISSINGNESS_UNHANDLED: [],
+            _MISSINGNESS_FORBIDS: [],
+        }
+
+        for column in columns:
+            if profile_by_name[column].n_missing <= 0:
+                continue
+            status = self._missingness_status(plan_by_column[column].encoding)
+            classified[status].append(column)
+
+        return classified
+
+    def _missingness_status(self, encoding: EncodingPresetSpec) -> str:
+        if isinstance(encoding, DropParams):
+            return _MISSINGNESS_HANDLED
+        if isinstance(encoding, PassthroughParams):
+            return _MISSINGNESS_UNHANDLED
+        if isinstance(encoding, CatOneHotParams):
+            if encoding.missing in ("impute_token", "dummy_na"):
+                return _MISSINGNESS_HANDLED
+            return _MISSINGNESS_FORBIDS
+        if isinstance(encoding, (NumStandardParams, NumMinMaxParams, NumLog1pParams)):
+            return _MISSINGNESS_HANDLED
+        if isinstance(encoding, DateTimeEpochParams):
+            return _MISSINGNESS_UNHANDLED
+        if isinstance(encoding, MapBinaryParams):
+            if encoding.missing == "error":
+                return _MISSINGNESS_FORBIDS
+            return _MISSINGNESS_HANDLED
+        if isinstance(encoding, MapOrdinalParams):
+            if encoding.missing == "error":
+                return _MISSINGNESS_FORBIDS
+            return _MISSINGNESS_HANDLED
+        return _MISSINGNESS_UNHANDLED
 
 
 __all__ = ["InferenceReadyCausalSpec"]

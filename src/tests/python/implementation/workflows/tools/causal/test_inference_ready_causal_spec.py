@@ -140,7 +140,11 @@ def test_valid_wrapper_derives_orders_from_transformation_plan() -> None:
 
     assert wrapper.get_effect_modifiers_order() == ["segment"]
     assert wrapper.get_covariates_order() == ["income", "age"]
+    assert wrapper.has_adjustment_columns() is True
+    assert wrapper.has_covariates() is True
+    assert wrapper.has_effect_modifiers() is True
     assert wrapper.is_covariates_missing() is False
+    assert wrapper.is_effect_modifiers_missing() is False
 
 
 def test_valid_wrapper_allows_only_covariates() -> None:
@@ -154,6 +158,8 @@ def test_valid_wrapper_allows_only_covariates() -> None:
 
     assert wrapper.get_covariates_order() == ["age"]
     assert wrapper.get_effect_modifiers_order() == []
+    assert wrapper.has_covariates() is True
+    assert wrapper.has_effect_modifiers() is False
 
 
 def test_valid_wrapper_allows_only_effect_modifiers() -> None:
@@ -175,6 +181,8 @@ def test_valid_wrapper_allows_only_effect_modifiers() -> None:
 
     assert wrapper.get_covariates_order() == []
     assert wrapper.get_effect_modifiers_order() == ["tier", "segment"]
+    assert wrapper.has_covariates() is False
+    assert wrapper.has_effect_modifiers() is True
 
 
 def test_wrapper_rejects_missing_covariate_in_plan() -> None:
@@ -309,3 +317,42 @@ def test_wrapper_rejects_data_summary_missing_referenced_columns() -> None:
             ),
             data_summary=_build_data_summary(include_income=False),
         )
+
+
+def test_wrapper_classifies_missingness_handling_from_summary_and_plan() -> None:
+    wrapper = InferenceReadyCausalSpec(
+        causal_spec=_build_causal_spec(),
+        transformation_plan=_build_transform_plan(
+            columns=[
+                {
+                    "column": "segment",
+                    "role": "effect_modifier",
+                    "encoding": {"preset": "cat_onehot", "missing": "error"},
+                },
+                {
+                    "column": "income",
+                    "role": "covariate",
+                    "encoding": {"preset": "passthrough"},
+                },
+                {
+                    "column": "age",
+                    "role": "covariate",
+                    "encoding": {"preset": "num_standard"},
+                },
+            ]
+        ),
+        data_summary=_summary_model(
+            _categorical_profile("treatment", ["drug", "placebo"]),
+            _numeric_profile("outcome"),
+            _numeric_profile("age", n_missing=1),
+            _numeric_profile("income", n_missing=2),
+            _categorical_profile("segment", ["A", "B"], n_missing=3),
+        ),
+    )
+
+    assert wrapper.get_covariates_with_missing() == ["income", "age"]
+    assert wrapper.get_effect_modifiers_with_missing() == ["segment"]
+    assert wrapper.get_covariates_with_unhandled_missing() == ["income"]
+    assert wrapper.get_covariates_with_forbidden_missing() == []
+    assert wrapper.get_effect_modifiers_with_unhandled_missing() == []
+    assert wrapper.get_effect_modifiers_with_forbidden_missing() == ["segment"]
