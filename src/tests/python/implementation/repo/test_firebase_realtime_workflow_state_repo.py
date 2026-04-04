@@ -9,8 +9,9 @@ from uuid import UUID, uuid4
 import pytest
 
 import python.implementation.repo.firebase_realtime_workflow_state_repo as repo_module
-from python.domain.service.llm_service import ChatMessage
-from python.domain.workflows.state import State, StateMessage
+from python.domain.models.errors import NodeExecutionError
+from python.domain.models.models import ChatMessage
+from python.domain.workflows.state import State
 from python.implementation.repo.firebase_realtime_workflow_state_repo import (
     FirebaseRealtimeWorkflowStateRepo,
 )
@@ -92,11 +93,10 @@ def _get_value(tree: dict[str, Any], parts: tuple[str, ...]) -> Any:
 
 def _set_value(tree: dict[str, Any], parts: tuple[str, ...], value: Any) -> None:
     if not parts:
-        if isinstance(value, dict):
-            tree.clear()
-            tree.update(copy.deepcopy(value))
-        else:
+        if not isinstance(value, dict):
             raise ValueError("root value must be dict")
+        tree.clear()
+        tree.update(copy.deepcopy(value))
         return
 
     node: Any = tree
@@ -123,32 +123,43 @@ def _delete_value(tree: dict[str, Any], parts: tuple[str, ...]) -> None:
         node.pop(parts[-1], None)
 
 
-@dataclass(frozen=True)
+@dataclass
 class _DemoState(State):
     state_name: str = "DEMO_STATE"
     text: str = "hello"
+    current_status: str = "PENDING"
+    error_text: str | None = None
 
-    @property
     def name(self) -> str:
         return self.state_name
 
-    @property
     def status(self) -> str:
-        return "PENDING"
+        return self.current_status
 
-    @property
-    def message(self) -> StateMessage:
-        return StateMessage(txt_message=self.text, action="NONE")
+    def set_status_freez(self) -> None:
+        self.current_status = "FREEZED"
 
-    @property
-    def error(self) -> None:
-        return None
+    def set_status_pending(self) -> None:
+        self.current_status = "PENDING"
+
+    def messages(self) -> list[ChatMessage]:
+        return [ChatMessage(role="assistant", content=self.text)]
+
+    def error(self) -> NodeExecutionError | None:
+        if self.error_text is None:
+            return None
+        return NodeExecutionError(state_name=self.state_name, error=self.error_text)
 
     def pre_required_states_names(self) -> list[str]:
         return []
 
     def to_json_dict(self) -> dict[str, Any]:
-        return {"name": self.state_name, "text": self.text}
+        return {
+            "name": self.state_name,
+            "text": self.text,
+            "status": self.current_status,
+            "error_text": self.error_text,
+        }
 
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> _DemoState:
@@ -159,28 +170,44 @@ class _DemoState(State):
         if not isinstance(name, str):
             raise ValueError("name must be string")
 
-        return cls(state_name=name, text=str(payload.get("text", "")))
+        status = payload.get("status", "PENDING")
+        if not isinstance(status, str):
+            raise ValueError("status must be string")
+
+        error_text = payload.get("error_text")
+        if error_text is not None and not isinstance(error_text, str):
+            raise ValueError("error_text must be string or None")
+
+        return cls(
+            state_name=name,
+            text=str(payload.get("text", "")),
+            current_status=status,
+            error_text=error_text,
+        )
 
     @classmethod
     def init_empty(cls) -> _DemoState:
         return cls()
 
 
+@dataclass
 class _MismatchState(State):
-    @property
     def name(self) -> str:
         return "OTHER_STATE"
 
-    @property
     def status(self) -> str:
         return "PENDING"
 
-    @property
-    def message(self) -> StateMessage:
-        return StateMessage(txt_message="x", action="NONE")
+    def set_status_freez(self) -> None:
+        return None
 
-    @property
-    def error(self) -> None:
+    def set_status_pending(self) -> None:
+        return None
+
+    def messages(self) -> list[ChatMessage]:
+        return [ChatMessage(role="assistant", content="x")]
+
+    def error(self) -> NodeExecutionError | None:
         return None
 
     def pre_required_states_names(self) -> list[str]:
@@ -245,10 +272,8 @@ def test_save_delete_and_query_conversation_ids(monkeypatch: pytest.MonkeyPatch)
     assert _get_value(fake_db.tree, index_path) is True
     assert _get_value(fake_db.tree, meta_path) == {"created": True}
 
-    # Add extra IDs (one invalid key should be ignored)
     second_id = uuid4()
-    user_index_ref = fake_db.reference(f"/workflow_conversation_index/{user_id}")
-    user_index_ref.set(
+    fake_db.reference(f"/workflow_conversation_index/{user_id}").set(
         {
             str(conversation_id): True,
             "not-a-uuid": True,
@@ -258,8 +283,10 @@ def test_save_delete_and_query_conversation_ids(monkeypatch: pytest.MonkeyPatch)
 
     ids = repo.get_conversation_ids_for_user(user_id=user_id)
     assert ids == sorted([conversation_id, second_id], key=lambda item: str(item))
-
-    assert repo.is_conversation_id_for_user_id_exists(user_id=user_id, conversation_id=conversation_id) is True
+    assert repo.is_conversation_id_for_user_id_exists(
+        user_id=user_id,
+        conversation_id=conversation_id,
+    ) is True
 
     repo.delete_conversation(user_id=user_id, conversation_id=conversation_id)
     assert _get_value(fake_db.tree, index_path) is None
@@ -273,22 +300,39 @@ def test_active_state_name_roundtrip_and_validation(monkeypatch: pytest.MonkeyPa
     assert repo.load_active_state_name(user_id=user_id, conversation_id=conversation_id) is None
 
     with pytest.raises(ValueError, match=r"non-empty string"):
-        repo.store_active_state_name(user_id=user_id, conversation_id=conversation_id, state_name="  ")
+        repo.store_active_state_name(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name="  ",
+        )
 
-    repo.store_active_state_name(user_id=user_id, conversation_id=conversation_id, state_name="DEMO_STATE")
-    assert repo.load_active_state_name(user_id=user_id, conversation_id=conversation_id) == "DEMO_STATE"
+    repo.store_active_state_name(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        state_name="DEMO_STATE",
+    )
+    assert (
+        repo.load_active_state_name(user_id=user_id, conversation_id=conversation_id)
+        == "DEMO_STATE"
+    )
 
 
 def test_store_and_load_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     repo, _ = _make_repo(monkeypatch)
     user_id, conversation_id = _ids()
 
-    state = _DemoState(state_name="DEMO_STATE", text="roundtrip")
+    state = _DemoState(state_name="DEMO_STATE", text="roundtrip", current_status="FREEZED")
     repo.store_state(user_id=user_id, conversation_id=conversation_id, state=state)
 
-    loaded = repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name="DEMO_STATE")
+    loaded = repo.load_state(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        state_name="DEMO_STATE",
+    )
     assert isinstance(loaded, _DemoState)
-    assert loaded.text == "roundtrip"
+    assert loaded.name() == "DEMO_STATE"
+    assert loaded.status() == "FREEZED"
+    assert [msg.content for msg in loaded.messages()] == ["roundtrip"]
 
 
 def test_load_state_validates_payload_and_registration(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -298,28 +342,50 @@ def test_load_state_validates_payload_and_registration(monkeypatch: pytest.Monke
     with pytest.raises(ValueError, match=r"state_name must be a non-empty string"):
         repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name="")
 
-    assert repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name="DEMO_STATE") is None
+    assert repo.load_state(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        state_name="DEMO_STATE",
+    ) is None
 
     fake_db.reference(f"/workflows/{user_id}/{conversation_id}/states/DEMO_STATE").set({"bad": "shape"})
     with pytest.raises(ValueError, match=r"must be a JSON string blob"):
-        repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name="DEMO_STATE")
+        repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name="DEMO_STATE",
+        )
 
     fake_db.reference(f"/workflows/{user_id}/{conversation_id}/states/DEMO_STATE").set("not-json")
     with pytest.raises(ValueError, match=r"not valid JSON"):
-        repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name="DEMO_STATE")
+        repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name="DEMO_STATE",
+        )
 
     fake_db.reference(f"/workflows/{user_id}/{conversation_id}/states/DEMO_STATE").set(json.dumps([1, 2]))
     with pytest.raises(ValueError, match=r"must be a dict"):
-        repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name="DEMO_STATE")
+        repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name="DEMO_STATE",
+        )
 
     fake_db.reference(f"/workflows/{user_id}/{conversation_id}/states/UNKNOWN").set(
         json.dumps({"name": "UNKNOWN"})
     )
     with pytest.raises(KeyError, match=r"No State class registered"):
-        repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name="UNKNOWN")
+        repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name="UNKNOWN",
+        )
 
 
-def test_load_state_wraps_deserialization_error_and_name_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_state_wraps_deserialization_error_and_name_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     repo, fake_db = _make_repo(monkeypatch)
     user_id, conversation_id = _ids()
 
@@ -327,7 +393,11 @@ def test_load_state_wraps_deserialization_error_and_name_mismatch(monkeypatch: p
         json.dumps({"name": "DEMO_STATE", "raise": True})
     )
     with pytest.raises(ValueError, match=r"Error deserializing state"):
-        repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name="DEMO_STATE")
+        repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name="DEMO_STATE",
+        )
 
     mismatch_repo, mismatch_db = _make_repo(
         monkeypatch,
@@ -337,14 +407,22 @@ def test_load_state_wraps_deserialization_error_and_name_mismatch(monkeypatch: p
         json.dumps({"name": "DEMO_STATE"})
     )
     with pytest.raises(ValueError, match=r"Loaded State.name mismatch"):
-        mismatch_repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name="DEMO_STATE")
+        mismatch_repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name="DEMO_STATE",
+        )
 
 
 def test_delete_state_and_message_history_workflow(monkeypatch: pytest.MonkeyPatch) -> None:
     repo, _ = _make_repo(monkeypatch)
     user_id, conversation_id = _ids()
 
-    repo.store_active_state_name(user_id=user_id, conversation_id=conversation_id, state_name="DEMO_STATE")
+    repo.store_active_state_name(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        state_name="DEMO_STATE",
+    )
     repo.store_state(
         user_id=user_id,
         conversation_id=conversation_id,
@@ -353,7 +431,14 @@ def test_delete_state_and_message_history_workflow(monkeypatch: pytest.MonkeyPat
     repo.delete_state(user_id=user_id, conversation_id=conversation_id, state_name="DEMO_STATE")
 
     assert repo.load_active_state_name(user_id=user_id, conversation_id=conversation_id) is None
-    assert repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name="DEMO_STATE") is None
+    assert (
+        repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name="DEMO_STATE",
+        )
+        is None
+    )
 
     repo.append_messages(
         user_id=user_id,
@@ -372,7 +457,6 @@ def test_delete_state_and_message_history_workflow(monkeypatch: pytest.MonkeyPat
 
     history = repo.load_message_history(user_id=user_id, conversation_id=conversation_id, limit=2)
     assert [msg.content for msg in history] == ["a3", "u4"]
-
     assert repo.load_message_history(user_id=user_id, conversation_id=conversation_id, limit=0) == []
 
     repo.clear_message_history(user_id=user_id, conversation_id=conversation_id)
@@ -393,10 +477,18 @@ def test_append_and_load_message_history_roundtrips_structured_artifacts(
         message=ChatMessage(
             role="assistant",
             content="dataset ready",
-            artifacts_ids=[
-                {"id": csv_id, "type": "csv"},
-                {"id": json_id, "type": "json"},
-            ],
+            artifact_refs=(
+                {"id": csv_id, "kind": "data", "format": "csv"},
+                {"id": json_id, "kind": "data", "format": "json"},
+            ),
+            artifacts=(
+                {
+                    "id": json_id,
+                    "content": {"rows": 3},
+                    "kind": "data",
+                    "format": "json",
+                },
+            ),
             id="msg-1",
         ),
     )
@@ -405,11 +497,51 @@ def test_append_and_load_message_history_roundtrips_structured_artifacts(
 
     assert len(history) == 1
     assert history[0].content == "dataset ready"
-    assert history[0].artifacts_ids == [
-        {"id": csv_id, "type": "csv"},
-        {"id": json_id, "type": "json"},
+    assert history[0].artifact_refs == [
+        {"id": csv_id, "kind": "data", "format": "csv"},
+        {"id": json_id, "kind": "data", "format": "json"},
+    ]
+    assert history[0].artifacts == [
+        {
+            "id": json_id,
+            "content": {"rows": 3},
+            "kind": "data",
+            "format": "json",
+        }
     ]
     assert history[0].id == "msg-1"
+
+
+def test_load_message_history_accepts_legacy_artifacts_ids_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fake_db = _make_repo(monkeypatch)
+    user_id, conversation_id = _ids()
+    csv_id = uuid4()
+    json_id = uuid4()
+
+    fake_db.reference(f"/workflows/{user_id}/{conversation_id}/messages").set(
+        {
+            "p000001": {
+                "role": "assistant",
+                "message": "x",
+                "artifacts_ids": [
+                    {"id": str(csv_id), "type": "csv"},
+                    {"id": str(json_id), "type": "json"},
+                ],
+                "id": "legacy-1",
+            }
+        }
+    )
+
+    history = repo.load_message_history(user_id=user_id, conversation_id=conversation_id, limit=10)
+
+    assert len(history) == 1
+    assert history[0].artifact_refs == [
+        {"id": csv_id, "kind": "data", "format": "csv"},
+        {"id": json_id, "kind": "data", "format": "json"},
+    ]
+    assert history[0].id == "legacy-1"
 
 
 def test_load_message_history_ignores_malformed_artifact_refs(
@@ -425,12 +557,12 @@ def test_load_message_history_ignores_malformed_artifact_refs(
             "p000001": {
                 "role": "assistant",
                 "message": "x",
-                "artifacts_ids": [
-                    {"id": str(csv_id), "type": "csv"},
-                    {"id": "", "type": "csv"},
+                "artifact_refs": [
+                    {"id": str(csv_id), "kind": "data", "format": "csv"},
+                    {"id": "", "kind": "data", "format": "csv"},
                     {"id": str(json_id), "type": "json"},
-                    {"id": "bad-1", "type": "png"},
-                    {"type": "csv"},
+                    {"id": "bad-1", "kind": "graph", "format": "png"},
+                    {"kind": "data", "format": "csv"},
                     "bad",
                     1,
                 ],
@@ -441,13 +573,15 @@ def test_load_message_history_ignores_malformed_artifact_refs(
     history = repo.load_message_history(user_id=user_id, conversation_id=conversation_id, limit=10)
 
     assert len(history) == 1
-    assert history[0].artifacts_ids == [
-        {"id": csv_id, "type": "csv"},
-        {"id": json_id, "type": "json"},
+    assert history[0].artifact_refs == [
+        {"id": csv_id, "kind": "data", "format": "csv"},
+        {"id": json_id, "kind": "data", "format": "json"},
     ]
 
 
-def test_get_default_firebase_database_app_returns_existing_app(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_default_firebase_database_app_returns_existing_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     existing_app = object()
     monkeypatch.setattr(repo_module.firebase_admin, "get_app", lambda: existing_app)
 
@@ -455,7 +589,11 @@ def test_get_default_firebase_database_app_returns_existing_app(monkeypatch: pyt
 
 
 def test_get_default_firebase_database_app_requires_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(repo_module.firebase_admin, "get_app", lambda: (_ for _ in ()).throw(ValueError("none")))
+    monkeypatch.setattr(
+        repo_module.firebase_admin,
+        "get_app",
+        lambda: (_ for _ in ()).throw(ValueError("none")),
+    )
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT_ID", raising=False)
     monkeypatch.setenv("FIREBASE_DATABASE_URL", "https://db.example")
 
@@ -469,7 +607,11 @@ def test_get_default_firebase_database_app_requires_env(monkeypatch: pytest.Monk
 
 
 def test_get_default_firebase_database_app_initializes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(repo_module.firebase_admin, "get_app", lambda: (_ for _ in ()).throw(ValueError("none")))
+    monkeypatch.setattr(
+        repo_module.firebase_admin,
+        "get_app",
+        lambda: (_ for _ in ()).throw(ValueError("none")),
+    )
     cred_factory = _CredFactory()
     captured: dict[str, Any] = {}
     expected_app = object()
