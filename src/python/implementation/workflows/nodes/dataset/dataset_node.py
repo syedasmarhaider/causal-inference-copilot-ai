@@ -288,6 +288,7 @@ class DatasetNode(Node):
         summary_answer: str | None = None
         manipulation_result: JSONDict | None = None
         chart_result: JSONDict | None = None
+        chart_artifact_refs: list[ArtifactRef] | None = None
 
         if intent.intent_data_question:
             summary_answer = self._answer_summary_question(
@@ -301,55 +302,86 @@ class DatasetNode(Node):
         working_summary_json = current_summary_json
 
         if intent.intent_manupulation_question:
-            (
-                manipulation_result,
-                dataset_iterations,
-                working_df,
-                working_summary,
-                working_summary_json,
-            ) = self._run_manipulation_intent(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                dataset_iterations=dataset_iterations,
-                dataframe=working_df,
-                summary_model=working_summary,
-                summary_json=working_summary_json,
-                profiling_tool=self._profiling_tool,
-                instructions=intent.intent_manupulation_question_brief or latest_user_message,
-                analytical_query=intent.intent_manupulation_is_analytical_query,
-            )
+            try:
+                (
+                    manipulation_result,
+                    dataset_iterations,
+                    working_df,
+                    working_summary,
+                    working_summary_json,
+                ) = self._run_manipulation_intent(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    dataset_iterations=dataset_iterations,
+                    dataframe=working_df,
+                    summary_model=working_summary,
+                    summary_json=working_summary_json,
+                    profiling_tool=self._profiling_tool,
+                    instructions=intent.intent_manupulation_question_brief or latest_user_message,
+                    analytical_query=intent.intent_manupulation_is_analytical_query,
+                    prepare_chart_data=intent.intent_chart,
+                )
+            except Exception as exc:
+                log.exception("failed to run dataset manipulation intent", error=safe_err(exc))
+                return self._build_state(
+                    dataset_iterations=dataset_iterations,
+                    freezed=is_freezed,
+                    user_message=(
+                        "I could not complete that data query or transformation. "
+                        "Please try rephrasing the request."
+                    ),
+                )
 
         if intent.intent_chart:
-            chart_result, dataset_iterations = self._run_chart_intent(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                dataset_iterations=dataset_iterations,
-                dataframe=working_df,
-                summary_model=working_summary,
-                instructions=intent.intent_chart_brief or latest_user_message,
-            )
+            try:
+                chart_result, chart_artifact_refs = self._run_chart_intent(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    dataframe=working_df,
+                    summary_model=working_summary,
+                    instructions=intent.intent_chart_brief or latest_user_message,
+                )
+            except Exception as exc:
+                log.exception("failed to generate dataset charts", error=safe_err(exc))
+                return self._build_state(
+                    dataset_iterations=dataset_iterations,
+                    freezed=is_freezed,
+                    user_message=(
+                        "I could not generate the requested chart output. "
+                        "Please try rephrasing the chart request."
+                    ),
+                )
 
-        final_message = self._build_final_message(
-            summary_answer=summary_answer,
-            manipulation_result=manipulation_result,
-            chart_result=chart_result,
-            dataset_context={
-                "dataset_loaded_this_turn": loaded_this_turn,
-                "dataset_freezed": is_freezed,
-                "original_user_message": latest_user_message,
-                "handled_intents": {
-                    "data_question": intent.intent_data_question,
-                    "manipulation_question": intent.intent_manupulation_question,
-                    "chart": intent.intent_chart,
+        try:
+            final_message = self._build_final_message(
+                summary_answer=summary_answer,
+                manipulation_result=manipulation_result,
+                chart_result=chart_result,
+                dataset_context={
+                    "dataset_loaded_this_turn": loaded_this_turn,
+                    "dataset_freezed": is_freezed,
+                    "original_user_message": latest_user_message,
+                    "handled_intents": {
+                        "data_question": intent.intent_data_question,
+                        "manipulation_question": intent.intent_manupulation_question,
+                        "chart": intent.intent_chart,
+                    },
+                    "active_dataset_rows": int(len(working_df)),
+                    "active_dataset_columns": [str(column) for column in working_df.columns],
                 },
-                "active_dataset_rows": int(len(working_df)),
-                "active_dataset_columns": [str(column) for column in working_df.columns],
-            },
-        )
+            )
+        except Exception as exc:
+            log.exception("failed to build final dataset response", error=safe_err(exc))
+            final_message = self._build_final_message_fallback(
+                summary_answer=summary_answer,
+                manipulation_result=manipulation_result,
+                chart_result=chart_result,
+            )
         return self._build_state(
             dataset_iterations=dataset_iterations,
             freezed=is_freezed,
             user_message=final_message,
+            message_artifact_refs=chart_artifact_refs,
         )
 
     def _build_state(
@@ -358,6 +390,7 @@ class DatasetNode(Node):
         user_message: str,
         dataset_iterations: Sequence[DatasetIterationModel] | None = None,
         freezed: bool = False,
+        message_artifact_refs: Sequence[ArtifactRef] | None = None,
     ) -> DatasetState:
         normalized_iterations = [
             iteration.model_copy(deep=True) for iteration in (dataset_iterations or [])
@@ -366,18 +399,9 @@ class DatasetNode(Node):
             DatasetPayloadModel(
                 dataset_iterations=normalized_iterations,
                 freezed=freezed,
+                user_message=user_message,
+                message_artifact_refs=[dict(ref) for ref in (message_artifact_refs or [])],
             )
-        )
-        latest_iteration = normalized_iterations[-1] if normalized_iterations else None
-        artifact_refs = (
-            list(latest_iteration.saved_vega_lite_specs_file_ids)
-            if latest_iteration and latest_iteration.saved_vega_lite_specs_file_ids
-            else None
-        )
-        state.chat_message = ChatMessage(
-            role="assistant",
-            content=user_message,
-            artifact_refs=artifact_refs,
         )
         return state
 
@@ -480,6 +504,7 @@ class DatasetNode(Node):
         profiling_tool: DatasetProfilingTool,
         instructions: str,
         analytical_query: bool,
+        prepare_chart_data: bool,
     ) -> tuple[JSONDict, list[DatasetIterationModel], pd.DataFrame, DatasetSummaryModel, str]:
         result_df = self._run_data_manipulation_tool(
             dataframe=dataframe,
@@ -489,6 +514,22 @@ class DatasetNode(Node):
         )
 
         if analytical_query:
+            if prepare_chart_data:
+                analytical_summary = profiling_tool.extract_dataset_summary(
+                    result_df,
+                    max_categories=200,
+                    sample_distinct=200,
+                    compute_quantiles=False,
+                    strict=True,
+                )
+                analytical_summary_json = profiling_tool.dataset_summary_to_json(analytical_summary)
+                next_dataframe = result_df
+                next_summary = analytical_summary
+                next_summary_json = analytical_summary_json
+            else:
+                next_dataframe = dataframe
+                next_summary = summary_model
+                next_summary_json = summary_json
             return (
                 {
                     "status": "analytical_query",
@@ -496,9 +537,9 @@ class DatasetNode(Node):
                     "result": _dataframe_preview(result_df),
                 },
                 dataset_iterations,
-                dataframe,
-                summary_model,
-                summary_json,
+                next_dataframe,
+                next_summary,
+                next_summary_json,
             )
 
         new_dataset_id = uuid.uuid4()
@@ -571,11 +612,10 @@ class DatasetNode(Node):
         *,
         user_id: UUID,
         conversation_id: UUID,
-        dataset_iterations: list[DatasetIterationModel],
         dataframe: pd.DataFrame,
         summary_model: DatasetSummaryModel,
         instructions: str,
-    ) -> tuple[JSONDict, list[DatasetIterationModel]]:
+    ) -> tuple[JSONDict, list[ArtifactRef]]:
         specs = self._plot_tool.generate_specs(
             dataframe=dataframe,
             data_summary=summary_model,
@@ -593,10 +633,6 @@ class DatasetNode(Node):
             )
             saved_ids.append({"id": saved_id, "kind": "data", "format": "json"})
 
-        latest_iteration = dataset_iterations[-1]
-        dataset_iterations[-1] = latest_iteration.model_copy(
-            update={"saved_vega_lite_specs_file_ids": saved_ids}
-        )
         return (
             {
                 "status": "charts_saved",
@@ -604,7 +640,7 @@ class DatasetNode(Node):
                 "saved_chart_spec_ids": [str(saved_id["id"]) for saved_id in saved_ids],
                 "saved_chart_count": len(saved_ids),
             },
-            dataset_iterations,
+            saved_ids,
         )
 
     def _build_final_message(
@@ -628,6 +664,38 @@ class DatasetNode(Node):
             history=None,
         )
         return response.content
+
+    def _build_final_message_fallback(
+        self,
+        *,
+        summary_answer: str | None,
+        manipulation_result: JSONDict | None,
+        chart_result: JSONDict | None,
+    ) -> str:
+        parts: list[str] = []
+
+        if summary_answer:
+            parts.append(summary_answer.strip())
+
+        if manipulation_result is not None:
+            status = str(manipulation_result.get("status", "")).strip()
+            if status == "dataset_updated":
+                parts.append("Saved an updated working dataset version.")
+            elif status == "analytical_query":
+                parts.append("Ran the requested analytical query.")
+
+        if chart_result is not None:
+            count = int(chart_result.get("saved_chart_count", 0) or 0)
+            if count > 0:
+                noun = "chart" if count == 1 else "charts"
+                parts.append(f"Generated {count} {noun}.")
+            else:
+                parts.append("Generated the requested chart output.")
+
+        if not parts:
+            return "Completed the dataset request."
+
+        return " ".join(parts)
 
 
 def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str | None:

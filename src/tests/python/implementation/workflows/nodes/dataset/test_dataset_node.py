@@ -278,6 +278,34 @@ def _status(state: DatasetState) -> str:
     return state.status()
 
 
+def test_dataset_state_init_empty_and_roundtrip_preserve_message_and_artifact_refs() -> None:
+    chart_id = uuid4()
+    state = DatasetState(
+        DatasetPayloadModel(
+            dataset_iterations=[
+                DatasetIterationModel(
+                    dataset_id=DatasetState.INIT_DATA_ID,
+                )
+            ],
+            user_message="Charts saved.",
+            message_artifact_refs=[
+                {"id": chart_id, "kind": "data", "format": "json"}
+            ],
+        )
+    )
+
+    empty_state = DatasetState.init_empty()
+    assert isinstance(empty_state, DatasetState)
+
+    restored = DatasetState.from_json_dict(state.to_json_dict())
+    message = _message(restored)
+
+    assert message.content == "Charts saved."
+    assert message.artifact_refs == [
+        {"id": chart_id, "kind": "data", "format": "json"}
+    ]
+
+
 def test_dataset_intent_model_allows_all_false_with_empty_briefs() -> None:
     intent = DatasetIntentModel(
         intent_data_question=False,
@@ -698,7 +726,8 @@ def test_dataset_node_saves_chart_specs_and_adds_artifact_ids() -> None:
     assert len(plot_tool.calls) == 1
     assert len(data_repo.saved_json_calls) == 2
     assert state.latest_iteration is not None
-    assert len(state.latest_iteration.saved_vega_lite_specs_file_ids) == 2
+    assert "saved_vega_lite_specs_file_ids" not in state.latest_iteration.model_dump()
+    assert len(state.payload.message_artifact_refs) == 2
     assert _message(state).artifact_refs is not None
     assert len(_message(state).artifact_refs or []) == 2
 
@@ -736,6 +765,82 @@ def test_dataset_node_allows_chart_generation_when_dataset_is_freezed() -> None:
     assert _message(state).content == "Frozen chart saved."
     assert len(plot_tool.calls) == 1
     assert len(data_repo.saved_json_calls) == 1
+    assert len(state.payload.message_artifact_refs) == 1
+
+
+def test_dataset_node_uses_analytical_query_result_as_chart_input_without_new_iteration() -> None:
+    conversation_id = uuid4()
+    analytical_df = pd.DataFrame([{"outcome": 1, "count": 2}, {"outcome": 0, "count": 1}])
+    node, data_repo, _, manipulation_tool, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}, {"age": 72, "outcome": 1}]),
+        manipulation_df=analytical_df,
+        plot_specs=[
+            {"mark": "bar", "data": {"values": [{"outcome": 1, "count": 2}]}, "encoding": {"x": {"field": "outcome"}, "y": {"field": "count"}}},
+        ],
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=True,
+                intent_manupulation_question_brief="aggregate outcome counts for charting",
+                intent_manupulation_is_analytical_query=True,
+                intent_chart=True,
+                intent_chart_brief="plot the aggregated outcome counts",
+            )
+        ],
+        generate_outputs=["Chart-ready analytics complete."],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=conversation_id,
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="aggregate outcome counts and plot them")],
+        state=DatasetState.init_empty(),
+    )
+
+    assert len(manipulation_tool.calls) == 1
+    assert len(plot_tool.calls) == 1
+    assert plot_tool.calls[0]["dataframe"].to_dict(orient="records") == analytical_df.to_dict(orient="records")
+    assert data_repo.saved_csv_calls == []
+    assert len(data_repo.saved_json_calls) == 1
+    assert state.latest_iteration is not None
+    assert state.latest_iteration.dataset_id == DatasetState.INIT_DATA_ID
+    assert len(state.payload.dataset_iterations) == 1
+    assert len(state.payload.message_artifact_refs) == 1
+
+
+def test_dataset_node_falls_back_when_final_response_llm_fails() -> None:
+    node, _, _, _, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}]),
+        plot_specs=[
+            {"mark": "bar", "data": {"values": [{"age": 65}]}, "encoding": {"x": {"field": "age"}}},
+        ],
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=False,
+                intent_manupulation_question_brief="",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=True,
+                intent_chart_brief="plot age",
+            )
+        ],
+        generate_outputs=[RuntimeError("final llm failed")],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="plot age")],
+        state=DatasetState.init_empty(),
+    )
+
+    assert len(plot_tool.calls) == 1
+    assert "generated 1 chart" in _message(state).content.lower()
+    assert len(state.payload.message_artifact_refs) == 1
 
 
 def test_dataset_node_returns_classification_failure_message_when_intent_call_raises() -> None:

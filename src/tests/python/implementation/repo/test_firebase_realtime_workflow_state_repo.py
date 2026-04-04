@@ -478,8 +478,18 @@ def test_append_and_load_message_history_roundtrips_structured_artifacts(
             role="assistant",
             content="dataset ready",
             artifact_refs=(
-                {"id": csv_id, "kind": "data", "format": "csv"},
-                {"id": json_id, "kind": "data", "format": "json"},
+                {
+                    "id": csv_id,
+                    "kind": "data",
+                    "format": "csv",
+                    "artifact_meta": {"source": "summary"},
+                },
+                {
+                    "id": json_id,
+                    "kind": "data",
+                    "format": "json",
+                    "artifact_meta": {"vega": "true"},
+                },
             ),
             artifacts=(
                 {
@@ -487,6 +497,7 @@ def test_append_and_load_message_history_roundtrips_structured_artifacts(
                     "content": {"rows": 3},
                     "kind": "data",
                     "format": "json",
+                    "artifact_meta": {"rows": "3"},
                 },
             ),
             id="msg-1",
@@ -498,8 +509,18 @@ def test_append_and_load_message_history_roundtrips_structured_artifacts(
     assert len(history) == 1
     assert history[0].content == "dataset ready"
     assert history[0].artifact_refs == [
-        {"id": csv_id, "kind": "data", "format": "csv"},
-        {"id": json_id, "kind": "data", "format": "json"},
+        {
+            "id": csv_id,
+            "kind": "data",
+            "format": "csv",
+            "artifact_meta": {"source": "summary"},
+        },
+        {
+            "id": json_id,
+            "kind": "data",
+            "format": "json",
+            "artifact_meta": {"vega": "true"},
+        },
     ]
     assert history[0].artifacts == [
         {
@@ -507,6 +528,7 @@ def test_append_and_load_message_history_roundtrips_structured_artifacts(
             "content": {"rows": 3},
             "kind": "data",
             "format": "json",
+            "artifact_meta": {"rows": "3"},
         }
     ]
     assert history[0].id == "msg-1"
@@ -538,8 +560,8 @@ def test_load_message_history_accepts_legacy_artifacts_ids_payload(
 
     assert len(history) == 1
     assert history[0].artifact_refs == [
-        {"id": csv_id, "kind": "data", "format": "csv"},
-        {"id": json_id, "kind": "data", "format": "json"},
+        {"id": csv_id, "kind": "data", "format": "csv", "artifact_meta": None},
+        {"id": json_id, "kind": "data", "format": "json", "artifact_meta": None},
     ]
     assert history[0].id == "legacy-1"
 
@@ -558,7 +580,12 @@ def test_load_message_history_ignores_malformed_artifact_refs(
                 "role": "assistant",
                 "message": "x",
                 "artifact_refs": [
-                    {"id": str(csv_id), "kind": "data", "format": "csv"},
+                    {
+                        "id": str(csv_id),
+                        "kind": "data",
+                        "format": "csv",
+                        "artifact_meta": {"source": "summary", "count": 1},
+                    },
                     {"id": "", "kind": "data", "format": "csv"},
                     {"id": str(json_id), "type": "json"},
                     {"id": "bad-1", "kind": "graph", "format": "png"},
@@ -574,8 +601,18 @@ def test_load_message_history_ignores_malformed_artifact_refs(
 
     assert len(history) == 1
     assert history[0].artifact_refs == [
-        {"id": csv_id, "kind": "data", "format": "csv"},
-        {"id": json_id, "kind": "data", "format": "json"},
+        {
+            "id": csv_id,
+            "kind": "data",
+            "format": "csv",
+            "artifact_meta": {"source": "summary", "count": "1"},
+        },
+        {
+            "id": json_id,
+            "kind": "data",
+            "format": "json",
+            "artifact_meta": None,
+        },
     ]
 
 

@@ -18,6 +18,7 @@ class ArtifactRef(TypedDict, total=False):
     id: UUID
     kind: ArtifactKind
     format: ArtifactFormat
+    artifact_meta: dict[str, str] | None = None
 
 
 class ArtifactPayload(TypedDict, total=False):
@@ -25,6 +26,7 @@ class ArtifactPayload(TypedDict, total=False):
     content: Any
     kind: ArtifactKind
     format: ArtifactFormat
+    artifact_meta: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)

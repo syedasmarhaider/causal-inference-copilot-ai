@@ -471,19 +471,24 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         )
 
     @staticmethod
-    def _serialize_artifact_refs(value: Any) -> list[dict[str, str]] | None:
+    def _serialize_artifact_refs(value: Any) -> list[dict[str, Any]] | None:
         normalized = FirebaseRealtimeWorkflowStateRepo._normalize_artifact_refs(value)
         if normalized is None:
             return None
 
-        return [
-            {
+        serialized: list[dict[str, Any]] = []
+        for item in normalized:
+            serialized_item: dict[str, Any] = {
                 "id": str(item["id"]),
                 "kind": item["kind"],
                 "format": item["format"],
             }
-            for item in normalized
-        ]
+            artifact_meta = item.get("artifact_meta")
+            if artifact_meta is not None:
+                serialized_item["artifact_meta"] = dict(artifact_meta)
+            serialized.append(serialized_item)
+
+        return serialized
 
     @staticmethod
     def _serialize_artifacts(value: Any) -> list[dict[str, Any]] | None:
@@ -529,6 +534,9 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
                     "id": parsed_artifact_id,
                     "kind": artifact_kind,
                     "format": artifact_format,
+                    "artifact_meta": FirebaseRealtimeWorkflowStateRepo._normalize_artifact_meta(
+                        item.get("artifact_meta")
+                    ),
                 }
             )
 
@@ -563,7 +571,26 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             if fmt is not None and fmt not in {"csv", "json"}:
                 normalized_item.pop("format", None)
 
+            normalized_item["artifact_meta"] = FirebaseRealtimeWorkflowStateRepo._normalize_artifact_meta(
+                normalized_item.get("artifact_meta")
+            )
+
             normalized.append(normalized_item)
+
+        return normalized or None
+
+    @staticmethod
+    def _normalize_artifact_meta(value: Any) -> dict[str, str] | None:
+        if not isinstance(value, dict):
+            return None
+
+        normalized: dict[str, str] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                continue
+            if item is None:
+                continue
+            normalized[key] = str(item)
 
         return normalized or None
 

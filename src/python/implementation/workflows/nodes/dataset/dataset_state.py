@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from typing import Any, ClassVar
+from typing import ClassVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -19,13 +19,14 @@ class DatasetIterationModel(BaseModel):
     
     dataset_id: UUID
     summary: DatasetSummaryModel | None = None
-    saved_vega_lite_specs_file_ids: list[ArtifactRef] = Field(default_factory=lambda: [])
 
 
 class DatasetPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     dataset_iterations: list[DatasetIterationModel] = Field(default_factory=lambda: [])
     freezed: bool = False
+    user_message: str | None = None
+    message_artifact_refs: list[ArtifactRef] = Field(default_factory=lambda: [])
 
 class DatasetState(State):
     INIT_DATA_ID = uuid.UUID("486f4975-6cd9-4261-a122-e6b0fc46462d")
@@ -33,7 +34,6 @@ class DatasetState(State):
 
     def __init__(self, payload: DatasetPayloadModel) -> None:
         self.payload = payload
-        self.chat_message: ChatMessage | None = None
 
     def name(self) -> str:
         return self.NAME
@@ -44,8 +44,14 @@ class DatasetState(State):
         return "PENDING"
 
     def messages(self) -> Sequence[ChatMessage]:
-        if self.chat_message:
-            return [self.chat_message]
+        if self.payload.user_message:
+            return [
+                ChatMessage(
+                    role="assistant",
+                    content=self.payload.user_message,
+                    artifact_refs=list(self.payload.message_artifact_refs) or None,
+                )
+            ]
         return [
             ChatMessage(
                 role="assistant",
@@ -53,7 +59,7 @@ class DatasetState(State):
             )
         ]
 
-    def set_status_freezed(self) -> None:
+    def set_status_freez(self) -> None:
         self.payload.freezed = True
 
     def set_status_pending(self) -> None:
