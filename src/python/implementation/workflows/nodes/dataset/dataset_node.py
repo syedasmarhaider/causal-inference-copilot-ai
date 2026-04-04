@@ -17,6 +17,7 @@ from python.domain.service.llm_service import (
     LLMConfig,
     LLMService,
 )
+from python.domain.models.models import ArtifactRef, get_chat_messages_role_and_message_json
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
@@ -358,15 +359,26 @@ class DatasetNode(Node):
         dataset_iterations: Sequence[DatasetIterationModel] | None = None,
         freezed: bool = False,
     ) -> DatasetState:
+        normalized_iterations = [
+            iteration.model_copy(deep=True) for iteration in (dataset_iterations or [])
+        ]
         state = DatasetState(
             DatasetPayloadModel(
-                dataset_iterations=[
-                    iteration.model_copy(deep=True) for iteration in (dataset_iterations or [])
-                ],
+                dataset_iterations=normalized_iterations,
                 freezed=freezed,
             )
         )
-        state.user_message = user_message
+        latest_iteration = normalized_iterations[-1] if normalized_iterations else None
+        artifact_refs = (
+            list(latest_iteration.saved_vega_lite_specs_file_ids)
+            if latest_iteration and latest_iteration.saved_vega_lite_specs_file_ids
+            else None
+        )
+        state.chat_message = ChatMessage(
+            role="assistant",
+            content=user_message,
+            artifact_refs=artifact_refs,
+        )
         return state
 
     def _handle_revert(self, *, dataset_iterations: list[DatasetIterationModel]) -> DatasetState:
@@ -569,7 +581,7 @@ class DatasetNode(Node):
             data_summary=summary_model,
             user_intent=instructions,
         )
-        saved_ids: list[Artifact_Id] = []
+        saved_ids: list[ArtifactRef] = []
         for spec in specs:
             saved_id = uuid.uuid4()
             self._data_repo.save_json_data(
@@ -579,7 +591,7 @@ class DatasetNode(Node):
                 json_data=json.dumps(spec, ensure_ascii=False),
                 overwrite=True,
             )
-            saved_ids.append(Artifact_Id(id=saved_id, type="json"))
+            saved_ids.append({"id": saved_id, "kind": "data", "format": "json"})
 
         latest_iteration = dataset_iterations[-1]
         dataset_iterations[-1] = latest_iteration.model_copy(
@@ -589,7 +601,7 @@ class DatasetNode(Node):
             {
                 "status": "charts_saved",
                 "instruction": instructions,
-                "saved_chart_spec_ids": [str(saved_id) for saved_id in saved_ids],
+                "saved_chart_spec_ids": [str(saved_id["id"]) for saved_id in saved_ids],
                 "saved_chart_count": len(saved_ids),
             },
             dataset_iterations,

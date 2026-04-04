@@ -7,8 +7,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from python.domain.models.models import ChatMessage
-from python.domain.workflows.state import State
+from python.domain.models.models import ArtifactRef, ChatMessage
+from python.domain.workflows.state import State, Status
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetSummaryModel,
 )
@@ -19,7 +19,7 @@ class DatasetIterationModel(BaseModel):
     
     dataset_id: UUID
     summary: DatasetSummaryModel | None = None
-    saved_vega_lite_specs: list[dict[str, Any]] = Field(default_factory=lambda: [])
+    saved_vega_lite_specs_file_ids: list[ArtifactRef] = Field(default_factory=lambda: [])
 
 
 class DatasetPayloadModel(BaseModel):
@@ -30,15 +30,15 @@ class DatasetPayloadModel(BaseModel):
 class DatasetState(State):
     INIT_DATA_ID = uuid.UUID("486f4975-6cd9-4261-a122-e6b0fc46462d")
     NAME: ClassVar[str] = "DATASET"
-    chat_message: ChatMessage | None = None
 
     def __init__(self, payload: DatasetPayloadModel) -> None:
         self.payload = payload
+        self.chat_message: ChatMessage | None = None
 
     def name(self) -> str:
         return self.NAME
 
-    def status(self) -> str:
+    def status(self) -> Status:
         if self.payload.freezed:
             return "FREEZED"
         return "PENDING"
@@ -46,10 +46,18 @@ class DatasetState(State):
     def messages(self) -> Sequence[ChatMessage]:
         if self.chat_message:
             return [self.chat_message]
-        return [ChatMessage(role="assistant", content="Data set is not uploaded yet. Please upload the dataset to proceed.")]
+        return [
+            ChatMessage(
+                role="assistant",
+                content="Data set is not uploaded yet. Please upload the dataset to proceed.",
+            )
+        ]
 
-    def freeze_status(self) -> None:
-        self.payload.freezed = True    
+    def set_status_freezed(self) -> None:
+        self.payload.freezed = True
+
+    def set_status_pending(self) -> None:
+        self.payload.freezed = False
 
     def error(self) -> None:
         return None

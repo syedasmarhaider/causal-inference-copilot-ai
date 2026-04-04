@@ -9,7 +9,6 @@ import pandas as pd
 import pytest
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMResponse
-from python.domain.workflows.state import StateMessage
 from python.implementation.workflows.nodes.dataset.dataset_node import (
     DatasetIntentModel,
     DatasetNode,
@@ -271,8 +270,8 @@ def _base_dataset_state(
     )
 
 
-def _message(state: DatasetState) -> StateMessage:
-    return state.message()
+def _message(state: DatasetState) -> ChatMessage:
+    return list(state.messages())[0]
 
 
 def _status(state: DatasetState) -> str:
@@ -365,8 +364,8 @@ def test_dataset_node_returns_missing_data_message_when_dataset_is_unavailable()
         state=DatasetState.init_empty(),
     )
 
-    assert _message(state).action == "NEEDS_DATA"
-    assert _message(state).txt_message == "Please upload a CSV first."
+    assert _status(state) == "PENDING"
+    assert _message(state).content == "Please upload a CSV first."
     assert len(llm.generate_calls) == 1
 
 
@@ -383,8 +382,7 @@ def test_dataset_node_returns_ready_message_when_dataset_loaded_and_no_user_mess
         state=DatasetState.init_empty(),
     )
 
-    assert _message(state).action == "NONE"
-    assert "ask about the data" in _message(state).txt_message.lower()
+    assert "ask about the data" in _message(state).content.lower()
     assert state.latest_iteration is not None
     assert state.latest_iteration.dataset_id == DatasetState.INIT_DATA_ID
 
@@ -404,8 +402,8 @@ def test_dataset_node_returns_freezed_ready_message_when_no_user_message() -> No
     )
 
     assert _status(state) == "FREEZED"
-    assert "dataset is freezed" in _message(state).txt_message.lower()
-    assert "cannot modify or revert" in _message(state).txt_message.lower()
+    assert "dataset is freezed" in _message(state).content.lower()
+    assert "cannot modify or revert" in _message(state).content.lower()
 
 
 def test_dataset_node_returns_off_topic_message_for_model_training_request() -> None:
@@ -433,9 +431,8 @@ def test_dataset_node_returns_off_topic_message_for_model_training_request() -> 
     )
 
     assert _status(state) == "PENDING"
-    assert _message(state).action == "NONE"
-    assert "dataset stage" in _message(state).txt_message.lower()
-    assert "chart generation" in _message(state).txt_message.lower()
+    assert "dataset stage" in _message(state).content.lower()
+    assert "chart generation" in _message(state).content.lower()
     assert len(llm.generate_json_calls) == 1
 
 
@@ -462,7 +459,7 @@ def test_dataset_node_reverts_to_previous_dataset_iteration() -> None:
 
     assert reverted_state.latest_iteration is not None
     assert reverted_state.latest_iteration.dataset_id == first_id
-    assert "reverted" in _message(reverted_state).txt_message.lower()
+    assert "reverted" in _message(reverted_state).content.lower()
 
 
 def test_dataset_node_blocks_revert_when_dataset_is_freezed() -> None:
@@ -489,7 +486,7 @@ def test_dataset_node_blocks_revert_when_dataset_is_freezed() -> None:
     assert _status(blocked_state) == "FREEZED"
     assert blocked_state.latest_iteration is not None
     assert blocked_state.latest_iteration.dataset_id == second_id
-    assert "dataset is freezed" in _message(blocked_state).txt_message.lower()
+    assert "dataset is freezed" in _message(blocked_state).content.lower()
     assert llm.generate_json_calls == []
     assert manipulation_tool.calls == []
     assert plot_tool.calls == []
@@ -522,7 +519,7 @@ def test_dataset_node_answers_summary_question_and_uses_final_llm_message() -> N
         state=DatasetState.init_empty(),
     )
 
-    assert _message(state).txt_message == "Final dataset response."
+    assert _message(state).content == "Final dataset response."
     assert len(llm.generate_calls) == 2
     assert manipulation_tool.calls == []
     assert plot_tool.calls == []
@@ -557,7 +554,7 @@ def test_dataset_node_runs_analytical_manipulation_without_saving_new_dataset() 
         state=DatasetState.init_empty(),
     )
 
-    assert _message(state).txt_message == "Query complete."
+    assert _message(state).content == "Query complete."
     assert len(manipulation_tool.calls) == 1
     assert manipulation_tool.calls[0]["retry_attempts"] == 3
     assert manipulation_tool.calls[0]["table_name"].startswith("df_")
@@ -627,7 +624,7 @@ def test_dataset_node_blocks_mutating_manipulation_when_dataset_is_freezed() -> 
     )
 
     assert _status(state) == "FREEZED"
-    assert "cannot modify the data or revert" in _message(state).txt_message.lower()
+    assert "cannot modify the data or revert" in _message(state).content.lower()
     assert manipulation_tool.calls == []
     assert plot_tool.calls == []
     assert data_repo.saved_csv_calls == []
@@ -664,7 +661,7 @@ def test_dataset_node_allows_analytical_manipulation_when_dataset_is_freezed() -
     )
 
     assert _status(state) == "FREEZED"
-    assert _message(state).txt_message == "Analytical query complete on frozen dataset."
+    assert _message(state).content == "Analytical query complete on frozen dataset."
     assert len(manipulation_tool.calls) == 1
     assert data_repo.saved_csv_calls == []
 
@@ -702,8 +699,8 @@ def test_dataset_node_saves_chart_specs_and_adds_artifact_ids() -> None:
     assert len(data_repo.saved_json_calls) == 2
     assert state.latest_iteration is not None
     assert len(state.latest_iteration.saved_vega_lite_specs_file_ids) == 2
-    assert _message(state).artifact_ids is not None
-    assert len(_message(state).artifact_ids or []) == 3
+    assert _message(state).artifact_refs is not None
+    assert len(_message(state).artifact_refs or []) == 2
 
 
 def test_dataset_node_allows_chart_generation_when_dataset_is_freezed() -> None:
@@ -736,7 +733,7 @@ def test_dataset_node_allows_chart_generation_when_dataset_is_freezed() -> None:
     )
 
     assert _status(state) == "FREEZED"
-    assert _message(state).txt_message == "Frozen chart saved."
+    assert _message(state).content == "Frozen chart saved."
     assert len(plot_tool.calls) == 1
     assert len(data_repo.saved_json_calls) == 1
 
@@ -755,4 +752,4 @@ def test_dataset_node_returns_classification_failure_message_when_intent_call_ra
         state=DatasetState.init_empty(),
     )
 
-    assert "could not classify" in _message(state).txt_message.lower()
+    assert "could not classify" in _message(state).content.lower()
