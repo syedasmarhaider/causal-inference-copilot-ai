@@ -309,6 +309,9 @@ def test_protocol_discussion_node_confirms_discussion_and_emits_cleaning_system_
     assert result.payload.system_message is not None
     assert result.payload.system_message.startswith("PROTOCOL_DISCUSSION_CONFIRMED")
     assert "This is a data-changing request." in result.payload.system_message
+    assert "final working dataset must retain only protocol-scope columns" in result.payload.system_message
+    assert "Apply the grounded target-population / cohort-eligibility filters" in result.payload.system_message
+    assert "Apply the grounded time-zero / baseline-definition rules" in result.payload.system_message
     assert "Normalize treatment to exactly two canonical values" in result.payload.system_message
     assert _messages(result) == [
         ChatMessage(role="system", content=result.payload.system_message),
