@@ -6,8 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from python.domain.models.errors import NodeExecutionError
-from python.domain.workflows.state import State, StateMessage, Status
+from python.domain.models.models import ChatMessage
+from python.domain.workflows.state import State, Status
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import (
     ProtocolDiscussionDeps,
 )
@@ -16,7 +16,7 @@ from python.implementation.workflows.tools.common.model.data_summary import (
 )
 from python.implementation.workflows.utils.utils import uuid_from_any
 
-Readiness = Literal["PENDING", "READY", "ABORT"]
+ProtocolDiscussionPhase = Literal["DISCUSSING", "CONFIRMED"]
 
 
 class ProtocolDiscussionPayloadModel(BaseModel):
@@ -25,24 +25,28 @@ class ProtocolDiscussionPayloadModel(BaseModel):
     dataset_id: UUID | None = None
     dataset_summary: DatasetSummaryModel | None = None
     discussion: str = ""
-    readiness: Readiness = "PENDING"
-    node_message: str | None = None
-    error_message: str | None = None
+    phase: ProtocolDiscussionPhase = "DISCUSSING"
+    assistant_message: str | None = None
+    system_message: str | None = None
 
     @field_validator("dataset_id", mode="before")
     @classmethod
     def _parse_dataset_id(cls, value: Any) -> UUID | None:
         return uuid_from_any(value)
 
-    @field_validator("discussion", "node_message", "error_message", mode="before")
+    @field_validator(
+        "discussion",
+        "assistant_message",
+        "system_message",
+        mode="before",
+    )
     @classmethod
     def _normalize_text(cls, value: Any) -> str | None:
         if value is None:
             return None
         if isinstance(value, str):
-            stripped = value.strip()
-            return stripped
-        raise TypeError("discussion/node_message/error_message must be str|null")
+            return value.strip()
+        raise TypeError("text fields must be str|null")
 
 
 class ProtocolDiscussionState(State):
@@ -51,35 +55,42 @@ class ProtocolDiscussionState(State):
     def __init__(self, payload: ProtocolDiscussionPayloadModel) -> None:
         self.payload = payload
 
-    @property
     def name(self) -> str:
         return self.NAME
 
-    @property
     def status(self) -> Status:
-        if self.payload.readiness == "ABORT" or self.payload.error_message is not None:
-            return "ABORTED"
-        if self.payload.readiness == "READY":
+        if self.payload.phase == "CONFIRMED":
             return "DONE"
         return "PENDING"
 
-    @property
-    def message(self) -> StateMessage:
-        if self.payload.node_message is None:
-            raise ValueError(
-                "ProtocolDiscussionState message is required but missing. "
-                "State must have node message in node context."
-            )
-        action = "NEEDS_INPUT" if self.payload.readiness == "PENDING" else "NONE"
-        return StateMessage(txt_message=self.payload.node_message, action=action)
-
-    @property
-    def error(self) -> NodeExecutionError | None:
-        if self.payload.error_message is not None:
-            return NodeExecutionError(state_name=self.NAME, error=self.payload.error_message)
+    def set_status_freez(self) -> None:
         return None
 
-    def freeze_status(self) -> None:
+    def set_status_pending(self) -> None:
+        if self.payload.phase == "CONFIRMED":
+            self.payload.phase = "DISCUSSING"
+
+    def messages(self) -> Sequence[ChatMessage]:
+        messages: list[ChatMessage] = []
+        if self.payload.system_message:
+            messages.append(ChatMessage(role="system", content=self.payload.system_message))
+        if self.payload.assistant_message:
+            messages.append(
+                ChatMessage(role="assistant", content=self.payload.assistant_message)
+            )
+        if messages:
+            return messages
+        return [
+            ChatMessage(
+                role="assistant",
+                content=(
+                    "Let’s work through the protocol carefully from the active dataset. "
+                    "Start with the causal question, treatment, outcome, study type, and time-zero logic."
+                ),
+            )
+        ]
+
+    def error(self) -> None:
         return None
 
     def pre_required_states_names(self) -> Sequence[str]:
@@ -90,8 +101,7 @@ class ProtocolDiscussionState(State):
 
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> ProtocolDiscussionState:
-        model = ProtocolDiscussionPayloadModel.model_validate(payload)
-        return cls(model)
+        return cls(ProtocolDiscussionPayloadModel.model_validate(payload))
 
     @classmethod
     def init_empty(cls) -> ProtocolDiscussionState:

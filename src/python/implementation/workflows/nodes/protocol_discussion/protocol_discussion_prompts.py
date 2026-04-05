@@ -3,11 +3,11 @@ from __future__ import annotations
 
 def get_protocol_discussion_get_node_info() -> str:
     return (
-        "Node for protocol discussion and readiness gating. It updates the protocol discussion, "
-        "confirms user causal question, confounders, effect modifiers, time zero, and treatment/outcome definitions. "
-        "If the user wants to change protocol, this node is used, and it "
-        "decides READY/PENDING/ABORT, and returns a user-facing message grounded in user chat "
-        "and dataset metadata."
+        "Node for target-trial style protocol discussion grounded in the active dataset. "
+        "It updates the protocol discussion, decides whether the discussion should continue, "
+        "or be confirmed, and on confirmation emits a downstream data-cleaning "
+        "handoff message describing grounded row filters, column handling, and binary-value "
+        "normalization requirements."
     )
 
 
@@ -19,61 +19,52 @@ Grounding and safety rules:
 - Binary treatment only.
 - Outcome must be binary or continuous only.
 - Do not reference internal question numbers in user-facing text.
+- Keep the protocol text explicit, stable, and careful because this is target-trial style protocol work.
 """.strip()
 
 
 _PROTOCOL_EDIT_RULES = """
 Protocol edit rules:
 - Edit ONLY A-lines in PROTOCOL_DISCUSSION.
-- Do not reorder/rename/delete questions.
+- Do not reorder, rename, or delete the canonical protocol questions.
 - Preserve correct prior answers unless new grounded evidence supersedes them.
-- If missing/ambiguous/contradictory, write UNCLEAR for the relevant answer.
-- Keep terminology consistent: treatment/exposure (X), comparator, outcome (Y), time zero (t0), population.
-- Lists remain lists for covariates/effect modifiers; do not infer causal roles beyond provided evidence.
+- If missing, ambiguous, or contradictory, write UNCLEAR for the relevant answer.
+- Keep terminology consistent: treatment/exposure, comparator/control, outcome, time zero (t0), population.
+- Lists remain lists for covariates and effect modifiers; do not infer causal roles beyond grounded evidence.
 """.strip()
 
 
 _FEASIBILITY_RULES = """
 Feasibility and design checks:
-- If no time support exists, treat as snapshot mode and avoid time-to-event claims that require event/censor times.
+- If no time support exists, treat as snapshot mode and avoid time-to-event claims that require event or censor times.
 - In snapshot mode, treatment must be defensibly before outcome in real-world semantics.
-- If study is claimed RCT, treatment must be a randomized assignment variable; otherwise clarify or keep pending.
+- If study is claimed RCT, treatment must be a randomized assignment variable; otherwise clarify or keep discussion going.
 - Ask at most 2 targeted follow-up questions when essentials are missing.
-- If covariates and effect modifiers overlap, request separation; overlap is not allowed in this tool.
+- If covariates and effect modifiers overlap, require separation; overlap is not allowed in this workflow.
 """.strip()
 
 
-_ABORT_CONDITIONS = """
-ABORT conditions (any one):
-- User requires time-to-event/survival estimand without required time support.
-- Treatment or outcome cannot be operationalized from available columns.
-- Snapshot mode is required but treatment-outcome ordering cannot be defended.
-- Inclusion/filtering is inherently post-treatment and cannot be reformulated.
-- User insists on unsupported protocol after alternatives are offered.
+_CONFIRM_RULES = """
+Confirmation rules:
+- next_action="confirm" only if the latest user message clearly confirms the current protocol discussion and the essentials are complete, coherent, and feasible.
+- next_action="continue" if details are still missing, unclear, contradictory, the user is still correcting the protocol, or the protocol is currently infeasible and needs changes before it can proceed.
 """.strip()
 
 
-_READINESS_RULES = """
-Readiness decision:
-- READY only if latest user message explicitly confirms current protocol summary, essentials are complete,
-  there are no contradictions, and no feasibility blockers.
-- PENDING if essentials are missing/unclear, user is correcting/asking, or confirmation is not explicit.
-- ABORT if infeasible under current data/question.
-""".strip()
-
-
-def get_protocol_discussion_update_and_gate_prompt() -> str:
+def get_protocol_discussion_update_prompt() -> str:
     return f"""
-You are a Causal ML Copilot.
+You are a Causal ML Copilot conducting a target-trial style protocol discussion.
 
 Inputs:
-- PROTOCOL_DISCUSSION (Q/A document)
+- PROTOCOL_DISCUSSION: the current canonical protocol Q/A document
 - recent chat context
 - dataset metadata summary (authoritative)
 
-Task:
-1) Update PROTOCOL_DISCUSSION.
-2) Decide readiness gate: READY, PENDING, or ABORT.
+Tasks:
+1) Update PROTOCOL_DISCUSSION using grounded user evidence.
+2) Decide the single best next_action.
+3) Produce the assistant_message for this turn.
+4) If next_action is confirm, produce dataset_change_request for the downstream data-cleaning stage.
 
 {_SHARED_GUARDRAILS}
 
@@ -81,42 +72,36 @@ Task:
 
 {_FEASIBILITY_RULES}
 
-{_READINESS_RULES}
+{_CONFIRM_RULES}
 
-{_ABORT_CONDITIONS}
+Assistant message policy:
+- Do not be terse. The user prefers comprehensive, specific responses.
+- For next_action="continue", answer the latest user point first and then ask the most important missing follow-up question if one is still needed.
+- For next_action="confirm", acknowledge that the protocol discussion is now confirmed and explain that data cleaning/normalization will proceed next.
+- If the protocol cannot proceed under the current assumptions or data, keep next_action="continue" and explain clearly what is not possible, apologize briefly, and state what would need to change.
+
+dataset_change_request policy when next_action="confirm":
+- The request is for a downstream data-changing stage.
+- Make it self-contained, operational, and grounded.
+- State explicitly that this is a data-changing request.
+- Specify the confirmed treatment, outcome, covariates, effect modifiers, and any time-zero relevant columns that must be preserved.
+- Specify row filters or cohort eligibility restrictions only when they are grounded in the discussion.
+- Specify columns to remove only when grounded; otherwise explicitly say not to drop columns beyond the confirmed protocol scope.
+- If treatment is binary, instruct normalization to exactly two canonical values and removal or mapping of unexpected values as grounded by the discussion.
+- If outcome is binary, instruct normalization to exactly two canonical values and handling of unexpected labels as grounded by the discussion.
+- If post-treatment variables were identified, instruct that they must not be used as baseline adjustment features.
+- Do not invent filters, drops, or mappings that are not grounded.
 
 Output format:
 Return ONLY JSON with exactly:
 {{
-  "protocol_discussion": "<updated discussion text>",
-  "readiness": "READY" | "PENDING" | "ABORT"
+  "discussion": "<updated protocol discussion text>",
+  "next_action": "continue" | "confirm",
+  "assistant_message": "<user-facing assistant message>",
+  "dataset_change_request": "<downstream data-cleaning instruction or null>"
 }}
 """.strip()
 
-def get_protocol_discussion_user_message_prompt() -> str:
-    return f"""
-You are a helpful, precise, clinically-oriented Causal ML Copilot.
-
-Inputs:
-- fixed readiness token (READY, PENDING, ABORT)
-- updated PROTOCOL_DISCUSSION
-- recent chat context
-- dataset metadata summary (authoritative)
-
-Task:
-- Produce ONLY the user-facing message.
-- Readiness is fixed; do not change it.
-
-{_SHARED_GUARDRAILS}
-
-Message policy by readiness:
-- READY: provide a compact protocol summary and clearly state you will proceed to cleaning the data and validation.
-- PENDING: answer latest user point first in detail, and then ask follow up question which is missing/unclear
-- ABORT: explain briefly why infeasible and the minimum change needed to continue.
-
-Output format:
-Return ONLY plain text user message (no JSON, no markdown, no commentary).
-""".strip()
 
 def get_questions() -> list[str]:
     return [
