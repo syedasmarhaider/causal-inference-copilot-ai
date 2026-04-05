@@ -1,68 +1,89 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Any, ClassVar
-from uuid import UUID
-
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.models.errors import NodeExecutionError
-from python.domain.workflows.state import State, StateMessage, Status
+from python.domain.models.models import ArtifactRef, ChatMessage
+from python.domain.workflows.state import State, Status
 from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import (
     CausalInferenceDeps,
 )
-
-
-class CausalInferencePayload(BaseModel):
+class CausalInferencePayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     ate_result_raw_json_str: str | None = None
-    error: str | None = None
-    
-    # workflow control
-    should_abort: bool | None = None
+    latest_cate_result_raw_json_str: str | None = None
+    latest_cate_request_summary: str | None = None
+    assistant_message: str | None = None
+    system_message: str | None = None
+    message_artifact_refs: list[ArtifactRef] = Field(default_factory=list)
+    error_message: str | None = None
 
-    # UI / node-local
-    message: str | None = None
-    artifacts: list[UUID] | None = None
+    @field_validator(
+        "ate_result_raw_json_str",
+        "latest_cate_result_raw_json_str",
+        "latest_cate_request_summary",
+        "assistant_message",
+        "system_message",
+        "error_message",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value.strip()
+        raise TypeError("text fields must be str|null")
 
 
-@dataclass(frozen=True, slots=True)
 class CausalInferenceState(State):
     NAME: ClassVar[str] = "CAUSAL_INFERENCE"
-    payload: CausalInferencePayload
-    current_artifact_ids: list[UUID] | None = None
 
-    @property
+    def __init__(self, payload: CausalInferencePayloadModel) -> None:
+        self.payload = payload
+
     def name(self) -> str:
         return self.NAME
 
-    @property
-    def error(self) -> NodeExecutionError | None:
-        if self.payload.error is not None:
-            return NodeExecutionError(state_name=self.NAME, error=self.payload.error)
-        return None
-
-    @property
     def status(self) -> Status:
-        if self.payload.should_abort:
-            return "ABORTED"
         return "PENDING"
 
-    @property
-    def message(self) -> StateMessage:
-        if self.payload.message is None:
-            raise ValueError(
-                "CausalInferenceState.message is required but missing. "
-                "Don't access .message outside the node/UI context where user_message is guaranteed."
+    def set_status_freez(self) -> None:
+        return None
+
+    def set_status_pending(self) -> None:
+        self.payload.error_message = None
+
+    def messages(self) -> Sequence[ChatMessage]:
+        messages: list[ChatMessage] = []
+        if self.payload.system_message:
+            messages.append(ChatMessage(role="system", content=self.payload.system_message))
+        if self.payload.assistant_message:
+            messages.append(
+                ChatMessage(
+                    role="assistant",
+                    content=self.payload.assistant_message,
+                    artifact_refs=list(self.payload.message_artifact_refs) or None,
+                )
             )
-        return StateMessage(
-            txt_message=self.payload.message,
-            action="NONE" if self.status == "ABORTED" else "NEEDS_INPUT",
-            artifact_ids=[str(aid) for aid in self.current_artifact_ids] if self.current_artifact_ids else None,
-        )
-        
+        if messages:
+            return messages
+        return [
+            ChatMessage(
+                role="assistant",
+                content=(
+                    "I will now compute and explain the causal effect estimates from the "
+                    "trained model, including subgroup effects when clinically requested."
+                ),
+            )
+        ]
+
+    def error(self) -> NodeExecutionError | None:
+        return None
+
     def pre_required_states_names(self) -> Sequence[str]:
         return CausalInferenceDeps.pre_required_states_names()
 
@@ -71,9 +92,8 @@ class CausalInferenceState(State):
 
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> CausalInferenceState:
-        model = CausalInferencePayload.model_validate(payload)
-        return cls(payload=model)
+        return cls(CausalInferencePayloadModel.model_validate(payload))
 
     @classmethod
     def init_empty(cls) -> CausalInferenceState:
-        return cls(payload=CausalInferencePayload())
+        return cls(CausalInferencePayloadModel())
