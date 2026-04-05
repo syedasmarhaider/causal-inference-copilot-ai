@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -52,13 +51,22 @@ class _ModelShortlist(BaseModel):
     clinician_message: str = Field(..., min_length=1)
 
 
-@dataclass(frozen=True, slots=True)
 class ModelSelectionNode(Node):
-    llm: LLMService
+    NAME: ClassVar[str] = ModelSelectionState.NAME
+
+    def __init__(
+        self,
+        *,
+        llm: LLMService,
+        tool_factory: ToolFactory,
+    ) -> None:
+        self._llm = llm
+        factory_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
+        self._model_factory = cast(CausalModelFactoryTool, factory_raw)
 
     @property
     def name(self) -> str:
-        return ModelSelectionState.NAME
+        return self.NAME
 
     @classmethod
     def get_info(cls) -> str:
@@ -70,7 +78,6 @@ class ModelSelectionNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         state: State,
-        tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
         messages_history: Sequence[ChatMessage] | None,
     ) -> State:
@@ -82,16 +89,14 @@ class ModelSelectionNode(Node):
         deps = ModelSelectionDeps.from_loaded(previous_state_dependencies)
         history = list(messages_history[-5:]) if messages_history else None
 
-        factory_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
-        factory = cast(CausalModelFactoryTool, factory_raw)
         model_catalog = _build_supported_model_catalog(
-            supported_estimators=factory.supported_estimators(),
-            estimators_info=factory.get_all_esimators_info(),
+            supported_estimators=self._model_factory.supported_estimators(),
+            estimators_info=self._model_factory.get_all_esimators_info(),
         )
         selection_context = _build_selection_context(deps=deps)
 
         if not state.payload.recommendations:
-            shortlist = self.llm.generate_json(
+            shortlist = self._llm.generate_json(
                 schema=_ModelShortlist,
                 system_prompt=MODEL_SELECTION_RECOMMENDER_SYSTEM_PROMPT,
                 user_prompt=MODEL_SELECTION_RECOMMENDER_USER_PROMPT_TEMPLATE.format(
@@ -127,7 +132,7 @@ class ModelSelectionNode(Node):
                 )
             )
 
-        decision = self.llm.generate_json(
+        decision = self._llm.generate_json(
             schema=ConfirmedModelSelectionPayload,
             system_prompt=MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
             user_prompt=MODEL_SELECTION_NEGOTIATOR_USER_PROMPT_TEMPLATE.format(

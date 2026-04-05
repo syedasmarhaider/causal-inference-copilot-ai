@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any, ClassVar, cast
 from uuid import UUID, uuid4
 
@@ -36,12 +35,20 @@ from python.implementation.workflows.utils.utils import safe_err
 log = get_logger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
 class ModelTrainNode(Node):
-    llm: LLMService | None
-    data_repo: DataRepo
-
     NAME: ClassVar[str] = ModelTrainState.NAME
+
+    def __init__(
+        self,
+        *,
+        llm: LLMService,
+        data_repo: DataRepo,
+        tool_factory: ToolFactory
+    ) -> None:
+        self._llm = llm
+        self._data_repo = data_repo
+        factory_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
+        self._model_factory = cast(CausalModelFactoryTool, factory_raw)
 
     @property
     def name(self) -> str:
@@ -57,7 +64,6 @@ class ModelTrainNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         state: State,
-        tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
         messages_history: Sequence[ChatMessage] | None,
     ) -> State:
@@ -72,7 +78,7 @@ class ModelTrainNode(Node):
             return ModelTrainState(payload)
 
         try:
-            df = self.data_repo.get_csv_data(
+            df = self._data_repo.get_csv_data(
                 user_id=user_id,
                 conversation_id=conversation_id,
                 dataset_id=deps.dataset_id,
@@ -102,9 +108,7 @@ class ModelTrainNode(Node):
                 )
             )
 
-        factory_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
-        model_factory = cast(CausalModelFactoryTool, factory_raw)
-        model = model_factory.resolve(deps.selected_model)
+        model = self._model_factory.resolve(deps.selected_model)
         if model is None:
             return ModelTrainState(
                 _failed_payload(

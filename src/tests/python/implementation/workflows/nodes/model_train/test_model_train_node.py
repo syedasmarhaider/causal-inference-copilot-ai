@@ -361,13 +361,16 @@ def test_model_train_success_builds_fit_command_from_confirmed_spec() -> None:
     fake_model = _FakeCausalModel(result=fit_result)
     fake_factory = _FakeModelFactory(model=fake_model)
     data_repo = _FakeDataRepo(dataframe=_build_dataframe())
-    node = ModelTrainNode(llm=None, data_repo=data_repo)
+    node = ModelTrainNode(
+        llm=None,
+        data_repo=data_repo,
+        tool_factory=_FakeToolFactory(model_factory=fake_factory),
+    )
 
     result = node.run(
         user_id=uuid4(),
         conversation_id=uuid4(),
         state=ModelTrainState.init_empty(),
-        tool_factory=_FakeToolFactory(model_factory=fake_factory),
         previous_state_dependencies={
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
@@ -410,13 +413,13 @@ def test_model_train_returns_aborted_state_on_command_failure() -> None:
     node = ModelTrainNode(
         llm=None,
         data_repo=_FakeDataRepo(dataframe=_build_dataframe()),
+        tool_factory=_FakeToolFactory(model_factory=_FakeModelFactory(model=fake_model)),
     )
 
     result = node.run(
         user_id=uuid4(),
         conversation_id=uuid4(),
         state=ModelTrainState.init_empty(),
-        tool_factory=_FakeToolFactory(model_factory=_FakeModelFactory(model=fake_model)),
         previous_state_dependencies={
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
@@ -451,13 +454,16 @@ def test_model_train_reuses_existing_fit_for_same_inputs() -> None:
         result=RuntimeError("should not be called"),
     )
     data_repo = _FakeDataRepo(dataframe=_build_dataframe())
-    node = ModelTrainNode(llm=None, data_repo=data_repo)
+    node = ModelTrainNode(
+        llm=None,
+        data_repo=data_repo,
+        tool_factory=_FakeToolFactory(model_factory=_FakeModelFactory(model=fake_model)),
+    )
 
     result = node.run(
         user_id=uuid4(),
         conversation_id=uuid4(),
         state=state,
-        tool_factory=_FakeToolFactory(model_factory=_FakeModelFactory(model=fake_model)),
         previous_state_dependencies={
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,

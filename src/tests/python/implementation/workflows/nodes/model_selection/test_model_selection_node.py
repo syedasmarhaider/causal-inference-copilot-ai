@@ -285,13 +285,15 @@ def test_model_selection_first_run_builds_clinician_friendly_shortlist() -> None
             }
         ]
     )
-    node = ModelSelectionNode(llm=llm)
+    node = ModelSelectionNode(
+        llm=llm,
+        tool_factory=_FakeToolFactory(_FakeModelFactory(supported=supported, info=info)),
+    )
 
     result = node.run(
         user_id=uuid4(),
         conversation_id=uuid4(),
         state=ModelSelectionState.init_empty(),
-        tool_factory=_FakeToolFactory(_FakeModelFactory(supported=supported, info=info)),
         previous_state_dependencies={CompileAndValidateState.NAME: _compile_state()},
         messages_history=[ChatMessage(role="user", content="Recommend the best models.")],
     )
@@ -322,7 +324,10 @@ def test_model_selection_second_run_confirms_user_choice() -> None:
             }
         ]
     )
-    node = ModelSelectionNode(llm=llm)
+    node = ModelSelectionNode(
+        llm=llm,
+        tool_factory=_FakeToolFactory(_FakeModelFactory(supported=supported, info=info)),
+    )
     state = ModelSelectionState(
         ModelSelectionPayload(
             recommendations=[
@@ -356,7 +361,6 @@ def test_model_selection_second_run_confirms_user_choice() -> None:
         user_id=uuid4(),
         conversation_id=uuid4(),
         state=state,
-        tool_factory=_FakeToolFactory(_FakeModelFactory(supported=supported, info=info)),
         previous_state_dependencies={CompileAndValidateState.NAME: _compile_state()},
         messages_history=[ChatMessage(role="user", content="I want the heterogeneity option.")],
     )
@@ -377,7 +381,10 @@ def test_model_selection_second_run_keeps_pending_when_user_is_unclear() -> None
             }
         ]
     )
-    node = ModelSelectionNode(llm=llm)
+    node = ModelSelectionNode(
+        llm=llm,
+        tool_factory=_FakeToolFactory(_FakeModelFactory(supported=supported, info=info)),
+    )
     state = ModelSelectionState(
         ModelSelectionPayload(
             recommendations=[
@@ -411,7 +418,6 @@ def test_model_selection_second_run_keeps_pending_when_user_is_unclear() -> None
         user_id=uuid4(),
         conversation_id=uuid4(),
         state=state,
-        tool_factory=_FakeToolFactory(_FakeModelFactory(supported=supported, info=info)),
         previous_state_dependencies={CompileAndValidateState.NAME: _compile_state()},
         messages_history=[ChatMessage(role="user", content="I am not sure.")],
     )

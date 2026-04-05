@@ -10,6 +10,8 @@ from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.route import NextDecision, Router
 from python.domain.workflows.state import State
+from python.domain.workflows.tool import Tool
+from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
     CausalInferenceNode,
@@ -41,14 +43,35 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionState,
 )
-from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_node import (
-    ValidateCleanProtocolNode,
-)
-from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import (
-    ValidateCleanProtocolState,
+from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
+    CausalModelFactoryTool,
 )
 
 log = get_logger(__name__, component="LLMAssistedRouterRouter", log_type="workflow_router")
+
+
+class _SingleToolFactory(ToolFactory):
+    def __init__(self, *, tool: Tool) -> None:
+        self._tool = tool
+
+    def get_tool_names(self) -> list[str]:
+        return [self._tool.get_tool_name()]
+
+    def get_tool_info(self, name: str) -> str:
+        if name != self._tool.get_tool_name():
+            raise KeyError(name)
+        return self._tool.get_tool_info()
+
+    def get_tools_info(self) -> dict[str, str]:
+        return {self._tool.get_tool_name(): self._tool.get_tool_info()}
+
+    def has_tool(self, name: str) -> bool:
+        return name == self._tool.get_tool_name()
+
+    def get_tool(self, name: str) -> Tool:
+        if name != self._tool.get_tool_name():
+            raise KeyError(name)
+        return self._tool
 
 
 class LLMAssistedRouterRouter(Router):
@@ -296,6 +319,11 @@ def get_node_name_with_description() -> Mapping[str, str]:
 
 
 def init_all_nodoes_with_name_as_key(llm: LLMService, data_repo: DataRepo, models_repo: ModelsRepo) -> dict[str, Node]:
+    causal_model_factory = CausalModelFactoryTool.create_default(
+        data_repo=data_repo,
+        models_repo=models_repo,
+    )
+    causal_tool_factory = _SingleToolFactory(tool=causal_model_factory)
     load_dataset_node = LoadDatasetNode(data_repo=data_repo, llm=llm)
     protocol_discussion_node = ProtocolDiscussionNode(
         llm=llm,
@@ -312,11 +340,13 @@ def init_all_nodoes_with_name_as_key(llm: LLMService, data_repo: DataRepo, model
     
     model_selection_node = ModelSelectionNode(
         llm=llm,
+        tool_factory=causal_tool_factory,
      )
     
     model_train_node = ModelTrainNode(
         llm=llm,
         data_repo=data_repo,
+        tool_factory=causal_tool_factory,
      )
     
     inference_node = CausalInferenceNode(
