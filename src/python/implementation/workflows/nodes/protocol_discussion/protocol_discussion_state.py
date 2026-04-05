@@ -7,9 +7,12 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from python.domain.models.models import ChatMessage
-from python.domain.workflows.state import State, Status
+from python.domain.workflows.state import Action, State, Status
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import (
     ProtocolDiscussionDeps,
+)
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
+    initial_user_message,
 )
 from python.implementation.workflows.tools.common.model.data_summary import (
     DatasetSummaryModel,
@@ -62,6 +65,11 @@ class ProtocolDiscussionState(State):
         if self.payload.phase == "CONFIRMED":
             return "DONE"
         return "PENDING"
+    
+    def action(self) -> Action:
+        if self.payload.phase == "DISCUSSING":
+            return "NEEDS_INPUT"
+        return "NONE"
 
     def set_status_freez(self) -> None:
         return None
@@ -83,10 +91,7 @@ class ProtocolDiscussionState(State):
         return [
             ChatMessage(
                 role="assistant",
-                content=(
-                    "Let’s work through the protocol carefully from the active dataset. "
-                    "Start with the causal question, treatment, outcome, study type, and time-zero logic."
-                ),
+                content=initial_user_message(),
             )
         ]
 

@@ -126,3 +126,26 @@ def get_questions() -> list[str]:
         "13) If Q4=No: acknowledge snapshot assumptions (Yes/No): shared baseline, T before Y, positivity, consistency, "
         "no post-treatment adjustment.",
     ]
+
+def initial_user_message() -> str:
+    return (
+        "Let’s define the protocol carefully from the current dataset. "
+        "Please state the causal question, treatment, outcome, study type, target population, "
+        "and how you want to define time zero."
+    )
+
+
+def confirmed_cleaning_system_message_preamble() -> str:
+    return (
+        "PROTOCOL_DISCUSSION_CONFIRMED\n"
+        "This is a data-changing request for the downstream data cleaning stage.\n"
+        "Clean the active dataset to match the confirmed protocol discussion.\n"
+        "Apply only grounded row filters, column handling, and normalization steps from the request below.\n"
+        "Enforce these downstream cleaning rules:\n"
+        "- Apply the grounded target-population / cohort-eligibility filters described by the confirmed protocol.\n"
+        "- Apply the grounded time-zero / baseline-definition rules before preparing the final working dataset only if user asked for.\n"
+        "- You may use auxiliary columns while applying grounded filters, but after cleaning the final working dataset **must** retain only protocol-scope columns: treatment, outcome, covariates, effect modifiers.\n"
+        "- Remove columns outside the confirmed protocol scope unless the request\n"
+        "- If treatment is binary, normalize it to exactly two canonical values and handle unexpected labels only as grounded by the confirmed protocol.\n"
+        "- If outcome is binary, normalize it to exactly two canonical values and handle unexpected labels only as grounded by the confirmed protocol."
+    )

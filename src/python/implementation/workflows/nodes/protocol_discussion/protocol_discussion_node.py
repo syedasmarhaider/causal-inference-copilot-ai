@@ -15,9 +15,11 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     ProtocolDiscussionDeps,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
+    confirmed_cleaning_system_message_preamble,
     get_protocol_discussion_get_node_info,
     get_protocol_discussion_update_prompt,
     get_questions,
+    initial_user_message,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionPayloadModel,
@@ -79,31 +81,6 @@ class ProtocolDiscussionNode(Node):
         return "\n".join(str(question).strip() for question in questions if str(question).strip())
 
     @staticmethod
-    def _initial_user_message() -> str:
-        return (
-            "Let’s define the protocol carefully from the current dataset. "
-            "Please state the causal question, treatment, outcome, study type, target population, "
-            "and how you want to define time zero."
-        )
-
-    @staticmethod
-    def _build_confirmed_cleaning_system_message(dataset_change_request: str) -> str:
-        return (
-            "PROTOCOL_DISCUSSION_CONFIRMED\n"
-            "This is a data-changing request for the downstream data cleaning stage.\n"
-            "Clean the active dataset to match the confirmed protocol discussion.\n"
-            "Apply only grounded row filters, column handling, and normalization steps from the request below.\n"
-            "Enforce these downstream cleaning rules:\n"
-            "- Apply the grounded target-population / cohort-eligibility filters described by the confirmed protocol.\n"
-            "- Apply the grounded time-zero / baseline-definition rules before preparing the final working dataset only if user asked for.\n"
-            "- You may use auxiliary columns while applying grounded filters, but after cleaning the final working dataset **must** retain only protocol-scope columns: treatment, outcome, covariates, effect modifiers.\n"
-            "- Remove columns outside the confirmed protocol scope unless the request below explicitly and groundingly says they must remain.\n"
-            "- If treatment is binary, normalize it to exactly two canonical values and handle unexpected labels only as grounded by the confirmed protocol.\n"
-            "- If outcome is binary, normalize it to exactly two canonical values and handle unexpected labels only as grounded by the confirmed protocol.\n\n"
-            f"{dataset_change_request.strip()}"
-        )
-
-    @staticmethod
     def _prefix_dataset_reset_message(
         *,
         assistant_message: str,
@@ -116,6 +93,13 @@ class ProtocolDiscussionNode(Node):
                 f"{assistant_message}"
             )
         return assistant_message
+
+    @staticmethod
+    def _build_confirmed_cleaning_system_message(dataset_change_request: str) -> str:
+        return (
+            f"{confirmed_cleaning_system_message_preamble()}\n\n"
+            f"{dataset_change_request.strip()}"
+        )
 
     def _bind_payload_to_dataset(
         self,
@@ -194,7 +178,7 @@ class ProtocolDiscussionNode(Node):
                 payload.model_copy(
                     update={
                         "assistant_message": self._prefix_dataset_reset_message(
-                            assistant_message=payload.assistant_message or self._initial_user_message(),
+                            assistant_message=payload.assistant_message or initial_user_message(),
                             dataset_changed=dataset_changed,
                             prior_dataset_id=prior_dataset_id,
                         ),
