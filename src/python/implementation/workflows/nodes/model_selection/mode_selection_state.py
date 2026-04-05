@@ -37,6 +37,7 @@ class ModelSelectionPayload(BaseModel):
     confirmed_model_selection: ConfirmedModelSelectionPayload | None = None
     assistant_message: str | None = None
     error_message: str | None = None
+    freezed: bool = False
 
     @field_validator("assistant_message", "error_message", mode="before")
     @classmethod
@@ -58,23 +59,41 @@ class ModelSelectionState(State):
         return self.NAME
 
     def status(self) -> Status:
+        if self.payload.freezed:
+            return "FREEZED"
         if self.payload.error_message is not None:
             return "ABORTED"
         cms = self.payload.confirmed_model_selection
         if cms is not None and cms.selected_model is not None:
             return "DONE"
+
         return "PENDING"
 
     def set_status_freez(self) -> None:
-        return None
+        if self.status() == "DONE":
+            self.payload.freezed = True
+        else:
+            raise ValueError(f"Can only freeze when status is DONE, current status: {self.status()!r}")
 
     def set_status_pending(self) -> None:
         if self.payload.error_message is not None:
             self.payload.error_message = None
+        if self.payload.freezed:
+            self.payload.freezed = False
 
     def messages(self) -> Sequence[ChatMessage]:
         if self.payload.assistant_message:
             return [ChatMessage(role="assistant", content=self.payload.assistant_message)]
+        if self.payload.freezed:
+            return [
+                ChatMessage(
+                    role="assistant",
+                    content=(
+                        "Model selection is freezed. You can ask read-only questions about "
+                        "the shortlisted options, the confirmed model, and the model-selection rationale."
+                    ),
+                )
+            ]
         return [
             ChatMessage(
                 role="assistant",
@@ -103,4 +122,3 @@ class ModelSelectionState(State):
     @classmethod
     def init_empty(cls) -> ModelSelectionState:
         return cls(ModelSelectionPayload())
-

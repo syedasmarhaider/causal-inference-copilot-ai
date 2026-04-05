@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from python.domain.models.errors import StateDependencyError
-from python.domain.service.llm_service import ChatMessage, LLMConfig
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMResponse
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
     CompileAndValidatePayloadModel,
@@ -29,6 +29,7 @@ from python.implementation.workflows.nodes.model_selection.model_selection_node 
 )
 from python.implementation.workflows.nodes.model_selection.model_selection_prompts import (
     get_model_selection_node_info,
+    get_model_selection_freezed_answer_prompt,
 )
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
     InferenceReadyCausalSpec,
@@ -132,7 +133,34 @@ def _compile_state(*, warnings: list[ValidationIssueModel] | None = None) -> Com
 @dataclass
 class _FakeLLM:
     json_outputs: list[object] = field(default_factory=list)
+    generate_outputs: list[object] = field(default_factory=list)
     generate_json_calls: list[dict[str, object]] = field(default_factory=list)
+    generate_calls: list[dict[str, object]] = field(default_factory=list)
+
+    def generate(
+        self,
+        *,
+        system_prompt: str | None,
+        user_prompt: str,
+        config: LLMConfig,
+        history: list[ChatMessage] | None,
+    ) -> LLMResponse:
+        self.generate_calls.append(
+            {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "config": config,
+                "history": history,
+            }
+        )
+        if not self.generate_outputs:
+            raise AssertionError("unexpected generate call")
+        next_output = self.generate_outputs.pop(0)
+        if isinstance(next_output, Exception):
+            raise next_output
+        if isinstance(next_output, LLMResponse):
+            return next_output
+        return LLMResponse(content=str(next_output))
 
     def generate_json(
         self,
@@ -213,6 +241,7 @@ def _supported_models() -> tuple[list[str], dict[str, str]]:
 
 def test_model_selection_info_and_state_roundtrip() -> None:
     assert "confirmed inference-ready causal specification" in get_model_selection_node_info().lower()
+    assert "read-only clinician questions" in get_model_selection_freezed_answer_prompt().lower()
 
     state = ModelSelectionState.init_empty()
     assert state.status() == "PENDING"
@@ -231,6 +260,11 @@ def test_model_selection_info_and_state_roundtrip() -> None:
     assert confirmed.status() == "DONE"
     restored = ModelSelectionState.from_json_dict(confirmed.to_json_dict())
     assert restored.payload.model_dump(mode="json") == confirmed.payload.model_dump(mode="json")
+
+    confirmed.set_status_freez()
+    assert confirmed.payload.freezed is True
+    assert confirmed.status() == "FREEZED"
+    assert "model selection is freezed" in confirmed.messages()[0].content.lower()
 
 
 def test_model_selection_deps_require_confirmed_compile_and_extract_warn_only() -> None:
@@ -425,3 +459,64 @@ def test_model_selection_second_run_keeps_pending_when_user_is_unclear() -> None
     assert result.status() == "PENDING"
     assert result.payload.confirmed_model_selection is None
     assert result.payload.assistant_message == "Do you want the most flexible subgroup model or the most interpretable baseline model?"
+
+
+def test_model_selection_freezed_flag_answers_read_only_questions() -> None:
+    supported, info = _supported_models()
+    llm = _FakeLLM(
+        generate_outputs=[
+            "The confirmed model favors subgroup heterogeneity over maximal interpretability."
+        ]
+    )
+    node = ModelSelectionNode(
+        llm=llm,
+        tool_factory=_FakeToolFactory(_FakeModelFactory(supported=supported, info=info)),
+    )
+    state = ModelSelectionState(
+        ModelSelectionPayload(
+            recommendations=[
+                ModelRecommendationModel(
+                    estimator_fqcn="econml.dml.CausalForestDML",
+                    display_label="Flexible Heterogeneity Model (Causal Forest Model)",
+                    best_when="Subgroup variation matters.",
+                    why="Flexible subgroup effects.",
+                    tradeoffs="Less transparent.",
+                ),
+                ModelRecommendationModel(
+                    estimator_fqcn="econml.dr.LinearDRLearner",
+                    display_label="Clinically Transparent Baseline Model (Doubly Robust Linear Model)",
+                    best_when="Interpretability matters.",
+                    why="Simple baseline estimate.",
+                    tradeoffs="Less flexible.",
+                ),
+                ModelRecommendationModel(
+                    estimator_fqcn="econml.dml.LinearDML",
+                    display_label="Adjusted Baseline Effect Model (Linear Double Machine Learning Model)",
+                    best_when="Adjusted linear estimate is acceptable.",
+                    why="Balanced choice.",
+                    tradeoffs="Less flexible than forest.",
+                ),
+            ],
+            confirmed_model_selection=ConfirmedModelSelectionPayload(
+                selected_model="econml.dml.CausalForestDML",
+                reasoning="Best fit for heterogeneity.",
+            ),
+            freezed=True,
+        )
+    )
+
+    result = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        state=state,
+        previous_state_dependencies={CompileAndValidateState.NAME: _compile_state()},
+        messages_history=[ChatMessage(role="user", content="Why was this model selected?")],
+    )
+
+    assert result.status() == "FREEZED"
+    assert result.payload.freezed is True
+    assert result.payload.assistant_message == (
+        "The confirmed model favors subgroup heterogeneity over maximal interpretability."
+    )
+    assert len(llm.generate_calls) == 1
+    assert len(llm.generate_json_calls) == 0

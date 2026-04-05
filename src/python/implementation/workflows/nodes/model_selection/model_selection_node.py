@@ -21,6 +21,7 @@ from python.implementation.workflows.nodes.model_selection.model_selection_deps 
     ModelSelectionDeps,
 )
 from python.implementation.workflows.nodes.model_selection.model_selection_prompts import (
+    get_model_selection_freezed_answer_prompt,
     MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
     MODEL_SELECTION_NEGOTIATOR_USER_PROMPT_TEMPLATE,
     MODEL_SELECTION_RECOMMENDER_SYSTEM_PROMPT,
@@ -94,6 +95,15 @@ class ModelSelectionNode(Node):
             estimators_info=self._model_factory.get_all_esimators_info(),
         )
         selection_context = _build_selection_context(deps=deps)
+        latest_user_message = _latest_user_message(messages_history)
+
+        if state.payload.freezed:
+            return self._answer_freezed_question(
+                state=state,
+                selection_context=selection_context,
+                latest_user_message=latest_user_message,
+                history=history,
+            )
 
         if not state.payload.recommendations:
             shortlist = self._llm.generate_json(
@@ -189,9 +199,67 @@ class ModelSelectionNode(Node):
             )
         )
 
+    def _answer_freezed_question(
+        self,
+        *,
+        state: ModelSelectionState,
+        selection_context: Mapping[str, Any],
+        latest_user_message: str | None,
+        history: Sequence[ChatMessage] | None,
+    ) -> ModelSelectionState:
+        if not latest_user_message:
+            return state
+
+        try:
+            assistant_message = self._llm.generate(
+                system_prompt=get_model_selection_freezed_answer_prompt(),
+                user_prompt=_dumps(
+                    {
+                        "recommendations": [
+                            recommendation.model_dump(mode="json")
+                            for recommendation in state.payload.recommendations
+                        ],
+                        "confirmed_model_selection": None
+                        if state.payload.confirmed_model_selection is None
+                        else state.payload.confirmed_model_selection.model_dump(mode="json"),
+                        "selection_context": dict(selection_context),
+                        "latest_user_message": latest_user_message,
+                    }
+                ),
+                config=LLMConfig(model="basic", temperature=0.2),
+                history=history,
+            ).content.strip()
+        except Exception:
+            assistant_message = (
+                "This model-selection state is frozen. I can answer read-only questions about "
+                "the shortlisted options and the confirmed selection, but I could not answer "
+                "that question right now."
+            )
+
+        return ModelSelectionState(
+            state.payload.model_copy(
+                update={
+                    "assistant_message": assistant_message,
+                    "error_message": None,
+                }
+            )
+        )
+
 
 def _dumps(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+
+
+def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
+    if not messages_history:
+        return None
+    for message in reversed(messages_history):
+        if message.role != "user":
+            continue
+        content = message.content.strip()
+        if content:
+            return content
+    return None
 
 
 def _build_selection_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
