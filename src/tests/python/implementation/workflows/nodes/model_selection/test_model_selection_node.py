@@ -43,7 +43,7 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import Causa
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
 )
-from python.implementation.workflows.utils.validation import ValidationIssueModel
+from python.domain.models.validation import ValidationIssueModel
 
 
 def _build_dataframe() -> pd.DataFrame:

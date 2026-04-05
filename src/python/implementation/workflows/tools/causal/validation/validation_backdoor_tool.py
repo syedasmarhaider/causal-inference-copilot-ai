@@ -25,7 +25,7 @@ from python.implementation.workflows.tools.causal.encoding.encoding_plan import 
     TransformPlan,
 )
 from python.implementation.workflows.tools.causal.encoding.encoding_util import compile_plan_to_transformers
-from python.implementation.workflows.utils.validation import ValidationIssueModel, ValidationStatus
+from python.domain.models.validation import ValidationIssueModel, ValidationStatus
 
 
 class ValidationBackdoorReport(BaseModel):

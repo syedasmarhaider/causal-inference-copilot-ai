@@ -5,7 +5,7 @@ from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from python.implementation.workflows.utils.validation import NonEmptyStr
+from python.domain.models.validation import NonEmptyStr
 from python.implementation.workflows.tools.common.model.data_summary import (
     BooleanColumnProfileModel,
     CategoricalColumnProfileModel,

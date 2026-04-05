@@ -21,7 +21,7 @@ from python.implementation.workflows.tools.common.model.data_summary import (
     DatasetSummaryModel,
 )
 from python.implementation.workflows.utils.utils import uuid_from_any
-from python.implementation.workflows.utils.validation import ValidationIssueModel
+from python.domain.models.validation import ValidationIssueModel
 
 CompileAndValidatePhase = Literal["INIT", "REVIEW_READY", "CONFIRMED", "FAILED"]
 

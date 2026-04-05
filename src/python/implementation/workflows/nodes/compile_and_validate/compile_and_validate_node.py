@@ -42,7 +42,7 @@ from python.implementation.workflows.tools.causal.validation.validation_backdoor
     ValidationBackdoorTool,
 )
 from python.implementation.workflows.utils.utils import safe_err
-from python.implementation.workflows.utils.validation import ValidationIssueModel
+from python.domain.models.validation import ValidationIssueModel
 
 log = get_logger(__name__)
 

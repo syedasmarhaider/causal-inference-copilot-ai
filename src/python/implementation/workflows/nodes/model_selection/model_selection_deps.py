@@ -11,7 +11,7 @@ from python.implementation.workflows.nodes.compile_and_validate.compile_and_vali
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
     InferenceReadyCausalSpec,
 )
-from python.implementation.workflows.utils.validation import ValidationIssueModel
+from python.domain.models.validation import ValidationIssueModel
 
 
 @dataclass(frozen=True, slots=True)
