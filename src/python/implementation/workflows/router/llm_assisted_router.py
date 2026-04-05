@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
-from string import Template
 
+from pydantic import BaseModel, ConfigDict
+
+from python.domain.repo.analytics_repo import AnalyticsRepo
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.route import NextDecision, Router
 from python.domain.workflows.state import State
-from python.domain.workflows.tool import Tool
-from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
     CausalInferenceNode,
@@ -19,14 +20,14 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_nod
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
     CausalInferenceState,
 )
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_node import (
-    CleanProtocolNode,
+from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_node import (
+    CompileAndValidateNode,
 )
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import (
-    CleanProtocolState,
+from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
+    CompileAndValidateState,
 )
-from python.implementation.workflows.nodes.load_dataset.load_dataset_node import LoadDatasetNode
-from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
+from python.implementation.workflows.nodes.dataset.dataset_node import DatasetNode
+from python.implementation.workflows.nodes.dataset.dataset_state import DatasetState
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
     ModelSelectionState,
 )
@@ -43,35 +44,22 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionState,
 )
-from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
-    CausalModelFactoryTool,
-)
+from python.implementation.workflows.tools.tools_factory import DefaultToolFactory
 
-log = get_logger(__name__, component="LLMAssistedRouterRouter", log_type="workflow_router")
+log = get_logger(__name__, component="LLMAssistedRouter", log_type="workflow_router")
 
 
-class _SingleToolFactory(ToolFactory):
-    def __init__(self, *, tool: Tool) -> None:
-        self._tool = tool
+class _RouteDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    def get_tool_names(self) -> list[str]:
-        return [self._tool.get_tool_name()]
+    state_name: str | None = None
+    router_confirmation_message_for_user: str | None = None
 
-    def get_tool_info(self, name: str) -> str:
-        if name != self._tool.get_tool_name():
-            raise KeyError(name)
-        return self._tool.get_tool_info()
 
-    def get_tools_info(self) -> dict[str, str]:
-        return {self._tool.get_tool_name(): self._tool.get_tool_info()}
-
-    def has_tool(self, name: str) -> bool:
-        return name == self._tool.get_tool_name()
-
-    def get_tool(self, name: str) -> Tool:
-        if name != self._tool.get_tool_name():
-            raise KeyError(name)
-        return self._tool
+@dataclass(frozen=True)
+class OtherStateInfo:
+    name: str
+    purpose: str
 
 
 class LLMAssistedRouterRouter(Router):
@@ -83,33 +71,35 @@ class LLMAssistedRouterRouter(Router):
         self._llm = llm
         self._next_state_names_map: Mapping[str, str | None] = init_next_state_names()
         self._node_name_to_description_map: Mapping[str, str] = get_node_name_with_description()
-        log.info(
-            "router initialized",
-            states_count=len(self._next_state_names_map),
-            described_nodes_count=len(self._node_name_to_description_map),
+        self._callable_map: Mapping[str, Sequence[OtherStateInfo]] = (
+            states_can_call_other_states_during_execution_map()
         )
-    
-    
+        self._recoverable_map: Mapping[str, Sequence[str]] = recoverable_states_map()
+
     def get_initial_state_name(self) -> str:
-        return LoadDatasetState.NAME
-    
+        return DatasetState.NAME
+
     def get_done_state_name(self) -> str:
         return NoopDoneState.NAME
-    
+
     def get_next_state_names(
         self,
         current_state_name: str,
     ) -> Sequence[str]:
         next_states: list[str] = []
+        visited: set[str] = set()
         cursor = current_state_name
         while True:
+            if cursor in visited:
+                break
+            visited.add(cursor)
             nxt = self._next_state_names_map.get(cursor)
             if nxt is None:
                 break
             next_states.append(nxt)
             cursor = nxt
         return next_states
-    
+
     def decide_next(
         self,
         *,
@@ -117,258 +107,430 @@ class LLMAssistedRouterRouter(Router):
         messages_history: Sequence[ChatMessage],
     ) -> NextDecision:
         if current_state is None:
-            log.debug("router selected initial state because current state is missing")
-            return NextDecision(state_name=LoadDatasetState.NAME, router_message_for_node=None)
+            return NextDecision(state_name=DatasetState.NAME, persist_as_active=True)
 
-        status = current_state.status
-        
-        if status == "PENDING":
-            log.debug("router kept current state because status is pending", state_name=current_state.name)
-            return NextDecision(state_name=current_state.name, router_message_for_node=None)
-        
-        if status == "DONE":
-            if current_state.name == NoopDoneState.NAME:
-                log.debug("router kept done state because terminal node reached")
-                return NextDecision(state_name=NoopDoneState.NAME, router_message_for_node=None)  
-            next_name = self._next_state_names_map.get(current_state.name)
+        current_name = current_state.name()
+        status = current_state.status()
+        recent_messages = _last_two_messages(messages_history)
+
+        if status in ("DONE", "FREEZED"):
+            next_name = self._deterministic_done_next_state(
+                current_state_name=current_name,
+                recent_messages=recent_messages,
+            )
             if next_name is None:
-                log.error(
-                    "router has no next state mapping for done state",
-                    state_name=current_state.name,
-                )
-                raise ValueError(f"Router has no next state defined for current state {current_state.name!r} with DONE status.")
-            log.info(
-                "router advanced from done state to next state",
-                current_state_name=current_state.name,
-                next_state_name=next_name,
+                return NextDecision(state_name=current_name, persist_as_active=True)
+            return NextDecision(state_name=next_name, persist_as_active=True)
+
+        if status == "PENDING":
+            return self._decide_pending(
+                current_state_name=current_name,
+                recent_messages=recent_messages,
             )
-            return NextDecision(
-                    state_name=next_name,
-                    router_message_for_node=None,
-            )
-            
-            
+
         if status == "ABORTED":
-            log.info("router entered aborted recovery flow", state_name=current_state.name)
-            return self._decision_on_aborted_state(
+            return self._decide_aborted(
                 current_state=current_state,
-                messages_history=messages_history,
+                recent_messages=recent_messages,
             )
-            
-        log.error(
-            "router received unexpected state status",
-            state_name=current_state.name,
-            status=status,
+
+        raise ValueError(f"Unexpected state status {status!r} for {current_name!r}")
+
+    def _deterministic_done_next_state(
+        self,
+        *,
+        current_state_name: str,
+        recent_messages: Sequence[ChatMessage],
+    ) -> str | None:
+        _ = recent_messages
+        if current_state_name == CausalInferenceNode.NAME:
+            return CausalInferenceNode.NAME
+
+        return self._next_state_names_map.get(current_state_name)
+
+    def _decide_pending(
+        self,
+        *,
+        current_state_name: str,
+        recent_messages: Sequence[ChatMessage],
+    ) -> NextDecision:
+        candidates = _pending_candidates(current_state_name=current_state_name, callable_map=self._callable_map)
+        decision = self._llm.generate_json(
+            schema=_RouteDecision,
+            system_prompt=_pending_router_system_prompt(),
+            user_prompt=_pending_router_user_prompt(
+                current_state_name=current_state_name,
+                candidates=candidates,
+                recent_messages=recent_messages,
+                node_descriptions=self._node_name_to_description_map,
+                callable_map=self._callable_map,
+            ),
+            config=LLMConfig(model="mini", temperature=0.1),
+            history=list(recent_messages) or None,
+            max_attempts=2,
         )
-        raise ValueError(f"Router: unexpected status={status!r} for state={current_state.name!r}")
-    
-    def _decision_on_aborted_state(
+
+        if decision.state_name is None:
+            return NextDecision(
+                state_name=None,
+                persist_as_active=None,
+                router_confirmation_message_for_user=decision.router_confirmation_message_for_user
+                or "Please clarify which stage you want: stay here or switch to a related stage.",
+            )
+
+        if decision.state_name not in candidates:
+            return NextDecision(
+                state_name=None,
+                persist_as_active=None,
+                router_confirmation_message_for_user=(
+                    "I could not map that request to an allowed stage from the current state. "
+                    "Please clarify the intended stage."
+                ),
+            )
+
+        return NextDecision(
+            state_name=decision.state_name,
+            persist_as_active=_persist_for_pending_transition(
+                current_state_name=current_state_name,
+                selected_state_name=decision.state_name,
+            ),
+        )
+
+    def _decide_aborted(
         self,
         *,
         current_state: State,
-        messages_history: Sequence[ChatMessage] | None,
+        recent_messages: Sequence[ChatMessage],
     ) -> NextDecision:
-        last_10_messages: list[ChatMessage] = list(messages_history[-10:]) if messages_history else []
-        
-        prev_map: dict[str, str] = {
-            nxt: cur for cur, nxt in self._next_state_names_map.items() if nxt is not None
-        }
+        current_state_name = current_state.name()
+        candidates = list(self._recoverable_map.get(current_state_name, (current_state_name,)))
 
-        allowed_prev: set[str] = set()
-        cursor = current_state.name
-        while cursor in prev_map:
-            cursor = prev_map[cursor]
-            allowed_prev.add(cursor)
-
-        if not allowed_prev:
-            allowed_prev = {current_state.name}
-            
-        prompt = _node_prompt_for_router()
-        prompt_filled = prompt.substitute(
-            current_node_name=current_state.name,
-            current_node_error=current_state.error or "null",
-            next_state_names_map=json.dumps(dict(self._next_state_names_map), ensure_ascii=False),
-            node_name_to_description_map=json.dumps(dict(self._node_name_to_description_map), ensure_ascii=False),
-            allowed_previous_states=json.dumps(sorted(allowed_prev), ensure_ascii=False),
-        )
+        state_error = current_state.error()
+        current_error = state_error.error if state_error is not None else None
+        current_system_message = _latest_system_message(current_state.messages())
 
         decision = self._llm.generate_json(
-            config=LLMConfig(model="basic", temperature=0.3),
-            system_prompt="Decide fallback state (must be previous). Output STRICT JSON matching schema.",
-            user_prompt=prompt_filled,
-            history=last_10_messages,
-            schema=NextDecision,
-            max_attempts=3,
+            schema=_RouteDecision,
+            system_prompt=_aborted_router_system_prompt(),
+            user_prompt=_aborted_router_user_prompt(
+                current_state_name=current_state_name,
+                current_error=current_error,
+                current_system_message=current_system_message,
+                candidates=candidates,
+                recent_messages=recent_messages,
+                node_descriptions=self._node_name_to_description_map,
+            ),
+            config=LLMConfig(model="basic", temperature=0.1),
+            history=list(recent_messages) or None,
+            max_attempts=2,
         )
 
-        chosen = decision.state_name
-
-        # ---- validation: must not be None ----
-        if not chosen:
-            log.error(
-                "router llm returned empty state selection",
-                current_state_name=current_state.name,
-            )
-            raise ValueError(f"LLM failed to select a state for aborted '{current_state.name}'. Got empty/null response.\n\nLLM message:\n{decision.router_message_for_node or ''}"
+        if decision.state_name is None:
+            return NextDecision(
+                state_name=None,
+                persist_as_active=None,
+                router_confirmation_message_for_user=decision.router_confirmation_message_for_user
+                or "Please confirm which stage you want to recover from.",
             )
 
-        # ---- validation: membership ----
-        if chosen not in self._node_name_to_description_map or chosen not in self._next_state_names_map:
-            log.error(
-                "router llm returned invalid state selection",
-                current_state_name=current_state.name,
-                selected_state_name=chosen,
-            )
-            raise ValueError(f"LLM selected invalid state '{chosen}' for aborted '{current_state.name}'. It must be a key in next_state_names_map and node_name_to_description_map.\n\nLLM message:\n{decision.router_message_for_node or ''}"
-            )
-
-        # ---- validation: previous constraint ----
-        if chosen not in allowed_prev:
-            log.error(
-                "router llm selected non-previous state",
-                current_state_name=current_state.name,
-                selected_state_name=chosen,
-                allowed_previous_states=sorted(allowed_prev),
-            )
-            raise ValueError(f"LLM selected state '{chosen}' which is not a previous state of '{current_state.name}' for recovery. Allowed previous states are: {sorted(allowed_prev)}.\n\nLLM message:\n{decision.router_message_for_node or ''}"
+        if decision.state_name not in candidates:
+            return NextDecision(
+                state_name=None,
+                persist_as_active=None,
+                router_confirmation_message_for_user=(
+                    "I could not select a valid recoverable stage. Please clarify where to recover."
+                ),
             )
 
-        next_states =  self.get_next_state_names(chosen)      
-        decision.delete_next_states_names = next_states if next_states else None  
-        log.info(
-            "router selected fallback state for aborted recovery",
-            current_state_name=current_state.name,
-            selected_state_name=chosen,
-            delete_states_count=len(next_states),
-        )
-        return decision
+        return NextDecision(state_name=decision.state_name, persist_as_active=True)
 
 
+def _pending_candidates(
+    *,
+    current_state_name: str,
+    callable_map: Mapping[str, Sequence[OtherStateInfo]],
+) -> list[str]:
+    candidates: list[str] = [current_state_name]
+    for other in callable_map.get(current_state_name, ()):
+        if other.name not in candidates:
+            candidates.append(other.name)
+    return candidates
 
 
+def _persist_for_pending_transition(
+    *,
+    current_state_name: str,
+    selected_state_name: str,
+) -> bool:
+    if selected_state_name == current_state_name:
+        return True
 
-        
+    if {current_state_name, selected_state_name} == {DatasetState.NAME, ProtocolDiscussionState.NAME}:
+        return True
 
-def _node_prompt_for_router() -> Template:
-    return Template(
-        """
-You are an LLM-assisted workflow router.
+    if (
+        selected_state_name == DatasetState.NAME
+        and current_state_name
+        in {
+            CompileAndValidateState.NAME,
+            ModelSelectionState.NAME,
+            ModelTrainState.NAME,
+            CausalInferenceState.NAME,
+        }
+    ):
+        return False
 
-Goal
-- The current node is ABORTED. Choose the next node to run to best recover.
+    return True
 
-Inputs (some may be null)
-- current_node_name: $current_node_name
-- current_node_error: $current_node_error
-- next_state_names_map: $next_state_names_map
-- node_name_to_description_map: $node_name_to_description_map
-- allowed_previous_states: $allowed_previous_states
 
-Hard Rules
-1) You MUST select exactly ONE state_name from allowed_previous_states.
-2) The selected state_name MUST be a key in node_name_to_description_map.
-3) Prefer the closest previous state that can fix the error with minimal rollback and those states which requires user input.
-4) Focus on last messages in error so that you can understand which state to return to best fix the error.
-5) Always try to solve error with directing to some node without distrubing user about techincal messages.
+def _last_two_messages(messages_history: Sequence[ChatMessage] | None) -> list[ChatMessage]:
+    if not messages_history:
+        return []
+    return list(messages_history[-2:])
 
-Output (STRICT JSON ONLY; no extra text)
-{
-  "state_name": "<one state name from allowed_previous_states>",
-  "router_message_for_node": "<detailed message for the selected node>"
-}
-""".strip()
+
+def _latest_system_message(messages: Sequence[ChatMessage]) -> str | None:
+    for message in reversed(messages):
+        if message.role == "system" and message.content.strip():
+            return message.content.strip()
+    return None
+
+
+def _pending_router_system_prompt() -> str:
+    return (
+        "You are a strict workflow router. Choose exactly one allowed state from candidates. "
+        "The current state is PENDING, so forward progression is not allowed. "
+        "If one of the recent messages is a system message, prioritize it strongly over older context. "
+        "If unclear, return state_name=null with a short confirmation question."
     )
+
+
+def _aborted_router_system_prompt() -> str:
+    return (
+        "You are a strict workflow recovery router. The current state is ABORTED. "
+        "Choose one recoverable state from the provided candidates. "
+        "If one of the recent messages is a system message, prioritize it strongly over older context. "
+        "If unclear, return state_name=null with a short confirmation question."
+    )
+
+
+def _pending_router_user_prompt(
+    *,
+    current_state_name: str,
+    candidates: Sequence[str],
+    recent_messages: Sequence[ChatMessage],
+    node_descriptions: Mapping[str, str],
+    callable_map: Mapping[str, Sequence[OtherStateInfo]],
+) -> str:
+    candidate_context: list[dict[str, str]] = []
+    purpose_by_name = {
+        item.name: item.purpose
+        for item in callable_map.get(current_state_name, ())
+    }
+    for name in candidates:
+        candidate_context.append(
+            {
+                "state_name": name,
+                "node_info": node_descriptions.get(name, ""),
+                "callable_purpose": purpose_by_name.get(name, ""),
+            }
+        )
+
+    payload = {
+        "current_state": current_state_name,
+        "recent_messages": [
+            {"role": m.role, "content": m.content}
+            for m in recent_messages
+        ],
+        "prioritize_system_instruction": any(m.role == "system" for m in recent_messages),
+        "allowed_candidates": candidate_context,
+        "output_schema": {
+            "state_name": "<candidate state name or null>",
+            "router_confirmation_message_for_user": "<short question if state_name is null>",
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _aborted_router_user_prompt(
+    *,
+    current_state_name: str,
+    current_error: str | None,
+    current_system_message: str | None,
+    candidates: Sequence[str],
+    recent_messages: Sequence[ChatMessage],
+    node_descriptions: Mapping[str, str],
+) -> str:
+    payload = {
+        "current_state": current_state_name,
+        "current_error": current_error,
+        "current_system_message": current_system_message,
+        "recoverable_candidates": [
+            {
+                "state_name": name,
+                "node_info": node_descriptions.get(name, ""),
+            }
+            for name in candidates
+        ],
+        "recent_messages": [
+            {"role": m.role, "content": m.content}
+            for m in recent_messages
+        ],
+        "prioritize_system_instruction": any(m.role == "system" for m in recent_messages),
+        "output_schema": {
+            "state_name": "<recoverable state name or null>",
+            "router_confirmation_message_for_user": "<short question if state_name is null>",
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def init_next_state_names() -> Mapping[str, str | None]:
+    return {
+        ProtocolDiscussionState.NAME: DatasetState.NAME,
+        DatasetState.NAME: CompileAndValidateNode.NAME,
+        CompileAndValidateState.NAME: ModelSelectionState.NAME,
+        ModelSelectionState.NAME: ModelTrainState.NAME,
+        ModelTrainState.NAME: CausalInferenceState.NAME,
+        CausalInferenceState.NAME: NoopDoneState.NAME,
+    }
+
+
+def states_can_call_other_states_during_execution_map() -> Mapping[str, Sequence[OtherStateInfo]]:
+    return {
+        DatasetState.NAME: (
+            OtherStateInfo(
+                name=ProtocolDiscussionState.NAME,
+                purpose="Move to protocol discussion when user is working on causal protocol definition.",
+            ),
+        ),
+        ProtocolDiscussionState.NAME: (
+            OtherStateInfo(
+                name=DatasetState.NAME,
+                purpose="Switch to dataset cleaning/inspection during protocol discussion.",
+            ),
+        ),
+        CompileAndValidateState.NAME: (
+            OtherStateInfo(
+                name=DatasetState.NAME,
+                purpose="Answer questions related to data, data characteristics, and insights.",
+            ),
+        ),
+        ModelSelectionState.NAME: (
+            OtherStateInfo(
+                name=DatasetState.NAME,
+                purpose="Answer questions related to data, data characteristics, and insights.",
+            ),
+            OtherStateInfo(
+                name=CompileAndValidateState.NAME,
+                purpose="Answer questions related to the compiled causal, questions about validation.",
+            ),
+        ),
+        CausalInferenceState.NAME: (
+            OtherStateInfo(
+                name=DatasetState.NAME,
+                purpose="Route raw data-graph or raw data-analysis requests back to dataset node.",
+            ),
+            OtherStateInfo(
+                name=CompileAndValidateState.NAME,
+                purpose="Answer questions related to the compiled causal, questions about validation.",
+            ),
+            OtherStateInfo(
+                name=ModelSelectionNode.NAME,
+                purpose="Answer questions related to model selection and selection rationale.",
+            ),
+        ),
+        NoopDoneState.NAME: (),
+    }
+
+
+def recoverable_states_map() -> Mapping[str, Sequence[str]]:
+    return {
+        DatasetState.NAME: (DatasetState.NAME,),
+        ProtocolDiscussionState.NAME: (ProtocolDiscussionState.NAME, DatasetState.NAME),
+        CompileAndValidateState.NAME: (
+            DatasetState.NAME,
+            ProtocolDiscussionState.NAME,
+        ),
+        ModelSelectionState.NAME: (
+            ProtocolDiscussionState.NAME,
+            CompileAndValidateState.NAME,
+        ),
+        ModelTrainState.NAME: (
+            ProtocolDiscussionState.NAME,
+            ModelSelectionState.NAME,
+        ),
+        CausalInferenceState.NAME: (
+            ModelSelectionState.NAME,
+            ProtocolDiscussionState.NAME,
+        ),
+        NoopDoneState.NAME: (NoopDoneState.NAME,),
+    }
+
+
+def get_node_name_with_description() -> Mapping[str, str]:
+    return {
+        DatasetNode.NAME: DatasetNode.get_info(),
+        ProtocolDiscussionNode.NAME: ProtocolDiscussionNode.get_info(),
+        CompileAndValidateNode.NAME: CompileAndValidateNode.get_info(),
+        ModelSelectionNode.NAME: ModelSelectionNode.get_info(),
+        ModelTrainNode.NAME: ModelTrainNode.get_info(),
+        CausalInferenceNode.NAME: CausalInferenceNode.get_info(),
+        NoopDoneNode.NAME: NoopDoneNode.get_info(),
+    }
 
 
 def build_state_classes_by_name() -> Mapping[str, type[State]]:
     return {
-        LoadDatasetState.NAME: LoadDatasetState,
+        DatasetState.NAME: DatasetState,
         ProtocolDiscussionState.NAME: ProtocolDiscussionState,
-        CleanProtocolState.NAME: CleanProtocolState,
-        ValidateCleanProtocolState.NAME: ValidateCleanProtocolState,
+        CompileAndValidateState.NAME: CompileAndValidateState,
         ModelSelectionState.NAME: ModelSelectionState,
         ModelTrainState.NAME: ModelTrainState,
         CausalInferenceState.NAME: CausalInferenceState,
         NoopDoneState.NAME: NoopDoneState,
     }
-        
-
-def init_next_state_names() -> Mapping[str, str | None]:
-    return {
-        LoadDatasetState.NAME: ProtocolDiscussionState.NAME,
-        ProtocolDiscussionState.NAME: CleanProtocolState.NAME,
-        CleanProtocolState.NAME: ValidateCleanProtocolState.NAME,
-        ValidateCleanProtocolState.NAME: ModelSelectionState.NAME,
-        ModelSelectionState.NAME: ModelTrainState.NAME,
-        ModelTrainState.NAME: CausalInferenceState.NAME,
-        CausalInferenceState.NAME: NoopDoneState.NAME,
-        NoopDoneState.NAME: None,
-    }
-
-def get_node_name_with_description() -> Mapping[str, str]:
-    return{
-        LoadDatasetNode.NAME: LoadDatasetNode.get_info(),
-        ProtocolDiscussionNode.NAME: ProtocolDiscussionNode.get_info(),
-        CleanProtocolNode.NAME: CleanProtocolNode.get_info(),
-        ValidateCleanProtocolNode.NAME: ValidateCleanProtocolNode.get_info(),
-        ModelSelectionState.NAME: ModelSelectionNode.get_info(),
-        ModelTrainState.NAME: ModelTrainNode.get_info(),
-        CausalInferenceState.NAME: CausalInferenceNode.get_info(),
-        NoopDoneState.NAME: NoopDoneNode.get_info(),
-    }
 
 
-def init_all_nodoes_with_name_as_key(llm: LLMService, data_repo: DataRepo, models_repo: ModelsRepo) -> dict[str, Node]:
-    causal_model_factory = CausalModelFactoryTool.create_default(
+def init_all_nodoes_with_name_as_key(
+    llm: LLMService,
+    data_repo: DataRepo,
+    models_repo: ModelsRepo,
+    analytics_repo: AnalyticsRepo,
+) -> dict[str, Node]:
+    tool_factory = DefaultToolFactory(
         data_repo=data_repo,
         models_repo=models_repo,
+        analytics_repo=analytics_repo,
+        llm_service=llm,
     )
-    causal_tool_factory = _SingleToolFactory(tool=causal_model_factory)
-    load_dataset_node = LoadDatasetNode(data_repo=data_repo, llm=llm)
-    protocol_discussion_node = ProtocolDiscussionNode(
+
+    dataset_node = DatasetNode(data_repo=data_repo, llm=llm, tools_factory=tool_factory)
+    protocol_discussion_node = ProtocolDiscussionNode(llm=llm)
+    compile_and_validate_node = CompileAndValidateNode(
         llm=llm,
-     )
-    clean_protocol_node = CleanProtocolNode(
-         data_repo=data_repo,
-        llm=llm,
-     )
-     
-    validate_cleaned_protocol_node = ValidateCleanProtocolNode(
         data_repo=data_repo,
-        llm=llm,
-        )
-    
-    model_selection_node = ModelSelectionNode(
-        llm=llm,
-        tool_factory=causal_tool_factory,
-     )
-    
+        tool_factory=tool_factory,
+    )
+    model_selection_node = ModelSelectionNode(llm=llm, tool_factory=tool_factory)
     model_train_node = ModelTrainNode(
         llm=llm,
         data_repo=data_repo,
-        tool_factory=causal_tool_factory,
-     )
-    
-    inference_node = CausalInferenceNode(
+        tool_factory=tool_factory,
+    )
+    causal_inference_node = CausalInferenceNode(
         llm=llm,
         data_repo=data_repo,
-     )
-    
-    
-   
+        tool_factory=tool_factory,
+    )
     done_node = NoopDoneNode()
-    
+
     return {
-        load_dataset_node.name: load_dataset_node,
+        dataset_node.name: dataset_node,
         protocol_discussion_node.name: protocol_discussion_node,
-        clean_protocol_node.name: clean_protocol_node,
-        validate_cleaned_protocol_node.name: validate_cleaned_protocol_node,
+        compile_and_validate_node.name: compile_and_validate_node,
         model_selection_node.name: model_selection_node,
         model_train_node.name: model_train_node,
-        inference_node.name: inference_node,
+        causal_inference_node.name: causal_inference_node,
         done_node.name: done_node,
     }
-    
-        
-     
-    
