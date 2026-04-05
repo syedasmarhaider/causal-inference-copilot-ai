@@ -2,64 +2,77 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TypeVar
 from uuid import UUID
 
 from python.domain.models.errors import StateDependencyError
 from python.domain.workflows.state import State
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import (
-    CleanProtocolState,
+from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
+    CompileAndValidateState,
 )
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
     ModelSelectionState,
 )
-from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
-from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
-
-T = TypeVar("T", bound=State)
+from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
+    InferenceReadyCausalSpec,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class ModelTrainDeps:
-    causal_specs: CausalSpec
-    dataset_summary: DatasetSummaryModel
     dataset_id: UUID
-
+    inference_ready_spec: InferenceReadyCausalSpec
     selected_model: str
 
     @classmethod
     def pre_required_states_names(cls) -> Sequence[str]:
-        return (
-            CleanProtocolState.NAME,
-            ModelSelectionState.NAME,
-        )
+        return [CompileAndValidateState.NAME, ModelSelectionState.NAME]
 
     @classmethod
     def from_loaded(cls, loaded: Mapping[str, State]) -> ModelTrainDeps:
-        def _get(name: str, expected_type: type[T]) -> T:
-            st = loaded.get(name)
-            if st is None:
-                raise StateDependencyError(f"ModelTrainDeps: missing {name}", to_state="ModelTrainDeps", missing_dependencies=[
-                    name,
-                ])
-            if not isinstance(st, expected_type):
-                raise StateDependencyError(f"ModelTrainDeps: invalid {name} (expected {expected_type.__name__}, got {type(st).__name__})", to_state="ModelTrainDeps", missing_dependencies=[name])
-            return st
-        cl = _get(CleanProtocolState.NAME, CleanProtocolState)
-        ms = _get(ModelSelectionState.NAME, ModelSelectionState)
-        
-        if cl.payload.summary is None:
-            raise StateDependencyError(f"ModelTrainDeps: {CleanProtocolState.NAME} is not DONE yet (missing clean dataset summary)", to_state="ModelTrainDeps", missing_dependencies=[CleanProtocolState.NAME])
-        if cl.payload.compiled_causal_spec is None:
-            raise StateDependencyError(f"ModelTrainDeps: {CleanProtocolState.NAME} is not DONE yet (missing compiled causal spec)", to_state="ModelTrainDeps", missing_dependencies=[CleanProtocolState.NAME])
-        if ms.payload.confirmed_model_selection is None or ms.payload.confirmed_model_selection.selected_model is None:
-            raise StateDependencyError(f"ModelTrainDeps: {ModelSelectionState.NAME} is not DONE yet (missing confirmed model selection)", to_state="ModelTrainDeps", missing_dependencies=[ModelSelectionState.NAME])
-        if cl.payload.clean_dataset_id is None:
-            raise StateDependencyError(f"ModelTrainDeps: {CleanProtocolState.NAME} is not DONE yet (missing dataset id)", to_state="ModelTrainDeps", missing_dependencies=[CleanProtocolState.NAME])
-        
+        compile_state = loaded.get(CompileAndValidateState.NAME)
+        if compile_state is None or not isinstance(compile_state, CompileAndValidateState):
+            raise StateDependencyError(
+                "MODEL_TRAIN",
+                "MODEL_TRAIN",
+                [CompileAndValidateState.NAME],
+            )
+
+        if compile_state.payload.phase != "CONFIRMED":
+            raise StateDependencyError(
+                "MODEL_TRAIN",
+                "MODEL_TRAIN",
+                [CompileAndValidateState.NAME],
+            )
+
+        inference_ready = compile_state.payload.inference_ready_causal_spec
+        dataset_id = compile_state.payload.dataset_id
+        if inference_ready is None or dataset_id is None:
+            raise StateDependencyError(
+                "MODEL_TRAIN",
+                "MODEL_TRAIN",
+                [CompileAndValidateState.NAME],
+            )
+
+        model_selection_state = loaded.get(ModelSelectionState.NAME)
+        if model_selection_state is None or not isinstance(
+            model_selection_state, ModelSelectionState
+        ):
+            raise StateDependencyError(
+                "MODEL_TRAIN",
+                "MODEL_TRAIN",
+                [ModelSelectionState.NAME],
+            )
+
+        selected = model_selection_state.payload.confirmed_model_selection
+        if selected is None or selected.selected_model is None:
+            raise StateDependencyError(
+                "MODEL_TRAIN",
+                "MODEL_TRAIN",
+                [ModelSelectionState.NAME],
+            )
+
         return cls(
-            causal_specs=cl.payload.compiled_causal_spec,
-            dataset_summary=cl.payload.summary,
-            dataset_id=cl.payload.clean_dataset_id,
-            selected_model=ms.payload.confirmed_model_selection.selected_model,
+            dataset_id=dataset_id,
+            inference_ready_spec=inference_ready,
+            selected_model=selected.selected_model,
         )

@@ -1,149 +1,97 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import Any
+from uuid import UUID, uuid4
 
-from pydantic import BaseModel
+import pandas as pd
+import pytest
 
-from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMResponse
+from python.domain.models.errors import StateDependencyError
+from python.domain.repo.data_repo import DataRepo
+from python.domain.service.llm_service import ChatMessage
+from python.domain.workflows.tool_factory import ToolFactory
+from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
+    CompileAndValidatePayloadModel,
+    CompileAndValidateState,
+)
+from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
+    ConfirmedModelSelectionPayload,
+    ModelSelectionPayload,
+    ModelSelectionState,
+)
+from python.implementation.workflows.nodes.model_train.model_train_deps import (
+    ModelTrainDeps,
+)
 from python.implementation.workflows.nodes.model_train.model_train_node import (
-    UserPlanInput,
-    _generate_encoding_plan,
-    _validate_plan_against_constraints,
+    ModelTrainNode,
+)
+from python.implementation.workflows.nodes.model_train.model_train_prompts import (
+    get_model_train_node_info,
+)
+from python.implementation.workflows.nodes.model_train.model_train_state import (
+    ModelTrainPayloadModel,
+    ModelTrainState,
+)
+from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
+    InferenceReadyCausalSpec,
+)
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
+    TransformPlan,
+)
+from python.implementation.workflows.tools.causal.inference.causal_command import (
+    CommandFailure,
+    ErrorInfo,
+    FitCommand,
+    FitSuccess,
+)
+from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
+    CausalModelFactoryTool,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
-from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.common.model.data_summary import (
-    DatasetSummaryModel,
-    NumericColumnProfileModel,
-    NumericSummaryModel,
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
+    DatasetProfilingTool,
 )
 
-T = TypeVar("T", bound=BaseModel)
 
-
-@dataclass
-class _GeneratePlanLLMStub:
-    plan_response: TransformPlan
-    triage_calls: int = 0
-    plan_calls: int = 0
-    plan_prompts: list[str] = field(default_factory=list)
-
-    def generate(
-        self,
-        *,
-        system_prompt: str | None,
-        user_prompt: str,
-        config: LLMConfig,
-        history: list[ChatMessage] | None,
-    ) -> LLMResponse:
-        raise AssertionError("generate() should not be called in this test")
-
-    def generate_json(
-        self,
-        *,
-        schema: type[T],
-        system_prompt: str | None,
-        user_prompt: str,
-        config: LLMConfig,
-        history: list[ChatMessage] | None,
-        max_attempts: int = 3,
-    ) -> T:
-        if schema is UserPlanInput:
-            self.triage_calls += 1
-            return UserPlanInput(
-                needs_user_input=False,
-                message="I have enough information to proceed with planning.",
-            )  # type: ignore[return-value]
-
-        if schema is TransformPlan:
-            self.plan_calls += 1
-            self.plan_prompts.append(user_prompt)
-            return self.plan_response  # type: ignore[return-value]
-
-        raise AssertionError(f"Unexpected schema requested: {schema}")
-
-
-def _build_numeric_summary(*column_names: str) -> DatasetSummaryModel:
-    return DatasetSummaryModel(
-        n_rows=5,
-        profiles=[
-            NumericColumnProfileModel(
-                name=column_name,
-                dtype="float64",
-                n_rows=5,
-                n_missing=1,
-                missing_rate=0.2,
-                distinct_count=4,
-                inferred_kind="NUMERIC",
-                summary=NumericSummaryModel(min=1.0, max=5.0),
-            )
-            for column_name in column_names
-        ],
+def _build_dataframe() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "treatment": ["drug", "control", "drug", "control"],
+            "outcome": [1.2, 0.4, 1.0, 0.6],
+            "age": [61, 55, 70, 49],
+            "sex": ["F", "M", "F", "M"],
+        }
     )
 
 
-def _build_causal_spec() -> CausalSpec:
-    return CausalSpec.model_validate(
+def _build_inference_ready_spec() -> InferenceReadyCausalSpec:
+    df = _build_dataframe()
+    summary = DatasetProfilingTool().extract_dataset_summary(
+        df,
+        max_categories=10,
+        sample_distinct=10,
+        compute_quantiles=False,
+        strict=True,
+    )
+    causal_spec = CausalSpec.model_validate(
         {
             "treatment_spec": {
                 "kind": "binary",
                 "column": "treatment",
-                "treated": "1",
-                "control": "0",
+                "treated": "drug",
+                "control": "control",
             },
             "outcome_spec": {
                 "kind": "continuous",
                 "column": "outcome",
-                "unit": "days",
+                "unit": "score",
             },
-            "covariates": ["age", "sex_code"],
-            "effect_modifiers": [],
+            "covariates": ["age"],
+            "effect_modifiers": ["sex"],
             "experiment_type": "OBSERVATIONAL",
         }
     )
-
-
-def test_validate_plan_rejects_incompatible_numeric_preset() -> None:
-    plan = TransformPlan.model_validate(
-        {
-            "columns": [
-                {
-                    "column": "age",
-                    "role": "covariate",
-                    "encoding": {"preset": "cat_onehot"},
-                }
-            ]
-        }
-    )
-    summary = _build_numeric_summary("age")
-
-    issues = _validate_plan_against_constraints(
-        plan=plan,
-        dataset_summary=summary,
-        eligible_cols={"age"},
-        expected_covariate_cols={"age"},
-        expected_effect_modifier_cols=set(),
-        treatment_col="treatment",
-        outcome_col="outcome",
-    )
-
-    incompatibility_issue = next(
-        issue for issue in issues if issue.message == "Encoding plan has column type and preset incompatibilities."
-    )
-    assert incompatibility_issue.severity == "FAIL"
-    assert incompatibility_issue.evidence == {
-        "incompatibilities": [
-            {
-                "column": "age",
-                "inferred_kind": "NUMERIC",
-                "preset": "cat_onehot",
-            }
-        ]
-    }
-
-
-def test_validate_plan_accepts_compatible_numeric_preset() -> None:
     plan = TransformPlan.model_validate(
         {
             "columns": [
@@ -151,71 +99,373 @@ def test_validate_plan_accepts_compatible_numeric_preset() -> None:
                     "column": "age",
                     "role": "covariate",
                     "encoding": {"preset": "num_standard"},
-                }
+                },
+                {
+                    "column": "sex",
+                    "role": "effect_modifier",
+                    "encoding": {
+                        "preset": "map_binary",
+                        "mapping": {"F": 0.0, "M": 1.0},
+                        "allow_unknown": False,
+                        "missing": "error",
+                    },
+                },
             ]
         }
     )
-    summary = _build_numeric_summary("age")
-
-    issues = _validate_plan_against_constraints(
-        plan=plan,
-        dataset_summary=summary,
-        eligible_cols={"age"},
-        expected_covariate_cols={"age"},
-        expected_effect_modifier_cols=set(),
-        treatment_col="treatment",
-        outcome_col="outcome",
+    return InferenceReadyCausalSpec(
+        causal_spec=causal_spec,
+        transformation_plan=plan,
+        data_summary=summary,
     )
 
-    assert issues == []
 
-
-def test_user_plan_input_accepts_legacy_user_message_key() -> None:
-    payload = UserPlanInput.model_validate(
-        {
-            "needs_user_input": True,
-            "user_message": "Need clarification for encoding choices.",
-        }
-    )
-
-    assert payload.needs_user_input is True
-    assert payload.message == "Need clarification for encoding choices."
-
-
-def test_generate_encoding_plan_requests_user_input_after_repeated_invalid_plan_attempts() -> None:
-    llm = _GeneratePlanLLMStub(
-        plan_response=TransformPlan.model_validate(
-            {
-                "columns": [
-                    {
-                        "column": "age",
-                        "role": "covariate",
-                        "encoding": {"preset": "num_standard"},
-                    },
-                    {
-                        "column": "sex_code",
-                        "role": "covariate",
-                        "encoding": {"preset": "cat_onehot"},
-                    },
-                ]
-            }
+def _compile_state(*, dataset_id: UUID | None = None) -> CompileAndValidateState:
+    spec = _build_inference_ready_spec()
+    return CompileAndValidateState(
+        CompileAndValidatePayloadModel(
+            dataset_id=dataset_id or uuid4(),
+            dataset_summary=spec.data_summary,
+            protocol_discussion="Confirmed protocol discussion",
+            compiled_causal_spec=spec.causal_spec,
+            transformation_plan=spec.transformation_plan,
+            inference_ready_causal_spec=spec,
+            phase="CONFIRMED",
+            assistant_message="Confirmed compile review",
         )
     )
 
-    discussion, plan = _generate_encoding_plan(
-        llm=llm,
-        causal_specs=_build_causal_spec(),
-        selected_model="econml.dml.LinearDML",
-        dataset_summary=_build_numeric_summary("age", "sex_code"),
-        prev_training_error=None,
-        documentation="fit docs",
-        history=None,
+
+def _selection_state(*, model_name: str = "econml.dml.LinearDML") -> ModelSelectionState:
+    return ModelSelectionState(
+        ModelSelectionPayload(
+            confirmed_model_selection=ConfirmedModelSelectionPayload(
+                selected_model=model_name,
+                reasoning="Best fit for the current protocol.",
+            ),
+            assistant_message="Confirmed model.",
+        )
     )
 
-    assert plan is None
-    assert discussion.needs_user_input is True
-    assert "column types" in discussion.message.lower()
-    assert llm.triage_calls == 2
-    assert llm.plan_calls == 2
-    assert len(llm.plan_prompts) == 2
-    assert "following issues" in llm.plan_prompts[1]
+
+@dataclass
+class _FakeDataRepo(DataRepo):
+    dataframe: pd.DataFrame
+    loaded_dataset_ids: list[UUID] = field(default_factory=list)
+
+    def get_csv_data(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+        limit: int | None = None,
+    ) -> pd.DataFrame:
+        _ = user_id
+        _ = conversation_id
+        self.loaded_dataset_ids.append(dataset_id)
+        if limit is None:
+            return self.dataframe.copy()
+        return self.dataframe.head(limit).copy()
+
+    def save_csv_data(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+        df: pd.DataFrame,
+        *,
+        overwrite: bool = True,
+        include_index: bool = False,
+    ) -> None:
+        raise NotImplementedError
+
+    def get_json_data(self, user_id: UUID, conversation_id: UUID, dataset_id: UUID) -> str:
+        raise NotImplementedError
+
+    def save_json_data(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+        json_data: str,
+        *,
+        overwrite: bool = True,
+    ) -> None:
+        raise NotImplementedError
+
+    def save_artifact(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        artifact_id: UUID,
+        content: bytes,
+        *,
+        mime: str,
+        overwrite: bool = True,
+    ) -> None:
+        raise NotImplementedError
+
+    def get_artifact_mime(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        artifact_id: UUID,
+    ) -> str:
+        raise NotImplementedError
+
+    def get_artifact_bytes(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        artifact_id: UUID,
+        *,
+        expected_mime: str | None = None,
+    ) -> bytes:
+        raise NotImplementedError
+
+
+@dataclass
+class _FakeCausalModel:
+    result: object
+    commands: list[FitCommand] = field(default_factory=list)
+
+    def get_info(self) -> str:
+        return "fake model"
+
+    def get_command_info(self, command: str) -> str | None:
+        _ = command
+        return None
+
+    def execute(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        command: FitCommand,
+    ) -> object:
+        _ = user_id
+        _ = conversation_id
+        self.commands.append(command)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+@dataclass
+class _FakeToolFactory(ToolFactory):
+    model_factory: Any
+
+    def get_tool_names(self) -> list[str]:
+        return [CausalModelFactoryTool.NAME]
+
+    def get_tool_info(self, name: str) -> str:
+        raise NotImplementedError
+
+    def get_tools_info(self) -> dict[str, str]:
+        raise NotImplementedError
+
+    def has_tool(self, name: str) -> bool:
+        return name == CausalModelFactoryTool.NAME
+
+    def get_tool(self, name: str) -> Any:
+        if name != CausalModelFactoryTool.NAME:
+            raise KeyError(name)
+        return self.model_factory
+
+
+@dataclass
+class _FakeModelFactory:
+    model: Any | None
+    requested_models: list[str] = field(default_factory=list)
+
+    def resolve(self, estimator_fqcn: str) -> Any | None:
+        self.requested_models.append(estimator_fqcn)
+        return self.model
+
+
+def test_model_train_info_state_and_roundtrip() -> None:
+    assert "confirmed inference-ready causal specification" in get_model_train_node_info().lower()
+
+    state = ModelTrainState.init_empty()
+    assert state.status() == "PENDING"
+    assert state.messages()[0].role == "assistant"
+
+    done = ModelTrainState(
+        ModelTrainPayloadModel(
+            dataset_id=uuid4(),
+            selected_model="econml.dml.LinearDML",
+            trained_model_id=uuid4(),
+            assistant_message="Training completed.",
+        )
+    )
+    assert done.status() == "DONE"
+
+    failed = ModelTrainState(
+        ModelTrainPayloadModel(
+            error_message="fit failed",
+            assistant_message="Training failed.",
+        )
+    )
+    assert failed.status() == "ABORTED"
+    assert failed.error() is not None
+
+    restored = ModelTrainState.from_json_dict(done.to_json_dict())
+    assert restored.payload.model_dump(mode="json") == done.payload.model_dump(mode="json")
+
+
+def test_model_train_deps_require_confirmed_compile_and_selected_model() -> None:
+    compile_state = _compile_state()
+    selection_state = _selection_state()
+
+    deps = ModelTrainDeps.from_loaded(
+        {
+            CompileAndValidateState.NAME: compile_state,
+            ModelSelectionState.NAME: selection_state,
+        }
+    )
+    assert deps.dataset_id == compile_state.payload.dataset_id
+    assert deps.selected_model == "econml.dml.LinearDML"
+    assert deps.inference_ready_spec.causal_spec.treatment_spec.column == "treatment"
+
+    with pytest.raises(StateDependencyError):
+        ModelTrainDeps.from_loaded(
+            {
+                CompileAndValidateState.NAME: CompileAndValidateState(
+                    compile_state.payload.model_copy(update={"phase": "REVIEW_READY"})
+                ),
+                ModelSelectionState.NAME: selection_state,
+            }
+        )
+
+    with pytest.raises(StateDependencyError):
+        ModelTrainDeps.from_loaded(
+            {
+                CompileAndValidateState.NAME: compile_state,
+                ModelSelectionState.NAME: ModelSelectionState.init_empty(),
+            }
+        )
+
+
+def test_model_train_success_builds_fit_command_from_confirmed_spec() -> None:
+    dataset_id = uuid4()
+    compile_state = _compile_state(dataset_id=dataset_id)
+    selection_state = _selection_state(model_name="econml.dml.CausalForestDML")
+    fit_result = FitSuccess(
+        run_id=uuid4(),
+        started_at=None,
+        finished_at=None,
+        warnings=["Convergence warning"],
+        meta={},
+        fitted_model_id=uuid4(),
+    )
+    fake_model = _FakeCausalModel(result=fit_result)
+    fake_factory = _FakeModelFactory(model=fake_model)
+    data_repo = _FakeDataRepo(dataframe=_build_dataframe())
+    node = ModelTrainNode(llm=None, data_repo=data_repo)
+
+    result = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        state=ModelTrainState.init_empty(),
+        tool_factory=_FakeToolFactory(model_factory=fake_factory),
+        previous_state_dependencies={
+            CompileAndValidateState.NAME: compile_state,
+            ModelSelectionState.NAME: selection_state,
+        },
+        messages_history=[ChatMessage(role="user", content="Train it.")],
+    )
+
+    assert isinstance(result, ModelTrainState)
+    assert result.status() == "DONE"
+    assert result.payload.dataset_id == dataset_id
+    assert result.payload.selected_model == "econml.dml.CausalForestDML"
+    assert result.payload.trained_model_id == fit_result.fitted_model_id
+    assert result.payload.training_warnings == ["Convergence warning"]
+    assert result.payload.column_transformation_plan == compile_state.payload.inference_ready_causal_spec.transformation_plan
+    assert result.payload.order_covariates == ["age"]
+    assert result.payload.order_effect_modifiers == ["sex"]
+    assert "training completed successfully" in (result.payload.assistant_message or "").lower()
+    assert data_repo.loaded_dataset_ids == [dataset_id]
+    assert fake_factory.requested_models == ["econml.dml.CausalForestDML"]
+    assert len(fake_model.commands) == 1
+    fit_command = fake_model.commands[0]
+    assert fit_command.model_name == "econml.dml.CausalForestDML"
+    assert fit_command.inference_ready_spec == compile_state.payload.inference_ready_causal_spec
+    assert fit_command.df.equals(_build_dataframe())
+
+
+def test_model_train_returns_aborted_state_on_command_failure() -> None:
+    compile_state = _compile_state()
+    selection_state = _selection_state()
+    fake_model = _FakeCausalModel(
+        result=CommandFailure(
+            run_id=uuid4(),
+            started_at=None,
+            finished_at=None,
+            warnings=["Check positivity"],
+            meta={},
+            error=ErrorInfo(code="ESTIMATOR_ERROR", message="fit failed"),
+        )
+    )
+    node = ModelTrainNode(
+        llm=None,
+        data_repo=_FakeDataRepo(dataframe=_build_dataframe()),
+    )
+
+    result = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        state=ModelTrainState.init_empty(),
+        tool_factory=_FakeToolFactory(model_factory=_FakeModelFactory(model=fake_model)),
+        previous_state_dependencies={
+            CompileAndValidateState.NAME: compile_state,
+            ModelSelectionState.NAME: selection_state,
+        },
+        messages_history=None,
+    )
+
+    assert isinstance(result, ModelTrainState)
+    assert result.status() == "ABORTED"
+    assert result.payload.trained_model_id is None
+    assert result.payload.training_warnings == []
+    assert result.payload.error_message == "fit failed"
+    assert "training failed" in (result.payload.assistant_message or "").lower()
+
+
+def test_model_train_reuses_existing_fit_for_same_inputs() -> None:
+    compile_state = _compile_state()
+    selection_state = _selection_state()
+    existing_model_id = uuid4()
+    state = ModelTrainState(
+        ModelTrainPayloadModel(
+            dataset_id=compile_state.payload.dataset_id,
+            selected_model="econml.dml.LinearDML",
+            trained_model_id=existing_model_id,
+            column_transformation_plan=compile_state.payload.inference_ready_causal_spec.transformation_plan,
+            order_covariates=["age"],
+            order_effect_modifiers=["sex"],
+            assistant_message="Already trained.",
+        )
+    )
+    fake_model = _FakeCausalModel(
+        result=RuntimeError("should not be called"),
+    )
+    data_repo = _FakeDataRepo(dataframe=_build_dataframe())
+    node = ModelTrainNode(llm=None, data_repo=data_repo)
+
+    result = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        state=state,
+        tool_factory=_FakeToolFactory(model_factory=_FakeModelFactory(model=fake_model)),
+        previous_state_dependencies={
+            CompileAndValidateState.NAME: compile_state,
+            ModelSelectionState.NAME: selection_state,
+        },
+        messages_history=None,
+    )
+
+    assert isinstance(result, ModelTrainState)
+    assert result.payload.trained_model_id == existing_model_id
+    assert data_repo.loaded_dataset_ids == []
+    assert fake_model.commands == []

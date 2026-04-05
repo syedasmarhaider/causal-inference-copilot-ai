@@ -31,6 +31,9 @@ from python.implementation.workflows.nodes.model_selection.model_selection_promp
 from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
 )
+from python.implementation.workflows.tools.causal.inference.econml.models_meta import (
+    get_model_display_labels,
+)
 
 
 class _RecommendationItem(BaseModel):
@@ -227,7 +230,7 @@ def _build_supported_model_catalog(
 ) -> list[dict[str, str]]:
     catalog: list[dict[str, str]] = []
     for fqcn in supported_estimators:
-        display_name, family_label = _display_labels_for_model(fqcn)
+        display_name, family_label = get_model_display_labels(fqcn)
         catalog.append(
             {
                 "estimator_fqcn": fqcn,
@@ -238,40 +241,6 @@ def _build_supported_model_catalog(
             }
         )
     return catalog
-
-
-def _display_labels_for_model(fqcn: str) -> tuple[str, str]:
-    mapping = {
-        "econml.dr.LinearDRLearner": (
-            "Clinically Transparent Baseline Model",
-            "Doubly Robust Linear Model",
-        ),
-        "econml.dr.SparseLinearDRLearner": (
-            "High-Dimensional Baseline Model",
-            "Sparse Doubly Robust Linear Model",
-        ),
-        "econml.dr.ForestDRLearner": (
-            "Flexible Subgroup Effect Model",
-            "Doubly Robust Forest Model",
-        ),
-        "econml.dml.LinearDML": (
-            "Adjusted Baseline Effect Model",
-            "Linear Double Machine Learning Model",
-        ),
-        "econml.dml.SparseLinearDML": (
-            "High-Dimensional Adjustment Model",
-            "Sparse Linear Double Machine Learning Model",
-        ),
-        "econml.dml.KernelDML": (
-            "Smooth Nonlinear Effect Model",
-            "Kernel Double Machine Learning Model",
-        ),
-        "econml.dml.CausalForestDML": (
-            "Flexible Heterogeneity Model",
-            "Causal Forest Model",
-        ),
-    }
-    return mapping.get(fqcn, ("Causal Effect Model", "Supported Model"))
 
 
 def _build_structured_recommendations(
@@ -317,4 +286,3 @@ def _format_shortlist_message(
         lines.append("")
     lines.append("Tell me which option fits your clinical goal best, or what tradeoff matters most.")
     return "\n".join(lines).strip()
-

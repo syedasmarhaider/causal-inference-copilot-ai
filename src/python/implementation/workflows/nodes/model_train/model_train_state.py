@@ -1,77 +1,88 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Any, ClassVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.models.errors import NodeExecutionError
-from python.domain.workflows.state import State, StateMessage, Status
+from python.domain.models.models import ChatMessage
+from python.domain.workflows.state import State, Status
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.utils.utils import uuid_from_any
 
 
-class ModelTrainPayload(BaseModel):
+class ModelTrainPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
+    dataset_id: UUID | None = None
+    selected_model: str | None = None
     trained_model_id: UUID | None = None
-    
+    training_warnings: list[str] = Field(default_factory=list)
     column_transformation_plan: TransformPlan | None = None
-    training_warnings: str | None = None
     order_effect_modifiers: list[str] | None = None
     order_covariates: list[str] | None = None
-    prev_training_errors: str | None = None
-    no_of_times_trained: int | None = None
+    assistant_message: str | None = None
+    error_message: str | None = None
 
-    # UI / node-local
-    user_message: str | None = None
-    needs_user_input: bool | None = None
-    
-    error: str | None = None
+    @field_validator("dataset_id", "trained_model_id", mode="before")
+    @classmethod
+    def _parse_uuid(cls, value: Any) -> UUID | None:
+        return uuid_from_any(value)
+
+    @field_validator("assistant_message", "error_message", "selected_model", mode="before")
+    @classmethod
+    def _normalize_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value.strip()
+        raise TypeError("text fields must be str|null")
 
 
-@dataclass(frozen=True, slots=True)
 class ModelTrainState(State):
     NAME: ClassVar[str] = "MODEL_TRAIN"
-    payload: ModelTrainPayload
-    MaxNoOfInterationTrain = 3
 
-    # ---- required by State ABC ----
-    @property
+    def __init__(self, payload: ModelTrainPayloadModel) -> None:
+        self.payload = payload
+
     def name(self) -> str:
         return self.NAME
 
-    @property
-    def error(self) -> NodeExecutionError | None:
-        if self.payload.error is not None:
-            return NodeExecutionError(state_name=self.NAME, error=self.payload.error)
-        return None
-
-    @property
     def status(self) -> Status:
-        if self.error is not None:
+        if self.payload.error_message is not None:
             return "ABORTED"
         if self.payload.trained_model_id is not None:
             return "DONE"
         return "PENDING"
 
-    @property
-    def message(self) -> StateMessage:
-        if self.payload.user_message is None:
-            raise ValueError(
-                "ModelTrainState.message is required but missing. "
-                "Don't access .message outside the node/UI context where user_message is guaranteed."
-            )
-        action = "NONE"
-        if  self.payload.needs_user_input is not None and self.payload.needs_user_input:
-            action = "NEEDS_INPUT"     
-        return StateMessage(txt_message=self.payload.user_message, action=action)
+    def set_status_freez(self) -> None:
+        return None
 
+    def set_status_pending(self) -> None:
+        self.payload.error_message = None
+
+    def messages(self) -> Sequence[ChatMessage]:
+        if self.payload.assistant_message:
+            return [ChatMessage(role="assistant", content=self.payload.assistant_message)]
+        return [
+            ChatMessage(
+                role="assistant",
+                content=(
+                    "I will now train the confirmed causal model using the active cleaned "
+                    "dataset and the confirmed preprocessing plan."
+                ),
+            )
+        ]
+
+    def error(self) -> NodeExecutionError | None:
+        if self.payload.error_message is None:
+            return None
+        return NodeExecutionError(state_name=self.NAME, error=self.payload.error_message)
 
     def pre_required_states_names(self) -> Sequence[str]:
-        # Fill this based on your pipeline, e.g. ("MODEL_SELECTION", "ENCODING", "VALIDATE_INFERENCE_READY")
         return ModelTrainDeps.pre_required_states_names()
 
     def to_json_dict(self) -> dict[str, Any]:
@@ -79,9 +90,8 @@ class ModelTrainState(State):
 
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> ModelTrainState:
-        model = ModelTrainPayload.model_validate(payload)
-        return cls(payload=model)
+        return cls(ModelTrainPayloadModel.model_validate(payload))
 
     @classmethod
     def init_empty(cls) -> ModelTrainState:
-        return cls(payload=ModelTrainPayload())
+        return cls(ModelTrainPayloadModel())

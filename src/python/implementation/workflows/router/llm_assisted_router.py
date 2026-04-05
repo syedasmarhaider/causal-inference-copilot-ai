@@ -316,6 +316,7 @@ def init_all_nodoes_with_name_as_key(llm: LLMService, data_repo: DataRepo, model
     
     model_train_node = ModelTrainNode(
         llm=llm,
+        data_repo=data_repo,
      )
     
     inference_node = CausalInferenceNode(
