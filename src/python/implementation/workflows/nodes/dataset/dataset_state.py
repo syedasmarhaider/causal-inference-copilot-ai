@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from python.domain.models.models import ArtifactRef, ChatMessage
+from python.domain.models.models import ArtifactRef, ChatMessage, WorkingDatasetInfo
 from python.domain.workflows.state import Action, State, Status
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetSummaryModel,
@@ -50,10 +50,13 @@ class DatasetState(State):
     def name(self) -> str:
         return self.NAME
     
-    def get_latest_dataset_id(self) -> UUID | None:
+    def get_working_dataset_info(self) -> WorkingDatasetInfo | None:
         if not self.payload.dataset_iterations or len(self.payload.dataset_iterations) == 0:
             return None
-        return self.payload.dataset_iterations[-1].dataset_id
+        return WorkingDatasetInfo(
+            dataset_id=self.payload.dataset_iterations[-1].dataset_id,
+            is_freezed=self.payload.freezed,
+        )
 
     def status(self) -> Status:
         if self.payload.freezed:

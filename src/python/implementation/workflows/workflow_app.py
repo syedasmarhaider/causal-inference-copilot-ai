@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import pandas as pd
 
 from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
-from python.domain.models.models import ArtifactRef, ChatMessage
+from python.domain.models.models import ArtifactRef, ChatMessage, WorkingDatasetInfo
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.workflows.node import Node
@@ -26,7 +26,7 @@ _MESSAGES_HISTORY_LIMIT = 15
 @dataclass(frozen=True)
 class WorkflowResponse:
     _current_state: State
-    _current_dataset_id: UUID | None = None
+    _current_working_dataset_info: WorkingDatasetInfo | None = None
     _assistant_messages_override: Sequence[ChatMessage] | None = None
     _current_stage_name_override: str | None = None
     _current_stage_status_override: Status | None = None
@@ -230,6 +230,25 @@ class WorkflowApp:
             columns_count=len(df.columns),
         )
         return dataset_id
+    
+    def get_working_dataset_info(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,    
+    )-> WorkingDatasetInfo | None:
+        state = self._repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=DatasetState.NAME,
+        )
+        if state is None:
+            return None
+        if not isinstance(state, DatasetState):
+            raise TypeError(
+                f"Expected state of type DatasetState, got {type(state).__name__}"
+            )
+        return state.get_working_dataset_info()
 
     def get_artifact(
         self,
@@ -494,9 +513,10 @@ class WorkflowApp:
                 state_name=new_state_name,
                 state_status=new_state_status,
                 assistant_messages_count=len(_assistant_messages_for_user(new_state)),
-            )
+            )    
 
         return WorkflowResponse(
+            _current_working_dataset_info=self.get_working_dataset_info(user_id=user_id, conversation_id=conversation_id),
             _current_state=new_state,
             _current_stage_name_override=active_state_name_after_run or new_state_name,
             _current_stage_status_override=active_state_status_after_run or new_state_status,
