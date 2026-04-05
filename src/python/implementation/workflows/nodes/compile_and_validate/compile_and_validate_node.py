@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Literal, cast
 from uuid import UUID
 
+import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.repo.data_repo import DataRepo
@@ -117,7 +118,7 @@ class CompileAndValidateNode(Node):
         deps: CompileAndValidateDeps,
     ) -> CompileAndValidatePayloadModel:
         payload = state.payload.model_copy(deep=True)
-        dataset_changed = payload.dataset_id is not None and payload.dataset_id != deps.dataset_id
+        dataset_changed = payload.dataset_id != deps.dataset_id
         should_reset = dataset_changed or payload.phase == "INIT"
 
         updates: dict[str, Any] = {
@@ -149,11 +150,25 @@ class CompileAndValidateNode(Node):
         messages_history: Sequence[ChatMessage] | None,
     ) -> CompileAndValidateState:
         history = list(messages_history[-4:]) if messages_history else None
-        context_payload = {
+        if payload.dataset_summary is None or payload.dataset_id is None:
+            return self._failed_state(
+                payload=payload,
+                issues=[
+                    _fail_issue(
+                        message="Compile-and-validate is missing bound dataset context.",
+                        evidence={},
+                        fix_hint="Reload the active dataset context and rerun compile-and-validate.",
+                    )
+                ],
+                assistant_message=(
+                    "I could not compile the protocol because the active dataset context is missing. "
+                    "Please retry after the dataset context is reloaded."
+                ),
+                error_message="compile-and-validate missing dataset context",
+            )
+        context_payload: dict[str, Any] = {
             "protocol_discussion": protocol_discussion,
-            "dataset_summary": payload.dataset_summary.model_dump(mode="json")
-            if payload.dataset_summary is not None
-            else None,
+            "dataset_summary": payload.dataset_summary.model_dump(mode="json"),
         }
 
         try:
@@ -442,7 +457,7 @@ def _fail_issue(
 
 def _validate_dataset_protocol_scope_columns(
     *,
-    dataframe,
+    dataframe: pd.DataFrame,
     causal_spec: CausalSpec,
 ) -> list[ValidationIssueModel]:
     allowed_columns = {

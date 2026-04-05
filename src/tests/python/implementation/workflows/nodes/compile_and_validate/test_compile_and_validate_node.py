@@ -258,6 +258,8 @@ def test_compile_and_validate_prompts_and_info_have_expected_scope() -> None:
 def test_compile_and_validate_state_roundtrip_and_statuses() -> None:
     state = CompileAndValidateState.init_empty()
     assert state.status() == "PENDING"
+    assert state.payload.dataset_id is None
+    assert state.payload.dataset_summary is None
 
     failed = CompileAndValidateState(
         CompileAndValidatePayloadModel(
