@@ -454,7 +454,6 @@ def recoverable_states_map() -> Mapping[str, Sequence[str]]:
         ),
         ModelSelectionState.NAME: (
             ProtocolDiscussionState.NAME,
-            CompileAndValidateState.NAME,
         ),
         ModelTrainState.NAME: (
             ProtocolDiscussionState.NAME,
