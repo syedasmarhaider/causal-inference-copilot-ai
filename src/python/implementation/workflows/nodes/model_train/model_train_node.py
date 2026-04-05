@@ -33,6 +33,7 @@ from python.implementation.workflows.tools.causal.inference.econml.models_meta i
 from python.implementation.workflows.utils.utils import safe_err
 
 log = get_logger(__name__)
+_MAX_TRAINING_ATTEMPTS = 2
 
 
 class ModelTrainNode(Node):
@@ -121,71 +122,118 @@ class ModelTrainNode(Node):
                 )
             )
 
-        command = FitCommand(
-            model_name=deps.selected_model,
-            df=df,
-            run_id=uuid4(),
-            inference_ready_spec=deps.inference_ready_spec,
-            inputs=FitInputs(),
-        )
+        last_error_message: str | None = None
+        last_user_message: str | None = None
+        last_warnings: list[str] = []
 
-        try:
-            result = model.execute(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                command=command,
+        for attempt in range(1, _MAX_TRAINING_ATTEMPTS + 1):
+            command = FitCommand(
+                model_name=deps.selected_model,
+                df=df,
+                run_id=uuid4(),
+                inference_ready_spec=deps.inference_ready_spec,
+                inputs=FitInputs(),
             )
-        except Exception as exc:
-            log.exception("MODEL_TRAIN fit execution crashed", error=exc)
-            return ModelTrainState(
-                _failed_payload(
-                    payload=payload,
-                    message=(
-                        "Model training did not complete because the estimator failed during fitting. "
-                        "Please review the selected model and the cleaned dataset, then try again."
-                    ),
-                    error_message=f"fit execution failed: {safe_err(exc)}",
+
+            try:
+                result = model.execute(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    command=command,
                 )
-            )
-
-        if isinstance(result, FitSuccess):
-            warnings_list = list(result.warnings or [])
-            return ModelTrainState(
-                payload.model_copy(
-                    update={
-                        "trained_model_id": result.fitted_model_id,
-                        "training_warnings": warnings_list,
-                        "assistant_message": _success_message(
-                            model_name=deps.selected_model,
-                            fitted_model_id=result.fitted_model_id,
-                            warnings=warnings_list,
+            except Exception as exc:
+                log.exception(
+                    "MODEL_TRAIN fit execution crashed",
+                    error=exc,
+                    attempt=attempt,
+                    max_attempts=_MAX_TRAINING_ATTEMPTS,
+                )
+                last_error_message = f"fit execution failed: {safe_err(exc)}"
+                last_user_message = (
+                    "Model training did not complete because the estimator failed during fitting. "
+                    "Please review the selected model and the cleaned dataset."
+                )
+                last_warnings = []
+                if attempt < _MAX_TRAINING_ATTEMPTS:
+                    continue
+                return ModelTrainState(
+                    _failed_payload(
+                        payload=payload,
+                        message=_retry_failure_message(
+                            base_message=last_user_message,
+                            attempts=attempt,
                         ),
-                        "error_message": None,
-                    }
+                        error_message=last_error_message,
+                    )
                 )
-            )
 
-        if isinstance(result, CommandFailure):
+            if isinstance(result, FitSuccess):
+                warnings_list = list(result.warnings or [])
+                return ModelTrainState(
+                    payload.model_copy(
+                        update={
+                            "trained_model_id": result.fitted_model_id,
+                            "training_warnings": warnings_list,
+                            "assistant_message": _success_message(
+                                model_name=deps.selected_model,
+                                fitted_model_id=result.fitted_model_id,
+                                warnings=warnings_list,
+                                attempts=attempt,
+                            ),
+                            "error_message": None,
+                        }
+                    )
+                )
+
+            if isinstance(result, CommandFailure):
+                last_warnings = list(result.warnings or [])
+                last_error_message = result.error.message
+                last_user_message = _failure_message(
+                    model_name=deps.selected_model,
+                    error_message=result.error.message,
+                    warnings=last_warnings,
+                )
+                if attempt < _MAX_TRAINING_ATTEMPTS:
+                    continue
+                return ModelTrainState(
+                    _failed_payload(
+                        payload=payload,
+                        message=_retry_failure_message(
+                            base_message=last_user_message,
+                            attempts=attempt,
+                        ),
+                        error_message=last_error_message,
+                    )
+                )
+
+            last_error_message = f"unexpected fit result type: {type(result).__name__}"
+            last_user_message = (
+                "Model training returned an unexpected result and could not be completed."
+            )
+            last_warnings = []
+            if attempt < _MAX_TRAINING_ATTEMPTS:
+                continue
             return ModelTrainState(
                 _failed_payload(
                     payload=payload,
-                    message=_failure_message(
-                        model_name=deps.selected_model,
-                        error_message=result.error.message,
-                        warnings=list(result.warnings or []),
+                    message=_retry_failure_message(
+                        base_message=last_user_message,
+                        attempts=attempt,
                     ),
-                    error_message=result.error.message,
+                    error_message=last_error_message,
                 )
             )
 
         return ModelTrainState(
             _failed_payload(
                 payload=payload,
-                message=(
-                    "Model training returned an unexpected result and could not be completed. "
-                    "Please try again."
+                message=_retry_failure_message(
+                    base_message=(
+                        "Model training could not be completed because the estimator failed during fitting."
+                    ),
+                    attempts=_MAX_TRAINING_ATTEMPTS,
                 ),
-                error_message=f"unexpected fit result type: {type(result).__name__}",
+                error_message=last_error_message or "training failed after retry",
             )
         )
 
@@ -248,16 +296,20 @@ def _success_message(
     model_name: str,
     fitted_model_id: UUID,
     warnings: Sequence[str],
+    attempts: int,
 ) -> str:
     label = get_model_training_label(model_name)
+    retry_text = ""
+    if attempts > 1:
+        retry_text = f" after {attempts} attempts"
     if not warnings:
         return (
-            f"Training completed successfully with {label}. "
+            f"Training completed successfully with {label}{retry_text}. "
             f"The fitted model is saved under id {fitted_model_id} and is ready for effect estimation."
         )
     warning_text = " ".join(str(item).strip() for item in warnings if str(item).strip())
     return (
-        f"Training completed successfully with {label}. "
+        f"Training completed successfully with {label}{retry_text}. "
         f"The fitted model is saved under id {fitted_model_id}. "
         f"Warnings reported during training: {warning_text}"
     )
@@ -278,3 +330,7 @@ def _failure_message(
         return base
     warning_text = " ".join(str(item).strip() for item in warnings if str(item).strip())
     return f"{base} Additional warnings: {warning_text}"
+
+
+def _retry_failure_message(*, base_message: str, attempts: int) -> str:
+    return f"{base_message.strip()} Training was attempted {attempts} times before stopping."

@@ -126,7 +126,6 @@ def _compile_state(*, dataset_id: UUID | None = None) -> CompileAndValidateState
         CompileAndValidatePayloadModel(
             dataset_id=dataset_id or uuid4(),
             dataset_summary=spec.data_summary,
-            protocol_discussion="Confirmed protocol discussion",
             compiled_causal_spec=spec.causal_spec,
             transformation_plan=spec.transformation_plan,
             inference_ready_causal_spec=spec,
@@ -226,7 +225,7 @@ class _FakeDataRepo(DataRepo):
 
 @dataclass
 class _FakeCausalModel:
-    result: object
+    results: list[object]
     commands: list[FitCommand] = field(default_factory=list)
 
     def get_info(self) -> str:
@@ -246,9 +245,12 @@ class _FakeCausalModel:
         _ = user_id
         _ = conversation_id
         self.commands.append(command)
-        if isinstance(self.result, Exception):
-            raise self.result
-        return self.result
+        if not self.results:
+            raise AssertionError("No fake fit result configured")
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 @dataclass
@@ -358,7 +360,7 @@ def test_model_train_success_builds_fit_command_from_confirmed_spec() -> None:
         meta={},
         fitted_model_id=uuid4(),
     )
-    fake_model = _FakeCausalModel(result=fit_result)
+    fake_model = _FakeCausalModel(results=[fit_result])
     fake_factory = _FakeModelFactory(model=fake_model)
     data_repo = _FakeDataRepo(dataframe=_build_dataframe())
     node = ModelTrainNode(
@@ -397,18 +399,19 @@ def test_model_train_success_builds_fit_command_from_confirmed_spec() -> None:
     assert fit_command.df.equals(_build_dataframe())
 
 
-def test_model_train_returns_aborted_state_on_command_failure() -> None:
+def test_model_train_retries_once_then_returns_aborted_state_on_command_failure() -> None:
     compile_state = _compile_state()
     selection_state = _selection_state()
+    failure = CommandFailure(
+        run_id=uuid4(),
+        started_at=None,
+        finished_at=None,
+        warnings=["Check positivity"],
+        meta={},
+        error=ErrorInfo(code="ESTIMATOR_ERROR", message="fit failed"),
+    )
     fake_model = _FakeCausalModel(
-        result=CommandFailure(
-            run_id=uuid4(),
-            started_at=None,
-            finished_at=None,
-            warnings=["Check positivity"],
-            meta={},
-            error=ErrorInfo(code="ESTIMATOR_ERROR", message="fit failed"),
-        )
+        results=[failure, failure]
     )
     node = ModelTrainNode(
         llm=None,
@@ -433,6 +436,56 @@ def test_model_train_returns_aborted_state_on_command_failure() -> None:
     assert result.payload.training_warnings == []
     assert result.payload.error_message == "fit failed"
     assert "training failed" in (result.payload.assistant_message or "").lower()
+    assert "attempted 2 times" in (result.payload.assistant_message or "").lower()
+    assert len(fake_model.commands) == 2
+
+
+def test_model_train_succeeds_on_second_attempt() -> None:
+    compile_state = _compile_state()
+    selection_state = _selection_state()
+    fit_result = FitSuccess(
+        run_id=uuid4(),
+        started_at=None,
+        finished_at=None,
+        warnings=[],
+        meta={},
+        fitted_model_id=uuid4(),
+    )
+    fake_model = _FakeCausalModel(
+        results=[
+            CommandFailure(
+                run_id=uuid4(),
+                started_at=None,
+                finished_at=None,
+                warnings=[],
+                meta={},
+                error=ErrorInfo(code="TRANSIENT", message="temporary failure"),
+            ),
+            fit_result,
+        ]
+    )
+    node = ModelTrainNode(
+        llm=None,
+        data_repo=_FakeDataRepo(dataframe=_build_dataframe()),
+        tool_factory=_FakeToolFactory(model_factory=_FakeModelFactory(model=fake_model)),
+    )
+
+    result = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        state=ModelTrainState.init_empty(),
+        previous_state_dependencies={
+            CompileAndValidateState.NAME: compile_state,
+            ModelSelectionState.NAME: selection_state,
+        },
+        messages_history=None,
+    )
+
+    assert isinstance(result, ModelTrainState)
+    assert result.status() == "DONE"
+    assert result.payload.trained_model_id == fit_result.fitted_model_id
+    assert "after 2 attempts" in (result.payload.assistant_message or "").lower()
+    assert len(fake_model.commands) == 2
 
 
 def test_model_train_reuses_existing_fit_for_same_inputs() -> None:
@@ -450,9 +503,7 @@ def test_model_train_reuses_existing_fit_for_same_inputs() -> None:
             assistant_message="Already trained.",
         )
     )
-    fake_model = _FakeCausalModel(
-        result=RuntimeError("should not be called"),
-    )
+    fake_model = _FakeCausalModel(results=[RuntimeError("should not be called")])
     data_repo = _FakeDataRepo(dataframe=_build_dataframe())
     node = ModelTrainNode(
         llm=None,
