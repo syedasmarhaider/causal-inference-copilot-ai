@@ -8,7 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.models.models import ArtifactRef, ChatMessage
-from python.domain.workflows.state import State, Status
+from python.domain.workflows.state import Action, State, Status
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetSummaryModel,
 )
@@ -42,6 +42,13 @@ class DatasetState(State):
         if self.payload.freezed:
             return "FREEZED"
         return "PENDING"
+
+    def action(self) -> Action:
+        # Dataset is the only stage that can genuinely require data upload. Once at least one
+        # dataset iteration exists, the user can keep interacting with this node conversationally.
+        if not self.payload.dataset_iterations:
+            return "NEEDS_DATA"
+        return "NEEDS_INPUT"
 
     def messages(self) -> Sequence[ChatMessage]:
         if self.payload.user_message:
