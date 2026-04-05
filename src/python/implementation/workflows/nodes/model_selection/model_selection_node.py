@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 from uuid import UUID
@@ -14,6 +14,7 @@ from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
     ConfirmedModelSelectionPayload,
+    ModelRecommendationModel,
     ModelSelectionPayload,
     ModelSelectionState,
 )
@@ -32,16 +33,12 @@ from python.implementation.workflows.tools.causal.inference.causal_model_factory
 )
 
 
-# ----------------------------
-# LLM schema for call 1
-# ----------------------------
 class _RecommendationItem(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     estimator_fqcn: str
-    title: str
-    best_when: str
-    why: str
+    best_when: str = Field(..., min_length=1)
+    why: str = Field(..., min_length=1)
     tradeoffs: str | None = None
 
 
@@ -49,63 +46,12 @@ class _ModelShortlist(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     recommendations: list[_RecommendationItem] = Field(..., min_length=3, max_length=3)
-    clinician_message: str
-
-
-def _dumps(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True, default=str)
-
-
-def _safe_model_dump(x: Any) -> Any:
-    if x is None:
-        return None
-    if hasattr(x, "model_dump"):
-        return x.model_dump(mode="json")
-    return x
-
-def _build_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
-    causal_specs = deps.compiled_causal_spec
-    validation_issues = deps.validation_errors
-    summary = deps.clean_dataset_summary
-    
-    treatment_spec = causal_specs.treatment_spec
-    outcome_spec = causal_specs.outcome_spec
-    covariates = causal_specs.covariates
-    effect_modifiers = causal_specs.effect_modifiers
-    experiment_type = causal_specs.experiment_type
-
-    return {
-    
-        "treatment_spec": _safe_model_dump(treatment_spec),
-        "outcome_spec": _safe_model_dump(outcome_spec),
-        "covariates": _safe_model_dump(covariates),
-        "effect_modifiers": _safe_model_dump(effect_modifiers),
-        "experiment_type": _safe_model_dump(experiment_type),
-        "summary": _safe_model_dump(summary),
-        "validate_clean_protocol": {
-            "issues": [_safe_model_dump(issue) for issue in validation_issues],
-        },
-    }
-
-
-def _format_shortlist_message(shortlist: _ModelShortlist) -> str:
-    lines: list[str] = []
-    lines.append("")
-    for i, rec in enumerate(shortlist.recommendations, start=1):
-        lines.append(f"Option {i}: {rec.title}")
-        lines.append(f"- Best when: {rec.best_when}")
-        lines.append(f"- Why: {rec.why}")
-        if rec.tradeoffs:
-            lines.append(f"- Trade-offs: {rec.tradeoffs}")
-        lines.append(f"- Internal model id: {rec.estimator_fqcn}")
-        lines.append("")
-    return "\n".join(lines).strip()
+    clinician_message: str = Field(..., min_length=1)
 
 
 @dataclass(frozen=True, slots=True)
 class ModelSelectionNode(Node):
     llm: LLMService
-
 
     @property
     def name(self) -> str:
@@ -122,125 +68,253 @@ class ModelSelectionNode(Node):
         conversation_id: UUID,
         state: State,
         tool_factory: ToolFactory,
-        previous_state_dependencies: Any,  # Mapping[str, State] (kept Any to match your ABC signature)
-        messages_history: Sequence[ChatMessage] | None
+        previous_state_dependencies: Mapping[str, State],
+        messages_history: Sequence[ChatMessage] | None,
     ) -> State:
+        _ = user_id
+        _ = conversation_id
         if not isinstance(state, ModelSelectionState):
-            raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")
+            raise TypeError(f"{self.name}: expected ModelSelectionState, got {type(state).__name__}")
 
-        # deps
         deps = ModelSelectionDeps.from_loaded(previous_state_dependencies)
-        context = _build_context(deps=deps)
-        last_5_messages = messages_history[-5:] if messages_history else None
-        
-        ci_tool_factory_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
-        ci_tool_factory = cast(CausalModelFactoryTool, ci_tool_factory_raw)
-        supported_estimators = ci_tool_factory.supported_estimators()
-        supported_estimators_info = ci_tool_factory.get_all_esimators_info()
-        
-        
-        # ============================================================
-        # CALL 1: generate shortlist if missing (skip if already exists)
-        # ============================================================
-        if not state.payload.system_choice_message:
-            user_prompt = MODEL_SELECTION_RECOMMENDER_USER_PROMPT_TEMPLATE.format(
-                supported_estimators_json=_dumps(  supported_estimators),
-                estimators_info_json=_dumps(  supported_estimators_info),
-                context_json=_dumps(context))
+        history = list(messages_history[-5:]) if messages_history else None
 
+        factory_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
+        factory = cast(CausalModelFactoryTool, factory_raw)
+        model_catalog = _build_supported_model_catalog(
+            supported_estimators=factory.supported_estimators(),
+            estimators_info=factory.get_all_esimators_info(),
+        )
+        selection_context = _build_selection_context(deps=deps)
+
+        if not state.payload.recommendations:
             shortlist = self.llm.generate_json(
-                    schema=_ModelShortlist,
-                    system_prompt=MODEL_SELECTION_RECOMMENDER_SYSTEM_PROMPT,
-                    user_prompt=user_prompt,
-                    config= LLMConfig(temperature=1.0, model="pro"),
-                    history=last_5_messages,
-                    max_attempts=3,
-                )
+                schema=_ModelShortlist,
+                system_prompt=MODEL_SELECTION_RECOMMENDER_SYSTEM_PROMPT,
+                user_prompt=MODEL_SELECTION_RECOMMENDER_USER_PROMPT_TEMPLATE.format(
+                    supported_models_json=_dumps(model_catalog),
+                    selection_context_json=_dumps(selection_context),
+                ),
+                config=LLMConfig(model="pro", temperature=0.4),
+                history=history,
+                max_attempts=3,
+            )
 
-            if len(shortlist.recommendations) != 3:
-                    return ModelSelectionState(
-                         ModelSelectionPayload(
-                            error=f"LLM returned {len(shortlist.recommendations)} recommendations, but exactly 3 are required.",
-                            system_choice_message=None,
-                            confirmed_model_selection=None,
-                            message="Selection error: LLM returned an incorrect number of recommendations. I will retry. Please wait a moment..."
-                       )
+            recommendations = _build_structured_recommendations(
+                shortlist=shortlist,
+                model_catalog=model_catalog,
+            )
+            if recommendations is None:
+                return ModelSelectionState(
+                    ModelSelectionPayload(
+                        assistant_message=(
+                            "I could not generate a valid shortlist of supported models. "
+                            "Please try again."
+                        ),
                     )
-                
-            for rec in shortlist.recommendations:
-                    if rec.estimator_fqcn not in supported_estimators:
-                        return ModelSelectionState(
-                            ModelSelectionPayload(
-                                error=f"LLM recommended model '{rec.estimator_fqcn}' which is not supported by the system.",
-                                system_choice_message=None,
-                                confirmed_model_selection=None,
-                                message="Selection error: LLM recommended an unsupported model. I will retry. Please wait a moment..."
-                            )
-                        )
+                )
 
             return ModelSelectionState(
                 ModelSelectionPayload(
-                    error=None,
-                    system_choice_message=_format_shortlist_message(shortlist),
-                    confirmed_model_selection=None,
-                    message=shortlist.clinician_message,
+                    recommendations=recommendations,
+                    assistant_message=_format_shortlist_message(
+                        recommendations=recommendations,
+                        clinician_message=shortlist.clinician_message,
+                    ),
                 )
             )
 
-        # ============================================================
-        # CALL 2: negotiate/confirm using user's reply (if present)
-        # ============================================================
-      
-        negotiator_user_prompt = MODEL_SELECTION_NEGOTIATOR_USER_PROMPT_TEMPLATE.format(
-            recommended_message=state.payload.system_choice_message or "",
-            supported_estimators_json=_dumps(supported_estimators),
-            estimators_info_json=_dumps(supported_estimators_info),
-            context_json=_dumps(context),
-        )
-        
         decision = self.llm.generate_json(
-                schema=ConfirmedModelSelectionPayload,
-                system_prompt=MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
-                user_prompt=negotiator_user_prompt,
-                config= LLMConfig(temperature=0.2, model="basic"),
-                history=last_5_messages,
-                max_attempts=3,
-            )
-      
- 
+            schema=ConfirmedModelSelectionPayload,
+            system_prompt=MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
+            user_prompt=MODEL_SELECTION_NEGOTIATOR_USER_PROMPT_TEMPLATE.format(
+                recommended_options_json=_dumps(
+                    [recommendation.model_dump(mode="json") for recommendation in state.payload.recommendations]
+                ),
+                selection_context_json=_dumps(selection_context),
+            ),
+            config=LLMConfig(model="basic", temperature=0.2),
+            history=history,
+            max_attempts=3,
+        )
 
-        # Not final: selected_model is null -> ask follow-up (stored in system_choice_message)
-        if not decision.selected_model:
-            payload = state.payload.model_copy(
+        if decision.selected_model is None:
+            return ModelSelectionState(
+                state.payload.model_copy(
+                    update={
+                        "assistant_message": decision.reasoning
+                        or "Please tell me which option you prefer, or what tradeoff matters most.",
+                    }
+                )
+            )
+
+        if not any(
+            recommendation.estimator_fqcn == decision.selected_model
+            for recommendation in state.payload.recommendations
+        ):
+            return ModelSelectionState(
+                state.payload.model_copy(
+                    update={
+                        "assistant_message": (
+                            "That model choice does not match the shortlisted supported options. "
+                            "Please choose one of the presented options."
+                        )
+                    }
+                )
+            )
+
+        selected_label = next(
+            recommendation.display_label
+            for recommendation in state.payload.recommendations
+            if recommendation.estimator_fqcn == decision.selected_model
+        )
+        return ModelSelectionState(
+            state.payload.model_copy(
                 update={
-                    "confirmed_model_selection": None,
-                    "error": None,
-                    "message": decision.reasoning 
+                    "confirmed_model_selection": decision,
+                    "assistant_message": (
+                        f"Confirmed model selection: {selected_label}. "
+                        f"{decision.reasoning or 'Next I will use this model for training and effect estimation.'}"
+                    ),
+                    "error_message": None,
                 }
             )
-            return ModelSelectionState(payload=payload)
+        )
 
-        # Final selection: confirm via tool
-        selected = decision.selected_model.strip()
-        if not ci_tool_factory.has_estimator(selected):
-            payload = state.payload.model_copy(
-                update={
-                    "confirmed_model_selection": None,
-                    "message": "Sorry but the selected model is not recognized. Please choose one of the recommended options.",
-                }
-            )
-            return ModelSelectionState(payload=payload)
 
-        final_msg = (
-            f"Confirmed model selection: {selected}\n"
-            "Next, I will fit this model and estimate the treatment effect."
-        ).strip()
+def _dumps(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True, default=str)
 
-        payload = state.payload.model_copy(
-            update={
-                "confirmed_model_selection": decision,
-                "error": None,
-                "message": final_msg,
+
+def _build_selection_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
+    causal_spec = deps.inference_ready_spec.causal_spec
+    column_types = [
+        {
+            "name": str(profile.name),
+            "inferred_kind": str(profile.inferred_kind),
+        }
+        for profile in deps.inference_ready_spec.data_summary.profiles
+    ]
+    return {
+        "treatment": {
+            "column": str(causal_spec.treatment_spec.column),
+            "kind": str(causal_spec.treatment_spec.kind),
+            "treated": str(causal_spec.treatment_spec.treated),
+            "control": str(causal_spec.treatment_spec.control),
+        },
+        "outcome": {
+            "column": str(causal_spec.outcome_spec.column),
+            "kind": str(causal_spec.outcome_spec.kind),
+        },
+        "experiment_type": str(causal_spec.experiment_type),
+        "covariates": list(causal_spec.covariates),
+        "effect_modifiers": list(causal_spec.effect_modifiers),
+        "column_types": column_types,
+        "validation_warnings": [
+            {
+                "message": issue.message,
+                "fix_hint": issue.fix_hint,
+            }
+            for issue in deps.validation_warnings
+        ],
+    }
+
+
+def _build_supported_model_catalog(
+    *,
+    supported_estimators: Sequence[str],
+    estimators_info: Mapping[str, str],
+) -> list[dict[str, str]]:
+    catalog: list[dict[str, str]] = []
+    for fqcn in supported_estimators:
+        display_name, family_label = _display_labels_for_model(fqcn)
+        catalog.append(
+            {
+                "estimator_fqcn": fqcn,
+                "display_label": f"{display_name} ({family_label})",
+                "display_name": display_name,
+                "family_label": family_label,
+                "model_info": estimators_info.get(fqcn, ""),
             }
         )
-        return ModelSelectionState(payload=payload)
+    return catalog
+
+
+def _display_labels_for_model(fqcn: str) -> tuple[str, str]:
+    mapping = {
+        "econml.dr.LinearDRLearner": (
+            "Clinically Transparent Baseline Model",
+            "Doubly Robust Linear Model",
+        ),
+        "econml.dr.SparseLinearDRLearner": (
+            "High-Dimensional Baseline Model",
+            "Sparse Doubly Robust Linear Model",
+        ),
+        "econml.dr.ForestDRLearner": (
+            "Flexible Subgroup Effect Model",
+            "Doubly Robust Forest Model",
+        ),
+        "econml.dml.LinearDML": (
+            "Adjusted Baseline Effect Model",
+            "Linear Double Machine Learning Model",
+        ),
+        "econml.dml.SparseLinearDML": (
+            "High-Dimensional Adjustment Model",
+            "Sparse Linear Double Machine Learning Model",
+        ),
+        "econml.dml.KernelDML": (
+            "Smooth Nonlinear Effect Model",
+            "Kernel Double Machine Learning Model",
+        ),
+        "econml.dml.CausalForestDML": (
+            "Flexible Heterogeneity Model",
+            "Causal Forest Model",
+        ),
+    }
+    return mapping.get(fqcn, ("Causal Effect Model", "Supported Model"))
+
+
+def _build_structured_recommendations(
+    *,
+    shortlist: _ModelShortlist,
+    model_catalog: Sequence[Mapping[str, str]],
+) -> list[ModelRecommendationModel] | None:
+    by_fqcn = {
+        str(entry["estimator_fqcn"]): str(entry["display_label"])
+        for entry in model_catalog
+    }
+    recommendations: list[ModelRecommendationModel] = []
+    for item in shortlist.recommendations:
+        display_label = by_fqcn.get(item.estimator_fqcn)
+        if display_label is None:
+            return None
+        recommendations.append(
+            ModelRecommendationModel(
+                estimator_fqcn=item.estimator_fqcn,
+                display_label=display_label,
+                best_when=item.best_when,
+                why=item.why,
+                tradeoffs=item.tradeoffs,
+            )
+        )
+    if len({item.estimator_fqcn for item in recommendations}) != 3:
+        return None
+    return recommendations
+
+
+def _format_shortlist_message(
+    *,
+    recommendations: Sequence[ModelRecommendationModel],
+    clinician_message: str,
+) -> str:
+    lines = [clinician_message.strip(), ""]
+    for index, recommendation in enumerate(recommendations, start=1):
+        lines.append(f"Option {index}: {recommendation.display_label}")
+        lines.append(f"- Best when: {recommendation.best_when}")
+        lines.append(f"- Why: {recommendation.why}")
+        if recommendation.tradeoffs:
+            lines.append(f"- Trade-offs: {recommendation.tradeoffs}")
+        lines.append("")
+    lines.append("Tell me which option fits your clinical goal best, or what tradeoff matters most.")
+    return "\n".join(lines).strip()
+
