@@ -9,8 +9,17 @@ from python.domain.repo.working_data_repo import WorkingDataRepo
 from python.domain.service.llm_service import LLMService
 from python.domain.workflows.tool import Tool
 from python.domain.workflows.tool_factory import ToolFactory
+from python.implementation.workflows.tools.causal.encoding.encoding_plan_tool import (
+    EncodingPlanTool,
+)
 from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
+)
+from python.implementation.workflows.tools.causal.specs.causal_specs_tool import (
+    CausalSpecsTool,
+)
+from python.implementation.workflows.tools.causal.validation.validation_backdoor_tool import (
+    ValidationBackdoorTool,
 )
 from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import DataManipulationTool
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
@@ -29,6 +38,9 @@ class DefaultToolFactory(ToolFactory):
                 working_data_repo=working_data_repo,
             ),
             PlotTool.NAME: PlotTool(llm=llm_service),
+            CausalSpecsTool.NAME: CausalSpecsTool(),
+            EncodingPlanTool.NAME: EncodingPlanTool(),
+            ValidationBackdoorTool.NAME: ValidationBackdoorTool(),
             CausalModelFactoryTool.NAME: CausalModelFactoryTool.create_default(data_repo=data_repo, models_repo=models_repo),
         }
 

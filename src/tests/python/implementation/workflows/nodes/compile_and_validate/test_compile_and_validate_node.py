@@ -10,6 +10,7 @@ import pytest
 from python.domain.models.errors import StateDependencyError
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig
+from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_deps import (
     CompileAndValidateDeps,
 )
@@ -37,7 +38,16 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     TransformPlan,
 )
+from python.implementation.workflows.tools.causal.encoding.encoding_plan_tool import (
+    EncodingPlanTool,
+)
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_specs_tool import (
+    CausalSpecsTool,
+)
+from python.implementation.workflows.tools.causal.validation.validation_backdoor_tool import (
+    ValidationBackdoorTool,
+)
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
     DatasetSummaryModel,
@@ -204,6 +214,39 @@ class _FakeDataRepo(DataRepo):
         raise NotImplementedError
 
 
+@dataclass
+class _FakeToolFactory(ToolFactory):
+    tool_by_name: dict[str, Any]
+
+    def get_tool_names(self) -> list[str]:
+        return sorted(self.tool_by_name)
+
+    def get_tool_info(self, name: str) -> str:
+        return self.get_tool(name).get_tool_info()
+
+    def get_tools_info(self) -> dict[str, str]:
+        return {name: tool.get_tool_info() for name, tool in self.tool_by_name.items()}
+
+    def has_tool(self, name: str) -> bool:
+        return name in self.tool_by_name
+
+    def get_tool(self, name: str) -> Any:
+        try:
+            return self.tool_by_name[name]
+        except KeyError as exc:
+            raise KeyError(name) from exc
+
+
+def _tool_factory() -> _FakeToolFactory:
+    return _FakeToolFactory(
+        tool_by_name={
+            CausalSpecsTool.NAME: CausalSpecsTool(),
+            EncodingPlanTool.NAME: EncodingPlanTool(),
+            ValidationBackdoorTool.NAME: ValidationBackdoorTool(),
+        }
+    )
+
+
 def test_compile_and_validate_prompts_and_info_have_expected_scope() -> None:
     assert "causal specification" in get_compile_and_validate_node_info().lower()
     assert "dataset summary is authoritative" in get_compile_causal_spec_prompt().lower()
@@ -312,7 +355,11 @@ def test_compile_and_validate_node_compiles_and_waits_for_confirmation() -> None
             },
         ]
     )
-    node = CompileAndValidateNode(llm=llm, data_repo=_FakeDataRepo(dataframe=df))
+    node = CompileAndValidateNode(
+        llm=llm,
+        data_repo=_FakeDataRepo(dataframe=df),
+        tool_factory=_tool_factory(),
+    )
 
     result = node.run(
         user_id=uuid4(),
@@ -387,7 +434,11 @@ def test_compile_and_validate_node_confirmed_review_marks_done() -> None:
             inference_ready_causal_spec=None,
         )
     )
-    node = CompileAndValidateNode(llm=_FakeLLM(), data_repo=_FakeDataRepo(dataframe=df))
+    node = CompileAndValidateNode(
+        llm=_FakeLLM(),
+        data_repo=_FakeDataRepo(dataframe=df),
+        tool_factory=_tool_factory(),
+    )
 
     result = node.run(
         user_id=uuid4(),
@@ -418,7 +469,11 @@ def test_compile_and_validate_node_rejection_aborts_review() -> None:
             assistant_message="Please confirm this compiled setup.",
         )
     )
-    node = CompileAndValidateNode(llm=_FakeLLM(), data_repo=_FakeDataRepo(dataframe=df))
+    node = CompileAndValidateNode(
+        llm=_FakeLLM(),
+        data_repo=_FakeDataRepo(dataframe=df),
+        tool_factory=_tool_factory(),
+    )
 
     result = node.run(
         user_id=uuid4(),
@@ -442,7 +497,11 @@ def test_compile_and_validate_node_spec_compile_failure_aborts() -> None:
     summary = _build_summary(df)
     dataset_id = uuid4()
     llm = _FakeLLM(json_outputs=[RuntimeError("spec compile exploded")])
-    node = CompileAndValidateNode(llm=llm, data_repo=_FakeDataRepo(dataframe=df))
+    node = CompileAndValidateNode(
+        llm=llm,
+        data_repo=_FakeDataRepo(dataframe=df),
+        tool_factory=_tool_factory(),
+    )
 
     result = node.run(
         user_id=uuid4(),
@@ -505,7 +564,11 @@ def test_compile_and_validate_node_validation_failures_abort() -> None:
             },
         ]
     )
-    node = CompileAndValidateNode(llm=llm, data_repo=_FakeDataRepo(dataframe=df))
+    node = CompileAndValidateNode(
+        llm=llm,
+        data_repo=_FakeDataRepo(dataframe=df),
+        tool_factory=_tool_factory(),
+    )
 
     result = node.run(
         user_id=uuid4(),
@@ -568,7 +631,11 @@ def test_compile_and_validate_node_extra_columns_in_cleaned_dataset_abort() -> N
             },
         ]
     )
-    node = CompileAndValidateNode(llm=llm, data_repo=_FakeDataRepo(dataframe=df))
+    node = CompileAndValidateNode(
+        llm=llm,
+        data_repo=_FakeDataRepo(dataframe=df),
+        tool_factory=_tool_factory(),
+    )
 
     result = node.run(
         user_id=uuid4(),

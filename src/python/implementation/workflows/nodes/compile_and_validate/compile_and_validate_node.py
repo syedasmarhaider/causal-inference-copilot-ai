@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 from uuid import UUID
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
+from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_deps import (
     CompileAndValidateDeps,
@@ -60,15 +61,16 @@ class CompileAndValidateNode(Node):
         *,
         llm: LLMService,
         data_repo: DataRepo,
-        causal_specs_tool: CausalSpecsTool | None = None,
-        encoding_plan_tool: EncodingPlanTool | None = None,
-        validation_tool: ValidationBackdoorTool | None = None,
+        tool_factory: ToolFactory,
     ) -> None:
         self._llm = llm
         self._data_repo = data_repo
-        self._causal_specs_tool = causal_specs_tool or CausalSpecsTool()
-        self._encoding_plan_tool = encoding_plan_tool or EncodingPlanTool()
-        self._validation_tool = validation_tool or ValidationBackdoorTool()
+        causal_specs_raw = tool_factory.get_tool(CausalSpecsTool.NAME)
+        encoding_plan_raw = tool_factory.get_tool(EncodingPlanTool.NAME)
+        validation_raw = tool_factory.get_tool(ValidationBackdoorTool.NAME)
+        self._causal_specs_tool = cast(CausalSpecsTool, causal_specs_raw)
+        self._encoding_plan_tool = cast(EncodingPlanTool, encoding_plan_raw)
+        self._validation_tool = cast(ValidationBackdoorTool, validation_raw)
 
     @property
     def name(self) -> str:
