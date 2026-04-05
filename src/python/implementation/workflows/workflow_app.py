@@ -9,12 +9,12 @@ from uuid import UUID, uuid4
 import pandas as pd
 
 from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
-from python.domain.models.models import ChatMessage
+from python.domain.models.models import ArtifactRef, ChatMessage
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.workflows.node import Node
 from python.domain.workflows.route import Router
-from python.domain.workflows.state import ACTION, State, Status
+from python.domain.workflows.state import Action, State, Status
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.dataset.dataset_state import DatasetState
@@ -23,8 +23,73 @@ from python.implementation.workflows.nodes.dataset.dataset_state import DatasetS
 _MESSAGES_HISTORY_LIMIT = 15
 
 
+@dataclass(frozen=True)
+class WorkflowResponse:
+    _current_state: State
+    _assistant_messages_override: Sequence[ChatMessage] | None = None
+    _current_stage_name_override: str | None = None
+    _current_stage_status_override: Status | None = None
+    _action_override: Action | None = None
 
-   
+    @property
+    def messages(self) -> Sequence[ChatMessage]:
+        if self._assistant_messages_override is not None:
+            return tuple(self._assistant_messages_override)
+        return tuple(_assistant_messages_for_user(self._current_state))
+
+    @property
+    def current_stage(self) -> str:
+        return self._current_stage_name_override or self._current_state.name()
+
+    @property
+    def current_stage_status(self) -> Status:
+        return self._current_stage_status_override or self._current_state.status()
+
+    @property
+    def action(self) -> Action:
+        return self._action_override or self._current_state.action()
+
+    @property
+    def node_message(self) -> str:
+        return "\n\n".join(message.content for message in self.messages)
+
+    @property
+    def stage_name(self) -> str:
+        return self.current_stage
+
+    @property
+    def status(self) -> Status:
+        return self.current_stage_status
+
+    @property
+    def needs_action(self) -> Action:
+        return self.action
+
+    @property
+    def artifact_refs(self) -> Sequence[ArtifactRef] | None:
+        artifact_refs: list[ArtifactRef] = []
+        for message in self.messages:
+            artifact_refs.extend(list(message.artifact_refs or ()))
+        return artifact_refs or None
+
+    @property
+    def artifact_ids(self) -> Sequence[str] | None:
+        artifact_ids: list[str] = []
+        for ref in self.artifact_refs or ():
+            artifact_id = ref.get("id")
+            if artifact_id is not None:
+                artifact_ids.append(str(artifact_id))
+        return artifact_ids or None
+
+    @property
+    def needs_input(self) -> bool:
+        return self.action == "NEEDS_INPUT"
+
+    @property
+    def needs_data(self) -> bool:
+        return self.action == "NEEDS_DATA"
+
+
 @dataclass(frozen=True)
 class ArtifactResponse:
     mime: str
@@ -286,28 +351,28 @@ class WorkflowApp:
                ) -> WorkflowResponse:
         self._log.debug(
             "workflow handle requested",
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
-            has_user_message=bool(req.user_message and req.user_message.strip()),
+            user_id=user_id,
+            conversation_id=conversation_id,
+            user_message=user_message,
         )
-        if req.user_message is not None and req.user_message.strip():
+        if user_message is not None and user_message.strip():
             self._repo.append_message(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                message=ChatMessage(role="user", content=req.user_message),
+                user_id=user_id,
+                conversation_id=conversation_id,
+                message=ChatMessage(role="user", content=user_message),
             )
 
         history = list(
             self._repo.load_message_history(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
                 limit=self._history_limit,
             )
         )
 
         state_name_to_route = self._repo.load_active_state_name(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
         )
         state_name_to_run: str
         state_to_run: State
@@ -318,19 +383,19 @@ class WorkflowApp:
         if not state_name_to_route:
             state_name_to_run = self._router.get_initial_state_name()
             self._repo.store_active_state_name(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
                 state_name=state_name_to_run,
             )
             state_to_run = self._load_or_init_state(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
                 state_name=state_name_to_run,
             )
         else:
             current_state = self._load_or_init_state(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
                 state_name=state_name_to_route,
             )
             active_state_status_before_run = current_state.status()
@@ -345,13 +410,13 @@ class WorkflowApp:
                 )
                 # Persist the router clarification so history stays coherent even when execution stops.
                 self._repo.append_message(
-                    user_id=req.user_id,
-                    conversation_id=req.conversation_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
                     message=ChatMessage(role="assistant", content=confirmation_message),
                 )
                 return WorkflowResponse(
                     _current_state=current_state,
-                    _messages_override=[
+                    _assistant_messages_override=[
                         ChatMessage(role="assistant", content=confirmation_message),
                     ],
                     _current_stage_name_override=state_name_to_route,
@@ -360,30 +425,30 @@ class WorkflowApp:
                 
             state_name_to_run = decision.state_name
             state_to_run = self._load_or_init_state(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
                 state_name=state_name_to_run,
             )
 
         deps = self._load_deps(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
             required=state_to_run.pre_required_states_names(),
         )
         node = self._nodes.get(state_name_to_run)
         if node is None:
             self._log.error(
                 "workflow node is not registered for state",
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
                 state_name=state_name_to_run,
             )
             raise KeyError(f"WorkflowApp: no node registered for state_name={state_name_to_run!r}")
 
         pre_state_to_run_status = state_to_run.status()
         new_state = node.run(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
             state=state_to_run,
             previous_state_dependencies=deps,
             messages_history=history,
@@ -395,8 +460,8 @@ class WorkflowApp:
         # Store the returned payload before moving the active pointer so repo state stays consistent
         # even if persistence fails midway.
         self._repo.store_state(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
             state=new_state,
         )
 
@@ -421,16 +486,16 @@ class WorkflowApp:
             and active_state_name_after_run != active_state_name_before_run
         ):
             self._repo.store_active_state_name(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
                 state_name=active_state_name_after_run,
             )
 
         ordered_history_messages = _ordered_history_messages(new_state)
         if ordered_history_messages:
             self._repo.append_messages(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
                 messages=ordered_history_messages,
             )
 
@@ -438,8 +503,8 @@ class WorkflowApp:
         if state_error is not None:
             self._log.error(
                 "node returned workflow error",
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
                 state_name=new_state_name,
                 state_status=new_state_status,
                 node_error=state_error.error,
@@ -447,8 +512,8 @@ class WorkflowApp:
         else:
             self._log.debug(
                 "workflow node completed",
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
                 state_name=new_state_name,
                 state_status=new_state_status,
                 assistant_messages_count=len(_assistant_messages_for_user(new_state)),
