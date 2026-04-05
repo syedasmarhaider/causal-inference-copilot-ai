@@ -20,6 +20,7 @@ from python.implementation.workflows.nodes.compile_and_validate.compile_and_vali
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_prompts import (
     get_compile_and_validate_node_info,
     get_compile_causal_spec_prompt,
+    get_compile_freezed_answer_prompt,
     get_compile_review_decision_prompt,
     get_compile_transformation_plan_prompt,
 )
@@ -94,8 +95,16 @@ class CompileAndValidateNode(Node):
             raise TypeError(f"{self.name}: expected CompileAndValidateState, got {type(state).__name__}")
 
         deps = CompileAndValidateDeps.from_loaded(previous_state_dependencies)
-        payload = self._bind_payload(state=state, deps=deps)
         latest_user_message = _latest_user_message(messages_history)
+
+        if state.payload.freezed:
+            return self._answer_freezed_question(
+                payload=state.payload.model_copy(deep=True),
+                latest_user_message=latest_user_message,
+                messages_history=messages_history,
+            )
+
+        payload = self._bind_payload(state=state, deps=deps)
 
         if payload.phase == "REVIEW_READY":
             return self._handle_review_response(payload=payload, latest_user_message=latest_user_message)
@@ -109,6 +118,55 @@ class CompileAndValidateNode(Node):
             payload=payload,
             protocol_discussion=deps.protocol_discussion,
             messages_history=messages_history,
+        )
+
+    def _answer_freezed_question(
+        self,
+        *,
+        payload: CompileAndValidatePayloadModel,
+        latest_user_message: str | None,
+        messages_history: Sequence[ChatMessage] | None,
+    ) -> CompileAndValidateState:
+        if not latest_user_message:
+            return CompileAndValidateState(payload)
+
+        context_payload = {
+            "compiled_causal_spec": None
+            if payload.compiled_causal_spec is None
+            else payload.compiled_causal_spec.model_dump(mode="json"),
+            "transformation_plan": None
+            if payload.transformation_plan is None
+            else payload.transformation_plan.model_dump(mode="json"),
+            "validation_issues": [
+                issue.model_dump(mode="json") for issue in payload.validation_issues
+            ],
+            "latest_user_message": latest_user_message,
+        }
+        history = list(messages_history[-6:]) if messages_history else None
+
+        try:
+            assistant_message = self._llm.generate(
+                system_prompt=get_compile_freezed_answer_prompt(),
+                user_prompt=json.dumps(context_payload, ensure_ascii=False),
+                config=LLMConfig(model="basic", temperature=0.2),
+                history=history,
+            ).content.strip()
+        except Exception as exc:
+            log.exception("COMPILE_AND_VALIDATE freezed answer failed", error=exc)
+            assistant_message = (
+                "This compiled setup is frozen. I can answer read-only questions about the "
+                "compiled causal specification, transformation plan, and validation issues, "
+                "but I could not answer that question right now."
+            )
+
+        return CompileAndValidateState(
+            payload.model_copy(
+                update={
+                    "assistant_message": assistant_message,
+                    "system_message": None,
+                    "error_message": None,
+                }
+            )
         )
 
     def _bind_payload(
