@@ -38,57 +38,30 @@ class WorkflowResponse:
         return tuple(_assistant_messages_for_user(self._current_state))
 
     @property
-    def current_stage(self) -> str:
-        return self._current_stage_name_override or self._current_state.name()
-
+    def current_stage_name(self) -> str:
+        if self._current_stage_name_override is not None:
+            return self._current_stage_name_override
+        return self._current_state.name()
+    
     @property
     def current_stage_status(self) -> Status:
-        return self._current_stage_status_override or self._current_state.status()
-
+        if self._current_stage_status_override is not None:
+            return self._current_stage_status_override
+        return self._current_state.status()
+    
     @property
     def action(self) -> Action:
-        return self._action_override or self._current_state.action()
-
-    @property
-    def node_message(self) -> str:
-        return "\n\n".join(message.content for message in self.messages)
-
-    @property
-    def stage_name(self) -> str:
-        return self.current_stage
-
-    @property
-    def status(self) -> Status:
-        return self.current_stage_status
-
-    @property
-    def needs_action(self) -> Action:
-        return self.action
-
+        if self._action_override is not None:
+            return self._action_override
+        return self._current_state.action()
+    
     @property
     def artifact_refs(self) -> Sequence[ArtifactRef] | None:
         artifact_refs: list[ArtifactRef] = []
         for message in self.messages:
             artifact_refs.extend(list(message.artifact_refs or ()))
         return artifact_refs or None
-
-    @property
-    def artifact_ids(self) -> Sequence[str] | None:
-        artifact_ids: list[str] = []
-        for ref in self.artifact_refs or ():
-            artifact_id = ref.get("id")
-            if artifact_id is not None:
-                artifact_ids.append(str(artifact_id))
-        return artifact_ids or None
-
-    @property
-    def needs_input(self) -> bool:
-        return self.action == "NEEDS_INPUT"
-
-    @property
-    def needs_data(self) -> bool:
-        return self.action == "NEEDS_DATA"
-
+    
 
 @dataclass(frozen=True)
 class ArtifactResponse:
@@ -420,9 +393,10 @@ class WorkflowApp:
                         ChatMessage(role="assistant", content=confirmation_message),
                     ],
                     _current_stage_name_override=state_name_to_route,
-                    _current_stage_status_override=active_state_status_before_run or "PENDING",
+                    _current_stage_status_override="PENDING",
+                    _action_override="NEEDS_INPUT",
                 )
-                
+                                
             state_name_to_run = decision.state_name
             state_to_run = self._load_or_init_state(
                 user_id=user_id,
@@ -457,14 +431,6 @@ class WorkflowApp:
         new_state_name = new_state.name()
         new_state_status = new_state.status()
 
-        # Store the returned payload before moving the active pointer so repo state stays consistent
-        # even if persistence fails midway.
-        self._repo.store_state(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            state=new_state,
-        )
-
         # If the routed state was already frozen before execution, treat it as a read-only detour and
         # keep the active pointer where it was. The only exception is when the returned state itself
         # is frozen, in which case that frozen state becomes the new active checkpoint.
@@ -480,6 +446,16 @@ class WorkflowApp:
             # Running the currently active frozen state in place rewrites that state's payload, so the
             # response should reflect the newly stored status even though the active pointer does not move.
             active_state_status_after_run = new_state_status
+        
+        
+             
+        if new_state.status() == "DONE":
+            new_state.set_status_freez()
+        self._repo.store_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state=new_state,
+        )
 
         if (
             active_state_name_after_run is not None
@@ -573,8 +549,6 @@ class WorkflowApp:
 
 def _state_messages(state: State) -> Sequence[ChatMessage]:
     value = state.messages()
-    if value is None:
-        return ()
     return list(value)
 
 
@@ -602,6 +576,5 @@ def _ordered_history_messages(state: State) -> list[ChatMessage]:
 __all__ = [
     "ArtifactResponse",
     "WorkflowApp",
-    "WorkflowRequest",
     "WorkflowResponse",
 ]
