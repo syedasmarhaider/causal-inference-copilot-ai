@@ -9,6 +9,7 @@ from python.domain.workflows.state import State
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
     CompileAndValidateState,
 )
+from python.implementation.workflows.nodes.dataset.dataset_state import DatasetState
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
     ModelSelectionState,
 )
@@ -25,10 +26,27 @@ class ModelTrainDeps:
 
     @classmethod
     def pre_required_states_names(cls) -> Sequence[str]:
-        return [CompileAndValidateState.NAME, ModelSelectionState.NAME]
+        return [CompileAndValidateState.NAME, ModelSelectionState.NAME, DatasetState.NAME]
 
     @classmethod
     def from_loaded(cls, loaded: Mapping[str, State]) -> ModelTrainDeps:
+        dataset_state = loaded.get(DatasetState.NAME)
+        if dataset_state is None or not isinstance(dataset_state, DatasetState):
+            raise StateDependencyError(
+                "MODEL_TRAIN",
+                "MODEL_TRAIN",
+                [DatasetState.NAME],
+            )
+        
+        dataset_state_payload = dataset_state.payload.dataset_iterations
+        if not dataset_state_payload or len(dataset_state_payload) == 0:
+            raise StateDependencyError(
+                "MODEL_TRAIN",
+                "MODEL_TRAIN",
+                [DatasetState.NAME],
+            )
+        dataset_id = dataset_state_payload[-1].dataset_id
+        
         compile_state = loaded.get(CompileAndValidateState.NAME)
         if compile_state is None or not isinstance(compile_state, CompileAndValidateState):
             raise StateDependencyError(
@@ -45,8 +63,8 @@ class ModelTrainDeps:
             )
 
         inference_ready = compile_state.payload.inference_ready_causal_spec
-        dataset_id = compile_state.payload.dataset_id
-        if inference_ready is None or dataset_id is None:
+       
+        if inference_ready is None:
             raise StateDependencyError(
                 "MODEL_TRAIN",
                 "MODEL_TRAIN",
