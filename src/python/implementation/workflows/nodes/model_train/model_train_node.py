@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, cast
 from uuid import UUID, uuid4
@@ -244,24 +246,16 @@ def _bind_payload(
     deps: ModelTrainDeps,
 ) -> ModelTrainPayloadModel:
     payload = state.payload.model_copy(deep=True)
-    current_plan = deps.inference_ready_spec.transformation_plan
-    order_covariates = deps.inference_ready_spec.get_covariates_order() or None
-    order_effect_modifiers = deps.inference_ready_spec.get_effect_modifiers_order() or None
+    current_signature = _training_signature(deps=deps)
 
     reset_required = (
         payload.dataset_id != deps.dataset_id
-        or payload.selected_model != deps.selected_model
-        or payload.column_transformation_plan != current_plan
-        or payload.order_covariates != order_covariates
-        or payload.order_effect_modifiers != order_effect_modifiers
+        or payload.training_signature != current_signature
     )
 
     updates: dict[str, Any] = {
         "dataset_id": deps.dataset_id,
-        "selected_model": deps.selected_model,
-        "column_transformation_plan": current_plan,
-        "order_covariates": order_covariates,
-        "order_effect_modifiers": order_effect_modifiers,
+        "training_signature": current_signature,
     }
     if reset_required:
         updates.update(
@@ -273,6 +267,22 @@ def _bind_payload(
             }
         )
     return payload.model_copy(update=updates)
+
+
+def _training_signature(*, deps: ModelTrainDeps) -> str:
+    signature_payload = {
+        "dataset_id": str(deps.dataset_id),
+        "selected_model": deps.selected_model,
+        "inference_ready_spec": deps.inference_ready_spec.model_dump(mode="json"),
+    }
+    signature_json = json.dumps(
+        signature_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(signature_json.encode("utf-8")).hexdigest()
 
 
 def _failed_payload(

@@ -119,7 +119,6 @@ def _compile_state(*, warnings: list[ValidationIssueModel] | None = None) -> Com
         CompileAndValidatePayloadModel(
             dataset_id=uuid4(),
             dataset_summary=spec.data_summary,
-            protocol_discussion="Confirmed protocol discussion",
             compiled_causal_spec=spec.causal_spec,
             transformation_plan=spec.transformation_plan,
             inference_ready_causal_spec=spec,
@@ -263,8 +262,19 @@ def test_model_selection_info_and_state_roundtrip() -> None:
 
     confirmed.set_status_freez()
     assert confirmed.payload.freezed is True
-    assert confirmed.status() == "FREEZED"
-    assert "model selection is freezed" in confirmed.messages()[0].content.lower()
+    assert confirmed.status() == "DONE"
+    assert confirmed.messages()[0].content == "Confirmed."
+
+    default_freezed_message_state = ModelSelectionState(
+        ModelSelectionPayload(
+            confirmed_model_selection=ConfirmedModelSelectionPayload(
+                selected_model="econml.dml.CausalForestDML",
+                reasoning="Best fit for subgroup heterogeneity.",
+            ),
+            freezed=True,
+        )
+    )
+    assert "model selection is freezed" in default_freezed_message_state.messages()[0].content.lower()
 
 
 def test_model_selection_deps_require_confirmed_compile_and_extract_warn_only() -> None:
@@ -513,10 +523,11 @@ def test_model_selection_freezed_flag_answers_read_only_questions() -> None:
         messages_history=[ChatMessage(role="user", content="Why was this model selected?")],
     )
 
-    assert result.status() == "FREEZED"
+    assert result.status() == "DONE"
     assert result.payload.freezed is True
     assert result.payload.assistant_message == (
         "The confirmed model favors subgroup heterogeneity over maximal interpretability."
     )
+    assert llm.generate_json_calls == []
     assert len(llm.generate_calls) == 1
     assert len(llm.generate_json_calls) == 0

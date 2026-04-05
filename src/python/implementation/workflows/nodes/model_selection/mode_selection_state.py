@@ -59,8 +59,6 @@ class ModelSelectionState(State):
         return self.NAME
 
     def status(self) -> Status:
-        if self.payload.freezed:
-            return "FREEZED"
         if self.payload.error_message is not None:
             return "ABORTED"
         cms = self.payload.confirmed_model_selection

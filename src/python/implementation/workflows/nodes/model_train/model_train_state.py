@@ -10,7 +10,6 @@ from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
 from python.domain.workflows.state import State, Status
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
-from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.utils.utils import uuid_from_any
 
 
@@ -18,12 +17,9 @@ class ModelTrainPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     dataset_id: UUID | None = None
-    selected_model: str | None = None
+    training_signature: str | None = None
     trained_model_id: UUID | None = None
     training_warnings: list[str] = Field(default_factory=list)
-    column_transformation_plan: TransformPlan | None = None
-    order_effect_modifiers: list[str] | None = None
-    order_covariates: list[str] | None = None
     assistant_message: str | None = None
     error_message: str | None = None
 
@@ -32,7 +28,7 @@ class ModelTrainPayloadModel(BaseModel):
     def _parse_uuid(cls, value: Any) -> UUID | None:
         return uuid_from_any(value)
 
-    @field_validator("assistant_message", "error_message", "selected_model", mode="before")
+    @field_validator("assistant_message", "error_message", "training_signature", mode="before")
     @classmethod
     def _normalize_text(cls, value: Any) -> str | None:
         if value is None:

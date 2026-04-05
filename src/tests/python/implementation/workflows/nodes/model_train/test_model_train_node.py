@@ -295,7 +295,7 @@ def test_model_train_info_state_and_roundtrip() -> None:
     done = ModelTrainState(
         ModelTrainPayloadModel(
             dataset_id=uuid4(),
-            selected_model="econml.dml.LinearDML",
+            training_signature="sig-1",
             trained_model_id=uuid4(),
             assistant_message="Training completed.",
         )
@@ -383,12 +383,9 @@ def test_model_train_success_builds_fit_command_from_confirmed_spec() -> None:
     assert isinstance(result, ModelTrainState)
     assert result.status() == "DONE"
     assert result.payload.dataset_id == dataset_id
-    assert result.payload.selected_model == "econml.dml.CausalForestDML"
+    assert result.payload.training_signature is not None
     assert result.payload.trained_model_id == fit_result.fitted_model_id
     assert result.payload.training_warnings == ["Convergence warning"]
-    assert result.payload.column_transformation_plan == compile_state.payload.inference_ready_causal_spec.transformation_plan
-    assert result.payload.order_covariates == ["age"]
-    assert result.payload.order_effect_modifiers == ["sex"]
     assert "training completed successfully" in (result.payload.assistant_message or "").lower()
     assert data_repo.loaded_dataset_ids == [dataset_id]
     assert fake_factory.requested_models == ["econml.dml.CausalForestDML"]
@@ -491,19 +488,20 @@ def test_model_train_succeeds_on_second_attempt() -> None:
 def test_model_train_reuses_existing_fit_for_same_inputs() -> None:
     compile_state = _compile_state()
     selection_state = _selection_state()
-    existing_model_id = uuid4()
-    state = ModelTrainState(
-        ModelTrainPayloadModel(
-            dataset_id=compile_state.payload.dataset_id,
-            selected_model="econml.dml.LinearDML",
-            trained_model_id=existing_model_id,
-            column_transformation_plan=compile_state.payload.inference_ready_causal_spec.transformation_plan,
-            order_covariates=["age"],
-            order_effect_modifiers=["sex"],
-            assistant_message="Already trained.",
-        )
+    fit_result = FitSuccess(
+        run_id=uuid4(),
+        started_at=None,
+        finished_at=None,
+        warnings=[],
+        meta={},
+        fitted_model_id=uuid4(),
     )
-    fake_model = _FakeCausalModel(results=[RuntimeError("should not be called")])
+    fake_model = _FakeCausalModel(
+        results=[
+            fit_result,
+            RuntimeError("should not be called"),
+        ]
+    )
     data_repo = _FakeDataRepo(dataframe=_build_dataframe())
     node = ModelTrainNode(
         llm=None,
@@ -511,10 +509,23 @@ def test_model_train_reuses_existing_fit_for_same_inputs() -> None:
         tool_factory=_FakeToolFactory(model_factory=_FakeModelFactory(model=fake_model)),
     )
 
-    result = node.run(
+    first_result = node.run(
         user_id=uuid4(),
         conversation_id=uuid4(),
-        state=state,
+        state=ModelTrainState.init_empty(),
+        previous_state_dependencies={
+            CompileAndValidateState.NAME: compile_state,
+            ModelSelectionState.NAME: selection_state,
+        },
+        messages_history=None,
+    )
+    assert isinstance(first_result, ModelTrainState)
+    assert first_result.payload.trained_model_id == fit_result.fitted_model_id
+
+    second_result = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        state=first_result,
         previous_state_dependencies={
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
@@ -522,7 +533,7 @@ def test_model_train_reuses_existing_fit_for_same_inputs() -> None:
         messages_history=None,
     )
 
-    assert isinstance(result, ModelTrainState)
-    assert result.payload.trained_model_id == existing_model_id
-    assert data_repo.loaded_dataset_ids == []
-    assert fake_model.commands == []
+    assert isinstance(second_result, ModelTrainState)
+    assert second_result.payload.trained_model_id == fit_result.fitted_model_id
+    assert data_repo.loaded_dataset_ids == [compile_state.payload.dataset_id]
+    assert len(fake_model.commands) == 1
