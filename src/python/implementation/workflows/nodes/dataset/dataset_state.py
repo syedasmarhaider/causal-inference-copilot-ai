@@ -49,6 +49,11 @@ class DatasetState(State):
 
     def name(self) -> str:
         return self.NAME
+    
+    def get_latest_dataset_id(self) -> UUID | None:
+        if not self.payload.dataset_iterations or len(self.payload.dataset_iterations) == 0:
+            return None
+        return self.payload.dataset_iterations[-1].dataset_id
 
     def status(self) -> Status:
         if self.payload.freezed:
