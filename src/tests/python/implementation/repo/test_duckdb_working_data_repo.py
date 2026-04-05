@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from python.domain.repo.working_data_repo import WorkingDataSQLRequest
-from python.implementation.repo.duckdb_working_data_repo import DuckDBWorkingDataRepo
+from python.implementation.repo.duckdb_working_analytics_repo import DuckDBWorkingDataRepo
 
 
 def test_execute_sql_returns_last_result_set_and_metadata() -> None:

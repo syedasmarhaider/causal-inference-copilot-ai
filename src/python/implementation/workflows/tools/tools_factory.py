@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from python.domain.repo.analytics_repo import AnalyticsRepo
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
-from python.domain.repo.working_data_repo import WorkingDataRepo
 from python.domain.service.llm_service import LLMService
 from python.domain.workflows.tool import Tool
 from python.domain.workflows.tool_factory import ToolFactory
@@ -30,12 +30,12 @@ from python.implementation.workflows.tools.plot_tool.plot_tool import PlotTool
 
 class DefaultToolFactory(ToolFactory):
     _tools: dict[str, Tool]
-    def __init__(self, data_repo: DataRepo, models_repo: ModelsRepo, working_data_repo: WorkingDataRepo, llm_service: LLMService) -> None:
+    def __init__(self, data_repo: DataRepo, models_repo: ModelsRepo, analytics_repo: AnalyticsRepo, llm_service: LLMService) -> None:
         self._tools = {
             DatasetProfilingTool.NAME: DatasetProfilingTool(),
             DataManipulationTool.NAME: DataManipulationTool(
                 llm=llm_service,
-                working_data_repo=working_data_repo,
+                analytics_repo=analytics_repo,
             ),
             PlotTool.NAME: PlotTool(llm=llm_service),
             CausalSpecsTool.NAME: CausalSpecsTool(),

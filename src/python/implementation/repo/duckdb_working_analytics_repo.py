@@ -9,18 +9,16 @@ from dataclasses import dataclass, field
 import duckdb
 import pandas as pd
 
-from python.domain.repo.working_data_repo import (
-    WorkingDataSQLRequest,
-    WorkingDataSQLResult,
-    WorkingDataRepo,
-)
+from python.domain.repo.analytics_repo import AnalyticsRepo, AnalyticsSQLRequest, AnalyticsSQLResult
+
+
 
 _REGISTERED_DF_NAME = "__working_input_dataframe"
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
-class DuckDBWorkingDataRepo(WorkingDataRepo):
+class DuckDBAnalyticsRepo(AnalyticsRepo):
     database: str = ":memory:"
     _connection: duckdb.DuckDBPyConnection = field(init=False, repr=False)
     _lock: threading.RLock = field(init=False, repr=False, default_factory=threading.RLock)
@@ -33,8 +31,8 @@ class DuckDBWorkingDataRepo(WorkingDataRepo):
         self,
         *,
         dataframe: pd.DataFrame,
-        request: WorkingDataSQLRequest,
-    ) -> WorkingDataSQLResult:
+        request: AnalyticsSQLRequest,
+    ) -> AnalyticsSQLResult:
         self._validate_dataframe(dataframe)
         self._validate_identifier(str(request.table_name))
 
@@ -75,7 +73,7 @@ class DuckDBWorkingDataRepo(WorkingDataRepo):
 
             elapsed_ms = (time.perf_counter() - started) * 1000.0
 
-            return WorkingDataSQLResult(
+            return AnalyticsSQLResult(
                 table_name=table_name,
                 executed_statements=statements,
                 columns=last_columns,

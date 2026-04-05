@@ -9,7 +9,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from python.domain.models.models import NonEmptyStr
-from python.domain.repo.working_data_repo import WorkingDataRepo, WorkingDataSQLRequest
+from python.domain.repo.analytics_repo import AnalyticsRepo, AnalyticsSQLRequest
 from python.domain.service.llm_service import AvailableModelsKey, LLMConfig, LLMService
 from python.domain.workflows.tool import Tool
 from python.implementation.service.logging.default_logging import get_app_logger
@@ -77,7 +77,7 @@ class DataManipulationSQLPlan(BaseModel):
 @dataclass(frozen=True)
 class DataManipulationTool(Tool):
     llm: LLMService
-    working_data_repo: WorkingDataRepo
+    analytics_repo: AnalyticsRepo
     model: AvailableModelsKey = "basic"
 
     NAME: ClassVar[str] = "DATA_MANIPULATION"
@@ -140,11 +140,11 @@ class DataManipulationTool(Tool):
         )
 
         statements = tuple(str(statement).strip() for statement in sql_plan.statements)
-        sql_request = WorkingDataSQLRequest(
+        sql_request = AnalyticsSQLRequest(
             statements=statements,
             table_name=normalized_table_name,
         )
-        sql_result = self.working_data_repo.execute_sql(
+        sql_result = self.analytics_repo.execute_sql(
             dataframe=dataframe,
             request=sql_request,
         )
