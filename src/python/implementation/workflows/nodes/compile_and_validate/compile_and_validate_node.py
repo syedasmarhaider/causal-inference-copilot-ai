@@ -42,6 +42,7 @@ from python.implementation.workflows.tools.causal.specs.causal_specs_tool import
 from python.implementation.workflows.tools.causal.validation.validation_backdoor_tool import (
     ValidationBackdoorTool,
 )
+from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.utils.utils import safe_err
 from python.domain.models.validation import ValidationIssueModel
 
@@ -104,7 +105,7 @@ class CompileAndValidateNode(Node):
                 messages_history=messages_history,
             )
 
-        payload = self._bind_payload(state=state, deps=deps)
+        payload = state.payload.model_copy(deep=True)
 
         if payload.phase == "REVIEW_READY":
             return self._handle_review_response(payload=payload, latest_user_message=latest_user_message)
@@ -116,6 +117,8 @@ class CompileAndValidateNode(Node):
             user_id=user_id,
             conversation_id=conversation_id,
             payload=payload,
+            dataset_id=deps.dataset_id,
+            dataset_summary=deps.dataset_summary,
             protocol_discussion=deps.protocol_discussion,
             messages_history=messages_history,
         )
@@ -169,69 +172,26 @@ class CompileAndValidateNode(Node):
             )
         )
 
-    def _bind_payload(
-        self,
-        *,
-        state: CompileAndValidateState,
-        deps: CompileAndValidateDeps,
-    ) -> CompileAndValidatePayloadModel:
-        payload = state.payload.model_copy(deep=True)
-        dataset_changed = payload.dataset_id != deps.dataset_id
-        should_reset = dataset_changed or payload.phase == "INIT"
-
-        updates: dict[str, Any] = {
-            "dataset_id": deps.dataset_id,
-            "dataset_summary": deps.dataset_summary,
-        }
-        if should_reset:
-            updates.update(
-                {
-                    "compiled_causal_spec": None,
-                    "transformation_plan": None,
-                    "inference_ready_causal_spec": None,
-                    "validation_issues": [],
-                    "phase": "INIT",
-                    "assistant_message": None,
-                    "system_message": None,
-                    "error_message": None,
-                }
-            )
-        return payload.model_copy(update=updates)
-
     def _compile_and_validate(
         self,
         *,
         user_id: UUID,
         conversation_id: UUID,
         payload: CompileAndValidatePayloadModel,
+        dataset_id: UUID,
+        dataset_summary: DatasetSummaryModel,
         protocol_discussion: str,
         messages_history: Sequence[ChatMessage] | None,
     ) -> CompileAndValidateState:
         history = list(messages_history[-4:]) if messages_history else None
-        if payload.dataset_summary is None or payload.dataset_id is None:
-            return self._failed_state(
-                payload=payload,
-                issues=[
-                    _fail_issue(
-                        message="Compile-and-validate is missing bound dataset context.",
-                        evidence={},
-                        fix_hint="Reload the active dataset context and rerun compile-and-validate.",
-                    )
-                ],
-                assistant_message=(
-                    "I could not compile the protocol because the active dataset context is missing. "
-                    "Please retry after the dataset context is reloaded."
-                ),
-                error_message="compile-and-validate missing dataset context",
-            )
         context_payload: dict[str, Any] = {
             "protocol_discussion": protocol_discussion,
-            "dataset_summary": payload.dataset_summary.model_dump(mode="json"),
+            "dataset_summary": dataset_summary.model_dump(mode="json"),
         }
 
         try:
             causal_schema = self._causal_specs_tool.build_backdoor_schema(
-                data_summary=payload.dataset_summary,
+                data_summary=dataset_summary,
             )
             causal_spec = self._llm.generate_json(
                 schema=causal_schema,
@@ -243,7 +203,7 @@ class CompileAndValidateNode(Node):
             )
             causal_spec = self._causal_specs_tool.post_validate_backdoor_spec(
                 causal_spec=causal_spec,
-                data_summary=payload.dataset_summary,
+                data_summary=dataset_summary,
             )
         except Exception as e:
             return self._failed_state(
@@ -287,7 +247,7 @@ class CompileAndValidateNode(Node):
 
         try:
             plan_schema = self._encoding_plan_tool.build_encoding_schema(
-                data_summary=payload.dataset_summary,
+                data_summary=dataset_summary,
                 covariate_columns=causal_spec.covariates,
                 effect_modifier_columns=causal_spec.effect_modifiers,
             )
@@ -307,7 +267,7 @@ class CompileAndValidateNode(Node):
             )
             transform_plan = self._encoding_plan_tool.post_validate_encoding_plan(
                 plan=transform_plan,
-                data_summary=payload.dataset_summary,
+                data_summary=dataset_summary,
                 covariate_columns=causal_spec.covariates,
                 effect_modifier_columns=causal_spec.effect_modifiers,
             )
@@ -335,7 +295,7 @@ class CompileAndValidateNode(Node):
             dataframe = self._data_repo.get_csv_data(
                 user_id=user_id,
                 conversation_id=conversation_id,
-                dataset_id=payload.dataset_id,
+                dataset_id=dataset_id,
                 limit=None,
             )
             scope_issues = _validate_dataset_protocol_scope_columns(
@@ -350,7 +310,7 @@ class CompileAndValidateNode(Node):
             inference_ready = InferenceReadyCausalSpec(
                 causal_spec=causal_spec,
                 transformation_plan=transform_plan,
-                data_summary=payload.dataset_summary,
+                data_summary=dataset_summary,
             )
         except Exception as e:
             return self._failed_state(

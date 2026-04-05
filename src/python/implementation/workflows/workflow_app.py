@@ -26,6 +26,7 @@ _MESSAGES_HISTORY_LIMIT = 15
 @dataclass(frozen=True)
 class WorkflowResponse:
     _current_state: State
+    _current_dataset_id: UUID | None = None
     _assistant_messages_override: Sequence[ChatMessage] | None = None
     _current_stage_name_override: str | None = None
     _current_stage_status_override: Status | None = None

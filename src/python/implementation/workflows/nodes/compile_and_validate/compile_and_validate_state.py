@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Any, ClassVar, Literal
-from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
@@ -17,10 +16,6 @@ from python.implementation.workflows.tools.causal.common.inference_ready_causal_
 )
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
-from python.implementation.workflows.tools.common.model.data_summary import (
-    DatasetSummaryModel,
-)
-from python.implementation.workflows.utils.utils import uuid_from_any
 from python.domain.models.validation import ValidationIssueModel
 
 CompileAndValidatePhase = Literal["INIT", "REVIEW_READY", "CONFIRMED", "FAILED"]
@@ -28,9 +23,6 @@ CompileAndValidatePhase = Literal["INIT", "REVIEW_READY", "CONFIRMED", "FAILED"]
 
 class CompileAndValidatePayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    dataset_id: UUID | None = None
-    dataset_summary: DatasetSummaryModel | None = None
     compiled_causal_spec: CausalSpec | None = None
     transformation_plan: TransformPlan | None = None
     inference_ready_causal_spec: InferenceReadyCausalSpec | None = None
@@ -40,11 +32,6 @@ class CompileAndValidatePayloadModel(BaseModel):
     system_message: str | None = None
     error_message: str | None = None
     freezed: bool = False
-
-    @field_validator("dataset_id", mode="before")
-    @classmethod
-    def _parse_dataset_id(cls, value: Any) -> UUID | None:
-        return uuid_from_any(value)
 
     @field_validator(
         "assistant_message",
