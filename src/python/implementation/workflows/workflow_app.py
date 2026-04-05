@@ -405,9 +405,12 @@ class WorkflowApp:
             previous_state_dependencies=deps,
             messages_history=history,
         )
+        
+        active_state_name = state_name_to_route
                 
         should_not_store_active_state = new_state.name() == state_name_to_run and new_state.status() == "FREEZED" and pre_state_to_run_status == "FREEZED"  
         if not should_not_store_active_state: 
+                active_state_name = new_state.name()
                 self._repo.store_active_state_name(
                     user_id=req.user_id,
                     conversation_id=req.conversation_id,
@@ -452,7 +455,7 @@ class WorkflowApp:
 
         return WorkflowResponse(
             messages=_assistant_messages_for_user(new_state),
-            current_stage=new_state.name(),
+            current_stage=active_state_name,
             current_stage_status=new_state.status(),
         )
 
