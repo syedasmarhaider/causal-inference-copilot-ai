@@ -9,6 +9,7 @@ from python.domain.workflows.state import State
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
     CompileAndValidateState,
 )
+from python.implementation.workflows.nodes.dataset.dataset_state import DatasetState
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
     ModelSelectionState,
 )
@@ -35,10 +36,26 @@ class CausalInferenceDeps:
             CompileAndValidateState.NAME,
             ModelSelectionState.NAME,
             ModelTrainState.NAME,
+            DatasetState.NAME,
         ]
 
     @classmethod
     def from_loaded(cls, loaded: Mapping[str, State]) -> CausalInferenceDeps:
+        dataset_state = loaded.get(DatasetState.NAME)
+        if dataset_state is None or not isinstance(dataset_state, DatasetState):
+                raise StateDependencyError(
+                    "CAUSAL_INFERENCE",
+                    "CAUSAL_INFERENCE",
+                    [DatasetState.NAME],
+                )
+        dataset_state_payload = dataset_state.payload
+        if len(dataset_state_payload.dataset_iterations) == 0:
+            raise StateDependencyError(
+                "CAUSAL_INFERENCE",
+                "CAUSAL_INFERENCE",
+                [DatasetState.NAME],
+            )        
+            
         compile_state = loaded.get(CompileAndValidateState.NAME)
         if compile_state is None or not isinstance(compile_state, CompileAndValidateState):
             raise StateDependencyError(
@@ -54,11 +71,10 @@ class CausalInferenceDeps:
             )
 
         inference_ready_spec = compile_state.payload.inference_ready_causal_spec
-        dataset_id = compile_state.payload.dataset_id
-        dataset_summary = compile_state.payload.dataset_summary
+        dataset_id = dataset_state_payload.dataset_iterations[-1].dataset_id
+        dataset_summary = dataset_state_payload.latest_summary
         if (
             inference_ready_spec is None
-            or dataset_id is None
             or dataset_summary is None
         ):
             raise StateDependencyError(
