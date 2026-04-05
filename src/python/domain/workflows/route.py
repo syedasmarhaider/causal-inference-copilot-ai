@@ -11,10 +11,9 @@ from python.domain.workflows.state import State
 
 class NextDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    state_name: str
-    router_message_for_node: str | None = None
-    # TODO: temp sol change later when we do snapshot mode.
-    delete_next_states_names: Sequence[str] | None = None
+    state_name: str | None = None
+    persist_as_active: bool | None = None
+    router_confirmation_message_for_user: str | None = None
 
 
 class Router(ABC):

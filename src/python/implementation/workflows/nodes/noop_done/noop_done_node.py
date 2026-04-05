@@ -1,22 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import ClassVar
 from uuid import UUID
 
 from python.domain.service.llm_service import ChatMessage
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
-from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.noop_done.noop_done_state import NoopDoneState
 
 
-@dataclass(frozen=True)
 class NoopDoneNode(Node):
-    """
-    Node that does nothing and returns a DONE state.
-    """
     NAME: ClassVar[str] = NoopDoneState.NAME
 
     @property
@@ -33,8 +27,12 @@ class NoopDoneNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         state: State,
-        tool_factory: ToolFactory,
         previous_state_dependencies: Mapping[str, State],
-        messages_history: Sequence[ChatMessage] | None
+        messages_history: Sequence[ChatMessage] | None,
     ) -> State:
+        _ = user_id
+        _ = conversation_id
+        _ = state
+        _ = previous_state_dependencies
+        _ = messages_history
         return NoopDoneState()

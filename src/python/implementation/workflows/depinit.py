@@ -53,6 +53,7 @@ def make_workflow_app() -> WorkflowApp:
         llm=llm,
         data_repo=data_repo,
         models_repo=models_repo,
+        analytics_repo=analytics_repo,
     )
 
     log.info(
