@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
-from python.domain.workflows.state import State, Status
+from python.domain.workflows.state import Action, State, Status
 from python.implementation.workflows.nodes.model_selection.model_selection_deps import (
     ModelSelectionDeps,
 )
@@ -66,6 +66,11 @@ class ModelSelectionState(State):
             return "DONE"
 
         return "PENDING"
+    
+    def action(self) -> Action:
+        if self.status() == "PENDING":
+            return "NEEDS_INPUT"
+        return "NONE"
 
     def set_status_freez(self) -> None:
         if self.status() == "DONE":

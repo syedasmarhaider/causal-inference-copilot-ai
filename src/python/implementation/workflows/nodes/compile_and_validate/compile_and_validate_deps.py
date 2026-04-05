@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
-from python.domain.models.errors import StateDependencyError
+from python.domain.models.errors import NodeExecutionError, StateDependencyError
 from python.domain.workflows.state import State
 from python.implementation.workflows.nodes.dataset.dataset_state import DatasetState
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (

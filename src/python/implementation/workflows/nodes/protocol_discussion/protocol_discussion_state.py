@@ -67,9 +67,9 @@ class ProtocolDiscussionState(State):
         return "PENDING"
     
     def action(self) -> Action:
-        if self.payload.phase == "DISCUSSING":
-            return "NEEDS_INPUT"
-        return "NONE"
+        if self.status() == "DONE":
+            return "NONE"
+        return "NEEDS_INPUT"
 
     def set_status_freez(self) -> None:
         return None

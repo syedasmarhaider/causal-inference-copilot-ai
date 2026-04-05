@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ArtifactRef, ChatMessage
-from python.domain.workflows.state import State, Status
+from python.domain.workflows.state import Action, State, Status
 from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import (
     CausalInferenceDeps,
 )
@@ -50,6 +50,9 @@ class CausalInferenceState(State):
 
     def status(self) -> Status:
         return "PENDING"
+    
+    def action(self) -> Action:
+        return "NEEDS_INPUT"
 
     def set_status_freez(self) -> None:
         return None

@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
-from python.domain.workflows.state import State, Status
+from python.domain.workflows.state import Action, State, Status
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.utils.utils import uuid_from_any
 
@@ -53,6 +53,9 @@ class ModelTrainState(State):
         if self.payload.trained_model_id is not None:
             return "DONE"
         return "PENDING"
+    
+    def action(self) -> Action:
+        return "NONE"
 
     def set_status_freez(self) -> None:
         return None
