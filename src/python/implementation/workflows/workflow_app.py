@@ -14,40 +14,67 @@ from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.workflows.node import Node
 from python.domain.workflows.route import Router
-from python.domain.workflows.state import State, Status
+from python.domain.workflows.state import ACTION, State, Status
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.dataset.dataset_state import DatasetState
 
-Stage = str
 
 _MESSAGES_HISTORY_LIMIT = 15
 
 
 @dataclass(frozen=True)
-class WorkflowRequest:
-    user_id: UUID
-    conversation_id: UUID
-    user_message: str | None
-
-
-@dataclass(frozen=True)
 class WorkflowResponse:
-    messages: Sequence[ChatMessage]
-    current_stage: Stage
-    current_stage_status: Status
+    _current_state: State
+    _messages_override: Sequence[ChatMessage] | None = None
+    _current_stage_name_override: str | None = None
+    _current_stage_status_override: Status | None = None
+
+    @property
+    def messages(self) -> Sequence[ChatMessage]:
+        if self._messages_override is not None:
+            return tuple(self._messages_override)
+        return tuple(_assistant_messages_for_user(self._current_state))
+
+    @property
+    def current_stage(self) -> str:
+        # The active stage can differ from the executed node during frozen read-only detours.
+        return self._current_stage_name_override or self._current_state.name()
+
+    @property
+    def current_stage_status(self) -> Status:
+        return self._current_stage_status_override or self._current_state.status()
+
+    @property
+    def action(self) -> ACTION:
+        if self.current_stage == DatasetState.NAME and self.current_stage_status != "DONE":
+            return "NEEDS_DATA"
+        if self.current_stage_status != "DONE":
+            return "NEEDS_INPUT"
+        return "NONE"
 
     @property
     def node_message(self) -> str:
         return "\n\n".join(message.content for message in self.messages)
 
     @property
-    def needs_input(self) -> bool:
-        return False
+    def needs_action(self) -> ACTION:
+        return self.action
 
     @property
-    def needs_data(self) -> bool:
-        return False
+    def stage_name(self) -> str:
+        return self.current_stage
+
+    @property
+    def status(self) -> Status:
+        return self.current_stage_status
+
+    @property
+    def artifact_refs(self) -> Sequence[dict[str, Any]] | None:
+        artifact_refs: list[dict[str, Any]] = []
+        for message in self.messages:
+            artifact_refs.extend(list(message.artifact_refs or ()))
+        return artifact_refs or None
 
     @property
     def artifact_ids(self) -> Sequence[str] | None:
@@ -59,7 +86,14 @@ class WorkflowResponse:
                     artifact_ids.append(str(artifact_id))
         return artifact_ids or None
 
+    @property
+    def needs_input(self) -> bool:
+        return self.action == "NEEDS_INPUT"
 
+    @property
+    def needs_data(self) -> bool:
+        return self.action == "NEEDS_DATA"
+   
 @dataclass(frozen=True)
 class ArtifactResponse:
     mime: str
@@ -165,11 +199,7 @@ class WorkflowApp:
             )
             return None
 
-        return WorkflowResponse(
-            messages=_assistant_messages_for_user(state),
-            current_stage=state.name(),
-            current_stage_status=state.status(),
-        )
+        return WorkflowResponse(_current_state=state)
 
     def upload_csv_data(
         self,
@@ -318,7 +348,11 @@ class WorkflowApp:
             deleted_states_count=len(state_names),
         )
 
-    def handle(self, req: WorkflowRequest) -> WorkflowResponse:
+    def handle(self, 
+               user_id: UUID,
+               conversation_id: UUID,
+               user_message: str | None,
+               ) -> WorkflowResponse:
         self._log.debug(
             "workflow handle requested",
             user_id=req.user_id,
@@ -343,11 +377,12 @@ class WorkflowApp:
         state_name_to_route = self._repo.load_active_state_name(
             user_id=req.user_id,
             conversation_id=req.conversation_id,
-        )        
+        )
         state_name_to_run: str
         state_to_run: State
-        pre_state_to_run_status: Status 
-
+        pre_state_to_run_status: Status
+        active_state_name_before_run = state_name_to_route
+        active_state_status_before_run: Status | None = None
 
         if not state_name_to_route:
             state_name_to_run = self._router.get_initial_state_name()
@@ -367,25 +402,42 @@ class WorkflowApp:
                 conversation_id=req.conversation_id,
                 state_name=state_name_to_route,
             )
+            active_state_status_before_run = current_state.status()
             decision = self._router.decide_next(
                 current_state=current_state,
                 messages_history=history,
             )
             if decision.state_name is None:
-                raise ValueError(
-                    decision.router_confirmation_message_for_user or "Router returned no state to execute."
+                confirmation_message = (
+                    decision.router_confirmation_message_for_user
+                    or "I need a bit more clarification before I can route this request."
                 )
+                # Persist the router clarification so history stays coherent even when execution stops.
+                self._repo.append_message(
+                    user_id=req.user_id,
+                    conversation_id=req.conversation_id,
+                    message=ChatMessage(role="assistant", content=confirmation_message),
+                )
+                return WorkflowResponse(
+                    _current_state=current_state,
+                    _messages_override=[
+                        ChatMessage(role="assistant", content=confirmation_message),
+                    ],
+                    _current_stage_name_override=state_name_to_route,
+                    _current_stage_status_override=active_state_status_before_run or "PENDING",
+                )
+                
             state_name_to_run = decision.state_name
             state_to_run = self._load_or_init_state(
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
                 state_name=state_name_to_run,
             )
-            
+
         deps = self._load_deps(
             user_id=req.user_id,
             conversation_id=req.conversation_id,
-            required=_state_required_names(state_to_run),
+            required=state_to_run.pre_required_states_names(),
         )
         node = self._nodes.get(state_name_to_run)
         if node is None:
@@ -396,7 +448,7 @@ class WorkflowApp:
                 state_name=state_name_to_run,
             )
             raise KeyError(f"WorkflowApp: no node registered for state_name={state_name_to_run!r}")
-        
+
         pre_state_to_run_status = state_to_run.status()
         new_state = node.run(
             user_id=req.user_id,
@@ -405,42 +457,60 @@ class WorkflowApp:
             previous_state_dependencies=deps,
             messages_history=history,
         )
-        
-        active_state_name = state_name_to_route
-                
-        should_not_store_active_state = new_state.name() == state_name_to_run and new_state.status() == "FREEZED" and pre_state_to_run_status == "FREEZED"  
-        if not should_not_store_active_state: 
-                active_state_name = new_state.name()
-                self._repo.store_active_state_name(
-                    user_id=req.user_id,
-                    conversation_id=req.conversation_id,
-                    state_name=new_state.name(),
-                )
-                if new_state.status() == "DONE":
-                    new_state.set_status_freez()
-        
+
+        new_state_name = new_state.name()
+        new_state_status = new_state.status()
+
+        # Store the returned payload before moving the active pointer so repo state stays consistent
+        # even if persistence fails midway.
         self._repo.store_state(
             user_id=req.user_id,
             conversation_id=req.conversation_id,
             state=new_state,
         )
-        
+
+        # If the routed state was already frozen before execution, treat it as a read-only detour and
+        # keep the active pointer where it was. The only exception is when the returned state itself
+        # is frozen, in which case that frozen state becomes the new active checkpoint.
+        active_state_name_after_run = active_state_name_before_run
+        active_state_status_after_run = active_state_status_before_run
+        if new_state_status == "FREEZED":
+            active_state_name_after_run = new_state_name
+            active_state_status_after_run = new_state_status
+        elif pre_state_to_run_status != "FREEZED":
+            active_state_name_after_run = new_state_name
+            active_state_status_after_run = new_state_status
+        elif active_state_name_before_run == new_state_name:
+            # Running the currently active frozen state in place rewrites that state's payload, so the
+            # response should reflect the newly stored status even though the active pointer does not move.
+            active_state_status_after_run = new_state_status
+
+        if (
+            active_state_name_after_run is not None
+            and active_state_name_after_run != active_state_name_before_run
+        ):
+            self._repo.store_active_state_name(
+                user_id=req.user_id,
+                conversation_id=req.conversation_id,
+                state_name=active_state_name_after_run,
+            )
+
         ordered_history_messages = _ordered_history_messages(new_state)
         if ordered_history_messages:
             self._repo.append_messages(
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
                 messages=ordered_history_messages,
-            )        
-                
-        state_error = _state_error(new_state)
+            )
+
+        state_error = new_state.error()
         if state_error is not None:
             self._log.error(
                 "node returned workflow error",
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
-                state_name=new_state.name(),
-                state_status=new_state.status(),
+                state_name=new_state_name,
+                state_status=new_state_status,
                 node_error=state_error.error,
             )
         else:
@@ -448,15 +518,15 @@ class WorkflowApp:
                 "workflow node completed",
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
-                state_name=new_state.name(),
-                state_status=new_state.status(),
+                state_name=new_state_name,
+                state_status=new_state_status,
                 assistant_messages_count=len(_assistant_messages_for_user(new_state)),
             )
 
         return WorkflowResponse(
-            messages=_assistant_messages_for_user(new_state),
-            current_stage=active_state_name,
-            current_stage_status=new_state.status(),
+            _current_state=new_state,
+            _current_stage_name_override=active_state_name_after_run or new_state_name,
+            _current_stage_status_override=active_state_status_after_run or new_state_status,
         )
 
     def _init_empty_state(self, state_name: str) -> State:
@@ -464,9 +534,10 @@ class WorkflowApp:
         if cls is None:
             raise KeyError(f"WorkflowApp: no State class registered for state_name={state_name!r}")
         state = cls.init_empty()
-        if state.name() != state_name:
+        state_name_from_state = state.name()
+        if state_name_from_state != state_name:
             raise ValueError(
-                f"init_empty() returned name={state.name()!r}, expected={state_name!r}"
+                f"init_empty() returned name={state_name_from_state!r}, expected={state_name!r}"
             )
         return state
 
@@ -504,31 +575,8 @@ class WorkflowApp:
                 deps[dep_name] = dep_state
         return deps
 
-def _read_state_attr(state: State, attr_name: str) -> Any:
-    value = getattr(state, attr_name)
-    if callable(value):
-        return value()
-    return value
-
-def _state_required_names(state: State) -> Sequence[str]:
-    value = _read_state_attr(state, "pre_required_states_names")
-    if value is None:
-        return ()
-    return value
-
-
-def _state_error(state: State) -> Any:
-    try:
-        return _read_state_attr(state, "error")
-    except AttributeError:
-        return None
-
-
 def _state_messages(state: State) -> Sequence[ChatMessage]:
-    try:
-        value = _read_state_attr(state, "messages")
-    except AttributeError:
-        return ()
+    value = state.messages()
     if value is None:
         return ()
     return list(value)
