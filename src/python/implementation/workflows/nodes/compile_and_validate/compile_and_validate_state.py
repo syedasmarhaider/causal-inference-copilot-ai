@@ -31,7 +31,6 @@ class CompileAndValidatePayloadModel(BaseModel):
 
     dataset_id: UUID | None = None
     dataset_summary: DatasetSummaryModel | None = None
-    protocol_discussion: str = ""
     compiled_causal_spec: CausalSpec | None = None
     transformation_plan: TransformPlan | None = None
     inference_ready_causal_spec: InferenceReadyCausalSpec | None = None
@@ -47,7 +46,6 @@ class CompileAndValidatePayloadModel(BaseModel):
         return uuid_from_any(value)
 
     @field_validator(
-        "protocol_discussion",
         "assistant_message",
         "system_message",
         "error_message",
@@ -123,4 +121,3 @@ class CompileAndValidateState(State):
     @classmethod
     def init_empty(cls) -> CompileAndValidateState:
         return cls(CompileAndValidatePayloadModel())
-

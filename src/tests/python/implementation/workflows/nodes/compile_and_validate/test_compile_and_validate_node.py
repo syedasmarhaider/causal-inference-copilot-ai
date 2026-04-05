@@ -20,6 +20,7 @@ from python.implementation.workflows.nodes.compile_and_validate.compile_and_vali
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_prompts import (
     get_compile_and_validate_node_info,
     get_compile_causal_spec_prompt,
+    get_compile_review_decision_prompt,
     get_compile_transformation_plan_prompt,
 )
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
@@ -251,6 +252,7 @@ def test_compile_and_validate_prompts_and_info_have_expected_scope() -> None:
     assert "causal specification" in get_compile_and_validate_node_info().lower()
     assert "dataset summary is authoritative" in get_compile_causal_spec_prompt().lower()
     assert "build the plan only for covariates and effect modifiers" in get_compile_transformation_plan_prompt().lower()
+    assert "full meaning of the user reply" in get_compile_review_decision_prompt().lower()
 
 
 def test_compile_and_validate_state_roundtrip_and_statuses() -> None:
@@ -393,7 +395,6 @@ def test_compile_and_validate_node_confirmed_review_marks_done() -> None:
         CompileAndValidatePayloadModel(
             dataset_id=dataset_id,
             dataset_summary=summary,
-            protocol_discussion="Confirmed protocol discussion",
             phase="REVIEW_READY",
             assistant_message="Please confirm this compiled setup.",
             compiled_causal_spec=CausalSpec.model_validate(
@@ -435,7 +436,17 @@ def test_compile_and_validate_node_confirmed_review_marks_done() -> None:
         )
     )
     node = CompileAndValidateNode(
-        llm=_FakeLLM(),
+        llm=_FakeLLM(
+            json_outputs=[
+                {
+                    "action": "confirm",
+                    "assistant_message": (
+                        "The compiled causal specification, transformation plan, and validation "
+                        "review are now confirmed. We can proceed with this setup."
+                    ),
+                }
+            ]
+        ),
         data_repo=_FakeDataRepo(dataframe=df),
         tool_factory=_tool_factory(),
     )
@@ -464,13 +475,22 @@ def test_compile_and_validate_node_rejection_aborts_review() -> None:
         CompileAndValidatePayloadModel(
             dataset_id=dataset_id,
             dataset_summary=summary,
-            protocol_discussion="Confirmed protocol discussion",
             phase="REVIEW_READY",
             assistant_message="Please confirm this compiled setup.",
         )
     )
     node = CompileAndValidateNode(
-        llm=_FakeLLM(),
+        llm=_FakeLLM(
+            json_outputs=[
+                {
+                    "action": "revise",
+                    "assistant_message": (
+                        "The compiled protocol review was not confirmed. Please go back and revise "
+                        "the protocol or dataset assumptions before we continue."
+                    ),
+                }
+            ]
+        ),
         data_repo=_FakeDataRepo(dataframe=df),
         tool_factory=_tool_factory(),
     )
@@ -490,6 +510,49 @@ def test_compile_and_validate_node_rejection_aborts_review() -> None:
     assert result.status() == "ABORTED"
     assert result.payload.system_message is not None
     assert result.payload.system_message.startswith("COMPILE_AND_VALIDATE_BLOCKED")
+
+
+def test_compile_and_validate_node_unclear_review_reply_stays_pending() -> None:
+    df = _build_dataframe()
+    summary = _build_summary(df)
+    dataset_id = uuid4()
+    state = CompileAndValidateState(
+        CompileAndValidatePayloadModel(
+            dataset_id=dataset_id,
+            dataset_summary=summary,
+            phase="REVIEW_READY",
+            assistant_message="Please confirm this compiled setup.",
+        )
+    )
+    node = CompileAndValidateNode(
+        llm=_FakeLLM(
+            json_outputs=[
+                {
+                    "action": "clarify",
+                    "assistant_message": "Please tell me whether you want to confirm this setup or which part should change.",
+                }
+            ]
+        ),
+        data_repo=_FakeDataRepo(dataframe=df),
+        tool_factory=_tool_factory(),
+    )
+
+    result = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={
+            DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary),
+            ProtocolDiscussionState.NAME: _protocol_state(dataset_id=dataset_id, summary=summary),
+        },
+        messages_history=[ChatMessage(role="user", content="Hmm, maybe.")],
+        state=state,
+    )
+
+    assert result.payload.phase == "REVIEW_READY"
+    assert result.status() == "PENDING"
+    assert result.payload.assistant_message == (
+        "Please tell me whether you want to confirm this setup or which part should change."
+    )
 
 
 def test_compile_and_validate_node_spec_compile_failure_aborts() -> None:

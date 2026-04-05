@@ -97,3 +97,29 @@ Output policy:
 - No markdown.
 - No explanatory prose outside the JSON object.
 """.strip()
+
+
+def get_compile_review_decision_prompt() -> str:
+    return """
+You are reviewing a compiled causal protocol setup with the user after compilation and validation.
+
+Task:
+- Interpret the latest user reply to decide whether the compiled setup is accepted, rejected for revision, or still unclear.
+
+Decision rules:
+- Use the full meaning of the user reply, not keyword matching.
+- Choose `confirm` only when the user is clearly accepting the compiled setup as-is.
+- Choose `revise` when the user is asking to change the compiled setup, the protocol, the data assumptions, the covariates, the effect modifiers, or any other part of the reviewed design.
+- Choose `clarify` when the reply is ambiguous, incomplete, or not enough to confirm or reject safely.
+
+Clinical wording rules:
+- Keep the assistant message plain, direct, and clinically understandable.
+- If `clarify`, ask one focused follow-up question.
+- Do not invent new protocol content.
+
+Output JSON exactly:
+{
+  "action": "confirm" | "revise" | "clarify",
+  "assistant_message": "<short clinician-friendly message>"
+}
+""".strip()

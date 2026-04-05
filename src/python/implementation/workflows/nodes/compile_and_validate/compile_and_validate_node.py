@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, Literal, cast
 from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
@@ -18,6 +19,7 @@ from python.implementation.workflows.nodes.compile_and_validate.compile_and_vali
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_prompts import (
     get_compile_and_validate_node_info,
     get_compile_causal_spec_prompt,
+    get_compile_review_decision_prompt,
     get_compile_transformation_plan_prompt,
 )
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
@@ -43,14 +45,12 @@ from python.implementation.workflows.utils.validation import ValidationIssueMode
 
 log = get_logger(__name__)
 
-_AFFIRM_RE = re.compile(
-    r"\b(yes|yep|yeah|confirm|confirmed|approve|approved|accept|accepted|proceed|looks good|go ahead)\b",
-    re.IGNORECASE,
-)
-_REJECT_RE = re.compile(
-    r"\b(no|reject|rejected|wrong|change|changes|revise|revise it|modify|fix|not correct|do not|don't)\b",
-    re.IGNORECASE,
-)
+
+class _ReviewDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    action: Literal["confirm", "revise", "clarify"]
+    assistant_message: str = Field(..., min_length=1)
 
 
 class CompileAndValidateNode(Node):
@@ -106,6 +106,7 @@ class CompileAndValidateNode(Node):
             user_id=user_id,
             conversation_id=conversation_id,
             payload=payload,
+            protocol_discussion=deps.protocol_discussion,
             messages_history=messages_history,
         )
 
@@ -117,16 +118,11 @@ class CompileAndValidateNode(Node):
     ) -> CompileAndValidatePayloadModel:
         payload = state.payload.model_copy(deep=True)
         dataset_changed = payload.dataset_id is not None and payload.dataset_id != deps.dataset_id
-        discussion_changed = (
-            bool(payload.protocol_discussion.strip())
-            and payload.protocol_discussion.strip() != deps.protocol_discussion.strip()
-        )
-        should_reset = dataset_changed or discussion_changed or payload.phase == "INIT"
+        should_reset = dataset_changed or payload.phase == "INIT"
 
         updates: dict[str, Any] = {
             "dataset_id": deps.dataset_id,
             "dataset_summary": deps.dataset_summary,
-            "protocol_discussion": deps.protocol_discussion,
         }
         if should_reset:
             updates.update(
@@ -149,11 +145,12 @@ class CompileAndValidateNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         payload: CompileAndValidatePayloadModel,
+        protocol_discussion: str,
         messages_history: Sequence[ChatMessage] | None,
     ) -> CompileAndValidateState:
         history = list(messages_history[-4:]) if messages_history else None
         context_payload = {
-            "protocol_discussion": payload.protocol_discussion,
+            "protocol_discussion": protocol_discussion,
             "dataset_summary": payload.dataset_summary.model_dump(mode="json")
             if payload.dataset_summary is not None
             else None,
@@ -363,40 +360,53 @@ class CompileAndValidateNode(Node):
         if not latest_user_message:
             return CompileAndValidateState(payload)
 
-        if _is_affirmative(latest_user_message):
+        decision = self._llm.generate_json(
+            schema=_ReviewDecision,
+            system_prompt=get_compile_review_decision_prompt(),
+            user_prompt=json.dumps(
+                {
+                    "compiled_causal_spec": None
+                    if payload.compiled_causal_spec is None
+                    else payload.compiled_causal_spec.model_dump(mode="json"),
+                    "transformation_plan": None
+                    if payload.transformation_plan is None
+                    else payload.transformation_plan.model_dump(mode="json"),
+                    "validation_issues": [
+                        issue.model_dump(mode="json") for issue in payload.validation_issues
+                    ],
+                    "latest_user_message": latest_user_message,
+                },
+                ensure_ascii=False,
+            ),
+            config=LLMConfig(model="basic", temperature=0.0),
+            history=None,
+            max_attempts=3,
+        )
+
+        if decision.action == "confirm":
             return CompileAndValidateState(
                 payload.model_copy(
                     update={
                         "phase": "CONFIRMED",
-                        "assistant_message": (
-                            "The compiled causal specification, transformation plan, and "
-                            "validation review are now confirmed. We can proceed with this setup."
-                        ),
+                        "assistant_message": decision.assistant_message,
                         "system_message": None,
                         "error_message": None,
                     }
                 )
             )
 
-        if _is_rejection(latest_user_message):
+        if decision.action == "revise":
             return self._failed_state(
                 payload=payload,
                 issues=payload.validation_issues,
-                assistant_message=(
-                    "The compiled protocol review was not confirmed. Please go back and revise "
-                    "the protocol or dataset assumptions before we continue."
-                ),
+                assistant_message=decision.assistant_message,
                 error_message="user rejected the compiled protocol review",
             )
 
         return CompileAndValidateState(
             payload.model_copy(
                 update={
-                    "assistant_message": (
-                        f"{payload.assistant_message or ''}\n\n"
-                        "Please reply clearly with confirmation if this compiled setup is acceptable, "
-                        "or state what must change."
-                    ).strip(),
+                    "assistant_message": decision.assistant_message,
                     "system_message": None,
                     "error_message": None,
                 }
@@ -414,15 +424,6 @@ def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str 
         if content:
             return content
     return None
-
-
-def _is_affirmative(text: str) -> bool:
-    stripped = text.strip()
-    return bool(_AFFIRM_RE.search(stripped)) and not bool(_REJECT_RE.search(stripped))
-
-
-def _is_rejection(text: str) -> bool:
-    return bool(_REJECT_RE.search(text.strip()))
 
 
 def _fail_issue(
