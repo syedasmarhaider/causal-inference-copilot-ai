@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -43,6 +44,10 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionState,
+)
+from python.implementation.workflows.router.llm_assisted_router_prompts import (
+    ABORTED_ROUTER_SYSTEM_PROMPT,
+    PENDING_ROUTER_SYSTEM_PROMPT,
 )
 from python.implementation.workflows.tools.tools_factory import DefaultToolFactory
 
@@ -107,20 +112,17 @@ class LLMAssistedRouterRouter(Router):
         messages_history: Sequence[ChatMessage],
     ) -> NextDecision:
         if current_state is None:
-            return NextDecision(state_name=DatasetState.NAME, persist_as_active=True)
+            return NextDecision(state_name=DatasetState.NAME)
 
-        current_name = current_state.name()
-        status = current_state.status()
+        current_name = _state_name(current_state)
+        status = _state_status(current_state)
         recent_messages = _last_two_messages(messages_history)
 
         if status in ("DONE", "FREEZED"):
-            next_name = self._deterministic_done_next_state(
-                current_state_name=current_name,
-                recent_messages=recent_messages,
-            )
+            next_name = self._next_state_names_map.get(current_name)
             if next_name is None:
-                return NextDecision(state_name=current_name, persist_as_active=True)
-            return NextDecision(state_name=next_name, persist_as_active=True)
+                return NextDecision(state_name=current_name)
+            return NextDecision(state_name=next_name)
 
         if status == "PENDING":
             return self._decide_pending(
@@ -136,18 +138,6 @@ class LLMAssistedRouterRouter(Router):
 
         raise ValueError(f"Unexpected state status {status!r} for {current_name!r}")
 
-    def _deterministic_done_next_state(
-        self,
-        *,
-        current_state_name: str,
-        recent_messages: Sequence[ChatMessage],
-    ) -> str | None:
-        _ = recent_messages
-        if current_state_name == CausalInferenceNode.NAME:
-            return CausalInferenceNode.NAME
-
-        return self._next_state_names_map.get(current_state_name)
-
     def _decide_pending(
         self,
         *,
@@ -155,25 +145,46 @@ class LLMAssistedRouterRouter(Router):
         recent_messages: Sequence[ChatMessage],
     ) -> NextDecision:
         candidates = _pending_candidates(current_state_name=current_state_name, callable_map=self._callable_map)
-        decision = self._llm.generate_json(
-            schema=_RouteDecision,
-            system_prompt=_pending_router_system_prompt(),
-            user_prompt=_pending_router_user_prompt(
-                current_state_name=current_state_name,
-                candidates=candidates,
-                recent_messages=recent_messages,
-                node_descriptions=self._node_name_to_description_map,
-                callable_map=self._callable_map,
-            ),
-            config=LLMConfig(model="mini", temperature=0.1),
-            history=list(recent_messages) or None,
-            max_attempts=2,
+
+        current_state_context = _build_current_state_context(
+            current_state_name=current_state_name,
+            node_descriptions=self._node_name_to_description_map,
         )
+        fellow_state_context = _build_pending_fellow_state_context(
+            current_state_name=current_state_name,
+            callable_map=self._callable_map,
+            node_descriptions=self._node_name_to_description_map,
+        )
+
+        try:
+            decision = self._llm.generate_json(
+                schema=_RouteDecision,
+                system_prompt=PENDING_ROUTER_SYSTEM_PROMPT,
+                user_prompt=build_pending_router_user_prompt(
+                    current_state_context=current_state_context,
+                    fellow_state_context=fellow_state_context,
+                    recent_messages=recent_messages,
+                ),
+                config=LLMConfig(model="mini", temperature=0.4),
+                history=None,
+                max_attempts=2,
+            )
+        except Exception as exc:
+            log.exception(
+                "pending router llm decision failed",
+                current_state_name=current_state_name,
+                error=str(exc),
+            )
+            return NextDecision(
+                state_name=None,
+                router_confirmation_message_for_user=(
+                    "Sorry I couldn't understand the intended route. Please clarify what you want to do next."
+                ),
+            )
 
         if decision.state_name is None:
             return NextDecision(
                 state_name=None,
-                persist_as_active=None,
                 router_confirmation_message_for_user=decision.router_confirmation_message_for_user
                 or "Sorry I couldn't understand the intended question. Please clarify what you want to do.",
             )
@@ -181,20 +192,13 @@ class LLMAssistedRouterRouter(Router):
         if decision.state_name not in candidates:
             return NextDecision(
                 state_name=None,
-                persist_as_active=None,
                 router_confirmation_message_for_user=(
                     "I could not map that request to an allowed stage from the current state. "
                     "Please clarify the intended stage."
                 ),
             )
 
-        return NextDecision(
-            state_name=decision.state_name,
-            persist_as_active=_persist_for_pending_transition(
-                current_state_name=current_state_name,
-                selected_state_name=decision.state_name,
-            ),
-        )
+        return NextDecision(state_name=decision.state_name)
 
     def _decide_aborted(
         self,
@@ -202,48 +206,67 @@ class LLMAssistedRouterRouter(Router):
         current_state: State,
         recent_messages: Sequence[ChatMessage],
     ) -> NextDecision:
-        current_state_name = current_state.name()
-        candidates = list(self._recoverable_map.get(current_state_name, (current_state_name,)))
-
-        state_error = current_state.error()
-        current_error = state_error.error if state_error is not None else None
-        current_system_message = _latest_system_message(current_state.messages())
-
-        decision = self._llm.generate_json(
-            schema=_RouteDecision,
-            system_prompt=_aborted_router_system_prompt(),
-            user_prompt=_aborted_router_user_prompt(
-                current_state_name=current_state_name,
-                current_error=current_error,
-                current_system_message=current_system_message,
-                candidates=candidates,
-                recent_messages=recent_messages,
-                node_descriptions=self._node_name_to_description_map,
-            ),
-            config=LLMConfig(model="basic", temperature=0.1),
-            history=list(recent_messages) or None,
-            max_attempts=2,
+        current_state_name = _state_name(current_state)
+        candidates = _recoverable_candidates(
+            current_state_name=current_state_name,
+            recoverable_map=self._recoverable_map,
         )
+        if len(candidates) == 1:
+            return NextDecision(state_name=candidates[0])
+
+        state_error = _state_error(current_state)
+        current_error = state_error.error if state_error is not None else None
+        current_system_message = _latest_system_message(_state_messages(current_state))
+
+        candidate_context = _build_aborted_candidate_context(
+            candidates=candidates,
+            node_descriptions=self._node_name_to_description_map,
+        )
+
+        try:
+            decision = self._llm.generate_json(
+                schema=_RouteDecision,
+                system_prompt=ABORTED_ROUTER_SYSTEM_PROMPT,
+                user_prompt=build_aborted_router_user_prompt(
+                    current_state_name=current_state_name,
+                    current_error=current_error,
+                    current_system_message=current_system_message,
+                    candidate_context=candidate_context,
+                    recent_messages=recent_messages,
+                ),
+                config=LLMConfig(model="basic", temperature=0.1),
+                history=None,
+                max_attempts=2,
+            )
+        except Exception as exc:
+            log.exception(
+                "aborted router llm decision failed",
+                current_state_name=current_state_name,
+                error=str(exc),
+            )
+            return NextDecision(
+                state_name=None,
+                router_confirmation_message_for_user=(
+                    "I could not determine the best recovery stage. Please clarify where you want to recover."
+                ),
+            )
 
         if decision.state_name is None:
             return NextDecision(
                 state_name=None,
-                persist_as_active=None,
                 router_confirmation_message_for_user=decision.router_confirmation_message_for_user
                 or "Please confirm which stage you want to recover from.",
             )
 
-        # TODO: inject dynamically in pydantic model so generate json can take care of it.
         if decision.state_name not in candidates:
             return NextDecision(
                 state_name=None,
-                persist_as_active=None,
                 router_confirmation_message_for_user=(
                     "I could not select a valid recoverable stage. Please clarify where to recover."
                 ),
             )
 
-        return NextDecision(state_name=decision.state_name, persist_as_active=True)
+        return NextDecision(state_name=decision.state_name)
 
 
 def _pending_candidates(
@@ -258,10 +281,74 @@ def _pending_candidates(
     return candidates
 
 
+def _recoverable_candidates(
+    *,
+    current_state_name: str,
+    recoverable_map: Mapping[str, Sequence[str] | str],
+) -> list[str]:
+    raw_candidates = recoverable_map.get(current_state_name, (current_state_name,))
+    if isinstance(raw_candidates, str):
+        candidates = [raw_candidates]
+    else:
+        candidates = list(raw_candidates)
+
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    if not deduped:
+        return [current_state_name]
+    return deduped
+
+
+def _build_current_state_context(
+    *,
+    current_state_name: str,
+    node_descriptions: Mapping[str, str],
+) -> dict[str, str]:
+    return {
+        "state_name": current_state_name,
+        "node_info": node_descriptions.get(current_state_name, ""),
+    }
+
+
+def _build_pending_fellow_state_context(
+    *,
+    current_state_name: str,
+    callable_map: Mapping[str, Sequence[OtherStateInfo]],
+    node_descriptions: Mapping[str, str],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "state_name": other.name,
+            "node_info": node_descriptions.get(other.name, ""),
+            "callable_purpose": other.purpose,
+        }
+        for other in callable_map.get(current_state_name, ())
+    ]
+
+
+def _build_aborted_candidate_context(
+    *,
+    candidates: Sequence[str],
+    node_descriptions: Mapping[str, str],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "state_name": state_name,
+            "node_info": node_descriptions.get(state_name, ""),
+        }
+        for state_name in candidates
+    ]
+
+
 def _last_two_messages(messages_history: Sequence[ChatMessage] | None) -> list[ChatMessage]:
     if not messages_history:
         return []
-    return list(messages_history[-2:])
+    non_empty_messages = [message for message in messages_history if message.content.strip()]
+    if not non_empty_messages:
+        return []
+    return list(non_empty_messages[-2:])
 
 
 def _latest_system_message(messages: Sequence[ChatMessage]) -> str | None:
@@ -271,93 +358,106 @@ def _latest_system_message(messages: Sequence[ChatMessage]) -> str | None:
     return None
 
 
-def _pending_router_system_prompt() -> str:
-    return (
-        "You are a strict workflow router. Choose exactly one allowed state from candidates. "
-        "The current state is PENDING, so forward progression is not allowed. "
-        "If one of the recent messages is a system message, prioritize it strongly over older context. "
-        "If unclear, return state_name=null with a short confirmation question."
-    )
-
-
-def _aborted_router_system_prompt() -> str:
-    return (
-        "You are a strict workflow recovery router. The current state is ABORTED. "
-        "Choose one recoverable state from the provided candidates. "
-        "If one of the recent messages is a system message, prioritize it strongly over older context. "
-        "If unclear, return state_name=null with a short confirmation question."
-    )
-
-
-def _pending_router_user_prompt(
+def build_pending_router_user_prompt(
     *,
-    current_state_name: str,
-    candidates: Sequence[str],
+    current_state_context: Mapping[str, str],
+    fellow_state_context: Sequence[Mapping[str, str]],
     recent_messages: Sequence[ChatMessage],
-    node_descriptions: Mapping[str, str],
-    callable_map: Mapping[str, Sequence[OtherStateInfo]],
 ) -> str:
-    candidate_context: list[dict[str, str]] = []
-    purpose_by_name = {
-        item.name: item.purpose
-        for item in callable_map.get(current_state_name, ())
-    }
-    for name in candidates:
-        candidate_context.append(
-            {
-                "state_name": name,
-                "node_info": node_descriptions.get(name, ""),
-                "callable_purpose": purpose_by_name.get(name, ""),
-            }
-        )
-
     payload = {
-        "current_state": current_state_name,
+        "current_state": dict(current_state_context),
+        "routing_mode": "pending",
+        "rules": {
+            "forward_progression_allowed": False,
+            "must_choose_current_or_fellow_state": True,
+            "prefer_current_state_by_default": True,
+            "prefer_latest_system_message": True,
+        },
         "recent_messages": [
-            {"role": m.role, "content": m.content}
-            for m in recent_messages
+            {
+                "role": message.role,
+                "content": message.content,
+            }
+            for message in recent_messages
         ],
-        "prioritize_system_instruction": any(m.role == "system" for m in recent_messages),
-        "allowed_candidates": candidate_context,
+        "fellow_states": list(fellow_state_context),
         "output_schema": {
-            "state_name": "<candidate state name or null>",
-            "router_confirmation_message_for_user": "<short question if state_name is null>",
+            "state_name": "<current state_name, fellow state_name, or null>",
+            "router_confirmation_message_for_user": "<short clarification question if state_name is null>",
         },
     }
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _aborted_router_user_prompt(
+def build_aborted_router_user_prompt(
     *,
     current_state_name: str,
     current_error: str | None,
     current_system_message: str | None,
-    candidates: Sequence[str],
+    candidate_context: Sequence[Mapping[str, str]],
     recent_messages: Sequence[ChatMessage],
-    node_descriptions: Mapping[str, str],
 ) -> str:
     payload = {
         "current_state": current_state_name,
+        "routing_mode": "aborted_recovery",
         "current_error": current_error,
         "current_system_message": current_system_message,
-        "recoverable_candidates": [
-            {
-                "state_name": name,
-                "node_info": node_descriptions.get(name, ""),
-            }
-            for name in candidates
-        ],
+        "rules": {
+            "must_choose_from_candidates": True,
+            "prefer_latest_system_message": True,
+        },
         "recent_messages": [
-            {"role": m.role, "content": m.content}
-            for m in recent_messages
+            {
+                "role": message.role,
+                "content": message.content,
+            }
+            for message in recent_messages
         ],
-        "prioritize_system_instruction": any(m.role == "system" for m in recent_messages),
+        "recoverable_candidates": list(candidate_context),
         "output_schema": {
-            "state_name": "<recoverable state name or null>",
-            "router_confirmation_message_for_user": "<short question if state_name is null>",
+            "state_name": "<exact recoverable state_name or null>",
+            "router_confirmation_message_for_user": "<short clarification question if state_name is null>",
         },
     }
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _read_state_attr(state: State, attr_name: str) -> Any:
+    value = getattr(state, attr_name)
+    if callable(value):
+        return value()
+    return value
+
+
+def _state_name(state: State) -> str:
+    value = _read_state_attr(state, "name")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("state.name must resolve to a non-empty string")
+    return value.strip()
+
+
+def _state_status(state: State) -> str:
+    value = _read_state_attr(state, "status")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("state.status must resolve to a non-empty string")
+    return value.strip()
+
+
+def _state_messages(state: State) -> Sequence[ChatMessage]:
+    try:
+        value = _read_state_attr(state, "messages")
+    except AttributeError:
+        return ()
+    if value is None:
+        return ()
+    return value
+
+
+def _state_error(state: State) -> Any:
+    try:
+        return _read_state_attr(state, "error")
+    except AttributeError:
+        return None
 
 
 def init_next_state_names() -> Mapping[str, str | None]:
@@ -422,7 +522,7 @@ def states_can_call_other_states_during_execution_map() -> Mapping[str, Sequence
 def recoverable_states_map() -> Mapping[str, Sequence[str]]:
     return {
         DatasetState.NAME: (DatasetState.NAME,),
-        ProtocolDiscussionState.NAME: (ProtocolDiscussionState.NAME),
+        ProtocolDiscussionState.NAME: (ProtocolDiscussionState.NAME,),
         CompileAndValidateState.NAME: (
             DatasetState.NAME,
             ProtocolDiscussionState.NAME,
