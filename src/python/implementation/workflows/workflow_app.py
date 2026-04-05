@@ -340,17 +340,16 @@ class WorkflowApp:
             )
         )
 
-        current_state_name = self._repo.load_active_state_name(
+        state_name_to_route = self._repo.load_active_state_name(
             user_id=req.user_id,
             conversation_id=req.conversation_id,
-        )
-        current_state: State | None = None
-        
+        )        
         state_name_to_run: str
         state_to_run: State
+        pre_state_to_run_status: Status 
 
 
-        if not current_state_name:
+        if not state_name_to_route:
             state_name_to_run = self._router.get_initial_state_name()
             self._repo.store_active_state_name(
                 user_id=req.user_id,
@@ -366,7 +365,7 @@ class WorkflowApp:
             current_state = self._load_or_init_state(
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
-                state_name=current_state_name,
+                state_name=state_name_to_route,
             )
             decision = self._router.decide_next(
                 current_state=current_state,
@@ -382,8 +381,7 @@ class WorkflowApp:
                 conversation_id=req.conversation_id,
                 state_name=state_name_to_run,
             )
-
-        pre_run_status = state_to_run.status() 
+            
         deps = self._load_deps(
             user_id=req.user_id,
             conversation_id=req.conversation_id,
@@ -398,7 +396,8 @@ class WorkflowApp:
                 state_name=state_name_to_run,
             )
             raise KeyError(f"WorkflowApp: no node registered for state_name={state_name_to_run!r}")
-
+        
+        pre_state_to_run_status = state_to_run.status()
         new_state = node.run(
             user_id=req.user_id,
             conversation_id=req.conversation_id,
@@ -406,54 +405,39 @@ class WorkflowApp:
             previous_state_dependencies=deps,
             messages_history=history,
         )
-
+                
+        should_not_store_active_state = new_state.name() == state_name_to_run and new_state.status() == "FREEZED" and pre_state_to_run_status == "FREEZED"  
+        if not should_not_store_active_state: 
+                self._repo.store_active_state_name(
+                    user_id=req.user_id,
+                    conversation_id=req.conversation_id,
+                    state_name=new_state.name(),
+                )
+                if new_state.status() == "DONE":
+                    new_state.set_status_freez()
+        
         self._repo.store_state(
             user_id=req.user_id,
             conversation_id=req.conversation_id,
             state=new_state,
         )
-
+        
         ordered_history_messages = _ordered_history_messages(new_state)
         if ordered_history_messages:
             self._repo.append_messages(
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
                 messages=ordered_history_messages,
-            )
-
-        new_state_name = new_state.name()
-        new_state_status = new_state.status()
-        
-        
-            
-            
-            
-
-        if new_state_status == "FREEZED":
-            self._repo.store_active_state_name(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                state_name=new_state_name,
-            )
-            active_state_name = new_state_name
-            active_state_status = new_state_status
-        elif pre_run_status != "FREEZED":
-            self._repo.store_active_state_name(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                state_name=new_state_name,
-            )
-            active_state_name = new_state_name
-            active_state_status = new_state_status
-
+            )        
+                
         state_error = _state_error(new_state)
         if state_error is not None:
             self._log.error(
                 "node returned workflow error",
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
-                state_name=new_state_name,
-                state_status=new_state_status,
+                state_name=new_state.name(),
+                state_status=new_state.status(),
                 node_error=state_error.error,
             )
         else:
@@ -461,15 +445,15 @@ class WorkflowApp:
                 "workflow node completed",
                 user_id=req.user_id,
                 conversation_id=req.conversation_id,
-                state_name=new_state_name,
-                state_status=new_state_status,
+                state_name=new_state.name(),
+                state_status=new_state.status(),
                 assistant_messages_count=len(_assistant_messages_for_user(new_state)),
             )
 
         return WorkflowResponse(
             messages=_assistant_messages_for_user(new_state),
-            current_stage=active_state_name,
-            current_stage_status=active_state_status,
+            current_stage=new_state.name(),
+            current_stage_status=new_state.status(),
         )
 
     def _init_empty_state(self, state_name: str) -> State:
