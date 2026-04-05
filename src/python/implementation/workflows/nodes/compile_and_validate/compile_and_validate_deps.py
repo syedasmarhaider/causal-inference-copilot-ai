@@ -41,7 +41,8 @@ class CompileAndValidateDeps:
             )
 
         latest_iteration = dataset_state.payload.dataset_iterations[-1]
-        if latest_iteration.summary is None:
+        latest_summary = dataset_state.payload.latest_summary
+        if latest_summary is None:
             raise StateDependencyError(
                 "COMPILE_AND_VALIDATE",
                 "COMPILE_AND_VALIDATE",
@@ -71,6 +72,6 @@ class CompileAndValidateDeps:
 
         return cls(
             dataset_id=latest_iteration.dataset_id,
-            dataset_summary=latest_iteration.summary,
+            dataset_summary=latest_summary,
             protocol_discussion=protocol_state.payload.discussion,
         )

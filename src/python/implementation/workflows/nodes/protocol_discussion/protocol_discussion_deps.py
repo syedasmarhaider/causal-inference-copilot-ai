@@ -31,6 +31,7 @@ class ProtocolDiscussionDeps:
         if len(ds.payload.dataset_iterations) == 0:
             raise StateDependencyError(f"ProtocolDiscussionDeps: {DatasetState.NAME} is not DONE yet (missing dataset iterations)", to_state="ProtocolDiscussionDeps", missing_dependencies=[DatasetState.NAME])
         latest_iteration = ds.payload.dataset_iterations[-1]
-        if latest_iteration.summary is None:
+        latest_summary = ds.payload.latest_summary
+        if latest_summary is None:
             raise StateDependencyError(f"ProtocolDiscussionDeps: {DatasetState.NAME} is not DONE yet (missing dataset summary)", to_state="ProtocolDiscussionDeps", missing_dependencies=[DatasetState.NAME])
-        return cls(dataset_summary=latest_iteration.summary, dataset_id=latest_iteration.dataset_id)
+        return cls(dataset_summary=latest_summary, dataset_id=latest_iteration.dataset_id)
