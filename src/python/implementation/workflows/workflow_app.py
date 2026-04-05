@@ -23,76 +23,7 @@ from python.implementation.workflows.nodes.dataset.dataset_state import DatasetS
 _MESSAGES_HISTORY_LIMIT = 15
 
 
-@dataclass(frozen=True)
-class WorkflowResponse:
-    _current_state: State
-    _messages_override: Sequence[ChatMessage] | None = None
-    _current_stage_name_override: str | None = None
-    _current_stage_status_override: Status | None = None
 
-    @property
-    def messages(self) -> Sequence[ChatMessage]:
-        if self._messages_override is not None:
-            return tuple(self._messages_override)
-        return tuple(_assistant_messages_for_user(self._current_state))
-
-    @property
-    def current_stage(self) -> str:
-        # The active stage can differ from the executed node during frozen read-only detours.
-        return self._current_stage_name_override or self._current_state.name()
-
-    @property
-    def current_stage_status(self) -> Status:
-        return self._current_stage_status_override or self._current_state.status()
-
-    @property
-    def action(self) -> ACTION:
-        if self.current_stage == DatasetState.NAME and self.current_stage_status != "DONE":
-            return "NEEDS_DATA"
-        if self.current_stage_status != "DONE":
-            return "NEEDS_INPUT"
-        return "NONE"
-
-    @property
-    def node_message(self) -> str:
-        return "\n\n".join(message.content for message in self.messages)
-
-    @property
-    def needs_action(self) -> ACTION:
-        return self.action
-
-    @property
-    def stage_name(self) -> str:
-        return self.current_stage
-
-    @property
-    def status(self) -> Status:
-        return self.current_stage_status
-
-    @property
-    def artifact_refs(self) -> Sequence[dict[str, Any]] | None:
-        artifact_refs: list[dict[str, Any]] = []
-        for message in self.messages:
-            artifact_refs.extend(list(message.artifact_refs or ()))
-        return artifact_refs or None
-
-    @property
-    def artifact_ids(self) -> Sequence[str] | None:
-        artifact_ids: list[str] = []
-        for message in self.messages:
-            for ref in message.artifact_refs or ():
-                artifact_id = ref.get("id")
-                if artifact_id is not None:
-                    artifact_ids.append(str(artifact_id))
-        return artifact_ids or None
-
-    @property
-    def needs_input(self) -> bool:
-        return self.action == "NEEDS_INPUT"
-
-    @property
-    def needs_data(self) -> bool:
-        return self.action == "NEEDS_DATA"
    
 @dataclass(frozen=True)
 class ArtifactResponse:

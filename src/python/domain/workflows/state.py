@@ -8,7 +8,7 @@ from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
 
 Status = Literal["PENDING", "DONE", "ABORTED","FREEZED"]
-ACTION = Literal["NONE", "NEEDS_INPUT","NEEDS_DATA"]
+Action = Literal["NONE", "NEEDS_INPUT","NEEDS_DATA"]
 
 
 class State(ABC):
@@ -22,6 +22,10 @@ class State(ABC):
     
     @abstractmethod
     def set_status_freez(self) -> None:
+        raise NotImplementedError
+    
+    @abstractmethod
+    def action(self) -> Action:
         raise NotImplementedError
     
     @abstractmethod
