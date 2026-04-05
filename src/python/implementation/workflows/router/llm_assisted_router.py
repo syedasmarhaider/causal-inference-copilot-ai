@@ -175,9 +175,9 @@ class LLMAssistedRouterRouter(Router):
                 state_name=None,
                 persist_as_active=None,
                 router_confirmation_message_for_user=decision.router_confirmation_message_for_user
-                or "Please clarify which stage you want: stay here or switch to a related stage.",
+                or "Sorry I couldn't understand the intended question. Please clarify what you want to do.",
             )
-
+            
         if decision.state_name not in candidates:
             return NextDecision(
                 state_name=None,
@@ -233,6 +233,7 @@ class LLMAssistedRouterRouter(Router):
                 or "Please confirm which stage you want to recover from.",
             )
 
+        # TODO: inject dynamically in pydantic model so generate json can take care of it.
         if decision.state_name not in candidates:
             return NextDecision(
                 state_name=None,
@@ -255,32 +256,6 @@ def _pending_candidates(
         if other.name not in candidates:
             candidates.append(other.name)
     return candidates
-
-
-def _persist_for_pending_transition(
-    *,
-    current_state_name: str,
-    selected_state_name: str,
-) -> bool:
-    if selected_state_name == current_state_name:
-        return True
-
-    if {current_state_name, selected_state_name} == {DatasetState.NAME, ProtocolDiscussionState.NAME}:
-        return True
-
-    if (
-        selected_state_name == DatasetState.NAME
-        and current_state_name
-        in {
-            CompileAndValidateState.NAME,
-            ModelSelectionState.NAME,
-            ModelTrainState.NAME,
-            CausalInferenceState.NAME,
-        }
-    ):
-        return False
-
-    return True
 
 
 def _last_two_messages(messages_history: Sequence[ChatMessage] | None) -> list[ChatMessage]:
@@ -447,7 +422,7 @@ def states_can_call_other_states_during_execution_map() -> Mapping[str, Sequence
 def recoverable_states_map() -> Mapping[str, Sequence[str]]:
     return {
         DatasetState.NAME: (DatasetState.NAME,),
-        ProtocolDiscussionState.NAME: (ProtocolDiscussionState.NAME, DatasetState.NAME),
+        ProtocolDiscussionState.NAME: (ProtocolDiscussionState.NAME),
         CompileAndValidateState.NAME: (
             DatasetState.NAME,
             ProtocolDiscussionState.NAME,
