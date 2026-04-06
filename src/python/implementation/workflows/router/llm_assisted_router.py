@@ -558,14 +558,14 @@ def states_can_call_other_states_during_execution_map() -> Mapping[str, Sequence
         DatasetState.NAME: (
             OtherStateInfo(
                 name=ProtocolDiscussionState.NAME,
-                purpose="Move to protocol discussion when user is working on causal protocol definition.",
+                purpose="Protocol discussion collect treatment, outcome, study type, and time zero information to run causal models",
                 should_persists_by_workflow= True
             ),
         ),
         ProtocolDiscussionState.NAME: (
             OtherStateInfo(
                 name=DatasetState.NAME,
-                purpose="Switch to dataset cleaning/inspection during protocol discussion.",
+                purpose="Switch to dataset cleaning/inspection during protocol discussion. it cleans data run insights generate graphs",
                 should_persists_by_workflow= False
             ),
         ),
