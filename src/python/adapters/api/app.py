@@ -7,12 +7,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from python.adapters.api.dependencies import (
     ARTIFACT_ID_PATH_PARAM,
+    ARTIFACT_FORMAT_QUERY_PARAM,
+    ARTIFACT_KIND_QUERY_PARAM,
     AUTHENTICATED_USER_DEP,
     CONVERSATION_ID_PATH_PARAM,
     CREDENTIALS_SECURITY,
+    DATAFLOW_APP_DEP,
     UPLOAD_DATASET_FILE_PARAM,
     WORKFLOW_APP_DEP,
     get_auth_service,
+    get_dataflow_app,
     get_authenticated_user,
     get_workflow_app,
 )
@@ -36,9 +40,13 @@ __all__ = [
     "CREDENTIALS_SECURITY",
     "CONVERSATION_ID_PATH_PARAM",
     "ARTIFACT_ID_PATH_PARAM",
+    "ARTIFACT_KIND_QUERY_PARAM",
+    "ARTIFACT_FORMAT_QUERY_PARAM",
     "UPLOAD_DATASET_FILE_PARAM",
     "AUTHENTICATED_USER_DEP",
     "WORKFLOW_APP_DEP",
+    "DATAFLOW_APP_DEP",
+    "get_dataflow_app",
 ]
 
 configure_default_logging(
