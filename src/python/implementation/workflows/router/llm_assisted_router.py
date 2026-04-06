@@ -55,6 +55,11 @@ from python.implementation.workflows.router.llm_assisted_router_prompts import (
 from python.implementation.workflows.tools.tools_factory import DefaultToolFactory
 
 log = get_logger(__name__, component="LLMAssistedRouter", log_type="workflow_router")
+_DATASET_PENDING_CLARIFICATION_MESSAGE = (
+    "I’m still helping with the current dataset. What exactly do you want me to inspect, "
+    "filter, summarize, or change in the data? If you want to start causal setup instead, "
+    "tell me the treatment, outcome, study type, and time zero."
+)
 
 
 class _RouteDecision(BaseModel):
@@ -191,24 +196,33 @@ class LLMAssistedRouterRouter(Router):
             )
             return NextDecision(
                 state_name=None,
-                router_confirmation_message_for_user=(
-                    "Sorry I couldn't understand the intended route. Please clarify what you want to do next."
+                router_confirmation_message_for_user=_pending_clarification_message(
+                    current_state_name=current_state_name,
+                    fallback_message=(
+                        "Sorry I couldn't understand the intended route. Please clarify what you want to do next."
+                    ),
                 ),
             )
 
         if decision.state_name is None:
             return NextDecision(
                 state_name=None,
-                router_confirmation_message_for_user=decision.router_confirmation_message_for_user
-                or "Sorry I couldn't understand the intended question. Please clarify what you want to do.",
+                router_confirmation_message_for_user=_pending_clarification_message(
+                    current_state_name=current_state_name,
+                    fallback_message=decision.router_confirmation_message_for_user
+                    or "Sorry I couldn't understand the intended question. Please clarify what you want to do.",
+                ),
             )
 
         if decision.state_name not in candidates:
             return NextDecision(
                 state_name=None,
-                router_confirmation_message_for_user=(
-                    "I could not map that request to an allowed stage from the current state. "
-                    "Please clarify the intended stage."
+                router_confirmation_message_for_user=_pending_clarification_message(
+                    current_state_name=current_state_name,
+                    fallback_message=(
+                        "I could not map that request to an allowed stage from the current state. "
+                        "Please clarify the intended stage."
+                    ),
                 ),
             )
 
@@ -313,6 +327,16 @@ def _recoverable_candidates(
     if not deduped:
         return [current_state_name]
     return deduped
+
+
+def _pending_clarification_message(
+    *,
+    current_state_name: str,
+    fallback_message: str,
+) -> str:
+    if current_state_name == DatasetState.NAME:
+        return _DATASET_PENDING_CLARIFICATION_MESSAGE
+    return fallback_message
 
 
 def _build_current_state_context(

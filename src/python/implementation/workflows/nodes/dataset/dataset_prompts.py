@@ -38,6 +38,11 @@ Classify the latest user request for the DATASET node.
 
 Return JSON that exactly matches the schema.
 
+Inputs:
+- latest_user_message
+- chat_history
+- dataset_summary
+
 Intent rules:
 - intent_data_question: true only when the request can be answered from dataset summary alone.
 - intent_manupulation_question: true when the request needs SQL-like data querying or transformation.
@@ -51,6 +56,8 @@ Brief rules:
 
 General rules:
 - Multiple intents may be true together.
+- Use chat_history to resolve short follow-ups, pronouns, ellipsis, or vague turns such as "what about by sex", "why", "show that as a chart", or "break that down further".
+- If the latest message is a short follow-up to a prior dataset-related exchange, classify the underlying dataset intent from context instead of treating the message as standalone.
 - If the user asks for filtering, deriving columns, cleaning, renaming, or reshaping, that is manipulation.
 - If the user asks for counts, aggregates, grouped comparisons, missingness summaries, descriptive statistics, cohort comparisons, balance-style summaries, percentages, rates, bins, rankings, or other query-style inspection without changing the working dataset, set manipulation true and analytical_query true.
 - If the user request implies complex SQL such as multi-stage aggregation, window functions, bucketing, or chart-ready summary tables, that is still manipulation and often analytical_query true.

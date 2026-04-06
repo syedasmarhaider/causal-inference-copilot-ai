@@ -402,7 +402,7 @@ def test_dataset_node_returns_missing_data_message_when_dataset_is_unavailable()
     assert len(llm.generate_calls) == 1
 
 
-def test_dataset_node_returns_ready_message_when_dataset_loaded_and_no_user_message() -> None:
+def test_dataset_node_returns_loaded_summary_message_when_dataset_loaded_and_no_user_message() -> None:
     node, _, _, _, _, _ = _make_node_and_tools(
         dataframe=pd.DataFrame([{"age": 65, "outcome": 1}]),
     )
@@ -415,7 +415,9 @@ def test_dataset_node_returns_ready_message_when_dataset_loaded_and_no_user_mess
         state=DatasetState.init_empty(),
     )
 
-    assert "ask about the data" in _message(state).content.lower()
+    assert "dataset loaded successfully" in _message(state).content.lower()
+    assert "1 rows and 2 columns" in _message(state).content.lower()
+    assert "age (numeric)" in _message(state).content.lower()
     assert state.latest_iteration is not None
     assert state.latest_iteration.dataset_id == DatasetState.INIT_DATA_ID
 
@@ -439,7 +441,7 @@ def test_dataset_node_returns_freezed_ready_message_when_no_user_message() -> No
     assert "cannot modify or revert" in _message(state).content.lower()
 
 
-def test_dataset_node_returns_off_topic_message_for_model_training_request() -> None:
+def test_dataset_node_returns_loaded_summary_message_for_downstream_request_on_first_load() -> None:
     node, _, llm, _, _, _ = _make_node_and_tools(
         dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
         json_outputs=[
@@ -464,9 +466,88 @@ def test_dataset_node_returns_off_topic_message_for_model_training_request() -> 
     )
 
     assert _status(state) == "PENDING"
-    assert "dataset stage" in _message(state).content.lower()
-    assert "chart generation" in _message(state).content.lower()
+    assert "dataset loaded successfully" in _message(state).content.lower()
+    assert "2 rows and 2 columns" in _message(state).content.lower()
+    assert "treatment, outcome, study type, and time zero" in _message(state).content.lower()
     assert len(llm.generate_json_calls) == 1
+
+
+def test_dataset_node_returns_off_topic_message_for_model_training_request_after_dataset_loaded() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, _, llm, _, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=False,
+                intent_manupulation_question_brief="",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=False,
+                intent_chart_brief="",
+            )
+        ],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="train a model on this dataset")],
+        state=_base_dataset_state(iterations=[init_iteration]),
+    )
+
+    assert _status(state) == "PENDING"
+    assert "outside the dataset stage" in _message(state).content.lower()
+    assert "protocol discussion" in _message(state).content.lower()
+    assert len(llm.generate_json_calls) == 1
+
+
+def test_dataset_node_explains_scope_on_clarification_after_off_topic_reply() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, _, llm, _, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=False,
+                intent_manupulation_question_brief="",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=False,
+                intent_chart_brief="",
+            )
+        ],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[
+            ChatMessage(role="user", content="train a model on this dataset"),
+            ChatMessage(
+                role="assistant",
+                content=(
+                    "That request is outside the dataset stage. Here I can inspect the current "
+                    "data, answer dataset questions, run analytical queries, clean or reshape "
+                    "the dataset, and generate charts. I cannot do model training or causal "
+                    "estimation from here. If you want to move forward with causal analysis, "
+                    "tell me the treatment, outcome, study type, and time zero so I can switch "
+                    "to protocol discussion."
+                ),
+            ),
+            ChatMessage(role="user", content="what do you mean"),
+        ],
+        state=_base_dataset_state(iterations=[init_iteration]),
+    )
+
+    assert _status(state) == "PENDING"
+    assert "current dataset itself" in _message(state).content.lower()
+    assert "protocol discussion" in _message(state).content.lower()
+    assert "i cannot help with that" not in _message(state).content.lower()
+    assert len(llm.generate_json_calls) == 1
+    assert llm.generate_calls == []
 
 
 def test_dataset_node_reverts_to_previous_dataset_iteration() -> None:

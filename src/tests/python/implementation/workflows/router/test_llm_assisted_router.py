@@ -38,6 +38,11 @@ from python.implementation.workflows.router.llm_assisted_router import (
 )
 
 T = TypeVar("T", bound=BaseModel)
+_DATASET_PENDING_CLARIFICATION_MESSAGE = (
+    "I’m still helping with the current dataset. What exactly do you want me to inspect, "
+    "filter, summarize, or change in the data? If you want to start causal setup instead, "
+    "tell me the treatment, outcome, study type, and time zero."
+)
 
 
 @dataclass
@@ -360,7 +365,7 @@ def test_pending_returns_confirmation_when_llm_returns_null() -> None:
 
     assert decision == NextDecision(
         state_name=None,
-        router_confirmation_message_for_user="Do you want data review or protocol discussion?",
+        router_confirmation_message_for_user=_DATASET_PENDING_CLARIFICATION_MESSAGE,
     )
 
 
@@ -400,9 +405,29 @@ def test_pending_returns_confirmation_when_llm_raises() -> None:
 
     assert decision == NextDecision(
         state_name=None,
-        router_confirmation_message_for_user=(
-            "Sorry I couldn't understand the intended route. Please clarify what you want to do next."
-        ),
+        router_confirmation_message_for_user=_DATASET_PENDING_CLARIFICATION_MESSAGE,
+    )
+
+
+def test_pending_invalid_candidate_from_dataset_uses_dataset_anchored_clarification() -> None:
+    llm = _FakeLLM(
+        scripted_results=[
+            {
+                "state_name": ModelTrainState.NAME,
+                "router_confirmation_message_for_user": None,
+            }
+        ]
+    )
+    router = LLMAssistedRouterRouter(llm=llm)
+
+    decision = router.decide_next(
+        current_state=_FakeState(state_name=DatasetState.NAME, state_status="PENDING"),
+        messages_history=_messages(("user", "train it now")),
+    )
+
+    assert decision == NextDecision(
+        state_name=None,
+        router_confirmation_message_for_user=_DATASET_PENDING_CLARIFICATION_MESSAGE,
     )
 
 

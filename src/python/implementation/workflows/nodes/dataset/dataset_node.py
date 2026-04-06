@@ -53,6 +53,7 @@ _WORKING_TABLE_HASH_HEX_LEN = 16
 _ARTIFACT_KIND_WORKING_DATASET = "working_dataset"
 _ARTIFACT_KIND_ANALYTICAL_RESULT = "analytical_result"
 _ARTIFACT_KIND_CHART_SPEC = "chart_spec"
+_INITIAL_SUMMARY_MAX_COLUMNS = 8
 _FREEZED_DATASET_BLOCKED_MESSAGE = (
     "Sorry, this dataset is freezed. I cannot modify the data or revert to a previous "
     "dataset version in this workflow. You can still ask questions about the data, run "
@@ -67,6 +68,20 @@ _FREEZED_DATASET_READY_MESSAGE = (
 _READY_DATASET_MESSAGE = (
     "Dataset is ready. Ask about the data, request analytical or statistical queries, ask "
     "for transformations, or ask for charts."
+)
+_OFF_TOPIC_MESSAGE = (
+    "That request is outside the dataset stage. Here I can inspect the current data, answer "
+    "dataset questions, run analytical queries, clean or reshape the dataset, and generate "
+    "charts. I cannot do model training or causal estimation from here. If you want to move "
+    "forward with causal analysis, tell me the treatment, outcome, study type, and time zero "
+    "so I can switch to protocol discussion."
+)
+_OFF_TOPIC_CLARIFICATION_MESSAGE = (
+    "I mean this step only works on the current dataset itself. I can inspect columns, answer "
+    "dataset questions, run read-only analytical queries, clean or reshape the data, and "
+    "generate charts. I cannot train a model or run causal inference from here. If you want "
+    "to move forward with causal analysis, tell me the treatment, outcome, study type, and "
+    "time zero so I can switch to protocol discussion."
 )
 
 
@@ -259,7 +274,11 @@ class DatasetNode(Node):
                 dataset_iterations=dataset_iterations,
                 latest_summary=persisted_latest_summary,
                 freezed=is_freezed,
-                user_message=self._build_ready_message(freezed=is_freezed),
+                user_message=(
+                    self._build_loaded_dataset_message(summary=current_summary)
+                    if loaded_this_turn
+                    else self._build_ready_message(freezed=is_freezed)
+                ),
             )
 
         last_4_messages_history = (
@@ -290,6 +309,20 @@ class DatasetNode(Node):
             )
 
         if not intent.has_any_intent():
+            if loaded_this_turn:
+                return self._build_state(
+                    dataset_iterations=dataset_iterations,
+                    latest_summary=persisted_latest_summary,
+                    freezed=is_freezed,
+                    user_message=self._build_loaded_dataset_message(summary=current_summary),
+                )
+            if _is_dataset_scope_message(_latest_assistant_message(messages_history)):
+                return self._build_state(
+                    dataset_iterations=dataset_iterations,
+                    latest_summary=persisted_latest_summary,
+                    freezed=is_freezed,
+                    user_message=self._build_off_topic_clarification_message(),
+                )
             return self._build_state(
                 dataset_iterations=dataset_iterations,
                 latest_summary=persisted_latest_summary,
@@ -519,10 +552,31 @@ class DatasetNode(Node):
         return response.content.strip()
 
     def _build_off_topic_message(self) -> str:
+        return _OFF_TOPIC_MESSAGE
+
+    def _build_off_topic_clarification_message(self) -> str:
+        return _OFF_TOPIC_CLARIFICATION_MESSAGE
+
+    def _build_loaded_dataset_message(
+        self,
+        *,
+        summary: DatasetSummaryModel,
+    ) -> str:
+        profiles = list(summary.profiles)
+        column_count = len(profiles)
+        shown_profiles = profiles[:_INITIAL_SUMMARY_MAX_COLUMNS]
+        column_preview = ", ".join(
+            f"{profile.name} ({profile.inferred_kind.lower()})" for profile in shown_profiles
+        )
+        if column_count > _INITIAL_SUMMARY_MAX_COLUMNS:
+            column_preview = (
+                f"{column_preview}, +{column_count - _INITIAL_SUMMARY_MAX_COLUMNS} more columns"
+            )
         return (
-            "I cannot help with that from the dataset stage. Here I only handle dataset "
-            "understanding, data manipulation, and chart generation. If you want downstream "
-            "workflow steps, continue through the pipeline after the data is ready."
+            f"Dataset loaded successfully. I profiled {summary.n_rows} rows and {column_count} "
+            f"columns. Columns: {column_preview}. I can now inspect the data, answer dataset "
+            "questions, reshape it, and generate charts. If you want to start causal analysis "
+            "next, tell me the treatment, outcome, study type, and time zero."
         )
 
     def _classify_intent(
@@ -820,6 +874,33 @@ def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str 
         if content:
             return content
     return None
+
+
+def _latest_assistant_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
+    if not messages_history:
+        return None
+    for message in reversed(messages_history):
+        if message.role != "assistant":
+            continue
+        content = message.content.strip()
+        if content:
+            return content
+    return None
+
+
+def _normalize_message_text(value: str) -> str:
+    return " ".join(value.strip().casefold().split()).strip("?.! ")
+
+
+def _is_dataset_scope_message(value: str | None) -> bool:
+    if not value:
+        return False
+    normalized = _normalize_message_text(value)
+    return "dataset stage" in normalized and (
+        "outside the dataset stage" in normalized
+        or "i cannot help with that" in normalized
+        or "i mean this step only works on the current dataset itself" in normalized
+    )
 
 
 def _is_revert_request(messages_history: Sequence[ChatMessage] | None) -> bool:
