@@ -1,23 +1,24 @@
 from __future__ import annotations
 
-import io
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
-import pandas as pd
-
 from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
-from python.domain.models.models import ArtifactRef, ChatMessage, WorkingDatasetInfo
-from python.domain.repo.data_repo import DataRepo
+from python.domain.models.models import (
+    ArtifactRef,
+    ChatMessage,
+)
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.workflows.node import Node
 from python.domain.workflows.route import Router
 from python.domain.workflows.state import Action, State, Status
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_app_logger
-from python.implementation.workflows.nodes.dataset.dataset_state import DatasetState
+from python.implementation.workflows.dataflow_app import (
+    DataflowArtifactResponse,
+)
 
 
 _MESSAGES_HISTORY_LIMIT = 15
@@ -26,7 +27,6 @@ _MESSAGES_HISTORY_LIMIT = 15
 @dataclass(frozen=True)
 class WorkflowResponse:
     _current_state: State
-    _current_working_dataset_info: WorkingDatasetInfo | None = None
     _assistant_messages_override: Sequence[ChatMessage] | None = None
     _current_stage_name_override: str | None = None
     _current_stage_status_override: Status | None = None
@@ -64,10 +64,7 @@ class WorkflowResponse:
         return artifact_refs or None
     
 
-@dataclass(frozen=True)
-class ArtifactResponse:
-    mime: str
-    content: bytes
+ArtifactResponse = DataflowArtifactResponse
 
 
 class WorkflowApp:
@@ -75,7 +72,6 @@ class WorkflowApp:
         self,
         *,
         repo: WorkflowStateRepo,
-        data_repo: DataRepo,
         router: Router,
         nodes_by_state_name: Mapping[str, Node],
         state_classes_by_name: Mapping[str, type[State]],
@@ -87,7 +83,6 @@ class WorkflowApp:
             raise ValueError("max_steps_per_call must be >= 1")
 
         self._repo = repo
-        self._data_repo = data_repo
         self._router = router
         self._nodes = dict(nodes_by_state_name)
         self._state_classes = dict(state_classes_by_name)
@@ -170,113 +165,6 @@ class WorkflowApp:
             return None
 
         return WorkflowResponse(_current_state=state)
-
-    def upload_csv_data(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-        csv_bytes: bytes,
-    ) -> UUID:
-        try:
-            df = pd.read_csv(io.BytesIO(csv_bytes), low_memory=False)  # pyright: ignore[reportUnknownMemberType]
-        except Exception as exc:
-            self._log.info(
-                "csv upload rejected due to invalid payload",
-                user_id=user_id,
-                conversation_id=conversation_id,
-                csv_size_bytes=len(csv_bytes),
-            )
-            raise ValueError(f"Uploaded file is not a valid CSV: {exc}") from exc
-
-        active_name = self._repo.load_active_state_name(
-            user_id=user_id,
-            conversation_id=conversation_id,
-        )
-        if not active_name:
-            active_name = self._router.get_initial_state_name()
-            self._repo.store_active_state_name(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                state_name=active_name,
-            )
-
-        if active_name != DatasetState.NAME:
-            self._log.info(
-                "csv upload rejected because conversation is not at dataset state",
-                user_id=user_id,
-                conversation_id=conversation_id,
-                active_state_name=active_name,
-                required_state_name=DatasetState.NAME,
-            )
-            raise ValueError(
-                "No active conversation found for this user and conversation or state is not at dataset."
-            )
-
-        dataset_id = DatasetState.INIT_DATA_ID
-        self._data_repo.save_csv_data(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            dataset_id=dataset_id,
-            df=df,
-            overwrite=True,
-        )
-        self._log.info(
-            "csv dataset uploaded",
-            user_id=user_id,
-            conversation_id=conversation_id,
-            dataset_id=dataset_id,
-            rows_count=len(df),
-            columns_count=len(df.columns),
-        )
-        return dataset_id
-    
-    def get_working_dataset_info(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,    
-    )-> WorkingDatasetInfo | None:
-        state = self._repo.load_state(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            state_name=DatasetState.NAME,
-        )
-        if state is None:
-            return None
-        if not isinstance(state, DatasetState):
-            raise TypeError(
-                f"Expected state of type DatasetState, got {type(state).__name__}"
-            )
-        return state.get_working_dataset_info()
-
-    def get_artifact(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-        artifact_id: UUID,
-    ) -> ArtifactResponse:
-        mime = self._data_repo.get_artifact_mime(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            artifact_id=artifact_id,
-        )
-        content = self._data_repo.get_artifact_bytes(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            artifact_id=artifact_id,
-            expected_mime=mime,
-        )
-        self._log.debug(
-            "artifact fetched",
-            user_id=user_id,
-            conversation_id=conversation_id,
-            artifact_id=artifact_id,
-            artifact_mime=mime,
-            content_size_bytes=len(content),
-        )
-        return ArtifactResponse(mime=mime, content=content)
 
     def revert_to_state(
         self,
@@ -516,7 +404,6 @@ class WorkflowApp:
             )    
 
         return WorkflowResponse(
-            _current_working_dataset_info=self.get_working_dataset_info(user_id=user_id, conversation_id=conversation_id),
             _current_state=new_state,
             _current_stage_name_override=active_state_name_after_run or new_state_name,
             _current_stage_status_override=active_state_status_after_run or new_state_status,
