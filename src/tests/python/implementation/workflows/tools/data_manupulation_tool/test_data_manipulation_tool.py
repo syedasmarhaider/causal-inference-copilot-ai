@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from python.domain.repo.working_data_repo import WorkingDataSQLResult
+from python.domain.repo.analytics_repo import AnalyticsSQLResult
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMResponse
 from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import (
     DataManipulationSQLPlan,
@@ -88,12 +88,12 @@ class _FakeLLMService:
 
 
 @dataclass
-class _FakeWorkingDataRepo:
+class _FakeAnalyticsRepo:
     calls: list[dict[str, object]] = field(default_factory=list)
 
-    def execute_sql(self, *, dataframe: pd.DataFrame, request: object) -> WorkingDataSQLResult:
+    def execute_sql(self, *, dataframe: pd.DataFrame, request: object) -> AnalyticsSQLResult:
         self.calls.append({"dataframe": dataframe.copy(), "request": request})
-        return WorkingDataSQLResult(
+        return AnalyticsSQLResult(
             table_name=request.table_name,
             executed_statements=tuple(request.statements),
             columns=("a",),
@@ -143,13 +143,9 @@ def test_plan_schema_requires_source_table_reference() -> None:
 
 
 def test_manipulate_executes_sql_with_dynamic_schema() -> None:
-    llm = _FakeLLMService(
-        plans=[
-            _plan_payload(statements=[f"SELECT a FROM {_TABLE} ORDER BY a DESC"]),
-        ]
-    )
-    repo = _FakeWorkingDataRepo()
-    tool = DataManipulationTool(llm=llm, working_data_repo=repo)
+    llm = _FakeLLMService(plans=[_plan_payload(statements=[f"SELECT a FROM {_TABLE} ORDER BY a DESC"])])
+    repo = _FakeAnalyticsRepo()
+    tool = DataManipulationTool(llm=llm, analytics_repo=repo)
 
     output_df = tool.manipulate(
         dataframe=pd.DataFrame([{"a": 1}, {"a": 3}, {"a": 2}]),
@@ -160,7 +156,7 @@ def test_manipulate_executes_sql_with_dynamic_schema() -> None:
 
     assert len(llm.calls) == 1
     assert _TABLE in str(llm.calls[0]["user_prompt"])
-    assert llm.calls[0]["max_attempts"] == 2
+    assert llm.calls[0]["max_attempts"] == 3
     assert llm.calls[0]["schema"] is not DataManipulationSQLPlan
     assert llm.calls[0]["schema"].EXPECTED_TABLE_NAME == _TABLE
     assert len(repo.calls) == 1
@@ -170,13 +166,9 @@ def test_manipulate_executes_sql_with_dynamic_schema() -> None:
 
 
 def test_manipulate_accepts_quoted_table_references() -> None:
-    llm = _FakeLLMService(
-        plans=[
-            _plan_payload(statements=[f'SELECT a FROM "{_TABLE}"']),
-        ]
-    )
-    repo = _FakeWorkingDataRepo()
-    tool = DataManipulationTool(llm=llm, working_data_repo=repo)
+    llm = _FakeLLMService(plans=[_plan_payload(statements=[f'SELECT a FROM "{_TABLE}"'])])
+    repo = _FakeAnalyticsRepo()
+    tool = DataManipulationTool(llm=llm, analytics_repo=repo)
 
     _ = tool.manipulate(
         dataframe=pd.DataFrame([{"a": 1}]),
@@ -195,8 +187,8 @@ def test_manipulate_uses_llm_internal_retry_for_table_name_mismatch() -> None:
             _plan_payload(statements=[f"SELECT a FROM {_TABLE}"]),
         ]
     )
-    repo = _FakeWorkingDataRepo()
-    tool = DataManipulationTool(llm=llm, working_data_repo=repo, max_attempts=1)
+    repo = _FakeAnalyticsRepo()
+    tool = DataManipulationTool(llm=llm, analytics_repo=repo)
 
     _ = tool.manipulate(
         dataframe=pd.DataFrame([{"a": 1}]),
@@ -218,8 +210,8 @@ def test_manipulate_uses_llm_internal_retry_for_missing_source_table_reference()
             _plan_payload(statements=[f"SELECT a FROM {_TABLE}"]),
         ]
     )
-    repo = _FakeWorkingDataRepo()
-    tool = DataManipulationTool(llm=llm, working_data_repo=repo)
+    repo = _FakeAnalyticsRepo()
+    tool = DataManipulationTool(llm=llm, analytics_repo=repo)
 
     _ = tool.manipulate(
         dataframe=pd.DataFrame([{"a": 1}]),
@@ -236,11 +228,9 @@ def test_manipulate_uses_llm_internal_retry_for_missing_source_table_reference()
 
 def test_manipulate_raises_runtime_error_after_retry_budget_is_exhausted() -> None:
     llm = _FakeLLMService(
-        plans=[
-            _plan_payload(table_name="wrong_table", statements=["SELECT a FROM wrong_table"]),
-        ]
+        plans=[_plan_payload(table_name="wrong_table", statements=["SELECT a FROM wrong_table"])]
     )
-    tool = DataManipulationTool(llm=llm, working_data_repo=_FakeWorkingDataRepo())
+    tool = DataManipulationTool(llm=llm, analytics_repo=_FakeAnalyticsRepo())
 
     with pytest.raises(
         RuntimeError,
@@ -266,8 +256,8 @@ def test_manipulate_supports_multiple_statements_with_temp_table_flow() -> None:
             ),
         ]
     )
-    repo = _FakeWorkingDataRepo()
-    tool = DataManipulationTool(llm=llm, working_data_repo=repo)
+    repo = _FakeAnalyticsRepo()
+    tool = DataManipulationTool(llm=llm, analytics_repo=repo)
 
     _ = tool.manipulate(
         dataframe=pd.DataFrame([{"a": 1}]),
@@ -290,13 +280,10 @@ def test_manipulate_supports_multiple_statements_with_temp_table_flow() -> None:
         ("123table", r"Invalid table_name"),
     ],
 )
-def test_manipulate_validates_table_name(
-    table_name: str,
-    error_pattern: str,
-) -> None:
+def test_manipulate_validates_table_name(table_name: str, error_pattern: str) -> None:
     tool = DataManipulationTool(
         llm=_FakeLLMService(plans=[_plan_payload()]),
-        working_data_repo=_FakeWorkingDataRepo(),
+        analytics_repo=_FakeAnalyticsRepo(),
     )
 
     with pytest.raises(ValueError, match=error_pattern):
@@ -334,7 +321,7 @@ def test_manipulate_validates_required_inputs(
 ) -> None:
     tool = DataManipulationTool(
         llm=_FakeLLMService(plans=[_plan_payload()]),
-        working_data_repo=_FakeWorkingDataRepo(),
+        analytics_repo=_FakeAnalyticsRepo(),
     )
 
     with pytest.raises(ValueError, match=error_pattern):
@@ -344,13 +331,4 @@ def test_manipulate_validates_required_inputs(
             data_summary=data_summary,
             instructions=instructions,
             retry_attempts=retry_attempts,
-        )
-
-
-def test_data_manipulation_tool_validates_constructor_max_attempts() -> None:
-    with pytest.raises(ValueError, match=r"max_attempts must be >= 1"):
-        DataManipulationTool(
-            llm=_FakeLLMService(plans=[_plan_payload()]),
-            working_data_repo=_FakeWorkingDataRepo(),
-            max_attempts=0,
         )

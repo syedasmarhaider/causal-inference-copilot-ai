@@ -117,8 +117,6 @@ def _compile_state(*, warnings: list[ValidationIssueModel] | None = None) -> Com
     spec = _build_inference_ready_spec()
     return CompileAndValidateState(
         CompileAndValidatePayloadModel(
-            dataset_id=uuid4(),
-            dataset_summary=spec.data_summary,
             compiled_causal_spec=spec.causal_spec,
             transformation_plan=spec.transformation_plan,
             inference_ready_causal_spec=spec,

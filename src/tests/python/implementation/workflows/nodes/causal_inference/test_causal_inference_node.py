@@ -29,6 +29,11 @@ from python.implementation.workflows.nodes.compile_and_validate.compile_and_vali
     CompileAndValidatePayloadModel,
     CompileAndValidateState,
 )
+from python.implementation.workflows.nodes.dataset.dataset_state import (
+    DatasetIterationModel,
+    DatasetPayloadModel,
+    DatasetState,
+)
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
     ConfirmedModelSelectionPayload,
     ModelSelectionPayload,
@@ -130,15 +135,25 @@ def _build_inference_ready_spec() -> InferenceReadyCausalSpec:
 
 def _compile_state(*, dataset_id: UUID | None = None) -> CompileAndValidateState:
     spec = _build_inference_ready_spec()
+    _ = dataset_id
     return CompileAndValidateState(
         CompileAndValidatePayloadModel(
-            dataset_id=dataset_id or uuid4(),
-            dataset_summary=spec.data_summary,
             compiled_causal_spec=spec.causal_spec,
             transformation_plan=spec.transformation_plan,
             inference_ready_causal_spec=spec,
             phase="CONFIRMED",
             assistant_message="Compile confirmed.",
+        )
+    )
+
+
+def _dataset_state(*, dataset_id: UUID | None = None) -> DatasetState:
+    spec = _build_inference_ready_spec()
+    resolved_dataset_id = dataset_id or uuid4()
+    return DatasetState(
+        DatasetPayloadModel(
+            dataset_iterations=[DatasetIterationModel(dataset_id=resolved_dataset_id)],
+            latest_summary=spec.data_summary,
         )
     )
 
@@ -451,23 +466,26 @@ def test_causal_inference_deps_require_confirmed_compile_model_selection_and_tra
     compile_state = _compile_state()
     selection_state = _selection_state(model_name="econml.dml.CausalForestDML")
     train_state = _train_state()
+    dataset_state = _dataset_state()
 
     deps = CausalInferenceDeps.from_loaded(
         {
+            DatasetState.NAME: dataset_state,
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
             ModelTrainState.NAME: train_state,
         }
     )
 
-    assert deps.dataset_id == compile_state.payload.dataset_id
-    assert deps.dataset_summary == compile_state.payload.dataset_summary
+    assert deps.dataset_id == dataset_state.payload.dataset_iterations[-1].dataset_id
+    assert deps.dataset_summary == dataset_state.payload.latest_summary
     assert deps.selected_model == "econml.dml.CausalForestDML"
     assert deps.trained_model_id == train_state.payload.trained_model_id
 
     with pytest.raises(StateDependencyError):
         CausalInferenceDeps.from_loaded(
             {
+                DatasetState.NAME: dataset_state,
                 CompileAndValidateState.NAME: CompileAndValidateState(
                     compile_state.payload.model_copy(update={"phase": "REVIEW_READY"})
                 ),
@@ -481,6 +499,7 @@ def test_causal_inference_initial_run_computes_and_caches_ate_without_copying_de
     compile_state = _compile_state()
     selection_state = _selection_state()
     train_state = _train_state()
+    dataset_state = _dataset_state()
     ate_success = ATESuccess(
         run_id=uuid4(),
         started_at=None,
@@ -509,6 +528,7 @@ def test_causal_inference_initial_run_computes_and_caches_ate_without_copying_de
         conversation_id=uuid4(),
         state=CausalInferenceState.init_empty(),
         previous_state_dependencies={
+            DatasetState.NAME: dataset_state,
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
             ModelTrainState.NAME: train_state,
@@ -535,6 +555,7 @@ def test_causal_inference_dataset_graph_handoff_stays_pending() -> None:
     compile_state = _compile_state()
     selection_state = _selection_state()
     train_state = _train_state()
+    dataset_state = _dataset_state()
     fake_model = _FakeCausalModel(results=[])
     node = CausalInferenceNode(
         llm=_FakeLLM(
@@ -566,6 +587,7 @@ def test_causal_inference_dataset_graph_handoff_stays_pending() -> None:
         conversation_id=uuid4(),
         state=state,
         previous_state_dependencies={
+            DatasetState.NAME: dataset_state,
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
             ModelTrainState.NAME: train_state,
@@ -587,6 +609,7 @@ def test_causal_inference_cate_graph_uses_data_manipulation_and_plot_tools() -> 
     compile_state = _compile_state()
     selection_state = _selection_state()
     train_state = _train_state()
+    dataset_state = _dataset_state()
     cate_result_women = CATESuccess(
         run_id=uuid4(),
         started_at=None,
@@ -659,6 +682,7 @@ def test_causal_inference_cate_graph_uses_data_manipulation_and_plot_tools() -> 
         conversation_id=uuid4(),
         state=state,
         previous_state_dependencies={
+            DatasetState.NAME: dataset_state,
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
             ModelTrainState.NAME: train_state,
@@ -683,6 +707,7 @@ def test_causal_inference_invalid_cate_selection_stays_pending() -> None:
     compile_state = _compile_state()
     selection_state = _selection_state()
     train_state = _train_state()
+    dataset_state = _dataset_state()
     fake_data_manip = _FakeDataManipulationTool(
         result_dataframe=pd.DataFrame(
             [
@@ -721,6 +746,7 @@ def test_causal_inference_invalid_cate_selection_stays_pending() -> None:
         conversation_id=uuid4(),
         state=state,
         previous_state_dependencies={
+            DatasetState.NAME: dataset_state,
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
             ModelTrainState.NAME: train_state,
@@ -739,6 +765,7 @@ def test_causal_inference_dataset_load_failure_stays_pending_with_system_detail(
     compile_state = _compile_state()
     selection_state = _selection_state()
     train_state = _train_state()
+    dataset_state = _dataset_state()
     node = CausalInferenceNode(
         llm=_FakeLLM(),
         data_repo=_FakeDataRepo(
@@ -758,6 +785,7 @@ def test_causal_inference_dataset_load_failure_stays_pending_with_system_detail(
         conversation_id=uuid4(),
         state=CausalInferenceState.init_empty(),
         previous_state_dependencies={
+            DatasetState.NAME: dataset_state,
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
             ModelTrainState.NAME: train_state,

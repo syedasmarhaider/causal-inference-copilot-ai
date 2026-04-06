@@ -15,6 +15,11 @@ from python.implementation.workflows.nodes.compile_and_validate.compile_and_vali
     CompileAndValidatePayloadModel,
     CompileAndValidateState,
 )
+from python.implementation.workflows.nodes.dataset.dataset_state import (
+    DatasetIterationModel,
+    DatasetPayloadModel,
+    DatasetState,
+)
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
     ConfirmedModelSelectionPayload,
     ModelSelectionPayload,
@@ -122,15 +127,23 @@ def _build_inference_ready_spec() -> InferenceReadyCausalSpec:
 
 def _compile_state(*, dataset_id: UUID | None = None) -> CompileAndValidateState:
     spec = _build_inference_ready_spec()
+    _ = dataset_id
     return CompileAndValidateState(
         CompileAndValidatePayloadModel(
-            dataset_id=dataset_id or uuid4(),
-            dataset_summary=spec.data_summary,
             compiled_causal_spec=spec.causal_spec,
             transformation_plan=spec.transformation_plan,
             inference_ready_causal_spec=spec,
             phase="CONFIRMED",
             assistant_message="Confirmed compile review",
+        )
+    )
+
+
+def _dataset_state(*, dataset_id: UUID | None = None) -> DatasetState:
+    resolved_dataset_id = dataset_id or uuid4()
+    return DatasetState(
+        DatasetPayloadModel(
+            dataset_iterations=[DatasetIterationModel(dataset_id=resolved_dataset_id)],
         )
     )
 
@@ -318,20 +331,23 @@ def test_model_train_info_state_and_roundtrip() -> None:
 def test_model_train_deps_require_confirmed_compile_and_selected_model() -> None:
     compile_state = _compile_state()
     selection_state = _selection_state()
+    dataset_state = _dataset_state()
 
     deps = ModelTrainDeps.from_loaded(
         {
+            DatasetState.NAME: dataset_state,
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
         }
     )
-    assert deps.dataset_id == compile_state.payload.dataset_id
+    assert deps.dataset_id == dataset_state.payload.dataset_iterations[-1].dataset_id
     assert deps.selected_model == "econml.dml.LinearDML"
     assert deps.inference_ready_spec.causal_spec.treatment_spec.column == "treatment"
 
     with pytest.raises(StateDependencyError):
         ModelTrainDeps.from_loaded(
             {
+                DatasetState.NAME: dataset_state,
                 CompileAndValidateState.NAME: CompileAndValidateState(
                     compile_state.payload.model_copy(update={"phase": "REVIEW_READY"})
                 ),
@@ -342,6 +358,7 @@ def test_model_train_deps_require_confirmed_compile_and_selected_model() -> None
     with pytest.raises(StateDependencyError):
         ModelTrainDeps.from_loaded(
             {
+                DatasetState.NAME: dataset_state,
                 CompileAndValidateState.NAME: compile_state,
                 ModelSelectionState.NAME: ModelSelectionState.init_empty(),
             }
@@ -352,6 +369,7 @@ def test_model_train_success_builds_fit_command_from_confirmed_spec() -> None:
     dataset_id = uuid4()
     compile_state = _compile_state(dataset_id=dataset_id)
     selection_state = _selection_state(model_name="econml.dml.CausalForestDML")
+    dataset_state = _dataset_state(dataset_id=dataset_id)
     fit_result = FitSuccess(
         run_id=uuid4(),
         started_at=None,
@@ -374,6 +392,7 @@ def test_model_train_success_builds_fit_command_from_confirmed_spec() -> None:
         conversation_id=uuid4(),
         state=ModelTrainState.init_empty(),
         previous_state_dependencies={
+            DatasetState.NAME: dataset_state,
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
         },
@@ -399,6 +418,7 @@ def test_model_train_success_builds_fit_command_from_confirmed_spec() -> None:
 def test_model_train_retries_once_then_returns_aborted_state_on_command_failure() -> None:
     compile_state = _compile_state()
     selection_state = _selection_state()
+    dataset_state = _dataset_state()
     failure = CommandFailure(
         run_id=uuid4(),
         started_at=None,
@@ -421,6 +441,7 @@ def test_model_train_retries_once_then_returns_aborted_state_on_command_failure(
         conversation_id=uuid4(),
         state=ModelTrainState.init_empty(),
         previous_state_dependencies={
+            DatasetState.NAME: dataset_state,
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
         },
@@ -440,6 +461,7 @@ def test_model_train_retries_once_then_returns_aborted_state_on_command_failure(
 def test_model_train_succeeds_on_second_attempt() -> None:
     compile_state = _compile_state()
     selection_state = _selection_state()
+    dataset_state = _dataset_state()
     fit_result = FitSuccess(
         run_id=uuid4(),
         started_at=None,
@@ -472,6 +494,7 @@ def test_model_train_succeeds_on_second_attempt() -> None:
         conversation_id=uuid4(),
         state=ModelTrainState.init_empty(),
         previous_state_dependencies={
+            DatasetState.NAME: dataset_state,
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
         },
@@ -488,6 +511,7 @@ def test_model_train_succeeds_on_second_attempt() -> None:
 def test_model_train_reuses_existing_fit_for_same_inputs() -> None:
     compile_state = _compile_state()
     selection_state = _selection_state()
+    dataset_state = _dataset_state()
     fit_result = FitSuccess(
         run_id=uuid4(),
         started_at=None,
@@ -514,6 +538,7 @@ def test_model_train_reuses_existing_fit_for_same_inputs() -> None:
         conversation_id=uuid4(),
         state=ModelTrainState.init_empty(),
         previous_state_dependencies={
+            DatasetState.NAME: dataset_state,
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
         },
@@ -527,6 +552,7 @@ def test_model_train_reuses_existing_fit_for_same_inputs() -> None:
         conversation_id=uuid4(),
         state=first_result,
         previous_state_dependencies={
+            DatasetState.NAME: dataset_state,
             CompileAndValidateState.NAME: compile_state,
             ModelSelectionState.NAME: selection_state,
         },
@@ -535,5 +561,5 @@ def test_model_train_reuses_existing_fit_for_same_inputs() -> None:
 
     assert isinstance(second_result, ModelTrainState)
     assert second_result.payload.trained_model_id == fit_result.fitted_model_id
-    assert data_repo.loaded_dataset_ids == [compile_state.payload.dataset_id]
+    assert data_repo.loaded_dataset_ids == [dataset_state.payload.dataset_iterations[-1].dataset_id]
     assert len(fake_model.commands) == 1

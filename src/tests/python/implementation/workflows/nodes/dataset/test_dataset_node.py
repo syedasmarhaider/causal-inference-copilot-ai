@@ -278,7 +278,7 @@ def _status(state: DatasetState) -> str:
     return state.status()
 
 
-def test_dataset_state_init_empty_and_roundtrip_preserve_message_and_artifact_refs() -> None:
+def test_dataset_state_init_empty_and_roundtrip_does_not_persist_response_artifact_refs() -> None:
     chart_id = uuid4()
     state = DatasetState(
         DatasetPayloadModel(
@@ -288,15 +288,15 @@ def test_dataset_state_init_empty_and_roundtrip_preserve_message_and_artifact_re
                 )
             ],
             user_message="Charts saved.",
-            message_artifact_refs=[
-                {
-                    "id": chart_id,
-                    "kind": "data",
-                    "format": "json",
-                    "artifact_meta": {"kind": "chart_spec"},
-                }
-            ],
-        )
+        ),
+        response_message_artifact_refs=[
+            {
+                "id": chart_id,
+                "kind": "data",
+                "format": "json",
+                "artifact_meta": {"kind": "chart_spec"},
+            }
+        ],
     )
 
     empty_state = DatasetState.init_empty()
@@ -306,14 +306,7 @@ def test_dataset_state_init_empty_and_roundtrip_preserve_message_and_artifact_re
     message = _message(restored)
 
     assert message.content == "Charts saved."
-    assert message.artifact_refs == [
-        {
-            "id": chart_id,
-            "kind": "data",
-            "format": "json",
-            "artifact_meta": {"kind": "chart_spec"},
-        }
-    ]
+    assert message.artifact_refs is None
 
 
 def test_dataset_intent_model_allows_all_false_with_empty_briefs() -> None:
@@ -642,14 +635,7 @@ def test_dataset_node_saves_new_dataset_for_mutating_manipulation() -> None:
     assert state.latest_iteration is not None
     assert state.latest_iteration.dataset_id != DatasetState.INIT_DATA_ID
     assert list(data_repo.saved_csv_calls[0]["df"].columns) == ["age"]
-    assert _message(state).artifact_refs == [
-        {
-            "id": state.latest_iteration.dataset_id,
-            "kind": "data",
-            "format": "csv",
-            "artifact_meta": {"kind": "working_dataset"},
-        }
-    ]
+    assert _message(state).artifact_refs is None
 
 
 def test_dataset_node_blocks_mutating_manipulation_when_dataset_is_freezed() -> None:
@@ -761,7 +747,6 @@ def test_dataset_node_saves_chart_specs_and_adds_artifact_ids() -> None:
     assert len(data_repo.saved_json_calls) == 2
     assert state.latest_iteration is not None
     assert "saved_vega_lite_specs_file_ids" not in state.latest_iteration.model_dump()
-    assert len(state.payload.message_artifact_refs) == 2
     assert _message(state).artifact_refs is not None
     assert len(_message(state).artifact_refs or []) == 2
     assert _message(state).artifact_refs == [
@@ -813,7 +798,6 @@ def test_dataset_node_allows_chart_generation_when_dataset_is_freezed() -> None:
     assert _message(state).content == "Frozen chart saved."
     assert len(plot_tool.calls) == 1
     assert len(data_repo.saved_json_calls) == 1
-    assert len(state.payload.message_artifact_refs) == 1
     assert _message(state).artifact_refs == [
         {
             "id": data_repo.saved_json_calls[0]["dataset_id"],
@@ -863,7 +847,6 @@ def test_dataset_node_uses_analytical_query_result_as_chart_input_without_new_it
     assert state.latest_iteration is not None
     assert state.latest_iteration.dataset_id == DatasetState.INIT_DATA_ID
     assert len(state.payload.dataset_iterations) == 1
-    assert len(state.payload.message_artifact_refs) == 2
     assert _message(state).artifact_refs == [
         {
             "id": data_repo.saved_csv_calls[0]["dataset_id"],
@@ -881,7 +864,7 @@ def test_dataset_node_uses_analytical_query_result_as_chart_input_without_new_it
 
 
 def test_dataset_node_falls_back_when_final_response_llm_fails() -> None:
-    node, _, _, _, plot_tool, _ = _make_node_and_tools(
+    node, data_repo, _, _, plot_tool, _ = _make_node_and_tools(
         dataframe=pd.DataFrame([{"age": 65, "outcome": 1}]),
         plot_specs=[
             {"mark": "bar", "data": {"values": [{"age": 65}]}, "encoding": {"x": {"field": "age"}}},
@@ -910,10 +893,9 @@ def test_dataset_node_falls_back_when_final_response_llm_fails() -> None:
 
     assert len(plot_tool.calls) == 1
     assert "generated 1 chart" in _message(state).content.lower()
-    assert len(state.payload.message_artifact_refs) == 1
     assert _message(state).artifact_refs == [
         {
-            "id": state.payload.message_artifact_refs[0]["id"],
+            "id": data_repo.saved_json_calls[0]["dataset_id"],
             "kind": "data",
             "format": "json",
             "artifact_meta": {"kind": "chart_spec"},

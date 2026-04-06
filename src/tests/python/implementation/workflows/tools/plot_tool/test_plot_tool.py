@@ -304,12 +304,13 @@ def test_generate_specs_uses_summary_headers_for_internal_retry_not_dataframe_co
             ),
         ]
     )
-    tool = PlotTool(llm=llm, max_attempts=2)
+    tool = PlotTool(llm=llm)
 
     specs = tool.generate_specs(
         dataframe=pd.DataFrame([{"x": 1, "hidden": 99}]),
         data_summary=_summary_model(_numeric_profile("x")),
         user_intent="scatter",
+        max_attempts=2,
     )
 
     assert len(llm.calls) == 1
@@ -343,12 +344,13 @@ def test_generate_specs_uses_llm_internal_retry_for_forbidden_template_values() 
             ),
         ]
     )
-    tool = PlotTool(llm=llm, max_attempts=2)
+    tool = PlotTool(llm=llm)
 
     specs = tool.generate_specs(
         dataframe=pd.DataFrame([{"x": 1}]),
         data_summary=_summary_model(_numeric_profile("x")),
         user_intent="bar chart",
+        max_attempts=2,
     )
 
     assert len(llm.calls) == 1
@@ -381,12 +383,13 @@ def test_generate_specs_uses_llm_internal_retry_for_summary_type_mismatch() -> N
             ),
         ]
     )
-    tool = PlotTool(llm=llm, max_attempts=2)
+    tool = PlotTool(llm=llm)
 
     specs = tool.generate_specs(
         dataframe=pd.DataFrame([{"label": "A"}]),
         data_summary=_summary_model(_categorical_profile("label"), n_rows=1),
         user_intent="show label distribution",
+        max_attempts=2,
     )
 
     assert len(llm.calls) == 1
@@ -409,19 +412,20 @@ def test_generate_specs_raises_runtime_error_after_retry_budget_is_exhausted() -
             )
         ]
     )
-    tool = PlotTool(llm=llm, max_attempts=1)
+    tool = PlotTool(llm=llm)
 
     with pytest.raises(RuntimeError, match=r"Failed JSON schema=PlotSpecsPlanForFields_1 after 1 attempts"):
         _ = tool.generate_specs(
             dataframe=pd.DataFrame([{"x": 1}]),
             data_summary=_summary_model(_numeric_profile("x")),
             user_intent="scatter",
+            max_attempts=1,
         )
 
 def test_generate_specs_rejects_non_model_data_summary() -> None:
     tool = PlotTool(llm=_FakeLLMService(plans=[]))
 
-    with pytest.raises(TypeError, match=r"data_summary must be a DatasetSummaryModel"):
+    with pytest.raises(AttributeError, match=r"profiles"):
         _ = tool.generate_specs(
             dataframe=pd.DataFrame([{"x": 1}]),
             data_summary=_summary_json(_numeric_profile("x")),
@@ -506,7 +510,7 @@ def test_generate_specs_warns_threshold_but_injects_all_values() -> None:
             )
         ]
     )
-    tool = PlotTool(llm=llm, max_rows_for_values=1)
+    tool = PlotTool(llm=llm, warn_max_rows_for_values=1)
 
     specs = tool.generate_specs(
         dataframe=pd.DataFrame([{"x": 1}, {"x": 2}]),
@@ -573,7 +577,7 @@ def test_generate_specs_preserves_existing_spec_title_over_plan_title() -> None:
 @pytest.mark.parametrize(
     ("data_summary", "user_intent", "dataframe", "error_pattern"),
     [
-        ("", "plot", pd.DataFrame([{"x": 1}]), r"data_summary must be a DatasetSummaryModel"),
+        ("", "plot", pd.DataFrame([{"x": 1}]), r"profiles"),
         (_summary_model(_numeric_profile("x")), "", pd.DataFrame([{"x": 1}]), r"user_intent must be non-empty"),
         (_summary_model(_numeric_profile("x"), n_rows=0), "plot", pd.DataFrame(), r"dataframe must have at least one column"),
     ],
@@ -601,7 +605,7 @@ def test_generate_specs_validates_required_inputs(
         )
     )
 
-    expected_error = TypeError if isinstance(data_summary, str) else ValueError
+    expected_error = AttributeError if isinstance(data_summary, str) else ValueError
     with pytest.raises(expected_error, match=error_pattern):
         _ = tool.generate_specs(
             dataframe=dataframe,
@@ -610,15 +614,10 @@ def test_generate_specs_validates_required_inputs(
         )
 
 
-def test_plot_tool_validates_constructor_arguments() -> None:
-    with pytest.raises(ValueError, match=r"max_attempts must be >= 1"):
-        PlotTool(
-            llm=_FakeLLMService(plans=[]),
-            max_attempts=0,
-        )
+def test_plot_tool_uses_configurable_warning_threshold() -> None:
+    tool = PlotTool(
+        llm=_FakeLLMService(plans=[]),
+        warn_max_rows_for_values=7,
+    )
 
-    with pytest.raises(ValueError, match=r"max_rows_for_values must be >= 1"):
-        PlotTool(
-            llm=_FakeLLMService(plans=[]),
-            max_rows_for_values=0,
-        )
+    assert tool.warn_max_rows_for_values == 7

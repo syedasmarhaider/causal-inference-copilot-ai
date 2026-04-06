@@ -82,7 +82,8 @@ def _build_summary(df: pd.DataFrame) -> DatasetSummaryModel:
 def _dataset_state(*, dataset_id: UUID, summary: DatasetSummaryModel) -> DatasetState:
     return DatasetState(
         DatasetPayloadModel(
-            dataset_iterations=[DatasetIterationModel(dataset_id=dataset_id, summary=summary)],
+            dataset_iterations=[DatasetIterationModel(dataset_id=dataset_id)],
+            latest_summary=summary,
         )
     )
 
@@ -258,8 +259,6 @@ def test_compile_and_validate_prompts_and_info_have_expected_scope() -> None:
 def test_compile_and_validate_state_roundtrip_and_statuses() -> None:
     state = CompileAndValidateState.init_empty()
     assert state.status() == "PENDING"
-    assert state.payload.dataset_id is None
-    assert state.payload.dataset_summary is None
 
     failed = CompileAndValidateState(
         CompileAndValidatePayloadModel(
@@ -395,8 +394,6 @@ def test_compile_and_validate_node_confirmed_review_marks_done() -> None:
     dataset_id = uuid4()
     compiled_state = CompileAndValidateState(
         CompileAndValidatePayloadModel(
-            dataset_id=dataset_id,
-            dataset_summary=summary,
             phase="REVIEW_READY",
             assistant_message="Please confirm this compiled setup.",
             compiled_causal_spec=CausalSpec.model_validate(
@@ -475,8 +472,6 @@ def test_compile_and_validate_node_rejection_aborts_review() -> None:
     dataset_id = uuid4()
     state = CompileAndValidateState(
         CompileAndValidatePayloadModel(
-            dataset_id=dataset_id,
-            dataset_summary=summary,
             phase="REVIEW_READY",
             assistant_message="Please confirm this compiled setup.",
         )
@@ -520,8 +515,6 @@ def test_compile_and_validate_node_unclear_review_reply_stays_pending() -> None:
     dataset_id = uuid4()
     state = CompileAndValidateState(
         CompileAndValidatePayloadModel(
-            dataset_id=dataset_id,
-            dataset_summary=summary,
             phase="REVIEW_READY",
             assistant_message="Please confirm this compiled setup.",
         )

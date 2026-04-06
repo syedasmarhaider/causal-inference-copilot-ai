@@ -12,7 +12,7 @@ from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
 from python.domain.service.llm_service import LLMConfig, LLMResponse
 from python.domain.workflows.route import NextDecision
-from python.domain.workflows.state import State
+from python.domain.workflows.state import Action, State
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
     CausalInferenceState,
 )
@@ -52,6 +52,9 @@ class _FakeState(State):
 
     def status(self) -> str:
         return self.state_status
+
+    def action(self) -> Action:
+        return "NONE"
 
     def set_status_freez(self) -> None:
         self.state_status = "FREEZED"

@@ -360,6 +360,9 @@ class WorkflowApp:
              
         if new_state.status() == "DONE":
             new_state.set_status_freez()
+            new_state_status = new_state.status()
+            if active_state_name_after_run == new_state_name:
+                active_state_status_after_run = new_state_status
         self._repo.store_state(
             user_id=user_id,
             conversation_id=conversation_id,

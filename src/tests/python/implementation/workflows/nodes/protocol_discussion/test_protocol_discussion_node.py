@@ -49,7 +49,8 @@ def _summary_for_df(df: pd.DataFrame) -> DatasetSummaryModel:
 def _dataset_state(*, dataset_id: UUID, summary: DatasetSummaryModel | None) -> DatasetState:
     return DatasetState(
         DatasetPayloadModel(
-            dataset_iterations=[DatasetIterationModel(dataset_id=dataset_id, summary=summary)],
+            dataset_iterations=[DatasetIterationModel(dataset_id=dataset_id)],
+            latest_summary=summary,
         )
     )
 
@@ -178,9 +179,10 @@ def test_protocol_discussion_deps_returns_latest_dataset_revision() -> None:
     dataset_state = DatasetState(
         DatasetPayloadModel(
             dataset_iterations=[
-                DatasetIterationModel(dataset_id=first_id, summary=first_summary),
-                DatasetIterationModel(dataset_id=latest_id, summary=latest_summary),
-            ]
+                DatasetIterationModel(dataset_id=first_id),
+                DatasetIterationModel(dataset_id=latest_id),
+            ],
+            latest_summary=latest_summary,
         )
     )
 
@@ -309,7 +311,7 @@ def test_protocol_discussion_node_confirms_discussion_and_emits_cleaning_system_
     assert result.payload.system_message is not None
     assert result.payload.system_message.startswith("PROTOCOL_DISCUSSION_CONFIRMED")
     assert "This is a data-changing request." in result.payload.system_message
-    assert "final working dataset must retain only protocol-scope columns" in result.payload.system_message
+    assert "final working dataset **must** retain only protocol-scope columns" in result.payload.system_message
     assert "Apply the grounded target-population / cohort-eligibility filters" in result.payload.system_message
     assert "Apply the grounded time-zero / baseline-definition rules" in result.payload.system_message
     assert "Normalize treatment to exactly two canonical values" in result.payload.system_message
