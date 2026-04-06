@@ -21,6 +21,7 @@ from python.implementation.service.llms.llm_service_factory import (
     LLMServiceSettings,
     make_llm_service,
 )
+from python.implementation.workflows.dataflow_app import DataflowApp
 from python.implementation.workflows.router.llm_assisted_router import (
     LLMAssistedRouterRouter,
     build_state_classes_by_name,
@@ -32,7 +33,7 @@ from python.implementation.workflows.workflow_app import WorkflowApp
 log = get_logger(__name__, component="workflow_depinit", log_type="dependency_bootstrap")
 
 
-def make_workflow_app() -> WorkflowApp:
+def make_apps() -> tuple[WorkflowApp, DataflowApp]:
     log.info("building workflow app dependencies")
     llm: LLMService = make_llm_service(settings=LLMServiceSettings())
     data_repo: DataRepo = _make_data_repo()
@@ -55,6 +56,10 @@ def make_workflow_app() -> WorkflowApp:
         models_repo=models_repo,
         analytics_repo=analytics_repo,
     )
+    dataflow_app = DataflowApp(
+        repo=workflow_repo,
+        data_repo=data_repo,
+    )
 
     log.info(
         "workflow app dependencies created",
@@ -63,11 +68,22 @@ def make_workflow_app() -> WorkflowApp:
     )
     return WorkflowApp(
         repo=workflow_repo,
-        data_repo=data_repo,
         router=router,
         nodes_by_state_name=nodes_by_state_name,
         state_classes_by_name=state_classes_by_name,
         tool_factory=DefaultToolFactory(data_repo=data_repo, models_repo=models_repo,llm_service=llm, analytics_repo=analytics_repo),
+    ), dataflow_app
+
+
+def make_dataflow_app() -> DataflowApp:
+    log.info("building dataflow app dependencies")
+    state_classes_by_name = build_state_classes_by_name()
+    workflow_repo = _make_workflow_state_repo(
+        state_classes_by_name=state_classes_by_name,
+    )
+    return DataflowApp(
+        repo=workflow_repo,
+        data_repo=_make_data_repo(),
     )
 
 
@@ -91,6 +107,4 @@ def _make_data_repo() -> DataRepo:
 def _make_analytics_repo() -> AnalyticsRepo:
     return DuckDBAnalyticsRepo()
    
-
-
 
