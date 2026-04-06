@@ -23,6 +23,7 @@ from python.implementation.workflows.dataflow_app import (
 
 _MESSAGES_HISTORY_LIMIT = 15
 
+# TODO: add distributed tnx or locks later
 
 @dataclass(frozen=True)
 class WorkflowResponse:
