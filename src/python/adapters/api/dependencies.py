@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from python.implementation.service.logging.default_logging import get_logger
+import inspect
+import os
 from functools import lru_cache
+
+from python.implementation.service.logging.default_logging import get_logger
 
 from fastapi import Depends, File, Header, HTTPException, Path, Query, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -55,6 +58,8 @@ def _unauthorized(detail: str) -> HTTPException:
 
 @lru_cache(maxsize=1)
 def get_apps() -> tuple[WorkflowApp, DataflowApp]:
+    if "use_local_files" in inspect.signature(make_apps).parameters:
+        return make_apps(use_local_files=_use_local_files_from_env())
     return make_apps()
 
 
@@ -106,3 +111,9 @@ async def get_authenticated_user(
 AUTHENTICATED_USER_DEP = Depends(get_authenticated_user)
 WORKFLOW_APP_DEP = Depends(get_workflow_app)
 DATAFLOW_APP_DEP = Depends(get_dataflow_app)
+
+
+def _use_local_files_from_env() -> bool:
+    value = os.getenv("USE_LOCAL_FILES", "")
+    normalized = value.strip().strip('"').strip("'").lower()
+    return normalized in {"true", "yes"}
