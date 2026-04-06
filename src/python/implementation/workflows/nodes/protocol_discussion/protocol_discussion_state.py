@@ -19,7 +19,7 @@ from python.implementation.workflows.tools.common.model.data_summary import (
 )
 from python.implementation.workflows.utils.utils import uuid_from_any
 
-ProtocolDiscussionPhase = Literal["DISCUSSING", "CONFIRMED"]
+ProtocolDiscussionPhase = Literal["DISCUSSING", "REVIEW_READY", "CONFIRMED"]
 
 
 class ProtocolDiscussionPayloadModel(BaseModel):
@@ -29,6 +29,7 @@ class ProtocolDiscussionPayloadModel(BaseModel):
     dataset_summary: DatasetSummaryModel | None = None
     discussion: str = ""
     phase: ProtocolDiscussionPhase = "DISCUSSING"
+    pending_dataset_change_request: str | None = None
     assistant_message: str | None = None
     system_message: str | None = None
 
@@ -39,6 +40,7 @@ class ProtocolDiscussionPayloadModel(BaseModel):
 
     @field_validator(
         "discussion",
+        "pending_dataset_change_request",
         "assistant_message",
         "system_message",
         mode="before",
@@ -77,6 +79,7 @@ class ProtocolDiscussionState(State):
     def set_status_pending(self) -> None:
         if self.payload.phase == "CONFIRMED":
             self.payload.phase = "DISCUSSING"
+            self.payload.pending_dataset_change_request = None
 
     def messages(self) -> Sequence[ChatMessage]:
         messages: list[ChatMessage] = []

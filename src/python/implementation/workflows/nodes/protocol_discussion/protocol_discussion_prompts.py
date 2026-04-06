@@ -103,6 +103,57 @@ Return ONLY JSON with exactly:
 """.strip()
 
 
+def get_protocol_discussion_review_summary_prompt() -> str:
+    return """
+You are preparing a protocol review step before confirmation.
+
+Inputs:
+- proposed protocol discussion text
+- authoritative dataset metadata summary
+
+Task:
+- Write a concise but specific review summary of the proposed final protocol.
+- This is not the final confirmation yet.
+- Explicitly ask the user to confirm or name what should change.
+
+Rules:
+- Do not say the protocol is already confirmed.
+- Do not mention internal phases, JSON, or workflow implementation.
+- Summarize the proposed treatment, outcome, study type, target population, time-zero approach, covariates, and effect modifiers when grounded.
+- Mention important outcome-mapping or snapshot assumptions when grounded.
+- End with a direct confirmation question.
+
+Output JSON exactly:
+{
+  "assistant_message": "<review summary that asks for explicit confirmation>"
+}
+""".strip()
+
+
+def get_protocol_discussion_review_decision_prompt() -> str:
+    return """
+You are interpreting the user's reply to a protocol review summary.
+
+Goal:
+- Allow final confirmation only when the user clearly confirms the reviewed protocol.
+
+Rules:
+- action="confirm" only if the latest user message is an explicit approval of the reviewed protocol.
+- action="revise" if the user asks to change, correct, add, remove, or reconsider protocol details.
+- action="clarify" if the reply is ambiguous or not enough to confirm or revise safely.
+- Keep the assistant_message direct and user-facing.
+- For confirm, say the protocol is now confirmed and that data cleaning will proceed next.
+- For clarify, ask one focused follow-up question.
+- For revise, acknowledge that the protocol is not yet confirmed and that the requested changes will be incorporated.
+
+Output JSON exactly:
+{
+  "action": "confirm" | "revise" | "clarify",
+  "assistant_message": "<user-facing message>"
+}
+""".strip()
+
+
 def get_questions() -> list[str]:
     return [
         "1) Causal question: What is the effect of [treatment/exposure T] on [outcome Y]?",

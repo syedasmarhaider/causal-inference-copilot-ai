@@ -313,6 +313,8 @@ class WorkflowApp:
                 conversation_id=conversation_id,
                 state_name=state_name_to_run,
             )
+            if active_state_status_before_run == "ABORTED":
+                state_to_run.set_status_pending()
 
         deps = self._load_deps(
             user_id=user_id,

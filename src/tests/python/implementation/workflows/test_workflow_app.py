@@ -341,6 +341,29 @@ def test_handle_routes_to_next_state_and_loads_dependencies() -> None:
     assert [message.content for message in response.messages] == ["from b"]
 
 
+def test_handle_reopens_recovered_state_after_abort() -> None:
+    repo = _FakeWorkflowStateRepo()
+    router = _FakeRouter(decisions=[NextDecision(state_name=_StateB.NAME)])
+    current_state = _StateA(status="ABORTED")
+    recovered_state = _StateB(status="FREEZED")
+    next_state = _StateB(messages=[ChatMessage(role="assistant", content="recovered")])
+    node = _FakeNode(_StateB.NAME, next_state)
+    app = _build_app(repo=repo, router=router, nodes={_StateB.NAME: node})
+    user_id = uuid4()
+    conversation_id = uuid4()
+    repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
+    repo.store_active_state_name(
+        user_id=user_id, conversation_id=conversation_id, state_name=_StateA.NAME
+    )
+    repo.store_state(user_id=user_id, conversation_id=conversation_id, state=current_state)
+    repo.store_state(user_id=user_id, conversation_id=conversation_id, state=recovered_state)
+
+    app.handle(user_id=user_id, conversation_id=conversation_id, user_message="recover")
+
+    assert len(node.calls) == 1
+    assert node.calls[0]["state"].status() == "PENDING"
+
+
 def test_handle_returns_router_clarification_without_running_node() -> None:
     repo = _FakeWorkflowStateRepo()
     router = _FakeRouter(

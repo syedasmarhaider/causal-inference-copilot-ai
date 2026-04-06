@@ -17,6 +17,8 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
     confirmed_cleaning_system_message_preamble,
     get_protocol_discussion_get_node_info,
+    get_protocol_discussion_review_decision_prompt,
+    get_protocol_discussion_review_summary_prompt,
     get_protocol_discussion_update_prompt,
     get_questions,
     initial_user_message,
@@ -30,6 +32,7 @@ from python.implementation.workflows.utils.utils import safe_err
 log = get_logger(__name__)
 
 NextAction = Literal["continue", "confirm"]
+ReviewAction = Literal["confirm", "revise", "clarify"]
 
 
 class _DiscussionDecisionModel(BaseModel):
@@ -47,6 +50,19 @@ class _DiscussionDecisionModel(BaseModel):
         if self.next_action != "confirm" and self.dataset_change_request is not None:
             raise ValueError("dataset_change_request must be null unless next_action=confirm")
         return self
+
+
+class _ReviewSummaryModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    assistant_message: str = Field(..., min_length=1)
+
+
+class _ReviewDecisionModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    action: ReviewAction
+    assistant_message: str = Field(..., min_length=1)
 
 
 class ProtocolDiscussionNode(Node):
@@ -116,6 +132,7 @@ class ProtocolDiscussionNode(Node):
                 {
                     "discussion": self._initial_discussion(questions=questions),
                     "phase": "DISCUSSING",
+                    "pending_dataset_change_request": None,
                     "assistant_message": None,
                     "system_message": None,
                 }
@@ -140,6 +157,61 @@ class ProtocolDiscussionNode(Node):
             config=LLMConfig(model="pro", temperature=0.2),
             history=history,
             max_attempts=2,
+        )
+
+    def _call_review_summary(
+        self,
+        *,
+        protocol_discussion: str,
+        dataset_summary_json: str,
+    ) -> _ReviewSummaryModel:
+        return self._llm.generate_json(
+            schema=_ReviewSummaryModel,
+            system_prompt=get_protocol_discussion_review_summary_prompt(),
+            user_prompt=json.dumps(
+                {
+                    "protocol_discussion": protocol_discussion,
+                    "dataset_summary": json.loads(dataset_summary_json),
+                },
+                ensure_ascii=False,
+            ),
+            config=LLMConfig(model="mini", temperature=0.2),
+            history=None,
+            max_attempts=2,
+        )
+
+    def _call_review_decision(
+        self,
+        *,
+        protocol_discussion: str,
+        review_message: str | None,
+        latest_user_message: str,
+    ) -> _ReviewDecisionModel:
+        return self._llm.generate_json(
+            schema=_ReviewDecisionModel,
+            system_prompt=get_protocol_discussion_review_decision_prompt(),
+            user_prompt=json.dumps(
+                {
+                    "protocol_discussion": protocol_discussion,
+                    "review_message": review_message,
+                    "latest_user_message": latest_user_message,
+                },
+                ensure_ascii=False,
+            ),
+            config=LLMConfig(model="mini", temperature=0.0),
+            history=None,
+            max_attempts=2,
+        )
+
+    @staticmethod
+    def _fallback_review_summary(protocol_discussion: str) -> str:
+        compact_lines = [line.strip() for line in protocol_discussion.splitlines() if line.strip()]
+        preview = " ".join(compact_lines[:6])
+        if len(preview) > 900:
+            preview = preview[:897].rstrip() + "..."
+        return (
+            "I drafted the final protocol summary based on the current discussion. "
+            f"{preview} Please confirm this protocol, or tell me exactly what should change."
         )
 
     def run(
@@ -192,6 +264,61 @@ class ProtocolDiscussionNode(Node):
         base_payload = self._base_payload(questions=questions, summary_string=summary_string)
         last_4_messages = list(messages_history[-4:]) if messages_history else None
 
+        if payload.phase == "REVIEW_READY":
+            try:
+                review_decision = self._call_review_decision(
+                    protocol_discussion=payload.discussion,
+                    review_message=payload.assistant_message,
+                    latest_user_message=latest_user_message,
+                )
+            except Exception as e:
+                log.exception("PROTOCOL_DISCUSSION review decision failure: %s", safe_err(e))
+                return ProtocolDiscussionState(
+                    payload.model_copy(
+                        update={
+                            "phase": "REVIEW_READY",
+                            "assistant_message": (
+                                "I could not interpret your reply to the protocol review. "
+                                "Please confirm the protocol explicitly or say what should change."
+                            ),
+                            "system_message": None,
+                        }
+                    )
+                )
+
+            if review_decision.action == "confirm":
+                return ProtocolDiscussionState(
+                    payload.model_copy(
+                        update={
+                            "phase": "CONFIRMED",
+                            "assistant_message": review_decision.assistant_message,
+                            "system_message": self._build_confirmed_cleaning_system_message(
+                                cast(str, payload.pending_dataset_change_request)
+                            ),
+                        }
+                    )
+                )
+
+            if review_decision.action == "clarify":
+                return ProtocolDiscussionState(
+                    payload.model_copy(
+                        update={
+                            "phase": "REVIEW_READY",
+                            "assistant_message": review_decision.assistant_message,
+                            "system_message": None,
+                        }
+                    )
+                )
+
+            payload = payload.model_copy(
+                update={
+                    "phase": "DISCUSSING",
+                    "pending_dataset_change_request": None,
+                    "assistant_message": None,
+                    "system_message": None,
+                }
+            )
+
         try:
             decision = self._call_update(
                 base_payload=base_payload,
@@ -217,15 +344,29 @@ class ProtocolDiscussionNode(Node):
         )
 
         if decision.next_action == "confirm":
+            try:
+                review_summary = self._call_review_summary(
+                    protocol_discussion=decision.discussion,
+                    dataset_summary_json=summary_string,
+                )
+                review_message = review_summary.assistant_message
+            except Exception as e:
+                log.exception("PROTOCOL_DISCUSSION review summary failure: %s", safe_err(e))
+                review_message = self._fallback_review_summary(decision.discussion)
             return ProtocolDiscussionState(
                 payload.model_copy(
                     update={
                         "discussion": decision.discussion,
-                        "phase": "CONFIRMED",
-                        "assistant_message": assistant_message,
-                        "system_message": self._build_confirmed_cleaning_system_message(
-                            cast(str, decision.dataset_change_request)
+                        "phase": "REVIEW_READY",
+                        "pending_dataset_change_request": cast(
+                            str, decision.dataset_change_request
                         ),
+                        "assistant_message": self._prefix_dataset_reset_message(
+                            assistant_message=review_message,
+                            dataset_changed=dataset_changed,
+                            prior_dataset_id=prior_dataset_id,
+                        ),
+                        "system_message": None,
                     }
                 )
             )
@@ -235,6 +376,7 @@ class ProtocolDiscussionNode(Node):
                 update={
                     "discussion": decision.discussion,
                     "phase": "DISCUSSING",
+                    "pending_dataset_change_request": None,
                     "assistant_message": assistant_message,
                     "system_message": None,
                 }

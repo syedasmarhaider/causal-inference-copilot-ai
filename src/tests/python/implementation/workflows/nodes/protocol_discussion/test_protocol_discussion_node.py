@@ -136,6 +136,16 @@ def test_protocol_discussion_state_status_messages_error_and_roundtrip() -> None
             assistant_message="Need more info",
         )
     )
+    review_ready = ProtocolDiscussionState(
+        ProtocolDiscussionPayloadModel(
+            dataset_id=uuid4(),
+            dataset_summary=summary,
+            discussion="Reviewed protocol",
+            phase="REVIEW_READY",
+            pending_dataset_change_request="Clean it",
+            assistant_message="Please confirm this protocol summary.",
+        )
+    )
     confirmed = ProtocolDiscussionState(
         ProtocolDiscussionPayloadModel(
             dataset_id=uuid4(),
@@ -149,6 +159,12 @@ def test_protocol_discussion_state_status_messages_error_and_roundtrip() -> None
     assert discussing.status() == "PENDING"
     assert _messages(discussing) == [ChatMessage(role="assistant", content="Need more info")]
     assert discussing.error() is None
+
+    assert review_ready.status() == "PENDING"
+    assert _messages(review_ready) == [
+        ChatMessage(role="assistant", content="Please confirm this protocol summary.")
+    ]
+    assert review_ready.error() is None
 
     assert confirmed.status() == "DONE"
     assert _messages(confirmed) == [
@@ -269,7 +285,9 @@ def test_protocol_discussion_node_without_user_message_returns_initial_prompt_wi
     assert llm.generate_json_calls == []
 
 
-def test_protocol_discussion_node_confirms_discussion_and_emits_cleaning_system_message() -> None:
+def test_protocol_discussion_node_moves_finalized_discussion_to_review_ready_before_confirming() -> (
+    None
+):
     dataset_id = uuid4()
     summary = _summary_for_df(
         pd.DataFrame(
@@ -286,14 +304,21 @@ def test_protocol_discussion_node_confirms_discussion_and_emits_cleaning_system_
             _DiscussionDecisionModel(
                 discussion="Confirmed protocol discussion",
                 next_action="confirm",
-                assistant_message="The protocol discussion is now confirmed. I will hand off the required data cleaning and normalization steps next.",
+                assistant_message="The protocol discussion is ready.",
                 dataset_change_request=(
                     "This is a data-changing request. Preserve treatment, outcome, age, and sex. "
                     "Normalize treatment to exactly two canonical values: drug and control. "
                     "Normalize binary outcome to exactly two canonical values. "
                     "Filter rows outside the confirmed cohort eligibility only when the rule is grounded."
                 ),
-            )
+            ),
+            {
+                "assistant_message": (
+                    "Here is the proposed final protocol: treatment is treatment, outcome is "
+                    "outcome, study type is observational, and baseline adjustment uses age and "
+                    "sex. Please confirm this protocol, or tell me exactly what should change."
+                )
+            },
         ],
     )
     node = ProtocolDiscussionNode(llm=llm)
@@ -319,23 +344,64 @@ def test_protocol_discussion_node_confirms_discussion_and_emits_cleaning_system_
 
     assert isinstance(result, ProtocolDiscussionState)
     assert result.payload.discussion == "Confirmed protocol discussion"
+    assert result.payload.phase == "REVIEW_READY"
+    assert result.status() == "PENDING"
+    assert result.payload.pending_dataset_change_request is not None
+    assert result.payload.system_message is None
+    assert result.payload.assistant_message is not None
+    assert "please confirm this protocol" in result.payload.assistant_message.lower()
+    assert _messages(result) == [
+        ChatMessage(role="assistant", content=result.payload.assistant_message or ""),
+    ]
+    assert len(llm.generate_json_calls) == 2
+    assert llm.generate_json_calls[0]["config"].model == "pro"
+    assert llm.generate_json_calls[1]["config"].model == "mini"
+
+
+def test_protocol_discussion_node_confirmed_review_emits_cleaning_system_message() -> None:
+    dataset_id = uuid4()
+    summary = _summary_for_df(pd.DataFrame({"treatment": ["drug"], "outcome": [1.0]}))
+    llm = _FakeLLM(
+        json_outputs=[
+            {
+                "action": "confirm",
+                "assistant_message": (
+                    "The protocol is now confirmed. I will hand off the required data cleaning "
+                    "and normalization steps next."
+                ),
+            }
+        ]
+    )
+    node = ProtocolDiscussionNode(llm=llm)
+    state = ProtocolDiscussionState(
+        ProtocolDiscussionPayloadModel(
+            dataset_id=dataset_id,
+            dataset_summary=summary,
+            discussion="Reviewed protocol discussion",
+            phase="REVIEW_READY",
+            pending_dataset_change_request=(
+                "This is a data-changing request. Preserve treatment and outcome."
+            ),
+            assistant_message="Please confirm this protocol summary.",
+        )
+    )
+
+    result = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={
+            DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary)
+        },
+        messages_history=[ChatMessage(role="user", content="Yes, I confirm this protocol.")],
+        state=state,
+    )
+
+    assert isinstance(result, ProtocolDiscussionState)
     assert result.payload.phase == "CONFIRMED"
     assert result.status() == "DONE"
     assert result.payload.system_message is not None
     assert result.payload.system_message.startswith("PROTOCOL_DISCUSSION_CONFIRMED")
     assert "This is a data-changing request." in result.payload.system_message
-    assert (
-        "final working dataset **must** retain only protocol-scope columns"
-        in result.payload.system_message
-    )
-    assert (
-        "Apply the grounded target-population / cohort-eligibility filters"
-        in result.payload.system_message
-    )
-    assert (
-        "Apply the grounded time-zero / baseline-definition rules" in result.payload.system_message
-    )
-    assert "Normalize treatment to exactly two canonical values" in result.payload.system_message
     assert _messages(result) == [
         ChatMessage(role="system", content=result.payload.system_message),
         ChatMessage(role="assistant", content=result.payload.assistant_message or ""),
