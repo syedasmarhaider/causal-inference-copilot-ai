@@ -12,8 +12,9 @@ from python.domain.workflows.state import State
 class NextDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     state_name: str | None = None
+    should_persists_by_workflow: bool| None
     router_confirmation_message_for_user: str | None = None
-    should_persists_by_workflow= bool| None
+
 
 
 class Router(ABC):

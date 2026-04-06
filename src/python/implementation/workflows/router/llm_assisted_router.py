@@ -121,7 +121,7 @@ class LLMAssistedRouterRouter(Router):
         messages_history: Sequence[ChatMessage],
     ) -> NextDecision:
         if current_state is None:
-            return NextDecision(state_name=DatasetState.NAME)
+            return NextDecision(state_name=DatasetState.NAME,should_persists_by_workflow=True)
 
         current_name = _state_name(current_state)
         status = _state_status(current_state)
@@ -134,13 +134,15 @@ class LLMAssistedRouterRouter(Router):
             DatasetState.NAME,
             ProtocolDiscussionState.NAME,
         }:
-            return NextDecision(state_name=DatasetState.NAME,should_persists_by_workflow=False)
+            return NextDecision(
+                state_name=DatasetState.NAME,
+                should_persists_by_workflow=False)
 
         if status in ("DONE", "FREEZED"):
             next_name = self._next_state_names_map.get(current_name)
             if next_name is None:
-                return NextDecision(state_name=current_name)
-            return NextDecision(state_name=next_name)
+                return NextDecision(state_name=current_name, should_persists_by_workflow=True)
+            return NextDecision(state_name=next_name, should_persists_by_workflow=True)
 
         if status == "PENDING":
             return self._decide_pending(
@@ -197,6 +199,7 @@ class LLMAssistedRouterRouter(Router):
             )
             return NextDecision(
                 state_name=None,
+                should_persists_by_workflow=False,
                 router_confirmation_message_for_user=_pending_clarification_message(
                     current_state_name=current_state_name,
                     fallback_message=(
@@ -208,6 +211,7 @@ class LLMAssistedRouterRouter(Router):
         if decision.state_name is None:
             return NextDecision(
                 state_name=None,
+                should_persists_by_workflow=False,
                 router_confirmation_message_for_user=_pending_clarification_message(
                     current_state_name=current_state_name,
                     fallback_message=decision.router_confirmation_message_for_user
@@ -218,6 +222,7 @@ class LLMAssistedRouterRouter(Router):
         if decision.state_name not in candidates:
             return NextDecision(
                 state_name=None,
+                should_persists_by_workflow=False,
                 router_confirmation_message_for_user=_pending_clarification_message(
                     current_state_name=current_state_name,
                     fallback_message=(
@@ -227,7 +232,7 @@ class LLMAssistedRouterRouter(Router):
                 ),
             )
 
-        return NextDecision(state_name=decision.state_name)
+        return NextDecision(state_name=decision.state_name, should_persists_by_workflow=False)
 
     def _decide_aborted(
         self,
@@ -241,7 +246,7 @@ class LLMAssistedRouterRouter(Router):
             recoverable_map=self._recoverable_map,
         )
         if len(candidates) == 1:
-            return NextDecision(state_name=candidates[0])
+            return NextDecision(state_name=candidates[0], should_persists_by_workflow=True )
 
         state_error = _state_error(current_state)
         current_error = state_error.error if state_error is not None else None
@@ -275,6 +280,7 @@ class LLMAssistedRouterRouter(Router):
             )
             return NextDecision(
                 state_name=None,
+                should_persists_by_workflow=False,
                 router_confirmation_message_for_user=(
                     "I could not determine the best recovery stage. Please clarify where you want to recover."
                 ),
@@ -283,6 +289,7 @@ class LLMAssistedRouterRouter(Router):
         if decision.state_name is None:
             return NextDecision(
                 state_name=None,
+                should_persists_by_workflow=False,
                 router_confirmation_message_for_user=decision.router_confirmation_message_for_user
                 or "Please confirm which stage you want to recover from.",
             )
@@ -290,12 +297,13 @@ class LLMAssistedRouterRouter(Router):
         if decision.state_name not in candidates:
             return NextDecision(
                 state_name=None,
+                should_persists_by_workflow=False,
                 router_confirmation_message_for_user=(
                     "I could not select a valid recoverable stage. Please clarify where to recover."
                 ),
             )
 
-        return NextDecision(state_name=decision.state_name)
+        return NextDecision(state_name=decision.state_name, should_persists_by_workflow=True)
 
 
 def _pending_candidates(
@@ -415,7 +423,7 @@ def build_pending_router_user_prompt(
     fellow_state_context: Sequence[Mapping[str, str]],
     recent_messages: Sequence[ChatMessage],
 ) -> str:
-    payload = {
+    payload: dict[str, Any] = {
         "current_state": dict(current_state_context),
         "routing_mode": "pending",
         "rules": {
@@ -448,7 +456,7 @@ def build_aborted_router_user_prompt(
     candidate_context: Sequence[Mapping[str, str]],
     recent_messages: Sequence[ChatMessage],
 ) -> str:
-    payload = {
+    payload: dict[str, Any] = {
         "current_state": current_state_name,
         "routing_mode": "aborted_recovery",
         "current_error": current_error,
