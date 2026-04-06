@@ -259,7 +259,7 @@ class WorkflowApp:
         )
         state_name_to_run: str
         state_to_run: State
-        pre_state_to_run_status: Status
+        persist_workflow_app = True
         active_state_name_before_run = state_name_to_route
         active_state_status_before_run: Status | None = None
 
@@ -286,6 +286,7 @@ class WorkflowApp:
                 current_state=current_state,
                 messages_history=history,
             )
+            persist_workflow_app = decision.should_persists_by_workflow if decision.should_persists_by_workflow is not None else True
             if decision.state_name is None:
                 confirmation_message = (
                     decision.router_confirmation_message_for_user
@@ -330,8 +331,7 @@ class WorkflowApp:
                 state_name=state_name_to_run,
             )
             raise KeyError(f"WorkflowApp: no node registered for state_name={state_name_to_run!r}")
-
-        pre_state_to_run_status = state_to_run.status()
+        
         new_state = node.run(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -348,12 +348,8 @@ class WorkflowApp:
         # is frozen, in which case that frozen state becomes the new active checkpoint.
         active_state_name_after_run = active_state_name_before_run
         active_state_status_after_run = active_state_status_before_run
-        if new_state_status == "FREEZED" or pre_state_to_run_status != "FREEZED":
+        if persist_workflow_app:
             active_state_name_after_run = new_state_name
-            active_state_status_after_run = new_state_status
-        elif active_state_name_before_run == new_state_name:
-            # Running the currently active frozen state in place rewrites that state's payload, so the
-            # response should reflect the newly stored status even though the active pointer does not move.
             active_state_status_after_run = new_state_status
 
         if new_state.status() == "DONE":
