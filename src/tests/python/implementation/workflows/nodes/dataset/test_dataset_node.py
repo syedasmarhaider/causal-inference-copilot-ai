@@ -311,6 +311,19 @@ def test_dataset_state_init_empty_and_roundtrip_does_not_persist_response_artifa
     assert message.artifact_refs is None
 
 
+def test_dataset_state_action_is_none_when_freezed() -> None:
+    state = DatasetState(
+        DatasetPayloadModel(
+            dataset_iterations=[DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)],
+            freezed=True,
+            user_message="Frozen dataset ready.",
+        )
+    )
+
+    assert state.status() == "FREEZED"
+    assert state.action() == "NONE"
+
+
 def test_dataset_intent_model_allows_all_false_with_empty_briefs() -> None:
     intent = DatasetIntentModel(
         intent_data_question=False,
@@ -1015,3 +1028,50 @@ def test_dataset_node_returns_classification_failure_message_when_intent_call_ra
     )
 
     assert "could not classify" in _message(state).content.lower()
+
+
+def test_dataset_node_applies_protocol_cleaning_request_and_freezes_dataset() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, data_repo, llm, manipulation_tool, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1, "extra": "x"}]),
+        manipulation_df=pd.DataFrame([{"age": 65, "outcome_status": 1}]),
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[
+            ChatMessage(
+                role="assistant",
+                content=(
+                    "The protocol discussion is now confirmed. I will hand off the required "
+                    "data cleaning and normalization steps next."
+                ),
+            ),
+            ChatMessage(
+                role="system",
+                content=(
+                    "PROTOCOL_DISCUSSION_CONFIRMED\n"
+                    "This is a data-changing request for the downstream data cleaning stage.\n\n"
+                    "Map istatus into outcome_status and drop the extra column."
+                ),
+            ),
+        ],
+        state=_base_dataset_state(iterations=[init_iteration]),
+    )
+
+    assert _status(state) == "FREEZED"
+    assert state.action() == "NONE"
+    assert "applied the confirmed protocol cleaning request" in _message(state).content.lower()
+    assert "1 rows and 2 columns" in _message(state).content.lower()
+    assert len(manipulation_tool.calls) == 1
+    assert manipulation_tool.calls[0]["instructions"] == (
+        "Map istatus into outcome_status and drop the extra column."
+    )
+    assert len(data_repo.saved_csv_calls) == 1
+    assert state.latest_iteration is not None
+    assert state.latest_iteration.dataset_id == data_repo.saved_csv_calls[0]["dataset_id"]
+    assert llm.generate_json_calls == []
+    assert llm.generate_calls == []
+    assert plot_tool.calls == []

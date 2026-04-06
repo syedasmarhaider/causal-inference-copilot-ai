@@ -65,6 +65,8 @@ class DatasetState(State):
         return "PENDING"
 
     def action(self) -> Action:
+        if self.payload.freezed:
+            return "NONE"
         # Dataset is the only stage that can genuinely require data upload. Once at least one
         # dataset iteration exists, the user can keep interacting with this node conversationally.
         if not self.payload.dataset_iterations:

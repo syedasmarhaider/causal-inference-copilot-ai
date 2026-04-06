@@ -54,6 +54,7 @@ _ARTIFACT_KIND_WORKING_DATASET = "working_dataset"
 _ARTIFACT_KIND_ANALYTICAL_RESULT = "analytical_result"
 _ARTIFACT_KIND_CHART_SPEC = "chart_spec"
 _INITIAL_SUMMARY_MAX_COLUMNS = 8
+_PROTOCOL_DISCUSSION_CONFIRMED_MARKER = "PROTOCOL_DISCUSSION_CONFIRMED"
 _FREEZED_DATASET_BLOCKED_MESSAGE = (
     "Sorry, this dataset is freezed. I cannot modify the data or revert to a previous "
     "dataset version in this workflow. You can still ask questions about the data, run "
@@ -267,6 +268,53 @@ class DatasetNode(Node):
             loaded_this_turn = True
 
         persisted_latest_summary = current_summary
+
+        protocol_cleaning_request = _latest_protocol_cleaning_request(messages_history)
+        if protocol_cleaning_request and not is_freezed:
+            try:
+                (
+                    _manipulation_result,
+                    _manipulation_artifact_refs,
+                    dataset_iterations,
+                    working_df,
+                    _working_summary,
+                    _working_summary_json,
+                    persisted_latest_summary,
+                ) = self._run_manipulation_intent(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    dataset_iterations=dataset_iterations,
+                    dataframe=current_df,
+                    summary_model=current_summary,
+                    summary_json=current_summary_json,
+                    profiling_tool=self._profiling_tool,
+                    instructions=protocol_cleaning_request,
+                    analytical_query=False,
+                    prepare_chart_data=False,
+                )
+            except Exception as exc:
+                log.exception(
+                    "failed to apply confirmed protocol dataset cleaning request",
+                    error=safe_err(exc),
+                )
+                return self._build_state(
+                    dataset_iterations=dataset_iterations,
+                    latest_summary=persisted_latest_summary,
+                    freezed=is_freezed,
+                    user_message=(
+                        "I could not apply the confirmed protocol cleaning request to the "
+                        "dataset. Please review the confirmed protocol instructions and try again."
+                    ),
+                )
+            return self._build_state(
+                dataset_iterations=dataset_iterations,
+                latest_summary=persisted_latest_summary,
+                freezed=True,
+                user_message=self._build_protocol_cleaning_completed_message(
+                    rows=int(len(working_df)),
+                    columns=[str(column) for column in working_df.columns],
+                ),
+            )
 
         latest_user_message = _latest_user_message(messages_history)
         if not latest_user_message:
@@ -579,6 +627,25 @@ class DatasetNode(Node):
             "next, tell me the treatment, outcome, study type, and time zero."
         )
 
+    def _build_protocol_cleaning_completed_message(
+        self,
+        *,
+        rows: int,
+        columns: Sequence[str],
+    ) -> str:
+        column_count = len(columns)
+        shown_columns = list(columns[:_INITIAL_SUMMARY_MAX_COLUMNS])
+        column_preview = ", ".join(shown_columns)
+        if column_count > _INITIAL_SUMMARY_MAX_COLUMNS:
+            column_preview = (
+                f"{column_preview}, +{column_count - _INITIAL_SUMMARY_MAX_COLUMNS} more columns"
+            )
+        return (
+            "Applied the confirmed protocol cleaning request and saved a frozen working dataset "
+            f"for validation. The cleaned dataset now has {rows} rows and {column_count} columns"
+            + (f": {column_preview}." if column_preview else ".")
+        )
+
     def _classify_intent(
         self,
         *,
@@ -886,6 +953,31 @@ def _latest_assistant_message(messages_history: Sequence[ChatMessage] | None) ->
         if content:
             return content
     return None
+
+
+def _latest_system_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
+    if not messages_history:
+        return None
+    for message in reversed(messages_history):
+        if message.role != "system":
+            continue
+        content = message.content.strip()
+        if content:
+            return content
+    return None
+
+
+def _latest_protocol_cleaning_request(messages_history: Sequence[ChatMessage] | None) -> str | None:
+    latest_system = _latest_system_message(messages_history)
+    if not latest_system:
+        return None
+    if not latest_system.startswith(_PROTOCOL_DISCUSSION_CONFIRMED_MARKER):
+        return None
+    _header, _sep, request = latest_system.partition("\n\n")
+    cleaned_request = request.strip()
+    if cleaned_request:
+        return cleaned_request
+    return latest_system.strip()
 
 
 def _normalize_message_text(value: str) -> str:
