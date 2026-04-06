@@ -28,6 +28,9 @@ from python.implementation.workflows.nodes.compile_and_validate.compile_and_vali
     CompileAndValidateState,
 )
 from python.implementation.workflows.nodes.dataset.dataset_node import DatasetNode
+from python.implementation.workflows.nodes.dataset.dataset_prompts import (
+    prev_state_revert_message,
+)
 from python.implementation.workflows.nodes.dataset.dataset_state import DatasetState
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
     ModelSelectionState,
@@ -117,6 +120,15 @@ class LLMAssistedRouterRouter(Router):
         current_name = _state_name(current_state)
         status = _state_status(current_state)
         recent_messages = _last_two_messages(messages_history)
+        latest_user_message = _latest_user_message(messages_history)
+
+        # TODO: replace this temporary router-level shortcut once dataset/dashboard revert flows
+        # become fully explicit and no longer rely on the magic revert_data_changes message.
+        if (
+            latest_user_message == prev_state_revert_message
+            and current_name in {DatasetState.NAME, ProtocolDiscussionState.NAME}
+        ):
+            return NextDecision(state_name=DatasetState.NAME)
 
         if status in ("DONE", "FREEZED"):
             next_name = self._next_state_names_map.get(current_name)
@@ -349,6 +361,18 @@ def _last_two_messages(messages_history: Sequence[ChatMessage] | None) -> list[C
     if not non_empty_messages:
         return []
     return list(non_empty_messages[-2:])
+
+
+def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
+    if not messages_history:
+        return None
+    for message in reversed(messages_history):
+        if message.role != "user":
+            continue
+        content = message.content.strip()
+        if content:
+            return content
+    return None
 
 
 def _latest_system_message(messages: Sequence[ChatMessage]) -> str | None:
