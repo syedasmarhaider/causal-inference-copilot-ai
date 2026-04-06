@@ -372,7 +372,7 @@ def test_validate_backdoor_covariate_missing_with_passthrough_warns() -> None:
     assert issue.evidence["preset"] == "passthrough"
 
 
-def test_validate_backdoor_covariate_missing_with_numeric_imputer_has_no_missingness_warning() -> (
+def test_validate_backdoor_covariate_missing_with_numeric_imputer_warns() -> (
     None
 ):
     dataframe = _build_dataframe()
@@ -396,11 +396,9 @@ def test_validate_backdoor_covariate_missing_with_numeric_imputer_has_no_missing
         ),
     )
 
-    assert not any(
-        issue.message
-        == "Covariate has missing values but the transform preset does not explicitly handle them."
-        for issue in report.issues
-    )
+    issue = _get_issue(report, "Covariate contains missing values in the cleaned dataset.")
+    assert issue.severity == "WARN"
+    assert issue.evidence["preset"] == "num_standard"
 
 
 def test_validate_backdoor_warns_when_category_level_exists_only_in_treated_arm() -> None:

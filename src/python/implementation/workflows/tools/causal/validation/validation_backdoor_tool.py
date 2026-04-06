@@ -775,6 +775,16 @@ def _validate_encoding_semantics(
     non_missing = series.dropna()
     preset = str(encoding.preset)
 
+    if role == "covariate":
+        issues.extend(
+            _maybe_issue_for_covariate_missing_values(
+                series=series,
+                column=column,
+                preset=preset,
+                encoding=encoding,
+            )
+        )
+
     if preset == "drop":
         return issues
 
@@ -1074,6 +1084,53 @@ def _maybe_issue_for_unhandled_missingness(
         )
     )
     return issues
+
+
+def _maybe_issue_for_covariate_missing_values(
+    *,
+    series: pd.Series,
+    column: str,
+    preset: str,
+    encoding: Any,
+) -> list[ValidationIssueModel]:
+    missing_count = int(series.isna().sum())
+    if missing_count == 0:
+        return []
+
+    if not _encoding_explicitly_handles_missing(encoding=encoding):
+        return []
+
+    missing_rate = float(series.isna().mean()) if len(series) else 0.0
+    return [
+        _issue(
+            severity="WARN",
+            message="Covariate contains missing values in the cleaned dataset.",
+            evidence={
+                "column": column,
+                "role": "covariate",
+                "missing_count": missing_count,
+                "missing_rate": missing_rate,
+                "preset": preset,
+            },
+            fix_hint=(
+                "Review the missingness pattern and confirm that keeping this covariate with "
+                "the current encoding is clinically and statistically acceptable. Models would to in later stage to cope wit that"
+            ),
+        )
+    ]
+
+
+def _encoding_explicitly_handles_missing(*, encoding: Any) -> bool:
+    preset = str(getattr(encoding, "preset", ""))
+    if preset in {"num_standard", "num_minmax", "num_log1p"}:
+        return True
+    if isinstance(encoding, CatOneHotParams):
+        return encoding.missing in ("impute_token", "dummy_na")
+    if isinstance(encoding, MapBinaryParams):
+        return encoding.missing != "error"
+    if isinstance(encoding, MapOrdinalParams):
+        return encoding.missing != "error"
+    return False
 
 
 def _maybe_issue_for_single_arm_levels(

@@ -61,6 +61,7 @@ from python.implementation.workflows.tools.causal.inference.econml.utils import 
     build_init_fit_options_param_maps,
     get_input_params_from_spec,
     get_treatment_t0_t1_from_spec,
+    has_missing,
     now_utc,
     raise_if_x_rows_not_exactly_match_fit_x_cols,
     required_init_keys,
@@ -152,6 +153,22 @@ def _treatment_categories_from_spec(specs: CausalSpec) -> Any:
     """
     _ = specs
     return [0.0, 1.0]
+
+
+def _get_allowed_missing_vars(estimator: Any) -> list[str] | None:
+    generator = getattr(estimator, "_gen_allowed_missing_vars", None)
+    if not callable(generator):
+        return None
+
+    try:
+        values = generator()
+    except Exception:
+        return None
+
+    if values is None:
+        return []
+
+    return [str(value) for value in values]
 
 
 def _split_first_block_and_tail(
@@ -657,6 +674,30 @@ class _BaseDRLearnerAdapter(CausalModel):
                 )
 
             est = self.ESTIMATOR_CLS(**defaults)
+            allowed_missing_vars = _get_allowed_missing_vars(est)
+            raw_x_has_nan = has_missing(X)
+            raw_w_has_nan = has_missing(W)
+
+            log.debug(
+                "DRLearner fit prepared",
+                backend=self.BACKEND_NAME,
+                allow_missing_requested=bool(defaults.get("allow_missing")),
+                estimator_allowed_missing_vars=allowed_missing_vars,
+                missingness_X=missingness_X,
+                missingness_W=missingness_W,
+                raw_X_has_nan=raw_x_has_nan,
+                raw_W_has_nan=raw_w_has_nan,
+                x_columns=effect_modifiers_order,
+                w_columns=covariates_order,
+            )
+            if missingness_W and allowed_missing_vars is not None and "W" not in allowed_missing_vars:
+                log.warning(
+                    "DRLearner estimator does not report W as allow_missing-capable",
+                    backend=self.BACKEND_NAME,
+                    estimator_allowed_missing_vars=allowed_missing_vars,
+                    raw_W_has_nan=raw_w_has_nan,
+                    w_columns=covariates_order,
+                )
 
             fit_warnings: list[str] = []
             with warnings.catch_warnings(record=True) as ws:

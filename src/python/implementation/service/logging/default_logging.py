@@ -13,6 +13,9 @@ from typing import Any, Protocol
 _DEFAULT_SERVICE_NAME = "causal-inference-copilot-ai"
 _LOG_LEVEL_ENV = "LOG_LEVEL"
 _SERVICE_NAME_ENV = "LOG_SERVICE_NAME"
+_LOG_FLUSH_FILE_ENABLED_ENV = "LOG_FLUSH_FILE_ENABLED"
+_LOG_FLUSH_FILE_PATH_ENV = "LOG_FLUSH_FILE_PATH"
+_DEFAULT_LOG_FILE_DIR = "/tmp"
 _logger_factory: LoggerFactory | None = None
 _request_id_ctx: ContextVar[str | None] = ContextVar("request_id", default=None)
 _trace_id_ctx: ContextVar[str | None] = ContextVar("trace_id", default=None)
@@ -239,6 +242,7 @@ def configure_default_logging(
     resolved_level = _resolve_log_level(level)
     resolved_service_name = service_name or os.getenv(_SERVICE_NAME_ENV, _DEFAULT_SERVICE_NAME)
     formatter = JSONLogFormatter(service_name=resolved_service_name)
+    file_log_path = _resolve_file_log_path(service_name=resolved_service_name)
 
     root_logger = logging.getLogger()
 
@@ -246,12 +250,21 @@ def configure_default_logging(
         root_logger.setLevel(resolved_level)
         for handler in root_logger.handlers:
             handler.setFormatter(formatter)
+        _ensure_file_handler(
+            root_logger=root_logger,
+            formatter=formatter,
+            file_log_path=file_log_path,
+        )
         return
 
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
+    handlers: list[logging.Handler] = [stream_handler]
+    file_handler = _build_file_handler(formatter=formatter, file_log_path=file_log_path)
+    if file_handler is not None:
+        handlers.append(file_handler)
 
-    logging.basicConfig(level=resolved_level, handlers=[stream_handler], force=force)
+    logging.basicConfig(level=resolved_level, handlers=handlers, force=force)
 
 
 def _resolve_log_level(level: str | int | None) -> int:
@@ -265,6 +278,54 @@ def _resolve_log_level(level: str | int | None) -> int:
 
     level_mapping = logging.getLevelNamesMapping()
     return level_mapping.get(normalized_level, logging.INFO)
+
+
+def _resolve_file_log_path(*, service_name: str) -> str | None:
+    raw_path = os.getenv(_LOG_FLUSH_FILE_PATH_ENV, "").strip()
+    if raw_path:
+        return os.path.abspath(os.path.expanduser(raw_path))
+
+    enabled = os.getenv(_LOG_FLUSH_FILE_ENABLED_ENV, "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return None
+
+    safe_service_name = service_name.strip().replace(" ", "-") or _DEFAULT_SERVICE_NAME
+    return os.path.join(_DEFAULT_LOG_FILE_DIR, f"{safe_service_name}.log")
+
+
+def _build_file_handler(
+    *,
+    formatter: logging.Formatter,
+    file_log_path: str | None,
+) -> logging.Handler | None:
+    if not file_log_path:
+        return None
+
+    os.makedirs(os.path.dirname(file_log_path), exist_ok=True)
+    handler = logging.FileHandler(file_log_path, mode="a", encoding="utf-8")
+    handler.setFormatter(formatter)
+    return handler
+
+
+def _ensure_file_handler(
+    *,
+    root_logger: logging.Logger,
+    formatter: logging.Formatter,
+    file_log_path: str | None,
+) -> None:
+    if not file_log_path:
+        return
+
+    normalized_target = os.path.abspath(file_log_path)
+    for handler in root_logger.handlers:
+        if not isinstance(handler, logging.FileHandler):
+            continue
+        if os.path.abspath(getattr(handler, "baseFilename", "")) == normalized_target:
+            return
+
+    file_handler = _build_file_handler(formatter=formatter, file_log_path=normalized_target)
+    if file_handler is not None:
+        root_logger.addHandler(file_handler)
 
 
 def _normalize_fields(values: dict[str, Any]) -> dict[str, Any]:

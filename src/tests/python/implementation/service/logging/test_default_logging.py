@@ -254,3 +254,32 @@ def test_get_logger_reuses_cached_default_logger_for_same_key() -> None:
 
     assert logger_a is logger_b
     assert logger_a is not logger_c
+
+
+def test_configure_default_logging_writes_json_logs_to_file_when_enabled(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    log_path = tmp_path / "server-debug.log"
+
+    monkeypatch.setenv("LOG_FLUSH_FILE_ENABLED", "true")
+    monkeypatch.setenv("LOG_FLUSH_FILE_PATH", str(log_path))
+
+    try:
+        logging_module.configure_default_logging(
+            service_name="svc-name",
+            level="INFO",
+            force=True,
+        )
+        logging.getLogger("tests.logging.file_sink").error("file sink active")
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+    finally:
+        logging.basicConfig(level=logging.WARNING, force=True)
+
+    lines = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert lines
+    payload = json.loads(lines[-1])
+    assert payload["service"] == "svc-name"
+    assert payload["logger"] == "tests.logging.file_sink"
+    assert payload["message"] == "file sink active"
