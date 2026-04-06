@@ -672,13 +672,7 @@ class DatasetNode(Node):
                 "new_dataset_id": str(new_dataset_id),
                 "result": _dataframe_preview(result_df),
             },
-            [
-                _build_data_artifact_ref(
-                    artifact_id=new_dataset_id,
-                    artifact_format="csv",
-                    artifact_kind=_ARTIFACT_KIND_WORKING_DATASET,
-                )
-            ],
+            [],
             dataset_iterations,
             result_df,
             new_summary,
