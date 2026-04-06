@@ -11,9 +11,8 @@ from typing_extensions import TypedDict
 from python.domain.models.models import ChatMessage
 
 T = TypeVar("T", bound=BaseModel)
-AvailableModelsKey = Literal["mini","basic", "pro","thinking"]
+AvailableModelsKey = Literal["mini", "basic", "pro", "thinking"]
 ProviderExtra = dict[str, Any]
-
 
 
 @dataclass(frozen=True)
@@ -24,6 +23,7 @@ class LLMConfig:
     max_tokens: int | None = 60000
     stop: list[str] | None = None
     extra: ProviderExtra | None = None
+
 
 class ToolCall(TypedDict, total=False):
     id: str

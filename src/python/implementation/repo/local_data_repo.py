@@ -219,13 +219,7 @@ class LocalFileDataRepo(DataRepo):
     # -------------------------------------------------------------------------
 
     def _conversation_dir(self, user_id: UUID, conversation_id: UUID) -> Path:
-        return (
-            self._root_dir
-            / "users"
-            / str(user_id)
-            / "conversations"
-            / str(conversation_id)
-        )
+        return self._root_dir / "users" / str(user_id) / "conversations" / str(conversation_id)
 
     def _datasets_dir(self, user_id: UUID, conversation_id: UUID) -> Path:
         return self._conversation_dir(user_id, conversation_id) / "datasets"

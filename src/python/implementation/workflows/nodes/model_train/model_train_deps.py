@@ -37,7 +37,7 @@ class ModelTrainDeps:
                 "MODEL_TRAIN",
                 [DatasetState.NAME],
             )
-        
+
         dataset_state_payload = dataset_state.payload.dataset_iterations
         if not dataset_state_payload or len(dataset_state_payload) == 0:
             raise StateDependencyError(
@@ -46,7 +46,7 @@ class ModelTrainDeps:
                 [DatasetState.NAME],
             )
         dataset_id = dataset_state_payload[-1].dataset_id
-        
+
         compile_state = loaded.get(CompileAndValidateState.NAME)
         if compile_state is None or not isinstance(compile_state, CompileAndValidateState):
             raise StateDependencyError(
@@ -63,7 +63,7 @@ class ModelTrainDeps:
             )
 
         inference_ready = compile_state.payload.inference_ready_causal_spec
-       
+
         if inference_ready is None:
             raise StateDependencyError(
                 "MODEL_TRAIN",

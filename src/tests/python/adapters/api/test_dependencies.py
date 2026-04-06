@@ -19,7 +19,9 @@ def _credentials(token: str = "token") -> HTTPAuthorizationCredentials:
     return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
 
-def test_get_workflow_and_dataflow_apps_share_cached_make_apps(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_workflow_and_dataflow_apps_share_cached_make_apps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[str] = []
     workflow_app = object()
     dataflow_app = object()

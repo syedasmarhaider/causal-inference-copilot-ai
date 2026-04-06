@@ -53,11 +53,11 @@ def make_apps(*, use_local_files: bool = False) -> tuple[WorkflowApp, DataflowAp
     workflow_repo = _make_workflow_state_repo(
         state_classes_by_name=state_classes_by_name,
     )
-    
+
     router: Router = LLMAssistedRouterRouter(
         llm=llm,
     )
-    
+
     nodes_by_state_name: dict[str, Node] = init_all_nodoes_with_name_as_key(
         llm=llm,
         data_repo=data_repo,
@@ -75,13 +75,21 @@ def make_apps(*, use_local_files: bool = False) -> tuple[WorkflowApp, DataflowAp
         nodes_count=len(nodes_by_state_name),
         use_local_files=use_local_files,
     )
-    return WorkflowApp(
-        repo=workflow_repo,
-        router=router,
-        nodes_by_state_name=nodes_by_state_name,
-        state_classes_by_name=state_classes_by_name,
-        tool_factory=DefaultToolFactory(data_repo=data_repo, models_repo=models_repo,llm_service=llm, analytics_repo=analytics_repo),
-    ), dataflow_app
+    return (
+        WorkflowApp(
+            repo=workflow_repo,
+            router=router,
+            nodes_by_state_name=nodes_by_state_name,
+            state_classes_by_name=state_classes_by_name,
+            tool_factory=DefaultToolFactory(
+                data_repo=data_repo,
+                models_repo=models_repo,
+                llm_service=llm,
+                analytics_repo=analytics_repo,
+            ),
+        ),
+        dataflow_app,
+    )
 
 
 def make_dataflow_app(*, use_local_files: bool = False) -> DataflowApp:
@@ -100,7 +108,7 @@ def _make_workflow_state_repo(
     *,
     state_classes_by_name: Mapping[str, type[State]],
 ) -> WorkflowStateRepo:
-    app =  FirebaseRealtimeWorkflowStateRepo.get_default_firebase_database_app()
+    app = FirebaseRealtimeWorkflowStateRepo.get_default_firebase_database_app()
     return FirebaseRealtimeWorkflowStateRepo(
         app=app,
         state_classes_by_name=state_classes_by_name,
@@ -111,14 +119,15 @@ def _make_models_repo(*, use_local_files: bool) -> ModelsRepo:
     if use_local_files:
         log.info("using local file models repo", root_dir=str(_LOCAL_MODELS_ROOT))
         return LocalFileModelsRepo(root_dir=_LOCAL_MODELS_ROOT)
-    return GoogleCloudStorageModelsRepo(GoogleCloudStorageModelsRepo.get_default_bucket())   
+    return GoogleCloudStorageModelsRepo(GoogleCloudStorageModelsRepo.get_default_bucket())
+
 
 def _make_data_repo(*, use_local_files: bool) -> DataRepo:
     if use_local_files:
         log.info("using local file data repo", root_dir=str(_LOCAL_DATA_ROOT))
         return LocalFileDataRepo(root_dir=_LOCAL_DATA_ROOT)
-    return GoogleCloudStorageDataRepo(GoogleCloudStorageDataRepo.get_default_bucket())   
+    return GoogleCloudStorageDataRepo(GoogleCloudStorageDataRepo.get_default_bucket())
+
 
 def _make_analytics_repo() -> AnalyticsRepo:
     return DuckDBAnalyticsRepo()
-   

@@ -51,7 +51,7 @@ class CausalSpecsTool(Tool):
         data_summary: DatasetSummaryModel,
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         validated_summary = self._require_dataset_summary(data_summary)
-        
+
         model_dict, issues = validate_backdoor_payload_structured(
             payload,
             dataset_summary=validated_summary,

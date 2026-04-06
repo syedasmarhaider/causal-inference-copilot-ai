@@ -30,7 +30,9 @@ def _build_dataframe() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _build_causal_spec(*, experiment_type: str, covariates: list[str], effect_modifiers: list[str]) -> CausalSpec:
+def _build_causal_spec(
+    *, experiment_type: str, covariates: list[str], effect_modifiers: list[str]
+) -> CausalSpec:
     return CausalSpec.model_validate(
         {
             "treatment_spec": {
@@ -51,7 +53,9 @@ def _build_causal_spec(*, experiment_type: str, covariates: list[str], effect_mo
     )
 
 
-def _build_binary_outcome_causal_spec(*, experiment_type: str, covariates: list[str], effect_modifiers: list[str]) -> CausalSpec:
+def _build_binary_outcome_causal_spec(
+    *, experiment_type: str, covariates: list[str], effect_modifiers: list[str]
+) -> CausalSpec:
     return CausalSpec.model_validate(
         {
             "treatment_spec": {
@@ -85,24 +89,34 @@ def test_validate_backdoor_accepts_rct_without_covariates() -> None:
     )
 
     assert report.status == "WARN"
-    assert any(issue.message == "RCT has no covariates; this is acceptable but limits precision gains." for issue in report.issues)
+    assert any(
+        issue.message == "RCT has no covariates; this is acceptable but limits precision gains."
+        for issue in report.issues
+    )
     assert not any(issue.severity == "FAIL" for issue in report.issues)
 
 
 def test_validate_backdoor_fails_observational_without_covariates() -> None:
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="OBSERVATIONAL", covariates=[], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="OBSERVATIONAL", covariates=[], effect_modifiers=[]
+        ),
         dataframe=_build_dataframe(),
         transform_plan=None,
     )
 
     assert report.status == "FAIL"
-    assert any(issue.message == "Observational studies require covariate for adjustment." for issue in report.issues)
+    assert any(
+        issue.message == "Observational studies require covariate for adjustment."
+        for issue in report.issues
+    )
 
 
 def test_validate_backdoor_reports_transform_compile_failure_as_issue() -> None:
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=[], effect_modifiers=["segment"]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=[], effect_modifiers=["segment"]
+        ),
         dataframe=_build_dataframe(),
         transform_plan=TransformPlan.model_validate(
             {
@@ -118,7 +132,11 @@ def test_validate_backdoor_reports_transform_compile_failure_as_issue() -> None:
     )
 
     assert report.status == "FAIL"
-    compile_issue = next(issue for issue in report.issues if issue.message == "Transform plan failed transformer compilation.")
+    compile_issue = next(
+        issue
+        for issue in report.issues
+        if issue.message == "Transform plan failed transformer compilation."
+    )
     assert compile_issue.severity == "FAIL"
     assert "dropped" in str(compile_issue.evidence.get("error")).lower()
 
@@ -128,7 +146,9 @@ def test_validate_backdoor_reports_invalid_treatment_values() -> None:
     dataframe.loc[0, "treatment"] = "2"
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -145,7 +165,10 @@ def test_validate_backdoor_reports_invalid_treatment_values() -> None:
 
     assert report.status == "FAIL"
     treatment_issue = next(
-        issue for issue in report.issues if issue.message == "Treatment column contains values outside the declared treated/control literals."
+        issue
+        for issue in report.issues
+        if issue.message
+        == "Treatment column contains values outside the declared treated/control literals."
     )
     assert treatment_issue.severity == "FAIL"
     assert treatment_issue.evidence["unexpected_values"] == ["num:2.0"]
@@ -156,7 +179,9 @@ def test_validate_backdoor_effect_modifier_missing_with_passthrough_fails() -> N
     dataframe.loc[0, "segment"] = None
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=[], effect_modifiers=["segment"]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=[], effect_modifiers=["segment"]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -171,17 +196,24 @@ def test_validate_backdoor_effect_modifier_missing_with_passthrough_fails() -> N
         ),
     )
 
-    issue = _get_issue(report, "Effect modifier has missing values but the transform preset does not explicitly handle them.")
+    issue = _get_issue(
+        report,
+        "Effect modifier has missing values but the transform preset does not explicitly handle them.",
+    )
     assert issue.severity == "FAIL"
     assert issue.evidence["preset"] == "passthrough"
 
 
-def test_validate_backdoor_effect_modifier_missing_with_cat_onehot_impute_token_has_no_missingness_failure() -> None:
+def test_validate_backdoor_effect_modifier_missing_with_cat_onehot_impute_token_has_no_missingness_failure() -> (
+    None
+):
     dataframe = _build_dataframe()
     dataframe.loc[0, "segment"] = None
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=[], effect_modifiers=["segment"]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=[], effect_modifiers=["segment"]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -201,7 +233,8 @@ def test_validate_backdoor_effect_modifier_missing_with_cat_onehot_impute_token_
     )
 
     assert not any(
-        issue.message == "Effect modifier has missing values but the transform preset does not explicitly handle them."
+        issue.message
+        == "Effect modifier has missing values but the transform preset does not explicitly handle them."
         for issue in report.issues
     )
 
@@ -212,7 +245,9 @@ def test_validate_backdoor_effect_modifier_missing_with_map_binary_error_fails()
     dataframe.loc[0, "flag"] = None
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=[], effect_modifiers=["flag"]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=[], effect_modifiers=["flag"]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -232,7 +267,10 @@ def test_validate_backdoor_effect_modifier_missing_with_map_binary_error_fails()
         ),
     )
 
-    issue = _get_issue(report, "Effect modifier has missing values but the transform preset does not explicitly handle them.")
+    issue = _get_issue(
+        report,
+        "Effect modifier has missing values but the transform preset does not explicitly handle them.",
+    )
     assert issue.severity == "FAIL"
     assert issue.evidence["preset"] == "map_binary"
 
@@ -243,7 +281,9 @@ def test_validate_backdoor_effect_modifier_missing_with_map_ordinal_error_fails(
     dataframe.loc[0, "level"] = None
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=[], effect_modifiers=["level"]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=[], effect_modifiers=["level"]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -263,7 +303,10 @@ def test_validate_backdoor_effect_modifier_missing_with_map_ordinal_error_fails(
         ),
     )
 
-    issue = _get_issue(report, "Effect modifier has missing values but the transform preset does not explicitly handle them.")
+    issue = _get_issue(
+        report,
+        "Effect modifier has missing values but the transform preset does not explicitly handle them.",
+    )
     assert issue.severity == "FAIL"
     assert issue.evidence["preset"] == "map_ordinal"
 
@@ -274,7 +317,9 @@ def test_validate_backdoor_effect_modifier_missing_with_datetime_preset_fails() 
     dataframe.loc[0, "visit_dt"] = pd.NaT
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=[], effect_modifiers=["visit_dt"]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=[], effect_modifiers=["visit_dt"]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -289,7 +334,10 @@ def test_validate_backdoor_effect_modifier_missing_with_datetime_preset_fails() 
         ),
     )
 
-    issue = _get_issue(report, "Effect modifier has missing values but the transform preset does not explicitly handle them.")
+    issue = _get_issue(
+        report,
+        "Effect modifier has missing values but the transform preset does not explicitly handle them.",
+    )
     assert issue.severity == "FAIL"
     assert issue.evidence["preset"] == "datetime_epoch_seconds"
 
@@ -299,7 +347,9 @@ def test_validate_backdoor_covariate_missing_with_passthrough_warns() -> None:
     dataframe.loc[0, "segment"] = None
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["segment"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["segment"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -314,17 +364,24 @@ def test_validate_backdoor_covariate_missing_with_passthrough_warns() -> None:
         ),
     )
 
-    issue = _get_issue(report, "Covariate has missing values but the transform preset does not explicitly handle them.")
+    issue = _get_issue(
+        report,
+        "Covariate has missing values but the transform preset does not explicitly handle them.",
+    )
     assert issue.severity == "WARN"
     assert issue.evidence["preset"] == "passthrough"
 
 
-def test_validate_backdoor_covariate_missing_with_numeric_imputer_has_no_missingness_warning() -> None:
+def test_validate_backdoor_covariate_missing_with_numeric_imputer_has_no_missingness_warning() -> (
+    None
+):
     dataframe = _build_dataframe()
     dataframe.loc[0, "age"] = None
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -340,7 +397,8 @@ def test_validate_backdoor_covariate_missing_with_numeric_imputer_has_no_missing
     )
 
     assert not any(
-        issue.message == "Covariate has missing values but the transform preset does not explicitly handle them."
+        issue.message
+        == "Covariate has missing values but the transform preset does not explicitly handle them."
         for issue in report.issues
     )
 
@@ -351,7 +409,9 @@ def test_validate_backdoor_warns_when_category_level_exists_only_in_treated_arm(
     dataframe.loc[[0, 2, 4], "segment"] = "treated_only"
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=[], effect_modifiers=["segment"]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=[], effect_modifiers=["segment"]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -369,7 +429,8 @@ def test_validate_backdoor_warns_when_category_level_exists_only_in_treated_arm(
     issue = next(
         issue
         for issue in report.issues
-        if issue.message == "Categorical or mapped column has levels observed in only one treatment arm."
+        if issue.message
+        == "Categorical or mapped column has levels observed in only one treatment arm."
     )
     assert issue.severity == "WARN"
     assert issue.evidence["levels_missing_by_arm"][0]["missing_arms"] == ["control"]
@@ -381,7 +442,9 @@ def test_validate_backdoor_warns_when_category_level_exists_only_in_control_arm(
     dataframe.loc[[1, 3, 5], "segment"] = "control_only"
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["segment"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["segment"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -399,7 +462,8 @@ def test_validate_backdoor_warns_when_category_level_exists_only_in_control_arm(
     issue = next(
         issue
         for issue in report.issues
-        if issue.message == "Categorical or mapped column has levels observed in only one treatment arm."
+        if issue.message
+        == "Categorical or mapped column has levels observed in only one treatment arm."
     )
     assert issue.severity == "WARN"
     assert issue.evidence["levels_missing_by_arm"][0]["missing_arms"] == ["treated"]
@@ -410,7 +474,9 @@ def test_validate_backdoor_warns_for_low_cardinality_numeric_with_numeric_preset
     dataframe["score_code"] = [index % 5 for index in range(len(dataframe))]
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["score_code"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["score_code"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -428,18 +494,23 @@ def test_validate_backdoor_warns_for_low_cardinality_numeric_with_numeric_preset
     issue = next(
         issue
         for issue in report.issues
-        if issue.message == "Numeric column has low cardinality and may actually represent coded categories."
+        if issue.message
+        == "Numeric column has low cardinality and may actually represent coded categories."
     )
     assert issue.severity == "WARN"
     assert issue.evidence["distinct_non_null_count"] == 5
 
 
-def test_validate_backdoor_does_not_add_low_cardinality_warning_for_numeric_column_with_categorical_preset() -> None:
+def test_validate_backdoor_does_not_add_low_cardinality_warning_for_numeric_column_with_categorical_preset() -> (
+    None
+):
     dataframe = _build_dataframe()
     dataframe["score_code"] = [index % 5 for index in range(len(dataframe))]
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["score_code"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["score_code"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -454,9 +525,14 @@ def test_validate_backdoor_does_not_add_low_cardinality_warning_for_numeric_colu
         ),
     )
 
-    assert any(issue.message == "Transform plan preset is incompatible with the observed dataframe column type." for issue in report.issues)
+    assert any(
+        issue.message
+        == "Transform plan preset is incompatible with the observed dataframe column type."
+        for issue in report.issues
+    )
     assert not any(
-        issue.message == "Numeric column has low cardinality and may actually represent coded categories."
+        issue.message
+        == "Numeric column has low cardinality and may actually represent coded categories."
         for issue in report.issues
     )
 
@@ -465,16 +541,28 @@ def test_validate_backdoor_reports_empty_dataframe_and_missing_columns() -> None
     dataframe = pd.DataFrame(columns=["treatment", "outcome"])
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=None,
     )
 
     assert report.status == "FAIL"
     assert any(issue.message == "Dataframe has no rows." for issue in report.issues)
-    assert any(issue.message == "Dataset has very few rows for causal estimation." for issue in report.issues)
-    assert any(issue.message == "Dataframe is missing columns referenced by the causal spec." for issue in report.issues)
-    assert any(issue.message == "Transform plan is required when covariates or effect modifiers are present." for issue in report.issues)
+    assert any(
+        issue.message == "Dataset has very few rows for causal estimation."
+        for issue in report.issues
+    )
+    assert any(
+        issue.message == "Dataframe is missing columns referenced by the causal spec."
+        for issue in report.issues
+    )
+    assert any(
+        issue.message
+        == "Transform plan is required when covariates or effect modifiers are present."
+        for issue in report.issues
+    )
 
 
 def test_validate_backdoor_reports_duplicate_dataframe_columns() -> None:
@@ -503,17 +591,32 @@ def test_validate_backdoor_reports_causal_spec_overlap_anomalies() -> None:
         transform_plan=TransformPlan.model_validate(
             {
                 "columns": [
-                    {"column": "age", "role": "effect_modifier", "encoding": {"preset": "cat_onehot"}},
-                    {"column": "treatment", "role": "covariate", "encoding": {"preset": "passthrough"}},
-                    {"column": "outcome", "role": "effect_modifier", "encoding": {"preset": "passthrough"}},
+                    {
+                        "column": "age",
+                        "role": "effect_modifier",
+                        "encoding": {"preset": "cat_onehot"},
+                    },
+                    {
+                        "column": "treatment",
+                        "role": "covariate",
+                        "encoding": {"preset": "passthrough"},
+                    },
+                    {
+                        "column": "outcome",
+                        "role": "effect_modifier",
+                        "encoding": {"preset": "passthrough"},
+                    },
                 ]
             }
         ),
     )
 
-    assert any(issue.message == "Covariates and effect modifiers overlap." for issue in report.issues)
     assert any(
-        issue.message == "Covariates and effect modifiers must not include treatment or outcome columns."
+        issue.message == "Covariates and effect modifiers overlap." for issue in report.issues
+    )
+    assert any(
+        issue.message
+        == "Covariates and effect modifiers must not include treatment or outcome columns."
         for issue in report.issues
     )
 
@@ -523,10 +626,16 @@ def test_validate_backdoor_fails_treatment_missing_values() -> None:
     dataframe.loc[0, "treatment"] = None
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
-            {"columns": [{"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}]}
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
         ),
     )
 
@@ -539,10 +648,16 @@ def test_validate_backdoor_fails_when_one_treatment_arm_missing() -> None:
     dataframe["treatment"] = "1"
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
-            {"columns": [{"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}]}
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
         ),
     )
 
@@ -555,15 +670,24 @@ def test_validate_backdoor_fails_treatment_low_support_and_imbalance() -> None:
     dataframe["treatment"] = ["1"] * 35 + ["0"] * 5
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="OBSERVATIONAL", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="OBSERVATIONAL", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
-            {"columns": [{"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}]}
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
         ),
     )
 
     assert any(issue.message == "One treatment arm has a low row count." for issue in report.issues)
-    assert any(issue.message == "Treatment-arm imbalance suggests a positivity risk." for issue in report.issues)
+    assert any(
+        issue.message == "Treatment-arm imbalance suggests a positivity risk."
+        for issue in report.issues
+    )
 
 
 def test_validate_backdoor_fails_for_continuous_outcome_missingness() -> None:
@@ -571,10 +695,16 @@ def test_validate_backdoor_fails_for_continuous_outcome_missingness() -> None:
     dataframe.loc[0, "outcome"] = None
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
-            {"columns": [{"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}]}
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
         ),
     )
 
@@ -587,10 +717,16 @@ def test_validate_backdoor_fails_for_continuous_outcome_non_numeric_values() -> 
     dataframe["outcome"] = ["bad" if index == 0 else str(index) for index in range(len(dataframe))]
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
-            {"columns": [{"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}]}
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
         ),
     )
 
@@ -603,10 +739,16 @@ def test_validate_backdoor_warns_for_continuous_outcome_low_variation() -> None:
     dataframe["outcome"] = [1.0, 2.0, 3.0, 4.0] * 10
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
-            {"columns": [{"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}]}
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
         ),
     )
 
@@ -616,17 +758,27 @@ def test_validate_backdoor_warns_for_continuous_outcome_low_variation() -> None:
 
 def test_validate_backdoor_fails_for_binary_outcome_with_unexpected_values() -> None:
     dataframe = _build_dataframe()
-    dataframe["outcome"] = ["2" if index == 0 else ("1" if index % 2 == 0 else "0") for index in range(len(dataframe))]
+    dataframe["outcome"] = [
+        "2" if index == 0 else ("1" if index % 2 == 0 else "0") for index in range(len(dataframe))
+    ]
 
     report = validate_backdoor(
-        causal_spec=_build_binary_outcome_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_binary_outcome_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
-            {"columns": [{"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}]}
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
         ),
     )
 
-    issue = _get_issue(report, "Binary outcome column contains values outside event/non-event literals.")
+    issue = _get_issue(
+        report, "Binary outcome column contains values outside event/non-event literals."
+    )
     assert issue.severity == "FAIL"
 
 
@@ -635,10 +787,16 @@ def test_validate_backdoor_fails_for_binary_outcome_with_only_one_class() -> Non
     dataframe["outcome"] = "1"
 
     report = validate_backdoor(
-        causal_spec=_build_binary_outcome_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_binary_outcome_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
-            {"columns": [{"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}]}
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
         ),
     )
 
@@ -648,18 +806,29 @@ def test_validate_backdoor_fails_for_binary_outcome_with_only_one_class() -> Non
 
 def test_validate_backdoor_reports_low_binary_outcome_event_count_and_sparse_arms() -> None:
     dataframe = _build_dataframe()
-    dataframe["outcome"] = ["1" if index in {0, 2, 4, 6, 8} else "0" for index in range(len(dataframe))]
+    dataframe["outcome"] = [
+        "1" if index in {0, 2, 4, 6, 8} else "0" for index in range(len(dataframe))
+    ]
 
     report = validate_backdoor(
-        causal_spec=_build_binary_outcome_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_binary_outcome_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
-            {"columns": [{"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}]}
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
         ),
     )
 
     assert any(issue.message == "Outcome event count is low." for issue in report.issues)
-    assert any(issue.message == "Some treatment arms have very few observed events." for issue in report.issues)
+    assert any(
+        issue.message == "Some treatment arms have very few observed events."
+        for issue in report.issues
+    )
 
 
 def test_validate_backdoor_fails_when_plan_is_provided_without_eligible_columns() -> None:
@@ -667,33 +836,64 @@ def test_validate_backdoor_fails_when_plan_is_provided_without_eligible_columns(
         causal_spec=_build_causal_spec(experiment_type="RCT", covariates=[], effect_modifiers=[]),
         dataframe=_build_dataframe(),
         transform_plan=TransformPlan.model_validate(
-            {"columns": [{"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}]}
-        ),
-    )
-
-    issue = _get_issue(report, "Transform plan was provided even though there are no covariates or effect modifiers to encode.")
-    assert issue.severity == "FAIL"
-
-
-def test_validate_backdoor_reports_plan_structure_errors() -> None:
-    report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=["segment"]),
-        dataframe=_build_dataframe(),
-        transform_plan=TransformPlan.model_validate(
             {
                 "columns": [
-                    {"column": "treatment", "role": "covariate", "encoding": {"preset": "passthrough"}},
-                    {"column": "age", "role": "effect_modifier", "encoding": {"preset": "num_standard"}},
-                    {"column": "extra_col", "role": "covariate", "encoding": {"preset": "num_standard"}},
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
                 ]
             }
         ),
     )
 
-    assert any(issue.message == "Transform plan must not include treatment or outcome columns." for issue in report.issues)
-    assert any(issue.message == "Transform plan is missing eligible columns." for issue in report.issues)
-    assert any(issue.message == "Transform plan contains non-eligible columns." for issue in report.issues)
-    assert any(issue.message == "Transform plan assigns the wrong role to a column." for issue in report.issues)
+    issue = _get_issue(
+        report,
+        "Transform plan was provided even though there are no covariates or effect modifiers to encode.",
+    )
+    assert issue.severity == "FAIL"
+
+
+def test_validate_backdoor_reports_plan_structure_errors() -> None:
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=["segment"]
+        ),
+        dataframe=_build_dataframe(),
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {
+                        "column": "treatment",
+                        "role": "covariate",
+                        "encoding": {"preset": "passthrough"},
+                    },
+                    {
+                        "column": "age",
+                        "role": "effect_modifier",
+                        "encoding": {"preset": "num_standard"},
+                    },
+                    {
+                        "column": "extra_col",
+                        "role": "covariate",
+                        "encoding": {"preset": "num_standard"},
+                    },
+                ]
+            }
+        ),
+    )
+
+    assert any(
+        issue.message == "Transform plan must not include treatment or outcome columns."
+        for issue in report.issues
+    )
+    assert any(
+        issue.message == "Transform plan is missing eligible columns." for issue in report.issues
+    )
+    assert any(
+        issue.message == "Transform plan contains non-eligible columns." for issue in report.issues
+    )
+    assert any(
+        issue.message == "Transform plan assigns the wrong role to a column."
+        for issue in report.issues
+    )
 
 
 def test_validate_backdoor_fails_for_num_log1p_invalid_values() -> None:
@@ -701,10 +901,16 @@ def test_validate_backdoor_fails_for_num_log1p_invalid_values() -> None:
     dataframe["age"] = [-2.0] + [float(index) for index in range(1, len(dataframe))]
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
-            {"columns": [{"column": "age", "role": "covariate", "encoding": {"preset": "num_log1p"}}]}
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_log1p"}}
+                ]
+            }
         ),
     )
 
@@ -714,10 +920,15 @@ def test_validate_backdoor_fails_for_num_log1p_invalid_values() -> None:
 
 def test_validate_backdoor_reports_datetime_parse_failures() -> None:
     dataframe = _build_dataframe()
-    dataframe["visit_dt"] = ["not-a-date" if index == 0 else f"2025-01-{(index % 28) + 1:02d}" for index in range(len(dataframe))]
+    dataframe["visit_dt"] = [
+        "not-a-date" if index == 0 else f"2025-01-{(index % 28) + 1:02d}"
+        for index in range(len(dataframe))
+    ]
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=[], effect_modifiers=["visit_dt"]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=[], effect_modifiers=["visit_dt"]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -732,7 +943,9 @@ def test_validate_backdoor_reports_datetime_parse_failures() -> None:
         ),
     )
 
-    issue = _get_issue(report, "Transform plan preset is incompatible with the observed dataframe column type.")
+    issue = _get_issue(
+        report, "Transform plan preset is incompatible with the observed dataframe column type."
+    )
     assert issue.severity == "FAIL"
     assert issue.evidence["preset"] == "datetime_epoch_seconds"
 
@@ -744,14 +957,22 @@ def test_validate_encoding_semantics_reports_datetime_parse_failures_for_datetim
 
     issues = validator_module._validate_encoding_semantics(
         dataframe=dataframe,
-        treatment_spec=_build_causal_spec(experiment_type="RCT", covariates=[], effect_modifiers=[]).treatment_spec,
+        treatment_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=[], effect_modifiers=[]
+        ).treatment_spec,
         column="visit_dt",
         role="effect_modifier",
         inferred_kind="DATETIME",
         encoding=DateTimeEpochParams(preset="datetime_epoch_seconds", errors="raise"),
     )
 
-    issue = next(issue for issue in issues if issue.message.startswith("datetime_epoch_seconds preset cannot parse some datetime values."))
+    issue = next(
+        issue
+        for issue in issues
+        if issue.message.startswith(
+            "datetime_epoch_seconds preset cannot parse some datetime values."
+        )
+    )
     assert issue.severity == "FAIL"
 
 
@@ -760,7 +981,9 @@ def test_validate_backdoor_reports_map_binary_missing_token_not_covered() -> Non
     dataframe["flag"] = ["Y" if index % 2 == 0 else "N" for index in range(len(dataframe))]
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["flag"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["flag"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -781,7 +1004,9 @@ def test_validate_backdoor_reports_map_binary_missing_token_not_covered() -> Non
         ),
     )
 
-    issue = _get_issue(report, "map_binary missing_token is not covered by the declared mapping/order.")
+    issue = _get_issue(
+        report, "map_binary missing_token is not covered by the declared mapping/order."
+    )
     assert issue.severity == "FAIL"
 
 
@@ -820,11 +1045,15 @@ def test_validate_backdoor_reports_mapping_anomalies(
     dataframe["mapped_col"] = ["Y" if index % 3 == 0 else "N" for index in range(len(dataframe))]
     dataframe.loc[0, "mapped_col"] = "UNKNOWN"
     if preset_payload["preset"] == "map_ordinal":
-        dataframe["mapped_col"] = ["low" if index % 3 == 0 else "high" for index in range(len(dataframe))]
+        dataframe["mapped_col"] = [
+            "low" if index % 3 == 0 else "high" for index in range(len(dataframe))
+        ]
         dataframe.loc[0, "mapped_col"] = "mystery"
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["mapped_col"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["mapped_col"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {"columns": [{"column": "mapped_col", "role": "covariate", "encoding": preset_payload}]}
@@ -840,7 +1069,9 @@ def test_validate_backdoor_warns_for_cat_onehot_max_categories_exceeded() -> Non
     dataframe["segment"] = [f"group_{index}" for index in range(len(dataframe))]
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["segment"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["segment"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
             {
@@ -863,10 +1094,16 @@ def test_validate_backdoor_reports_real_world_column_name_mismatch() -> None:
     dataframe = _build_dataframe().rename(columns={"age": "age_years"})
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
-            {"columns": [{"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}]}
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
         ),
     )
 
@@ -880,14 +1117,22 @@ def test_validate_backdoor_reports_real_world_dtype_mismatch_for_numeric_preset(
     dataframe["age"] = ["young" if index % 2 == 0 else "old" for index in range(len(dataframe))]
 
     report = validate_backdoor(
-        causal_spec=_build_causal_spec(experiment_type="RCT", covariates=["age"], effect_modifiers=[]),
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
         dataframe=dataframe,
         transform_plan=TransformPlan.model_validate(
-            {"columns": [{"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}]}
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
         ),
     )
 
-    issue = _get_issue(report, "Transform plan preset is incompatible with the observed dataframe column type.")
+    issue = _get_issue(
+        report, "Transform plan preset is incompatible with the observed dataframe column type."
+    )
     assert issue.severity == "FAIL"
     assert issue.evidence["column"] == "age"
     assert issue.evidence["preset"] == "num_standard"
@@ -905,7 +1150,11 @@ def test_validate_backdoor_converts_internal_step_error_to_fail_issue(monkeypatc
         transform_plan=None,
     )
 
-    guarded_issue = next(issue for issue in report.issues if issue.message == "Causal spec validation failed unexpectedly.")
+    guarded_issue = next(
+        issue
+        for issue in report.issues
+        if issue.message == "Causal spec validation failed unexpectedly."
+    )
     assert guarded_issue.severity == "FAIL"
     assert guarded_issue.evidence["step"] == "causal spec"
     assert "RuntimeError('boom')" in str(guarded_issue.evidence["error"])

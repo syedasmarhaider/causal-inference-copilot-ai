@@ -104,13 +104,17 @@ class _FakeWorkflowStateRepo:
     def get_conversation_ids_for_user(self, *, user_id: UUID) -> Sequence[UUID]:
         return sorted(self.conversations.get(user_id, set()), key=str)
 
-    def is_conversation_id_for_user_id_exists(self, *, user_id: UUID, conversation_id: UUID) -> bool:
+    def is_conversation_id_for_user_id_exists(
+        self, *, user_id: UUID, conversation_id: UUID
+    ) -> bool:
         return conversation_id in self.conversations.get(user_id, set())
 
     def load_active_state_name(self, *, user_id: UUID, conversation_id: UUID) -> str | None:
         return self.active_by_conversation.get((user_id, conversation_id))
 
-    def store_active_state_name(self, *, user_id: UUID, conversation_id: UUID, state_name: str) -> None:
+    def store_active_state_name(
+        self, *, user_id: UUID, conversation_id: UUID, state_name: str
+    ) -> None:
         self.active_by_conversation[(user_id, conversation_id)] = state_name
         self.stored_active_calls.append((user_id, conversation_id, state_name))
 
@@ -128,7 +132,9 @@ class _FakeWorkflowStateRepo:
     def append_message(self, *, user_id: UUID, conversation_id: UUID, message: ChatMessage) -> None:
         self.append_messages(user_id=user_id, conversation_id=conversation_id, messages=[message])
 
-    def append_messages(self, *, user_id: UUID, conversation_id: UUID, messages: Sequence[ChatMessage]) -> None:
+    def append_messages(
+        self, *, user_id: UUID, conversation_id: UUID, messages: Sequence[ChatMessage]
+    ) -> None:
         key = (user_id, conversation_id)
         self.messages.setdefault(key, []).extend(messages)
 
@@ -252,7 +258,9 @@ def test_get_last_conversation_state_returns_active_state_response() -> None:
     user_id = uuid4()
     conversation_id = uuid4()
     repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
-    repo.store_active_state_name(user_id=user_id, conversation_id=conversation_id, state_name=_StateA.NAME)
+    repo.store_active_state_name(
+        user_id=user_id, conversation_id=conversation_id, state_name=_StateA.NAME
+    )
     repo.store_state(
         user_id=user_id,
         conversation_id=conversation_id,
@@ -286,7 +294,10 @@ def test_handle_initializes_initial_state_without_router() -> None:
 
     assert router.decide_calls == []
     assert len(node.calls) == 1
-    assert repo.load_active_state_name(user_id=user_id, conversation_id=conversation_id) == _StateA.NAME
+    assert (
+        repo.load_active_state_name(user_id=user_id, conversation_id=conversation_id)
+        == _StateA.NAME
+    )
     assert repo.stored_state_calls == [(user_id, conversation_id, _StateA.NAME)]
     assert [message.content for message in response.messages] == ["hello from a"]
     assert response.current_stage_name == _StateA.NAME
@@ -309,7 +320,9 @@ def test_handle_routes_to_next_state_and_loads_dependencies() -> None:
     user_id = uuid4()
     conversation_id = uuid4()
     repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
-    repo.store_active_state_name(user_id=user_id, conversation_id=conversation_id, state_name=_StateA.NAME)
+    repo.store_active_state_name(
+        user_id=user_id, conversation_id=conversation_id, state_name=_StateA.NAME
+    )
     repo.store_state(user_id=user_id, conversation_id=conversation_id, state=current_state)
     repo.store_state(user_id=user_id, conversation_id=conversation_id, state=dep_state)
     repo.store_state(user_id=user_id, conversation_id=conversation_id, state=state_to_run)
@@ -320,7 +333,10 @@ def test_handle_routes_to_next_state_and_loads_dependencies() -> None:
     assert router.decide_calls[0]["current_state"] is current_state
     assert len(node.calls) == 1
     assert node.calls[0]["previous_state_dependencies"] == {_DepState.NAME: dep_state}
-    assert repo.load_active_state_name(user_id=user_id, conversation_id=conversation_id) == _StateB.NAME
+    assert (
+        repo.load_active_state_name(user_id=user_id, conversation_id=conversation_id)
+        == _StateB.NAME
+    )
     assert response.current_stage_name == _StateB.NAME
     assert [message.content for message in response.messages] == ["from b"]
 
@@ -336,10 +352,14 @@ def test_handle_returns_router_clarification_without_running_node() -> None:
     user_id = uuid4()
     conversation_id = uuid4()
     repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
-    repo.store_active_state_name(user_id=user_id, conversation_id=conversation_id, state_name=_StateA.NAME)
+    repo.store_active_state_name(
+        user_id=user_id, conversation_id=conversation_id, state_name=_StateA.NAME
+    )
     repo.store_state(user_id=user_id, conversation_id=conversation_id, state=current_state)
 
-    response = app.handle(user_id=user_id, conversation_id=conversation_id, user_message="ambiguous")
+    response = app.handle(
+        user_id=user_id, conversation_id=conversation_id, user_message="ambiguous"
+    )
 
     assert node.calls == []
     assert [message.content for message in response.messages] == ["Need clarification"]
@@ -381,8 +401,13 @@ def test_revert_to_state_deletes_downstream_states_and_appends_system_message() 
         (user_id, conversation_id, _StateB.NAME),
         (user_id, conversation_id, _DepState.NAME),
     ]
-    assert repo.load_active_state_name(user_id=user_id, conversation_id=conversation_id) == _StateA.NAME
-    last_message = repo.load_message_history(user_id=user_id, conversation_id=conversation_id, limit=1)[0]
+    assert (
+        repo.load_active_state_name(user_id=user_id, conversation_id=conversation_id)
+        == _StateA.NAME
+    )
+    last_message = repo.load_message_history(
+        user_id=user_id, conversation_id=conversation_id, limit=1
+    )[0]
     assert last_message.role == "system"
     assert "User reverted to state STATE_A" in last_message.content
 

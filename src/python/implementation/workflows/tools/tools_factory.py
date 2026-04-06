@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from typing import Any
@@ -32,7 +31,14 @@ from python.implementation.workflows.tools.plot_tool.plot_tool import PlotTool
 
 class DefaultToolFactory(ToolFactory):
     _tools: dict[str, Tool]
-    def __init__(self, data_repo: DataRepo, models_repo: ModelsRepo, analytics_repo: AnalyticsRepo, llm_service: LLMService) -> None:
+
+    def __init__(
+        self,
+        data_repo: DataRepo,
+        models_repo: ModelsRepo,
+        analytics_repo: AnalyticsRepo,
+        llm_service: LLMService,
+    ) -> None:
         self._tools = {
             DatasetProfilingTool.NAME: DatasetProfilingTool(),
             DataManipulationTool.NAME: DataManipulationTool(
@@ -43,7 +49,9 @@ class DefaultToolFactory(ToolFactory):
             CausalSpecsTool.NAME: CausalSpecsTool(),
             EncodingPlanTool.NAME: EncodingPlanTool(),
             ValidationBackdoorTool.NAME: ValidationBackdoorTool(),
-            CausalModelFactoryTool.NAME: CausalModelFactoryTool.create_default(data_repo=data_repo, models_repo=models_repo),
+            CausalModelFactoryTool.NAME: CausalModelFactoryTool.create_default(
+                data_repo=data_repo, models_repo=models_repo
+            ),
         }
 
     def get_tool_names(self) -> list[str]:

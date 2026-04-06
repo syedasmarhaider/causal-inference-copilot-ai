@@ -7,8 +7,8 @@ from typing import Any, Literal
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
 
-Status = Literal["PENDING", "DONE", "ABORTED","FREEZED"]
-Action = Literal["NONE", "NEEDS_INPUT","NEEDS_DATA"]
+Status = Literal["PENDING", "DONE", "ABORTED", "FREEZED"]
+Action = Literal["NONE", "NEEDS_INPUT", "NEEDS_DATA"]
 
 
 class State(ABC):
@@ -19,23 +19,23 @@ class State(ABC):
     @abstractmethod
     def status(self) -> Status:
         raise NotImplementedError
-    
+
     @abstractmethod
     def set_status_freez(self) -> None:
         raise NotImplementedError
-    
+
     @abstractmethod
     def action(self) -> Action:
         raise NotImplementedError
-    
+
     @abstractmethod
     def set_status_pending(self) -> None:
         raise NotImplementedError
-        
+
     @abstractmethod
     def messages(self) -> Sequence[ChatMessage]:
         raise NotImplementedError
-    
+
     @abstractmethod
     def error(self) -> NodeExecutionError | None:
         raise NotImplementedError
@@ -43,7 +43,7 @@ class State(ABC):
     @abstractmethod
     def pre_required_states_names(self) -> Sequence[str]:
         raise NotImplementedError
-    
+
     @abstractmethod
     def to_json_dict(self) -> dict[str, Any]:
         raise NotImplementedError
@@ -52,7 +52,7 @@ class State(ABC):
     @abstractmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> State:
         raise NotImplementedError
-    
+
     @classmethod
     @abstractmethod
     def init_empty(cls) -> State:

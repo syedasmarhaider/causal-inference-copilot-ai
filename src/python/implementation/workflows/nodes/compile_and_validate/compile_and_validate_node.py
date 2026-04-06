@@ -93,7 +93,9 @@ class CompileAndValidateNode(Node):
         state: State,
     ) -> State:
         if not isinstance(state, CompileAndValidateState):
-            raise TypeError(f"{self.name}: expected CompileAndValidateState, got {type(state).__name__}")
+            raise TypeError(
+                f"{self.name}: expected CompileAndValidateState, got {type(state).__name__}"
+            )
 
         deps = CompileAndValidateDeps.from_loaded(previous_state_dependencies)
         latest_user_message = _latest_user_message(messages_history)
@@ -108,7 +110,9 @@ class CompileAndValidateNode(Node):
         payload = state.payload.model_copy(deep=True)
 
         if payload.phase == "REVIEW_READY":
-            return self._handle_review_response(payload=payload, latest_user_message=latest_user_message)
+            return self._handle_review_response(
+                payload=payload, latest_user_message=latest_user_message
+            )
 
         if payload.phase == "CONFIRMED":
             return CompileAndValidateState(payload)
@@ -134,12 +138,16 @@ class CompileAndValidateNode(Node):
             return CompileAndValidateState(payload)
 
         context_payload = {
-            "compiled_causal_spec": None
-            if payload.compiled_causal_spec is None
-            else payload.compiled_causal_spec.model_dump(mode="json"),
-            "transformation_plan": None
-            if payload.transformation_plan is None
-            else payload.transformation_plan.model_dump(mode="json"),
+            "compiled_causal_spec": (
+                None
+                if payload.compiled_causal_spec is None
+                else payload.compiled_causal_spec.model_dump(mode="json")
+            ),
+            "transformation_plan": (
+                None
+                if payload.transformation_plan is None
+                else payload.transformation_plan.model_dump(mode="json")
+            ),
             "validation_issues": [
                 issue.model_dump(mode="json") for issue in payload.validation_issues
             ],
@@ -398,12 +406,16 @@ class CompileAndValidateNode(Node):
             system_prompt=get_compile_review_decision_prompt(),
             user_prompt=json.dumps(
                 {
-                    "compiled_causal_spec": None
-                    if payload.compiled_causal_spec is None
-                    else payload.compiled_causal_spec.model_dump(mode="json"),
-                    "transformation_plan": None
-                    if payload.transformation_plan is None
-                    else payload.transformation_plan.model_dump(mode="json"),
+                    "compiled_causal_spec": (
+                        None
+                        if payload.compiled_causal_spec is None
+                        else payload.compiled_causal_spec.model_dump(mode="json")
+                    ),
+                    "transformation_plan": (
+                        None
+                        if payload.transformation_plan is None
+                        else payload.transformation_plan.model_dump(mode="json")
+                    ),
                     "validation_issues": [
                         issue.model_dump(mode="json") for issue in payload.validation_issues
                     ],
@@ -511,7 +523,10 @@ def _build_blocking_system_message(issues: Sequence[ValidationIssueModel]) -> st
     ]
     for issue in issues:
         lines.append(f"- {issue.severity}: {issue.message}")
-        if issue.message == "Cleaned dataset contains columns outside the confirmed protocol scope.":
+        if (
+            issue.message
+            == "Cleaned dataset contains columns outside the confirmed protocol scope."
+        ):
             extra_columns = issue.evidence.get("extra_columns")
             allowed_columns = issue.evidence.get("allowed_columns")
             if extra_columns:
@@ -530,7 +545,8 @@ def _build_blocking_user_message(
         (
             issue
             for issue in issues
-            if issue.message == "Cleaned dataset contains columns outside the confirmed protocol scope."
+            if issue.message
+            == "Cleaned dataset contains columns outside the confirmed protocol scope."
         ),
         None,
     )
@@ -549,7 +565,9 @@ def _build_blocking_user_message(
         if issue is scope_issue:
             extra_columns = issue.evidence.get("extra_columns")
             if extra_columns:
-                main_lines.append(f"  Extra columns currently present: {', '.join(map(str, extra_columns))}")
+                main_lines.append(
+                    f"  Extra columns currently present: {', '.join(map(str, extra_columns))}"
+                )
     main_lines.append("")
     if scope_issue is not None:
         main_lines.append(
@@ -558,9 +576,7 @@ def _build_blocking_user_message(
         main_lines.append(
             "If any of the extra columns are intentionally still needed, tell me exactly which columns they are and whether they should remain in the protocol scope."
         )
-        main_lines.append(
-            "Otherwise, remove those extra columns and then rerun this step."
-        )
+        main_lines.append("Otherwise, remove those extra columns and then rerun this step.")
     else:
         main_lines.append(
             "Please revise the protocol or the cleaned dataset assumptions before we continue."
@@ -578,8 +594,7 @@ def _build_review_user_message(
     outcome = causal_spec.outcome_spec
     warning_lines = [f"- {issue.message}" for issue in issues if issue.severity == "WARN"]
     plan_lines = [
-        f"- {column.column}: {column.encoding.preset}"
-        for column in transform_plan.columns
+        f"- {column.column}: {column.encoding.preset}" for column in transform_plan.columns
     ]
     lines = [
         "I compiled the confirmed protocol into a causal specification and a baseline transformation plan.",

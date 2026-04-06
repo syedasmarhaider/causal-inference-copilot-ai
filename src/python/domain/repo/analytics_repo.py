@@ -41,7 +41,7 @@ class AnalyticsRepo(ABC):
 
     Implementations may execute in memory (DuckDB) or via external engines.
     """
-    
+
     @abstractmethod
     def execute_sql(
         self,

@@ -53,4 +53,3 @@ class ModelSelectionDeps:
             inference_ready_spec=inference_ready,
             validation_warnings=warnings,
         )
-

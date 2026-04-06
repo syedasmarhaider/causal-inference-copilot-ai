@@ -55,7 +55,7 @@ def get_chat_messages_role_and_message_json(messages: Sequence[ChatMessage]) -> 
     return "\n".join(get_chat_message_role_and_message_json(msg) for msg in messages)
 
 
-@dataclass(frozen=True, slots=True)    
+@dataclass(frozen=True, slots=True)
 class WorkingDatasetInfo:
     dataset_id: UUID
     is_freezed: bool

@@ -289,10 +289,13 @@ def test_save_delete_and_query_conversation_ids(monkeypatch: pytest.MonkeyPatch)
 
     ids = repo.get_conversation_ids_for_user(user_id=user_id)
     assert ids == sorted([conversation_id, second_id], key=lambda item: str(item))
-    assert repo.is_conversation_id_for_user_id_exists(
-        user_id=user_id,
-        conversation_id=conversation_id,
-    ) is True
+    assert (
+        repo.is_conversation_id_for_user_id_exists(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        is True
+    )
 
     repo.delete_conversation(user_id=user_id, conversation_id=conversation_id)
     assert _get_value(fake_db.tree, index_path) is None
@@ -348,13 +351,18 @@ def test_load_state_validates_payload_and_registration(monkeypatch: pytest.Monke
     with pytest.raises(ValueError, match=r"state_name must be a non-empty string"):
         repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name="")
 
-    assert repo.load_state(
-        user_id=user_id,
-        conversation_id=conversation_id,
-        state_name="DEMO_STATE",
-    ) is None
+    assert (
+        repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name="DEMO_STATE",
+        )
+        is None
+    )
 
-    fake_db.reference(f"/workflows/{user_id}/{conversation_id}/states/DEMO_STATE").set({"bad": "shape"})
+    fake_db.reference(f"/workflows/{user_id}/{conversation_id}/states/DEMO_STATE").set(
+        {"bad": "shape"}
+    )
     with pytest.raises(ValueError, match=r"must be a JSON string blob"):
         repo.load_state(
             user_id=user_id,
@@ -370,7 +378,9 @@ def test_load_state_validates_payload_and_registration(monkeypatch: pytest.Monke
             state_name="DEMO_STATE",
         )
 
-    fake_db.reference(f"/workflows/{user_id}/{conversation_id}/states/DEMO_STATE").set(json.dumps([1, 2]))
+    fake_db.reference(f"/workflows/{user_id}/{conversation_id}/states/DEMO_STATE").set(
+        json.dumps([1, 2])
+    )
     with pytest.raises(ValueError, match=r"must be a dict"):
         repo.load_state(
             user_id=user_id,
@@ -463,10 +473,14 @@ def test_delete_state_and_message_history_workflow(monkeypatch: pytest.MonkeyPat
 
     history = repo.load_message_history(user_id=user_id, conversation_id=conversation_id, limit=2)
     assert [msg.content for msg in history] == ["a3", "u4"]
-    assert repo.load_message_history(user_id=user_id, conversation_id=conversation_id, limit=0) == []
+    assert (
+        repo.load_message_history(user_id=user_id, conversation_id=conversation_id, limit=0) == []
+    )
 
     repo.clear_message_history(user_id=user_id, conversation_id=conversation_id)
-    assert repo.load_message_history(user_id=user_id, conversation_id=conversation_id, limit=10) == []
+    assert (
+        repo.load_message_history(user_id=user_id, conversation_id=conversation_id, limit=10) == []
+    )
 
 
 def test_append_and_load_message_history_roundtrips_structured_artifacts(

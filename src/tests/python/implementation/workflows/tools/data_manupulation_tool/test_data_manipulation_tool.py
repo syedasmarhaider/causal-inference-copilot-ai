@@ -120,14 +120,10 @@ def test_plan_schema_factory_binds_expected_table_name_without_shared_state() ->
     assert alpha_plan.table_name == "alpha"
 
     with pytest.raises(ValidationError, match=r"expected='alpha' got='beta'"):
-        alpha_schema.model_validate(
-            {"statements": ["SELECT a FROM beta"], "table_name": "beta"}
-        )
+        alpha_schema.model_validate({"statements": ["SELECT a FROM beta"], "table_name": "beta"})
 
     with pytest.raises(ValidationError, match=r"expected='beta' got='alpha'"):
-        beta_schema.model_validate(
-            {"statements": ["SELECT a FROM alpha"], "table_name": "alpha"}
-        )
+        beta_schema.model_validate({"statements": ["SELECT a FROM alpha"], "table_name": "alpha"})
 
 
 def test_plan_schema_requires_source_table_reference() -> None:
@@ -136,14 +132,19 @@ def test_plan_schema_requires_source_table_reference() -> None:
     with pytest.raises(ValidationError, match=r"does not reference expected table_name"):
         schema.model_validate(
             {
-                "statements": ["CREATE TEMP TABLE tmp AS SELECT a FROM somewhere_else", "SELECT a FROM tmp"],
+                "statements": [
+                    "CREATE TEMP TABLE tmp AS SELECT a FROM somewhere_else",
+                    "SELECT a FROM tmp",
+                ],
                 "table_name": _TABLE,
             }
         )
 
 
 def test_manipulate_executes_sql_with_dynamic_schema() -> None:
-    llm = _FakeLLMService(plans=[_plan_payload(statements=[f"SELECT a FROM {_TABLE} ORDER BY a DESC"])])
+    llm = _FakeLLMService(
+        plans=[_plan_payload(statements=[f"SELECT a FROM {_TABLE} ORDER BY a DESC"])]
+    )
     repo = _FakeAnalyticsRepo()
     tool = DataManipulationTool(llm=llm, analytics_repo=repo)
 

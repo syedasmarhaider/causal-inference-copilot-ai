@@ -235,7 +235,7 @@ async def create_conversation(
     description=(
         "Advances the authenticated user's conversation by one workflow step. "
         "To trigger dataset-history revert behavior inside workflow execution, "
-        "send `user_text=\"revert_data_changes\"`."
+        'send `user_text="revert_data_changes"`.'
     ),
     response_description="Workflow response with assistant messages, action, stage, and latest working dataset info.",
     responses={
@@ -285,7 +285,7 @@ async def invoke_once(
     description=(
         "Reverts the authenticated user's conversation to a previous workflow state. "
         "This endpoint is only for workflow-stage revert. "
-        "Dataset-history revert is done by calling invoke with `user_text=\"revert_data_changes\"`."
+        'Dataset-history revert is done by calling invoke with `user_text="revert_data_changes"`.'
     ),
     responses={
         401: {"description": "Missing or invalid Bearer token."},
@@ -367,4 +367,3 @@ def _to_working_dataset_info_response(
         dataset_id=info.dataset_id,
         is_freezed=info.is_freezed,
     )
-

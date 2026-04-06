@@ -252,7 +252,10 @@ def _tool_factory() -> _FakeToolFactory:
 def test_compile_and_validate_prompts_and_info_have_expected_scope() -> None:
     assert "causal specification" in get_compile_and_validate_node_info().lower()
     assert "dataset summary is authoritative" in get_compile_causal_spec_prompt().lower()
-    assert "build the plan only for covariates and effect modifiers" in get_compile_transformation_plan_prompt().lower()
+    assert (
+        "build the plan only for covariates and effect modifiers"
+        in get_compile_transformation_plan_prompt().lower()
+    )
     assert "full meaning of the user reply" in get_compile_review_decision_prompt().lower()
 
 
@@ -275,7 +278,9 @@ def test_compile_and_validate_state_roundtrip_and_statuses() -> None:
     assert restored.payload.model_dump(mode="json") == failed.payload.model_dump(mode="json")
 
 
-def test_compile_and_validate_deps_require_confirmed_protocol_and_allow_cleaned_dataset_revision() -> None:
+def test_compile_and_validate_deps_require_confirmed_protocol_and_allow_cleaned_dataset_revision() -> (
+    None
+):
     df = _build_dataframe()
     summary = _build_summary(df)
     dataset_id = uuid4()
@@ -371,7 +376,9 @@ def test_compile_and_validate_node_compiles_and_waits_for_confirmation() -> None
             DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary),
             ProtocolDiscussionState.NAME: _protocol_state(dataset_id=dataset_id, summary=summary),
         },
-        messages_history=[ChatMessage(role="user", content="Yes, confirm the protocol discussion.")],
+        messages_history=[
+            ChatMessage(role="user", content="Yes, confirm the protocol discussion.")
+        ],
         state=CompileAndValidateState.init_empty(),
     )
 

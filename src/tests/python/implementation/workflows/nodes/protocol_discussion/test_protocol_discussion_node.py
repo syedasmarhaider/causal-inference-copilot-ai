@@ -161,7 +161,9 @@ def test_protocol_discussion_state_status_messages_error_and_roundtrip() -> None
     assert restored.payload.model_dump(mode="json") == confirmed.payload.model_dump(mode="json")
 
 
-def test_protocol_discussion_update_prompt_contract_mentions_confirm_only_and_cleaning_requirements() -> None:
+def test_protocol_discussion_update_prompt_contract_mentions_confirm_only_and_cleaning_requirements() -> (
+    None
+):
     prompt = get_protocol_discussion_update_prompt()
 
     assert '"next_action": "continue" | "confirm"' in prompt
@@ -222,7 +224,9 @@ def test_protocol_discussion_node_first_run_initializes_from_latest_dataset_revi
     result = node.run(
         user_id=uuid4(),
         conversation_id=uuid4(),
-        previous_state_dependencies={DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary)},
+        previous_state_dependencies={
+            DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary)
+        },
         messages_history=[ChatMessage(role="user", content="Here is the protocol.")],
         state=ProtocolDiscussionState.init_empty(),
     )
@@ -233,11 +237,16 @@ def test_protocol_discussion_node_first_run_initializes_from_latest_dataset_revi
     assert result.payload.discussion == "Updated discussion against current dataset"
     assert result.payload.phase == "DISCUSSING"
     assert result.status() == "PENDING"
-    assert result.payload.assistant_message == "Need one more clarification before we confirm the protocol."
+    assert (
+        result.payload.assistant_message
+        == "Need one more clarification before we confirm the protocol."
+    )
     assert result.payload.system_message is None
 
 
-def test_protocol_discussion_node_without_user_message_returns_initial_prompt_without_llm_call() -> None:
+def test_protocol_discussion_node_without_user_message_returns_initial_prompt_without_llm_call() -> (
+    None
+):
     dataset_id = uuid4()
     summary = _summary_for_df(pd.DataFrame({"treatment": ["drug"], "outcome": [1.0]}))
     llm = _FakeLLM()
@@ -246,7 +255,9 @@ def test_protocol_discussion_node_without_user_message_returns_initial_prompt_wi
     result = node.run(
         user_id=uuid4(),
         conversation_id=uuid4(),
-        previous_state_dependencies={DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary)},
+        previous_state_dependencies={
+            DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary)
+        },
         messages_history=None,
         state=ProtocolDiscussionState.init_empty(),
     )
@@ -299,7 +310,9 @@ def test_protocol_discussion_node_confirms_discussion_and_emits_cleaning_system_
     result = node.run(
         user_id=uuid4(),
         conversation_id=uuid4(),
-        previous_state_dependencies={DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary)},
+        previous_state_dependencies={
+            DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary)
+        },
         messages_history=[ChatMessage(role="user", content="Yes, I confirm this protocol.")],
         state=state,
     )
@@ -311,9 +324,17 @@ def test_protocol_discussion_node_confirms_discussion_and_emits_cleaning_system_
     assert result.payload.system_message is not None
     assert result.payload.system_message.startswith("PROTOCOL_DISCUSSION_CONFIRMED")
     assert "This is a data-changing request." in result.payload.system_message
-    assert "final working dataset **must** retain only protocol-scope columns" in result.payload.system_message
-    assert "Apply the grounded target-population / cohort-eligibility filters" in result.payload.system_message
-    assert "Apply the grounded time-zero / baseline-definition rules" in result.payload.system_message
+    assert (
+        "final working dataset **must** retain only protocol-scope columns"
+        in result.payload.system_message
+    )
+    assert (
+        "Apply the grounded target-population / cohort-eligibility filters"
+        in result.payload.system_message
+    )
+    assert (
+        "Apply the grounded time-zero / baseline-definition rules" in result.payload.system_message
+    )
     assert "Normalize treatment to exactly two canonical values" in result.payload.system_message
     assert _messages(result) == [
         ChatMessage(role="system", content=result.payload.system_message),
@@ -321,7 +342,9 @@ def test_protocol_discussion_node_confirms_discussion_and_emits_cleaning_system_
     ]
 
 
-def test_protocol_discussion_node_unchanged_dataset_preserves_discussion_source_and_continues() -> None:
+def test_protocol_discussion_node_unchanged_dataset_preserves_discussion_source_and_continues() -> (
+    None
+):
     dataset_id = uuid4()
     summary = _summary_for_df(pd.DataFrame({"treatment": ["drug"], "outcome": [1.0]}))
     llm = _FakeLLM(
@@ -348,8 +371,12 @@ def test_protocol_discussion_node_unchanged_dataset_preserves_discussion_source_
     result = node.run(
         user_id=uuid4(),
         conversation_id=uuid4(),
-        previous_state_dependencies={DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary)},
-        messages_history=[ChatMessage(role="user", content="The covariates should be age and sex.")],
+        previous_state_dependencies={
+            DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary)
+        },
+        messages_history=[
+            ChatMessage(role="user", content="The covariates should be age and sex.")
+        ],
         state=state,
     )
 
@@ -367,7 +394,9 @@ def test_protocol_discussion_node_changed_dataset_resets_discussion_and_prefixes
     old_dataset_id = uuid4()
     new_dataset_id = uuid4()
     old_summary = _summary_for_df(pd.DataFrame({"treatment": ["drug"], "outcome": [1.0]}))
-    new_summary = _summary_for_df(pd.DataFrame({"treatment": ["drug"], "outcome": [1.0], "age": [50]}))
+    new_summary = _summary_for_df(
+        pd.DataFrame({"treatment": ["drug"], "outcome": [1.0], "age": [50]})
+    )
     llm = _FakeLLM(
         json_outputs=[
             _DiscussionDecisionModel(
@@ -393,7 +422,9 @@ def test_protocol_discussion_node_changed_dataset_resets_discussion_and_prefixes
     result = node.run(
         user_id=uuid4(),
         conversation_id=uuid4(),
-        previous_state_dependencies={DatasetState.NAME: _dataset_state(dataset_id=new_dataset_id, summary=new_summary)},
+        previous_state_dependencies={
+            DatasetState.NAME: _dataset_state(dataset_id=new_dataset_id, summary=new_summary)
+        },
         messages_history=[ChatMessage(role="user", content="Use the latest dataset now.")],
         state=state,
     )
@@ -412,11 +443,15 @@ def test_protocol_discussion_node_changed_dataset_resets_discussion_and_prefixes
     assert result.payload.system_message is None
 
 
-def test_protocol_discussion_node_changed_dataset_without_user_message_resets_and_returns_prompt() -> None:
+def test_protocol_discussion_node_changed_dataset_without_user_message_resets_and_returns_prompt() -> (
+    None
+):
     old_dataset_id = uuid4()
     new_dataset_id = uuid4()
     old_summary = _summary_for_df(pd.DataFrame({"treatment": ["drug"], "outcome": [1.0]}))
-    new_summary = _summary_for_df(pd.DataFrame({"treatment": ["drug"], "outcome": [1.0], "age": [50]}))
+    new_summary = _summary_for_df(
+        pd.DataFrame({"treatment": ["drug"], "outcome": [1.0], "age": [50]})
+    )
     node = ProtocolDiscussionNode(llm=_FakeLLM())
     state = ProtocolDiscussionState(
         ProtocolDiscussionPayloadModel(
@@ -432,7 +467,9 @@ def test_protocol_discussion_node_changed_dataset_without_user_message_resets_an
     result = node.run(
         user_id=uuid4(),
         conversation_id=uuid4(),
-        previous_state_dependencies={DatasetState.NAME: _dataset_state(dataset_id=new_dataset_id, summary=new_summary)},
+        previous_state_dependencies={
+            DatasetState.NAME: _dataset_state(dataset_id=new_dataset_id, summary=new_summary)
+        },
         messages_history=None,
         state=state,
     )
@@ -464,7 +501,9 @@ def test_protocol_discussion_node_update_failure_returns_pending_retry_state() -
     result = node.run(
         user_id=uuid4(),
         conversation_id=uuid4(),
-        previous_state_dependencies={DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary)},
+        previous_state_dependencies={
+            DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary)
+        },
         messages_history=[ChatMessage(role="user", content="Continue")],
         state=state,
     )
@@ -473,7 +512,9 @@ def test_protocol_discussion_node_update_failure_returns_pending_retry_state() -
     assert result.payload.dataset_id == dataset_id
     assert result.payload.discussion == "Existing discussion"
     assert result.payload.phase == "DISCUSSING"
-    assert result.payload.assistant_message == "Protocol discussion update failed. Please try again."
+    assert (
+        result.payload.assistant_message == "Protocol discussion update failed. Please try again."
+    )
     assert result.status() == "PENDING"
 
 
@@ -508,8 +549,12 @@ def test_protocol_discussion_node_infeasible_case_stays_pending_with_explanation
     result = node.run(
         user_id=uuid4(),
         conversation_id=uuid4(),
-        previous_state_dependencies={DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary)},
-        messages_history=[ChatMessage(role="user", content="Proceed even though survival time is unavailable.")],
+        previous_state_dependencies={
+            DatasetState.NAME: _dataset_state(dataset_id=dataset_id, summary=summary)
+        },
+        messages_history=[
+            ChatMessage(role="user", content="Proceed even though survival time is unavailable.")
+        ],
         state=state,
     )
 

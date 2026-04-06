@@ -96,7 +96,9 @@ def test_verify_token_non_string_email_defaults_to_none(monkeypatch: pytest.Monk
     assert user.email_verified is False
 
 
-def test_get_firebase_auth_default_app_returns_existing_app(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_firebase_auth_default_app_returns_existing_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     existing_app = object()
 
     monkeypatch.setattr(firebase_auth_module.firebase_admin, "get_app", lambda: existing_app)
@@ -118,7 +120,9 @@ def test_get_firebase_auth_default_app_requires_project_id(monkeypatch: pytest.M
         FirebaseAuthService.get_firebase_auth_default_app()
 
 
-def test_get_firebase_auth_default_app_requires_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_firebase_auth_default_app_requires_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def fake_get_app() -> object:
         raise ValueError("no default app")
 
@@ -130,7 +134,9 @@ def test_get_firebase_auth_default_app_requires_database_url(monkeypatch: pytest
         FirebaseAuthService.get_firebase_auth_default_app()
 
 
-def test_get_firebase_auth_default_app_initializes_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_firebase_auth_default_app_initializes_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def fake_get_app() -> object:
         raise ValueError("no default app")
 

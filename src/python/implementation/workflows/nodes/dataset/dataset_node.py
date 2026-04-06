@@ -108,11 +108,7 @@ class DatasetIntentModel(BaseModel):
         return self
 
     def has_any_intent(self) -> bool:
-        return (
-            self.intent_data_question
-            or self.intent_manupulation_question
-            or self.intent_chart
-        )
+        return self.intent_data_question or self.intent_manupulation_question or self.intent_chart
 
 
 class DatasetNode(Node):
@@ -160,7 +156,9 @@ class DatasetNode(Node):
         if not isinstance(state, DatasetState):
             raise TypeError(f"{self.name}: expected DatasetState, got {type(state).__name__}")
 
-        dataset_iterations = [item.model_copy(deep=True) for item in state.payload.dataset_iterations]
+        dataset_iterations = [
+            item.model_copy(deep=True) for item in state.payload.dataset_iterations
+        ]
         latest_summary = (
             state.payload.latest_summary.model_copy(deep=True)
             if state.payload.latest_summary is not None
@@ -232,7 +230,9 @@ class DatasetNode(Node):
             except Exception:
                 return self._build_state(
                     freezed=is_freezed,
-                    user_message=self._build_missing_data_message(messages_history=messages_history),
+                    user_message=self._build_missing_data_message(
+                        messages_history=messages_history
+                    ),
                 )
 
             current_summary = self._profiling_tool.extract_dataset_summary(
@@ -297,7 +297,11 @@ class DatasetNode(Node):
                 user_message=self._build_off_topic_message(),
             )
 
-        if is_freezed and intent.intent_manupulation_question and not intent.intent_manupulation_is_analytical_query:
+        if (
+            is_freezed
+            and intent.intent_manupulation_question
+            and not intent.intent_manupulation_is_analytical_query
+        ):
             return self._build_state(
                 dataset_iterations=dataset_iterations,
                 latest_summary=persisted_latest_summary,
@@ -426,14 +430,14 @@ class DatasetNode(Node):
             DatasetPayloadModel(
                 dataset_iterations=normalized_iterations,
                 latest_summary=(
-                    latest_summary.model_copy(deep=True)
-                    if latest_summary is not None
-                    else None
+                    latest_summary.model_copy(deep=True) if latest_summary is not None else None
                 ),
                 freezed=freezed,
                 user_message=user_message,
             ),
-            response_message_artifact_refs=[dict(ref) for ref in (response_message_artifact_refs or [])],
+            response_message_artifact_refs=[
+                dict(ref) for ref in (response_message_artifact_refs or [])
+            ],
         )
         return state
 

@@ -56,9 +56,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
             database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
             if not database_url:
-                raise ValueError(
-                    "FIREBASE_DATABASE_URL environment variable must be set"
-                ) from None
+                raise ValueError("FIREBASE_DATABASE_URL environment variable must be set") from None
 
             return firebase_admin.initialize_app(
                 credentials.ApplicationDefault(),
@@ -81,9 +79,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
         self._root_ref = db.reference("/", app=app)
         self._workflows_root_ref = db.reference(self._WORKFLOWS_ROOT, app=app)
-        self._conversation_index_root_ref = db.reference(
-            self._CONVERSATION_INDEX_ROOT, app=app
-        )
+        self._conversation_index_root_ref = db.reference(self._CONVERSATION_INDEX_ROOT, app=app)
         self._state_classes_by_name = dict(state_classes_by_name)
 
     # ---------------------------------------------------------------------
@@ -271,9 +267,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
                 separators=(",", ":"),
             )
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"State '{state_name}' is not JSON-serializable: {exc}"
-            ) from exc
+            raise ValueError(f"State '{state_name}' is not JSON-serializable: {exc}") from exc
 
         (
             self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
@@ -330,10 +324,9 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         if not messages:
             return
 
-        messages_ref = (
-            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
-            .child("messages")
-        )
+        messages_ref = self._conversation_ref(
+            user_id=user_id, conversation_id=conversation_id
+        ).child("messages")
 
         for message in messages:
             messages_ref.push(self._chat_message_to_dict(message))
@@ -382,9 +375,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         return self._conversation_index_root_ref.child(str(user_id))
 
     def _conversation_index_ref(self, *, user_id: UUID, conversation_id: UUID) -> Any:
-        return self._conversation_index_user_ref(user_id=user_id).child(
-            str(conversation_id)
-        )
+        return self._conversation_index_user_ref(user_id=user_id).child(str(conversation_id))
 
     def _user_ref(self, *, user_id: UUID) -> Any:
         return self._workflows_root_ref.child(str(user_id))
@@ -398,10 +389,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         user_id: UUID,
         conversation_id: UUID,
     ) -> str:
-        return (
-            f"{self._CONVERSATION_INDEX_ROOT.strip('/')}/"
-            f"{user_id}/{conversation_id}"
-        )
+        return f"{self._CONVERSATION_INDEX_ROOT.strip('/')}/" f"{user_id}/{conversation_id}"
 
     def _conversation_path(
         self,
@@ -511,7 +499,11 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             artifact_kind = item.get("kind")
             artifact_format = item.get("format")
 
-            if artifact_kind is None and artifact_format is None and item.get("type") in {"csv", "json"}:
+            if (
+                artifact_kind is None
+                and artifact_format is None
+                and item.get("type") in {"csv", "json"}
+            ):
                 artifact_kind = "data"
                 artifact_format = item.get("type")
 
@@ -522,9 +514,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
             try:
                 parsed_artifact_id = (
-                    artifact_id
-                    if isinstance(artifact_id, UUID)
-                    else UUID(str(artifact_id).strip())
+                    artifact_id if isinstance(artifact_id, UUID) else UUID(str(artifact_id).strip())
                 )
             except (TypeError, ValueError, AttributeError):
                 continue
@@ -571,8 +561,10 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             if fmt is not None and fmt not in {"csv", "json"}:
                 normalized_item.pop("format", None)
 
-            normalized_item["artifact_meta"] = FirebaseRealtimeWorkflowStateRepo._normalize_artifact_meta(
-                normalized_item.get("artifact_meta")
+            normalized_item["artifact_meta"] = (
+                FirebaseRealtimeWorkflowStateRepo._normalize_artifact_meta(
+                    normalized_item.get("artifact_meta")
+                )
             )
 
             normalized.append(normalized_item)

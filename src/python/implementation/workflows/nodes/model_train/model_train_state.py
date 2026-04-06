@@ -53,7 +53,7 @@ class ModelTrainState(State):
         if self.payload.trained_model_id is not None:
             return "DONE"
         return "PENDING"
-    
+
     def action(self) -> Action:
         return "NONE"
 

@@ -184,7 +184,10 @@ def test_plot_plan_schema_rejects_summary_type_mismatch() -> None:
     summary = DatasetSummaryModel.model_validate_json(_summary_json(_categorical_profile("label")))
     schema = PlotSpecsPlan.for_summary(summary)
 
-    with pytest.raises(ValidationError, match=r"declared quantitative but data_summary inferred kind is CATEGORICAL"):
+    with pytest.raises(
+        ValidationError,
+        match=r"declared quantitative but data_summary inferred kind is CATEGORICAL",
+    ):
         schema.model_validate(
             _plan_payload(
                 charts=[
@@ -414,13 +417,16 @@ def test_generate_specs_raises_runtime_error_after_retry_budget_is_exhausted() -
     )
     tool = PlotTool(llm=llm)
 
-    with pytest.raises(RuntimeError, match=r"Failed JSON schema=PlotSpecsPlanForFields_1 after 1 attempts"):
+    with pytest.raises(
+        RuntimeError, match=r"Failed JSON schema=PlotSpecsPlanForFields_1 after 1 attempts"
+    ):
         _ = tool.generate_specs(
             dataframe=pd.DataFrame([{"x": 1}]),
             data_summary=_summary_model(_numeric_profile("x")),
             user_intent="scatter",
             max_attempts=1,
         )
+
 
 def test_generate_specs_rejects_non_model_data_summary() -> None:
     tool = PlotTool(llm=_FakeLLMService(plans=[]))
@@ -451,7 +457,9 @@ def test_generate_specs_rejects_summary_header_not_in_dataframe() -> None:
         )
     )
 
-    with pytest.raises(ValueError, match=r"data_summary references unknown dataframe headers: \['y'\]"):
+    with pytest.raises(
+        ValueError, match=r"data_summary references unknown dataframe headers: \['y'\]"
+    ):
         _ = tool.generate_specs(
             dataframe=pd.DataFrame([{"x": 1}]),
             data_summary=_summary_model(_numeric_profile("x"), _numeric_profile("y")),
@@ -578,8 +586,18 @@ def test_generate_specs_preserves_existing_spec_title_over_plan_title() -> None:
     ("data_summary", "user_intent", "dataframe", "error_pattern"),
     [
         ("", "plot", pd.DataFrame([{"x": 1}]), r"profiles"),
-        (_summary_model(_numeric_profile("x")), "", pd.DataFrame([{"x": 1}]), r"user_intent must be non-empty"),
-        (_summary_model(_numeric_profile("x"), n_rows=0), "plot", pd.DataFrame(), r"dataframe must have at least one column"),
+        (
+            _summary_model(_numeric_profile("x")),
+            "",
+            pd.DataFrame([{"x": 1}]),
+            r"user_intent must be non-empty",
+        ),
+        (
+            _summary_model(_numeric_profile("x"), n_rows=0),
+            "plot",
+            pd.DataFrame(),
+            r"dataframe must have at least one column",
+        ),
     ],
 )
 def test_generate_specs_validates_required_inputs(

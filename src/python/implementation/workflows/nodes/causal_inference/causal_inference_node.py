@@ -149,7 +149,9 @@ class CausalInferenceNode(Node):
         messages_history: Sequence[ChatMessage] | None,
     ) -> State:
         if not isinstance(state, CausalInferenceState):
-            raise TypeError(f"{self.name}: expected CausalInferenceState, got {type(state).__name__}")
+            raise TypeError(
+                f"{self.name}: expected CausalInferenceState, got {type(state).__name__}"
+            )
 
         deps = CausalInferenceDeps.from_loaded(previous_state_dependencies)
         payload = _bind_payload(state=state)
@@ -866,7 +868,9 @@ def _normalize_ate_result(result: ATESuccess) -> dict[str, Any]:
     return {
         "contrast": dict(result.contrast),
         "estimate": estimate,
-        "interval": {"lower": lower, "upper": upper} if lower is not None and upper is not None else None,
+        "interval": (
+            {"lower": lower, "upper": upper} if lower is not None and upper is not None else None
+        ),
         "warnings": list(result.warnings or []),
         "meta": dict(result.meta or {}),
     }

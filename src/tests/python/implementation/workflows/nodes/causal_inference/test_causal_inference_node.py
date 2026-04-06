@@ -444,7 +444,12 @@ def test_causal_inference_state_roundtrip_stays_pending_and_does_not_store_dep_i
             assistant_message="Here is the latest result.",
             system_message="dataset graph handoff",
             message_artifact_refs=[
-                {"id": uuid4(), "kind": "data", "format": "json", "artifact_meta": {"kind": "chart_spec"}}
+                {
+                    "id": uuid4(),
+                    "kind": "data",
+                    "format": "json",
+                    "artifact_meta": {"kind": "chart_spec"},
+                }
             ],
             error_message="ignored",
         )
@@ -532,7 +537,9 @@ def test_causal_inference_initial_run_computes_and_caches_ate_without_copying_de
             ModelSelectionState.NAME: selection_state,
             ModelTrainState.NAME: train_state,
         },
-        messages_history=[ChatMessage(role="user", content="What is the average treatment effect?")],
+        messages_history=[
+            ChatMessage(role="user", content="What is the average treatment effect?")
+        ],
     )
 
     assert isinstance(result, CausalInferenceState)
@@ -576,7 +583,9 @@ def test_causal_inference_dataset_graph_handoff_stays_pending() -> None:
     )
     state = CausalInferenceState(
         CausalInferencePayloadModel(
-            ate_result_raw_json_str=json.dumps({"estimate": 0.5, "interval": {"lower": 0.1, "upper": 0.9}}),
+            ate_result_raw_json_str=json.dumps(
+                {"estimate": 0.5, "interval": {"lower": 0.1, "upper": 0.9}}
+            ),
             assistant_message="Old answer.",
         )
     )
@@ -591,12 +600,17 @@ def test_causal_inference_dataset_graph_handoff_stays_pending() -> None:
             ModelSelectionState.NAME: selection_state,
             ModelTrainState.NAME: train_state,
         },
-        messages_history=[ChatMessage(role="user", content="Show me a histogram of age by treatment.")],
+        messages_history=[
+            ChatMessage(role="user", content="Show me a histogram of age by treatment.")
+        ],
     )
 
     assert result.status() == "PENDING"
     assert result.error() is None
-    assert result.payload.assistant_message == "I will hand this chart request to dataset visualization."
+    assert (
+        result.payload.assistant_message
+        == "I will hand this chart request to dataset visualization."
+    )
     assert result.payload.system_message is not None
     handoff = json.loads(result.payload.system_message)
     assert handoff["handoff_target"] == "DATASET"
@@ -686,7 +700,11 @@ def test_causal_inference_cate_graph_uses_data_manipulation_and_plot_tools() -> 
             ModelSelectionState.NAME: selection_state,
             ModelTrainState.NAME: train_state,
         },
-        messages_history=[ChatMessage(role="user", content="Compare treatment effects between women and men as a graph.")],
+        messages_history=[
+            ChatMessage(
+                role="user", content="Compare treatment effects between women and men as a graph."
+            )
+        ],
     )
 
     assert result.status() == "PENDING"
@@ -750,7 +768,9 @@ def test_causal_inference_invalid_cate_selection_stays_pending() -> None:
             ModelSelectionState.NAME: selection_state,
             ModelTrainState.NAME: train_state,
         },
-        messages_history=[ChatMessage(role="user", content="Estimate treatment effects among women.")],
+        messages_history=[
+            ChatMessage(role="user", content="Estimate treatment effects among women.")
+        ],
     )
 
     assert result.status() == "PENDING"

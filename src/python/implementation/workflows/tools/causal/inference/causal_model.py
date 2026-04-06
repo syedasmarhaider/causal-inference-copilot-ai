@@ -17,6 +17,7 @@ CausalCommand = FitCommand | ATECommand | CATECommand
 
 CausalResult = FitResult | ATEResult | CATEResult
 
+
 class CausalModel(Protocol):
     def get_info(self) -> str: ...
     def get_command_info(self, command: CommandType) -> str | None: ...

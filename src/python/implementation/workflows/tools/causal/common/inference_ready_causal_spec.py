@@ -36,9 +36,7 @@ class InferenceReadyCausalSpec(BaseModel):
     @model_validator(mode="after")
     def _validate_consistency(self) -> InferenceReadyCausalSpec:
         covariates = [str(column).strip() for column in self.causal_spec.covariates]
-        effect_modifiers = [
-            str(column).strip() for column in self.causal_spec.effect_modifiers
-        ]
+        effect_modifiers = [str(column).strip() for column in self.causal_spec.effect_modifiers]
         expected_columns = set(covariates).union(effect_modifiers)
 
         if not expected_columns:
@@ -60,8 +58,7 @@ class InferenceReadyCausalSpec(BaseModel):
             )
 
         plan_columns = [
-            str(column_plan.column).strip()
-            for column_plan in self.transformation_plan.columns
+            str(column_plan.column).strip() for column_plan in self.transformation_plan.columns
         ]
         plan_roles = {
             str(column_plan.column).strip(): str(column_plan.role)
@@ -92,8 +89,7 @@ class InferenceReadyCausalSpec(BaseModel):
         missing_covariates = sorted(set(covariates) - set(plan_columns))
         if missing_covariates:
             raise ValueError(
-                "transformation_plan is missing causal_spec covariates: "
-                f"{missing_covariates}"
+                "transformation_plan is missing causal_spec covariates: " f"{missing_covariates}"
             )
 
         missing_effect_modifiers = sorted(set(effect_modifiers) - set(plan_columns))
@@ -190,13 +186,17 @@ class InferenceReadyCausalSpec(BaseModel):
         return self._classify_missing_columns(self.get_covariates_order())[_MISSINGNESS_UNHANDLED]
 
     def get_effect_modifiers_with_unhandled_missing(self) -> list[str]:
-        return self._classify_missing_columns(self.get_effect_modifiers_order())[_MISSINGNESS_UNHANDLED]
+        return self._classify_missing_columns(self.get_effect_modifiers_order())[
+            _MISSINGNESS_UNHANDLED
+        ]
 
     def get_covariates_with_forbidden_missing(self) -> list[str]:
         return self._classify_missing_columns(self.get_covariates_order())[_MISSINGNESS_FORBIDS]
 
     def get_effect_modifiers_with_forbidden_missing(self) -> list[str]:
-        return self._classify_missing_columns(self.get_effect_modifiers_order())[_MISSINGNESS_FORBIDS]
+        return self._classify_missing_columns(self.get_effect_modifiers_order())[
+            _MISSINGNESS_FORBIDS
+        ]
 
     def assert_covariates_missingness_is_allowed(self) -> None:
         self._assert_missingness_is_not_forbidden(
@@ -223,8 +223,7 @@ class InferenceReadyCausalSpec(BaseModel):
     def _classify_missing_columns(self, columns: list[str]) -> dict[str, list[str]]:
         profile_by_name = self._profile_by_name()
         plan_by_column = {
-            str(column_plan.column): column_plan
-            for column_plan in self.transformation_plan.columns
+            str(column_plan.column): column_plan for column_plan in self.transformation_plan.columns
         }
         classified: dict[str, list[str]] = {
             _MISSINGNESS_HANDLED: [],

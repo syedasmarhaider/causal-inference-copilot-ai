@@ -111,7 +111,9 @@ class CausalSpec(BaseModel):
 # ----------------------------
 def _fmt_loc(loc: Any) -> str:
     if isinstance(loc, (tuple, list)):
-        return ".".join(str(x) for x in loc) # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+        return ".".join(
+            str(x) for x in loc
+        )  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
     return str(loc)
 
 
@@ -191,7 +193,9 @@ def _validate_causal_spec_against_summary(
 
     missing = [column for column in referenced_columns if column not in set(summary_field_names)]
     if missing:
-        raise ValueError(f"causal spec references unknown dataset_summary columns: {sorted(set(missing))}")
+        raise ValueError(
+            f"causal spec references unknown dataset_summary columns: {sorted(set(missing))}"
+        )
 
     if treatment_col == outcome_col:
         raise ValueError("treatment and outcome must be different columns")
@@ -202,9 +206,7 @@ def _validate_causal_spec_against_summary(
 
     duplicate_effect_modifiers = _find_duplicates(effect_modifiers)
     if duplicate_effect_modifiers:
-        raise ValueError(
-            f"effect_modifiers contain duplicates: {duplicate_effect_modifiers}"
-        )
+        raise ValueError(f"effect_modifiers contain duplicates: {duplicate_effect_modifiers}")
 
     overlap = sorted(set(covariates).intersection(effect_modifiers))
     if overlap:
@@ -326,11 +328,13 @@ def _extract_summary_known_values(
 
 
 def _known_values_from_profile(
-    profile: NumericColumnProfileModel
-    | DatetimeColumnProfileModel
-    | BooleanColumnProfileModel
-    | CategoricalColumnProfileModel
-    | OtherColumnProfileModel,
+    profile: (
+        NumericColumnProfileModel
+        | DatetimeColumnProfileModel
+        | BooleanColumnProfileModel
+        | CategoricalColumnProfileModel
+        | OtherColumnProfileModel
+    ),
 ) -> set[str] | None:
     if isinstance(profile, BooleanColumnProfileModel):
         return {str(value) for value in profile.summary.counts.keys()}

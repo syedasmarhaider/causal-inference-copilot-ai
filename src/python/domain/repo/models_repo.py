@@ -38,7 +38,7 @@ class ModelsRepo(ABC):
         Must be idempotent for the same (user_id, conversation_id, model_id).
         """
 
-    @abstractmethod 
+    @abstractmethod
     def load_model(
         self,
         *,
@@ -58,7 +58,7 @@ class ModelsRepo(ABC):
         user_id: UUID,
         conversation_id: UUID,
         model_id: UUID,
-    ) -> bool: # pyright: ignore[reportReturnType]
+    ) -> bool:  # pyright: ignore[reportReturnType]
         """
         True iff the model artifact exists.
         """

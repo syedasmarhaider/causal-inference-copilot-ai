@@ -105,7 +105,9 @@ class DataManipulationTool(Tool):
     ) -> pd.DataFrame:
         normalized_table_name = table_name.strip()
         normalized_data_summary = data_summary.strip()
-        normalized_instructions = instructions.strip() if instructions and instructions.strip() else ""
+        normalized_instructions = (
+            instructions.strip() if instructions and instructions.strip() else ""
+        )
         effective_retry_attempts = retry_attempts
 
         if not normalized_table_name:
@@ -162,8 +164,7 @@ class DataManipulationTool(Tool):
     def _validate_table_name(table_name: str) -> None:
         if not _IDENT_RE.fullmatch(table_name):
             raise ValueError(
-                f"Invalid table_name '{table_name}'. "
-                "Allowed pattern: [A-Za-z_][A-Za-z0-9_]*"
+                f"Invalid table_name '{table_name}'. " "Allowed pattern: [A-Za-z_][A-Za-z0-9_]*"
             )
 
     @staticmethod

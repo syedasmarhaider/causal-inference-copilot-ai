@@ -33,7 +33,9 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import (
 class ValidationBackdoorReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    issues: list[ValidationIssueModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
+    issues: list[ValidationIssueModel] = Field(
+        default_factory=list
+    )  # pyright: ignore[reportUnknownVariableType]
     metrics: dict[str, Any] = Field(default_factory=dict)
 
     @property
@@ -82,7 +84,11 @@ class ValidationBackdoorTool(Tool):
             "covariates": covariates,
             "effect_modifiers": effect_modifiers,
             "eligible_plan_columns": eligible_cols,
-            "plan_columns": [] if transform_plan is None else [column_plan.column for column_plan in transform_plan.columns],
+            "plan_columns": (
+                []
+                if transform_plan is None
+                else [column_plan.column for column_plan in transform_plan.columns]
+            ),
         }
 
         issues: list[ValidationIssueModel] = []
@@ -319,7 +325,7 @@ def _validate_causal_spec(
                 fix_hint="Add observed confounders to causal_spec.covariates.",
             )
         )
-        
+
     elif causal_spec.experiment_type == "RCT" and not covariates:
         issues.append(
             _issue(
@@ -622,7 +628,11 @@ def _validate_transform_plan(
                 _issue(
                     severity="FAIL",
                     message="Transform plan was provided even though there are no covariates or effect modifiers to encode.",
-                    evidence={"plan_columns": [column_plan.column for column_plan in transform_plan.columns]},
+                    evidence={
+                        "plan_columns": [
+                            column_plan.column for column_plan in transform_plan.columns
+                        ]
+                    },
                     fix_hint="Drop the transform plan or add adjustment features if encoding is actually needed.",
                 )
             )
@@ -990,7 +1000,11 @@ def _validate_mapping_encoding(
     issues: list[ValidationIssueModel] = []
 
     observed_keys = {str(value) for value in series.dropna().tolist()}
-    if missing_mode == "impute_token" and missing_token is not None and missing_token not in allowed_keys:
+    if (
+        missing_mode == "impute_token"
+        and missing_token is not None
+        and missing_token not in allowed_keys
+    ):
         issues.append(
             _issue(
                 severity="FAIL",
@@ -1080,7 +1094,9 @@ def _maybe_issue_for_single_arm_levels(
     control_key = _normalize_discrete_value(treatment_spec.control)
 
     counts_by_level: dict[str, dict[str, int]] = {}
-    for treatment_value, raw_value in dataframe[[treatment_col, column]].dropna().itertuples(index=False):
+    for treatment_value, raw_value in (
+        dataframe[[treatment_col, column]].dropna().itertuples(index=False)
+    ):
         treatment_key = _normalize_discrete_value(treatment_value)
         if treatment_key not in {treated_key, control_key}:
             continue
@@ -1137,14 +1153,21 @@ def _maybe_issue_for_low_cardinality_numeric(
     inferred_kind: str,
 ) -> list[ValidationIssueModel]:
     issues: list[ValidationIssueModel] = []
-    if inferred_kind != "NUMERIC" or preset not in {"num_standard", "num_minmax", "num_log1p", "passthrough"}:
+    if inferred_kind != "NUMERIC" or preset not in {
+        "num_standard",
+        "num_minmax",
+        "num_log1p",
+        "passthrough",
+    }:
         return issues
 
     non_missing = series.dropna()
     if non_missing.empty:
         return issues
 
-    distinct_values = sorted({float(value) for value in pd.to_numeric(non_missing, errors="coerce").dropna().tolist()})
+    distinct_values = sorted(
+        {float(value) for value in pd.to_numeric(non_missing, errors="coerce").dropna().tolist()}
+    )
     distinct_count = len(distinct_values)
     if distinct_count > 20:
         return issues
@@ -1194,7 +1217,11 @@ def _infer_kind_from_series(series: pd.Series) -> str:
         return "NUMERIC"
     if ptypes.is_datetime64_any_dtype(series):
         return "DATETIME"
-    if ptypes.is_object_dtype(series) or ptypes.is_string_dtype(series) or ptypes.is_categorical_dtype(series):
+    if (
+        ptypes.is_object_dtype(series)
+        or ptypes.is_string_dtype(series)
+        or ptypes.is_categorical_dtype(series)
+    ):
         return "CATEGORICAL"
     return "OTHER"
 

@@ -70,6 +70,7 @@ def _to_jsonable(value: Any) -> Any:
         return value.item()
     return value
 
+
 def _safe_required_init_keys(estimator_cls: Any, *, init_map: dict[str, Any]) -> list[str]:
     keys = list(required_init_keys(estimator_cls, init_map=init_map))
     return [k for k in keys if k not in ("args", "kwargs")]
@@ -413,7 +414,9 @@ class _BaseDMLAdapter(CausalModel):
             self._validate_ate_x(X)
 
             item: dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
-            item["ate"] = est.ate(X=X, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+            item["ate"] = est.ate(
+                X=X, T0=t0, T1=t1
+            )  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
 
             try:
                 ate_interval = est.ate_interval(
@@ -432,7 +435,9 @@ class _BaseDMLAdapter(CausalModel):
                 item["ate_interval"] = None
 
             try:
-                inf = est.ate_inference(X=X, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+                inf = est.ate_inference(
+                    X=X, T0=t0, T1=t1
+                )  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
                 if inf is None:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
                     item["ate_inference"] = None
@@ -532,7 +537,9 @@ class _BaseDMLAdapter(CausalModel):
 
             effects: dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
             try:
-                effects["cate"] = est.effect(X_query, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+                effects["cate"] = est.effect(
+                    X_query, T0=t0, T1=t1
+                )  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
             except Exception as e:
                 return CommandFailure(
                     run_id=command.run_id,
@@ -564,7 +571,9 @@ class _BaseDMLAdapter(CausalModel):
                 effects["cate_interval"] = None
 
             try:
-                inf = est.effect_inference(X_query, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+                inf = est.effect_inference(
+                    X_query, T0=t0, T1=t1
+                )  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
                 if inf is None:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_inference returned None")
                     effects["cate_inference"] = None

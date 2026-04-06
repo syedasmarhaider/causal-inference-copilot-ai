@@ -24,10 +24,11 @@ class WorkflowStateRepo(ABC):
     @abstractmethod
     def get_conversation_ids_for_user(self, *, user_id: UUID) -> Sequence[UUID]:
         raise NotImplementedError
-    
-    
+
     @abstractmethod
-    def is_conversation_id_for_user_id_exists(self, *, user_id: UUID, conversation_id: UUID) -> bool:
+    def is_conversation_id_for_user_id_exists(
+        self, *, user_id: UUID, conversation_id: UUID
+    ) -> bool:
         raise NotImplementedError
 
     @abstractmethod
@@ -35,7 +36,9 @@ class WorkflowStateRepo(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def store_active_state_name(self, *, user_id: UUID, conversation_id: UUID, state_name: str) -> None:
+    def store_active_state_name(
+        self, *, user_id: UUID, conversation_id: UUID, state_name: str
+    ) -> None:
         raise NotImplementedError
 
     # -----------------------
@@ -62,11 +65,13 @@ class WorkflowStateRepo(ABC):
     @abstractmethod
     def append_message(self, *, user_id: UUID, conversation_id: UUID, message: ChatMessage) -> None:
         raise NotImplementedError
-    
+
     @abstractmethod
-    def append_messages(self, *, user_id: UUID, conversation_id: UUID, messages: Sequence[ChatMessage]) -> None:
+    def append_messages(
+        self, *, user_id: UUID, conversation_id: UUID, messages: Sequence[ChatMessage]
+    ) -> None:
         raise NotImplementedError
-    
+
     @abstractmethod
     def load_message_history(
         self,

@@ -85,7 +85,9 @@ class ModelSelectionNode(Node):
         _ = user_id
         _ = conversation_id
         if not isinstance(state, ModelSelectionState):
-            raise TypeError(f"{self.name}: expected ModelSelectionState, got {type(state).__name__}")
+            raise TypeError(
+                f"{self.name}: expected ModelSelectionState, got {type(state).__name__}"
+            )
 
         deps = ModelSelectionDeps.from_loaded(previous_state_dependencies)
         history = list(messages_history[-5:]) if messages_history else None
@@ -147,7 +149,10 @@ class ModelSelectionNode(Node):
             system_prompt=MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
             user_prompt=MODEL_SELECTION_NEGOTIATOR_USER_PROMPT_TEMPLATE.format(
                 recommended_options_json=_dumps(
-                    [recommendation.model_dump(mode="json") for recommendation in state.payload.recommendations]
+                    [
+                        recommendation.model_dump(mode="json")
+                        for recommendation in state.payload.recommendations
+                    ]
                 ),
                 selection_context_json=_dumps(selection_context),
             ),
@@ -219,9 +224,11 @@ class ModelSelectionNode(Node):
                             recommendation.model_dump(mode="json")
                             for recommendation in state.payload.recommendations
                         ],
-                        "confirmed_model_selection": None
-                        if state.payload.confirmed_model_selection is None
-                        else state.payload.confirmed_model_selection.model_dump(mode="json"),
+                        "confirmed_model_selection": (
+                            None
+                            if state.payload.confirmed_model_selection is None
+                            else state.payload.confirmed_model_selection.model_dump(mode="json")
+                        ),
                         "selection_context": dict(selection_context),
                         "latest_user_message": latest_user_message,
                     }
@@ -321,10 +328,7 @@ def _build_structured_recommendations(
     shortlist: _ModelShortlist,
     model_catalog: Sequence[Mapping[str, str]],
 ) -> list[ModelRecommendationModel] | None:
-    by_fqcn = {
-        str(entry["estimator_fqcn"]): str(entry["display_label"])
-        for entry in model_catalog
-    }
+    by_fqcn = {str(entry["estimator_fqcn"]): str(entry["display_label"]) for entry in model_catalog}
     recommendations: list[ModelRecommendationModel] = []
     for item in shortlist.recommendations:
         display_label = by_fqcn.get(item.estimator_fqcn)
@@ -357,5 +361,7 @@ def _format_shortlist_message(
         if recommendation.tradeoffs:
             lines.append(f"- Trade-offs: {recommendation.tradeoffs}")
         lines.append("")
-    lines.append("Tell me which option fits your clinical goal best, or what tradeoff matters most.")
+    lines.append(
+        "Tell me which option fits your clinical goal best, or what tradeoff matters most."
+    )
     return "\n".join(lines).strip()

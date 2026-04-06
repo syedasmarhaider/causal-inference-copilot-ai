@@ -24,6 +24,7 @@ _MESSAGES_HISTORY_LIMIT = 15
 
 # TODO: add distributed tnx or locks later
 
+
 @dataclass(frozen=True)
 class WorkflowResponse:
     _current_state: State
@@ -43,26 +44,26 @@ class WorkflowResponse:
         if self._current_stage_name_override is not None:
             return self._current_stage_name_override
         return self._current_state.name()
-    
+
     @property
     def current_stage_status(self) -> Status:
         if self._current_stage_status_override is not None:
             return self._current_stage_status_override
         return self._current_state.status()
-    
+
     @property
     def action(self) -> Action:
         if self._action_override is not None:
             return self._action_override
         return self._current_state.action()
-    
+
     @property
     def artifact_refs(self) -> Sequence[ArtifactRef] | None:
         artifact_refs: list[ArtifactRef] = []
         for message in self.messages:
             artifact_refs.extend(list(message.artifact_refs or ()))
         return artifact_refs or None
-    
+
 
 ArtifactResponse = DataflowArtifactResponse
 
@@ -225,11 +226,12 @@ class WorkflowApp:
             deleted_states_count=len(state_names),
         )
 
-    def handle(self, 
-               user_id: UUID,
-               conversation_id: UUID,
-               user_message: str | None,
-               ) -> WorkflowResponse:
+    def handle(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        user_message: str | None,
+    ) -> WorkflowResponse:
         self._log.debug(
             "workflow handle requested",
             user_id=user_id,
@@ -304,7 +306,7 @@ class WorkflowApp:
                     _current_stage_status_override="PENDING",
                     _action_override="NEEDS_INPUT",
                 )
-                                
+
             state_name_to_run = decision.state_name
             state_to_run = self._load_or_init_state(
                 user_id=user_id,
@@ -351,9 +353,7 @@ class WorkflowApp:
             # Running the currently active frozen state in place rewrites that state's payload, so the
             # response should reflect the newly stored status even though the active pointer does not move.
             active_state_status_after_run = new_state_status
-        
-        
-             
+
         if new_state.status() == "DONE":
             new_state.set_status_freez()
             new_state_status = new_state.status()
@@ -401,7 +401,7 @@ class WorkflowApp:
                 state_name=new_state_name,
                 state_status=new_state_status,
                 assistant_messages_count=len(_assistant_messages_for_user(new_state)),
-            )    
+            )
 
         return WorkflowResponse(
             _current_state=new_state,
@@ -454,6 +454,7 @@ class WorkflowApp:
             if dep_state is not None:
                 deps[dep_name] = dep_state
         return deps
+
 
 def _state_messages(state: State) -> Sequence[ChatMessage]:
     value = state.messages()

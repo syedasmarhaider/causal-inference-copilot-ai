@@ -124,10 +124,10 @@ class LLMAssistedRouterRouter(Router):
 
         # TODO: replace this temporary router-level shortcut once dataset/dashboard revert flows
         # become fully explicit and no longer rely on the magic revert_data_changes message.
-        if (
-            latest_user_message == prev_state_revert_message
-            and current_name in {DatasetState.NAME, ProtocolDiscussionState.NAME}
-        ):
+        if latest_user_message == prev_state_revert_message and current_name in {
+            DatasetState.NAME,
+            ProtocolDiscussionState.NAME,
+        }:
             return NextDecision(state_name=DatasetState.NAME)
 
         if status in ("DONE", "FREEZED"):
@@ -156,7 +156,9 @@ class LLMAssistedRouterRouter(Router):
         current_state_name: str,
         recent_messages: Sequence[ChatMessage],
     ) -> NextDecision:
-        candidates = _pending_candidates(current_state_name=current_state_name, callable_map=self._callable_map)
+        candidates = _pending_candidates(
+            current_state_name=current_state_name, callable_map=self._callable_map
+        )
 
         current_state_context = _build_current_state_context(
             current_state_name=current_state_name,
@@ -200,7 +202,7 @@ class LLMAssistedRouterRouter(Router):
                 router_confirmation_message_for_user=decision.router_confirmation_message_for_user
                 or "Sorry I couldn't understand the intended question. Please clarify what you want to do.",
             )
-            
+
         if decision.state_name not in candidates:
             return NextDecision(
                 state_name=None,
@@ -551,9 +553,7 @@ def recoverable_states_map() -> Mapping[str, Sequence[str]]:
             DatasetState.NAME,
             ProtocolDiscussionState.NAME,
         ),
-        ModelSelectionState.NAME: (
-            ProtocolDiscussionState.NAME,
-        ),
+        ModelSelectionState.NAME: (ProtocolDiscussionState.NAME,),
         ModelTrainState.NAME: (
             ProtocolDiscussionState.NAME,
             ModelSelectionState.NAME,

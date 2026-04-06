@@ -41,13 +41,7 @@ _MAX_TRAINING_ATTEMPTS = 2
 class ModelTrainNode(Node):
     NAME: ClassVar[str] = ModelTrainState.NAME
 
-    def __init__(
-        self,
-        *,
-        llm: LLMService,
-        data_repo: DataRepo,
-        tool_factory: ToolFactory
-    ) -> None:
+    def __init__(self, *, llm: LLMService, data_repo: DataRepo, tool_factory: ToolFactory) -> None:
         self._llm = llm
         self._data_repo = data_repo
         factory_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
@@ -249,8 +243,7 @@ def _bind_payload(
     current_signature = _training_signature(deps=deps)
 
     reset_required = (
-        payload.dataset_id != deps.dataset_id
-        or payload.training_signature != current_signature
+        payload.dataset_id != deps.dataset_id or payload.training_signature != current_signature
     )
 
     updates: dict[str, Any] = {

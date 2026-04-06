@@ -127,6 +127,7 @@ def get_questions() -> list[str]:
         "no post-treatment adjustment.",
     ]
 
+
 def initial_user_message() -> str:
     return (
         "Let’s define the protocol carefully from the current dataset. "

@@ -30,6 +30,7 @@ class DatasetPayloadModel(BaseModel):
     freezed: bool = False
     user_message: str | None = None
 
+
 class DatasetState(State):
     INIT_DATA_ID = uuid.UUID("486f4975-6cd9-4261-a122-e6b0fc46462d")
     NAME: ClassVar[str] = "DATASET"
@@ -49,7 +50,7 @@ class DatasetState(State):
 
     def name(self) -> str:
         return self.NAME
-    
+
     def get_working_dataset_info(self) -> WorkingDatasetInfo | None:
         if not self.payload.dataset_iterations or len(self.payload.dataset_iterations) == 0:
             return None

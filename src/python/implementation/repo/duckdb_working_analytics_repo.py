@@ -101,16 +101,13 @@ class DuckDBAnalyticsRepo(AnalyticsRepo):
         duplicate_columns = dataframe.columns[dataframe.columns.duplicated()].tolist()
         if duplicate_columns:
             duplicate_columns = [str(col) for col in duplicate_columns]
-            raise ValueError(
-                f"dataframe has duplicate column names: {duplicate_columns}"
-            )
+            raise ValueError(f"dataframe has duplicate column names: {duplicate_columns}")
 
     @staticmethod
     def _validate_identifier(value: str) -> None:
         if not _IDENT_RE.fullmatch(value):
             raise ValueError(
-                f"Invalid table_name '{value}'. "
-                "Allowed pattern: [A-Za-z_][A-Za-z0-9_]*"
+                f"Invalid table_name '{value}'. " "Allowed pattern: [A-Za-z_][A-Za-z0-9_]*"
             )
 
     def _register_dataframe_as_table(

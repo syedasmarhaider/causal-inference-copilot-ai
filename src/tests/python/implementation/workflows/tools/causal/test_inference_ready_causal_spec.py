@@ -150,9 +150,7 @@ def test_valid_wrapper_derives_orders_from_transformation_plan() -> None:
 def test_valid_wrapper_allows_only_covariates() -> None:
     wrapper = InferenceReadyCausalSpec(
         causal_spec=_build_causal_spec(covariates=["age"], effect_modifiers=[]),
-        transformation_plan=_build_transform_plan(
-            columns=[_num_standard("age", "covariate")]
-        ),
+        transformation_plan=_build_transform_plan(columns=[_num_standard("age", "covariate")]),
         data_summary=_build_data_summary(include_income=False),
     )
 
@@ -281,9 +279,7 @@ def test_wrapper_rejects_empty_adjustment_set() -> None:
     ):
         InferenceReadyCausalSpec(
             causal_spec=_build_causal_spec(covariates=[], effect_modifiers=[]),
-            transformation_plan=_build_transform_plan(
-                columns=[_num_standard("age", "covariate")]
-            ),
+            transformation_plan=_build_transform_plan(columns=[_num_standard("age", "covariate")]),
             data_summary=_build_data_summary(include_income=False),
         )
 
@@ -305,7 +301,9 @@ def test_is_covariates_missing_returns_true_when_any_covariate_profile_has_missi
 
 
 def test_wrapper_rejects_data_summary_missing_referenced_columns() -> None:
-    with pytest.raises(ValidationError, match=r"data_summary is missing causal_spec/transformation_plan columns"):
+    with pytest.raises(
+        ValidationError, match=r"data_summary is missing causal_spec/transformation_plan columns"
+    ):
         InferenceReadyCausalSpec(
             causal_spec=_build_causal_spec(),
             transformation_plan=_build_transform_plan(

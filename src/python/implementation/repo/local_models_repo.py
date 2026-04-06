@@ -126,13 +126,7 @@ class LocalFileModelsRepo(ModelsRepo):
         user_id: UUID,
         conversation_id: UUID,
     ) -> Path:
-        return (
-            self._root_dir
-            / "users"
-            / str(user_id)
-            / "conversations"
-            / str(conversation_id)
-        )
+        return self._root_dir / "users" / str(user_id) / "conversations" / str(conversation_id)
 
     def _models_dir(
         self,
@@ -155,13 +149,10 @@ class LocalFileModelsRepo(ModelsRepo):
         conversation_id: UUID,
         model_id: UUID,
     ) -> Path:
-        return (
-            self._models_dir(
-                user_id=user_id,
-                conversation_id=conversation_id,
-            )
-            / str(model_id)
-        )
+        return self._models_dir(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        ) / str(model_id)
 
     def _record_path(
         self,
@@ -207,19 +198,13 @@ class LocalFileModelsRepo(ModelsRepo):
         # Backward/defensive compatibility if something dict-like got stored.
         if isinstance(raw, dict):
             if "model" not in raw or "metadata" not in raw:
-                raise ValueError(
-                    f"stored model record at {path} is missing required keys"
-                )
+                raise ValueError(f"stored model record at {path} is missing required keys")
 
             metadata = raw["metadata"]
             if not isinstance(metadata, dict):
-                raise ValueError(
-                    f"stored metadata at {path} must deserialize to dict"
-                )
+                raise ValueError(f"stored metadata at {path} must deserialize to dict")
             if not all(isinstance(key, str) for key in metadata):
-                raise ValueError(
-                    f"stored metadata at {path} must have string keys"
-                )
+                raise ValueError(f"stored metadata at {path} must have string keys")
 
             return _StoredModelPayload(
                 model=raw["model"],
@@ -227,8 +212,7 @@ class LocalFileModelsRepo(ModelsRepo):
             )
 
         raise ValueError(
-            f"stored model record at {path} has unsupported type: "
-            f"{type(raw).__name__}"
+            f"stored model record at {path} has unsupported type: " f"{type(raw).__name__}"
         )
 
     # -------------------------------------------------------------------------

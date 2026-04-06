@@ -66,7 +66,7 @@ class ModelSelectionState(State):
             return "DONE"
 
         return "PENDING"
-    
+
     def action(self) -> Action:
         if self.status() == "PENDING":
             return "NEEDS_INPUT"
@@ -76,7 +76,9 @@ class ModelSelectionState(State):
         if self.status() == "DONE":
             self.payload.freezed = True
         else:
-            raise ValueError(f"Can only freeze when status is DONE, current status: {self.status()!r}")
+            raise ValueError(
+                f"Can only freeze when status is DONE, current status: {self.status()!r}"
+            )
 
     def set_status_pending(self) -> None:
         if self.payload.error_message is not None:

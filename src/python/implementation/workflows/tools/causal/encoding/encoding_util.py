@@ -20,15 +20,22 @@ from python.implementation.workflows.tools.causal.encoding.encoding_plan import 
 
 class EncodingUtil:
     NAME: ClassVar[str] = "ENCODING"
-    def compile(self,plan: TransformPlan, *, effect_modifiers_order: Sequence[str], covariates_order: Sequence[str], dense_output: bool = True) -> CompiledTransformers:
+
+    def compile(
+        self,
+        plan: TransformPlan,
+        *,
+        effect_modifiers_order: Sequence[str],
+        covariates_order: Sequence[str],
+        dense_output: bool = True,
+    ) -> CompiledTransformers:
         return compile_plan_to_transformers(
             plan=plan,
             effect_modifiers=effect_modifiers_order,
             covariates=covariates_order,
             dense_output=dense_output,
             require_full_coverage=True,
-        )  
-
+        )
 
 
 # =============================================================================
@@ -43,10 +50,13 @@ class CompiledTransformers:
              [effect_modifiers|covariates] matrix (n, dx+dw)
              ordered as (effect_modifiers_order + covariates_order)
     """
+
     pre_X: ColumnTransformer | None
     pre_XW: ColumnTransformer
 
+
 CTTransformer = Union[BaseEstimator, Literal["passthrough"], Literal["drop"]]
+
 
 # =============================================================================
 # Helpers: sklearn-compat OneHotEncoder (version differences) + sparse/dense control
@@ -192,6 +202,7 @@ class MinMaxEpsScaler(BaseEstimator, TransformerMixin):
     Min-max scaling with epsilon-clamped denominator to avoid divide-by-zero explosions
     for constant columns. Works on dense arrays (n,k).
     """
+
     def __init__(self, *, eps: float = 1e-12):
         self.eps = float(eps)
         self.data_min_: np.ndarray | None = None
@@ -268,7 +279,9 @@ class BinaryMapTransformer(BaseEstimator, TransformerMixin):
         if bool(unknown_mask.any()):
             if not self.allow_unknown:
                 sample = s.loc[unknown_mask].astype(str).head(25).tolist()
-                raise ValueError(f"map_binary: unknown categories found (allow_unknown=False). sample={sample}")
+                raise ValueError(
+                    f"map_binary: unknown categories found (allow_unknown=False). sample={sample}"
+                )
             fill = float(self.unknown_value) if self.unknown_value is not None else np.nan
             out.loc[unknown_mask] = fill
 
@@ -310,7 +323,9 @@ class OrdinalMapTransformer(BaseEstimator, TransformerMixin):
             raise ValueError("map_ordinal: 'order' must not contain duplicates.")
         if self.missing == "impute_token":
             if self.missing_token is None or self.token_position is None:
-                raise ValueError("map_ordinal: missing_token and token_position required when missing='impute_token'.")
+                raise ValueError(
+                    "map_ordinal: missing_token and token_position required when missing='impute_token'."
+                )
         if (not self.allow_unknown) and (self.unknown_value is not None):
             raise ValueError("map_ordinal: unknown_value must be null when allow_unknown=False.")
         return self
@@ -345,7 +360,9 @@ class OrdinalMapTransformer(BaseEstimator, TransformerMixin):
         if bool(unknown_mask.any()):
             if not self.allow_unknown:
                 sample = s.loc[unknown_mask].astype(str).head(25).tolist()
-                raise ValueError(f"map_ordinal: unknown categories found (allow_unknown=False). sample={sample}")
+                raise ValueError(
+                    f"map_ordinal: unknown categories found (allow_unknown=False). sample={sample}"
+                )
             fill = float(self.unknown_value) if self.unknown_value is not None else np.nan
             out.loc[unknown_mask] = fill
 
@@ -483,7 +500,24 @@ def compile_plan_to_transformers(
             steps: list[tuple[str, BaseEstimator]] = []
             if enc.missing == "error":
                 steps.append(("check_missing", RaiseIfMissing()))
-                steps.append((
+                steps.append(
+                    (
+                        "ohe",
+                        _make_one_hot_encoder(
+                            handle_unknown=enc.handle_unknown,
+                            drop_first=enc.drop_first,
+                            max_categories=enc.max_categories,
+                            dense_output=dense_output,
+                        ),
+                    )
+                )
+                return Pipeline(steps)
+
+            # Ensure missing always becomes a known category
+            token = "__NA__" if enc.missing == "dummy_na" else enc.missing_token
+            steps.append(("impute", SimpleImputer(strategy="constant", fill_value=token)))
+            steps.append(
+                (
                     "ohe",
                     _make_one_hot_encoder(
                         handle_unknown=enc.handle_unknown,
@@ -491,34 +525,31 @@ def compile_plan_to_transformers(
                         max_categories=enc.max_categories,
                         dense_output=dense_output,
                     ),
-                ))
-                return Pipeline(steps)
-
-            # Ensure missing always becomes a known category
-            token = "__NA__" if enc.missing == "dummy_na" else enc.missing_token
-            steps.append(("impute", SimpleImputer(strategy="constant", fill_value=token)))
-            steps.append((
-                "ohe",
-                _make_one_hot_encoder(
-                    handle_unknown=enc.handle_unknown,
-                    drop_first=enc.drop_first,
-                    max_categories=enc.max_categories,
-                    dense_output=dense_output,
-                ),
-            ))
+                )
+            )
             return Pipeline(steps)
 
         if preset == "num_standard":
-            return Pipeline([
-                ("impute", SimpleImputer(strategy=enc.impute, add_indicator=enc.add_missing_indicator)),
-                ("scale", StandardScaler()),
-            ])
+            return Pipeline(
+                [
+                    (
+                        "impute",
+                        SimpleImputer(strategy=enc.impute, add_indicator=enc.add_missing_indicator),
+                    ),
+                    ("scale", StandardScaler()),
+                ]
+            )
 
         if preset == "num_minmax":
-            return Pipeline([
-                ("impute", SimpleImputer(strategy=enc.impute, add_indicator=enc.add_missing_indicator)),
-                ("scale", MinMaxEpsScaler(eps=enc.eps)),
-            ])
+            return Pipeline(
+                [
+                    (
+                        "impute",
+                        SimpleImputer(strategy=enc.impute, add_indicator=enc.add_missing_indicator),
+                    ),
+                    ("scale", MinMaxEpsScaler(eps=enc.eps)),
+                ]
+            )
 
         if preset == "num_log1p":
             return NumLog1pTransformer(
@@ -589,25 +620,35 @@ def compile_plan_to_transformers(
         xw_trs.append((col, _compile(cp.encoding), [xw_index[col]]))
 
     # Enforce “effect_modifier or covariate always”
-    if not any(cp.role == "effect_modifier" for cp in plan.columns) and not any(cp.role == "covariate" for cp in plan.columns):
+    if not any(cp.role == "effect_modifier" for cp in plan.columns) and not any(
+        cp.role == "covariate" for cp in plan.columns
+    ):
         raise ValueError(
             "At least one column must have role 'effect_modifier' or 'covariate' in the plan."
         )
-    
+
     # Ensure we have at least one non-dropped transformer in each active view
     def _has_non_drop(trs: list[tuple[str, CTTransformer, list[int]]]) -> bool:
         return any(t[1] != "drop" for t in trs)
 
     if not xw_trs:
-        raise ValueError("No effect_modifier/covariate transformers compiled (empty effect_modifiers+covariates?).")
+        raise ValueError(
+            "No effect_modifier/covariate transformers compiled (empty effect_modifiers+covariates?)."
+        )
     if not _has_non_drop(xw_trs):
-        raise ValueError("All effect_modifier/covariate columns are dropped. At least one column must be kept.")
+        raise ValueError(
+            "All effect_modifier/covariate columns are dropped. At least one column must be kept."
+        )
 
     if effect_modifiers_l:
         if not x_trs:
-            raise ValueError("No effect_modifier transformers compiled (empty effect_modifiers_order?).")
+            raise ValueError(
+                "No effect_modifier transformers compiled (empty effect_modifiers_order?)."
+            )
         if not _has_non_drop(x_trs):
-            raise ValueError("All effect_modifier columns are dropped. At least one effect_modifier column must be kept.")
+            raise ValueError(
+                "All effect_modifier columns are dropped. At least one effect_modifier column must be kept."
+            )
 
     # If you requested dense output, force dense aggregation.
     # If not, allow sparse when beneficial (especially for one-hot).
@@ -632,4 +673,4 @@ def compile_plan_to_transformers(
     return CompiledTransformers(
         pre_X=pre_X,
         pre_XW=pre_XW,
-    )  
+    )

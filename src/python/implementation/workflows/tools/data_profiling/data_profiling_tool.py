@@ -62,15 +62,16 @@ class DatasetProfilingError(RuntimeError):
 # =============================================================================
 class DatasetProfilingTool(Tool):
     NAME: ClassVar[str] = "DATA_PROFILING"
+
     def get_tool_name(self) -> str:
         return self.NAME
-    
+
     def get_tool_info(self) -> str:
         return (
             "Tool for profiling tabular datasets. Analyzes each column to determine data types, missingness, distinct counts, and provides summaries such as numeric stats, category frequencies, and sample distinct values. "
             "Designed to handle a variety of DataFrame-like inputs with robust error handling and informative reporting."
         )
-    
+
     def extract_dataset_summary(
         self,
         df: pd.DataFrame,
@@ -189,7 +190,8 @@ class DatasetProfilingTool(Tool):
 
         return DatasetSummaryModel(n_rows=n_rows, profiles=profiles)
 
-    def dataset_summary_to_json(self,
+    def dataset_summary_to_json(
+        self,
         summary: DatasetSummaryModel,
         *,
         indent: int | None = None,
@@ -204,6 +206,7 @@ class DatasetProfilingTool(Tool):
 # =============================================================================
 # Internals (logic preserved from your reference)
 # =============================================================================
+
 
 def _validate_params(*, max_categories: int, sample_distinct: int) -> None:
     if max_categories <= 0:
@@ -468,7 +471,9 @@ def _categorical_summary(series: Any, *, max_categories: int) -> CategoricalSumm
             items = sorted(freq.items(), key=lambda kv: kv[1], reverse=True)
 
         top_items = items[:max_categories]
-        other_count = sum(int(v) for _, v in items[max_categories:]) if len(items) > max_categories else 0
+        other_count = (
+            sum(int(v) for _, v in items[max_categories:]) if len(items) > max_categories else 0
+        )
 
         top = [CategoryCountModel(value=str(k), count=int(v)) for k, v in top_items]
         return CategoricalSummaryModel(top_categories=top, other_count=int(other_count))
@@ -485,11 +490,17 @@ def _categorical_summary(series: Any, *, max_categories: int) -> CategoricalSumm
 
 def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummaryModel:
     try:
-        s = series.dropna() if hasattr(series, "dropna") else [x for x in list(series) if x is not None]
+        s = (
+            series.dropna()
+            if hasattr(series, "dropna")
+            else [x for x in list(series) if x is not None]
+        )
 
         if hasattr(s, "unique"):
             try:
-                uniq: list[Any] = list(s.unique()) # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownArgumentType]
+                uniq: list[Any] = list(
+                    s.unique()
+                )  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownArgumentType]
                 distinct = [str(x) for x in uniq[:sample_distinct]]
             except Exception:
                 seen: list[str] = []
@@ -520,7 +531,8 @@ def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummaryModel:
                 evidence={"error": repr(e)},
             )
         ) from e
-        
+
+
 def _infer_kind(
     series: pd.Series,
     *,

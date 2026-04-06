@@ -95,7 +95,9 @@ def _causal_spec(
                 "unit": "score",
             },
             "covariates": covariates if covariates is not None else ["age", "income"],
-            "effect_modifiers": effect_modifiers if effect_modifiers is not None else ["segment_score"],
+            "effect_modifiers": (
+                effect_modifiers if effect_modifiers is not None else ["segment_score"]
+            ),
             "experiment_type": "OBSERVATIONAL",
         }
     )
@@ -149,7 +151,16 @@ def _df(
             ],
             "outcome": [1.0, 2.2, 1.3, 2.6, 1.1, 2.9, 1.4, 3.0],
             "age": [32.0, 45.0, 37.0, 51.0, 43.0, 39.0, 58.0, 49.0],
-            "income": [55_000.0, 63_000.0, 58_000.0, 67_000.0, 61_000.0, 70_000.0, 73_000.0, 69_000.0],
+            "income": [
+                55_000.0,
+                63_000.0,
+                58_000.0,
+                67_000.0,
+                61_000.0,
+                70_000.0,
+                73_000.0,
+                69_000.0,
+            ],
             "segment_score": [0.1, 0.8, 0.2, 0.7, 0.4, 0.9, 0.3, 0.6],
             "risk_score": [0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8, 0.1],
         }
@@ -260,30 +271,44 @@ class _RecordingFeaturizedEstimator:
             "allow_missing": allow_missing,
         }
 
-    def fit(self, Y, T, X=None, W=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def fit(
+        self, Y, T, X=None, W=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         type(self).last_fit_payload = {"Y": Y, "T": T, "X": X, "W": W}
         return self
 
-    def ate(self, X=None, T0=None, T1=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def ate(
+        self, X=None, T0=None, T1=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return 1.25
 
-    def ate_interval(self, X=None, T0=None, T1=None, alpha=0.05):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def ate_interval(
+        self, X=None, T0=None, T1=None, alpha=0.05
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return (1.0, 1.5)
 
-    def ate_inference(self, X=None, T0=None, T1=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def ate_inference(
+        self, X=None, T0=None, T1=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return None
 
-    def effect(self, X, T0=None, T1=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def effect(
+        self, X, T0=None, T1=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         stored_x = X.copy() if isinstance(X, pd.DataFrame) else X
         type(self).last_effect_payload = {"X": stored_x, "T0": T0, "T1": T1}
         rows = int(getattr(X, "shape", [0])[0])
         return np.ones(rows, dtype=float)
 
-    def effect_interval(self, X, T0=None, T1=None, alpha=0.05):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def effect_interval(
+        self, X, T0=None, T1=None, alpha=0.05
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         rows = int(getattr(X, "shape", [0])[0])
         return (np.zeros(rows, dtype=float), np.ones(rows, dtype=float))
 
-    def effect_inference(self, X, T0=None, T1=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def effect_inference(
+        self, X, T0=None, T1=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return None
 
 
@@ -317,29 +342,43 @@ class _RecordingKernelEstimator:
             "allow_missing": allow_missing,
         }
 
-    def fit(self, Y, T, X=None, W=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def fit(
+        self, Y, T, X=None, W=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         type(self).last_fit_payload = {"Y": Y, "T": T, "X": X, "W": W}
         return self
 
-    def ate(self, X=None, T0=None, T1=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def ate(
+        self, X=None, T0=None, T1=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return 1.0
 
-    def ate_interval(self, X=None, T0=None, T1=None, alpha=0.05):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def ate_interval(
+        self, X=None, T0=None, T1=None, alpha=0.05
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return (0.8, 1.2)
 
-    def ate_inference(self, X=None, T0=None, T1=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def ate_inference(
+        self, X=None, T0=None, T1=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return None
 
-    def effect(self, X, T0=None, T1=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def effect(
+        self, X, T0=None, T1=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         type(self).last_effect_payload = {"X": X, "T0": T0, "T1": T1}
         rows = int(getattr(X, "shape", [0])[0])
         return np.ones(rows, dtype=float)
 
-    def effect_interval(self, X, T0=None, T1=None, alpha=0.05):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def effect_interval(
+        self, X, T0=None, T1=None, alpha=0.05
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         rows = int(getattr(X, "shape", [0])[0])
         return (np.zeros(rows, dtype=float), np.ones(rows, dtype=float))
 
-    def effect_inference(self, X, T0=None, T1=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def effect_inference(
+        self, X, T0=None, T1=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return None
 
 
@@ -382,7 +421,11 @@ def test_linear_dml_fit_passes_featurizer_and_discrete_treatment() -> None:
     model = _TestLinearDMLModel(models_repo=repo, encoding_util=EncodingUtil())
     spec = _inference_ready_spec(
         plan_columns=[
-            {"column": "segment_score", "role": "effect_modifier", "encoding": {"preset": "num_standard"}},
+            {
+                "column": "segment_score",
+                "role": "effect_modifier",
+                "encoding": {"preset": "num_standard"},
+            },
             {"column": "income", "role": "covariate", "encoding": {"preset": "num_standard"}},
             {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
         ]
@@ -410,7 +453,11 @@ def test_sparse_linear_dml_fit_passes_featurizer() -> None:
     model = _TestSparseLinearDMLModel(models_repo=repo, encoding_util=EncodingUtil())
     spec = _inference_ready_spec(
         plan_columns=[
-            {"column": "segment_score", "role": "effect_modifier", "encoding": {"preset": "num_standard"}},
+            {
+                "column": "segment_score",
+                "role": "effect_modifier",
+                "encoding": {"preset": "num_standard"},
+            },
             {"column": "income", "role": "covariate", "encoding": {"preset": "num_standard"}},
             {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
         ]
@@ -437,7 +484,11 @@ def test_kernel_dml_fit_uses_allow_missing_without_featurizer() -> None:
     model = _TestKernelDMLModel(models_repo=repo, encoding_util=EncodingUtil())
     spec = _inference_ready_spec(
         plan_columns=[
-            {"column": "segment_score", "role": "effect_modifier", "encoding": {"preset": "num_standard"}},
+            {
+                "column": "segment_score",
+                "role": "effect_modifier",
+                "encoding": {"preset": "num_standard"},
+            },
             {"column": "income", "role": "covariate", "encoding": {"preset": "passthrough"}},
             {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
         ],
@@ -514,7 +565,11 @@ def test_linear_dml_fit_rejects_unhandled_missing_effect_modifiers() -> None:
     model = _TestLinearDMLModel(models_repo=repo, encoding_util=EncodingUtil())
     spec = _inference_ready_spec(
         plan_columns=[
-            {"column": "segment_score", "role": "effect_modifier", "encoding": {"preset": "passthrough"}},
+            {
+                "column": "segment_score",
+                "role": "effect_modifier",
+                "encoding": {"preset": "passthrough"},
+            },
             {"column": "income", "role": "covariate", "encoding": {"preset": "num_standard"}},
             {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
         ],
@@ -554,8 +609,16 @@ def test_linear_dml_cate_uses_transformation_plan_order() -> None:
         effect_modifiers=["segment_score", "risk_score"],
         covariates=["age"],
         plan_columns=[
-            {"column": "risk_score", "role": "effect_modifier", "encoding": {"preset": "num_standard"}},
-            {"column": "segment_score", "role": "effect_modifier", "encoding": {"preset": "num_standard"}},
+            {
+                "column": "risk_score",
+                "role": "effect_modifier",
+                "encoding": {"preset": "num_standard"},
+            },
+            {
+                "column": "segment_score",
+                "role": "effect_modifier",
+                "encoding": {"preset": "num_standard"},
+            },
             {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
         ],
     )
@@ -599,4 +662,3 @@ def test_causal_forest_dml_module_imports_cleanly() -> None:
     importlib.import_module(
         "python.implementation.workflows.tools.causal.inference.econml.dml.causal_forest_dml"
     )
-

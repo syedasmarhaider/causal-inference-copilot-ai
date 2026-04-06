@@ -65,7 +65,7 @@ class ProtocolDiscussionState(State):
         if self.payload.phase == "CONFIRMED":
             return "DONE"
         return "PENDING"
-    
+
     def action(self) -> Action:
         if self.status() == "DONE":
             return "NONE"
@@ -83,9 +83,7 @@ class ProtocolDiscussionState(State):
         if self.payload.system_message:
             messages.append(ChatMessage(role="system", content=self.payload.system_message))
         if self.payload.assistant_message:
-            messages.append(
-                ChatMessage(role="assistant", content=self.payload.assistant_message)
-            )
+            messages.append(ChatMessage(role="assistant", content=self.payload.assistant_message))
         if messages:
             return messages
         return [

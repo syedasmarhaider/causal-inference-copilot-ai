@@ -66,4 +66,3 @@ def get_model_training_label(fqcn: str) -> str:
         ("Causal Effect Model", "Supported Model", "the confirmed causal model"),
     )
     return training_label
- 

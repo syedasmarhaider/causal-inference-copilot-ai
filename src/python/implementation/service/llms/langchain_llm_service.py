@@ -38,6 +38,7 @@ class ReliabilityPolicy:
     - base_backoff_s: exponential backoff base
     - executor_workers: parallel invoke capacity for a shared service instance
     """
+
     timeout_s: float = 60.0
     hard_deadline_s: float | None = 90.0
     max_retries: int = 2
@@ -76,7 +77,7 @@ class LangChainLLMService(LLMService):
 
     def close(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
-    
+
     @observe()
     def generate(
         self,
@@ -96,6 +97,7 @@ class LangChainLLMService(LLMService):
             ai=ai,
             fallback_model=self._resolve_concrete_model_name(config.model),
         )
+
     @observe()
     def generate_json(
         self,
@@ -109,7 +111,7 @@ class LangChainLLMService(LLMService):
     ) -> T:
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
-        
+
         parser = PydanticOutputParser(pydantic_object=schema)
         format_instructions = parser.get_format_instructions()
 
@@ -126,7 +128,9 @@ class LangChainLLMService(LLMService):
             attempt_config = config if attempt == 1 else self._deterministic_config(config)
 
             ai = self._invoke_with_retries(messages=messages, config=attempt_config)
-            text = self._content_to_str(ai.content).strip() # pyright: ignore[reportUnknownMemberType]
+            text = self._content_to_str(
+                ai.content
+            ).strip()  # pyright: ignore[reportUnknownMemberType]
             last_output_text = text
 
             try:
@@ -160,12 +164,16 @@ class LangChainLLMService(LLMService):
         )
 
     # ---------------- internals ----------------
-    
+
     @staticmethod
     def _validate_rel(rel: ReliabilityPolicy) -> ReliabilityPolicy:
         if rel.timeout_s <= 0 or rel.timeout_s > MAX_TIMEOUT_S:
-            raise ValueError(f"timeout_s must be in (0, {MAX_TIMEOUT_S}] seconds. Got {rel.timeout_s}.")
-        if rel.hard_deadline_s is not None and (rel.hard_deadline_s <= 0 or rel.hard_deadline_s > MAX_TIMEOUT_S):
+            raise ValueError(
+                f"timeout_s must be in (0, {MAX_TIMEOUT_S}] seconds. Got {rel.timeout_s}."
+            )
+        if rel.hard_deadline_s is not None and (
+            rel.hard_deadline_s <= 0 or rel.hard_deadline_s > MAX_TIMEOUT_S
+        ):
             raise ValueError(
                 f"hard_deadline_s must be in (0, {MAX_TIMEOUT_S}] seconds or None. Got {rel.hard_deadline_s}."
             )
@@ -203,7 +211,7 @@ class LangChainLLMService(LLMService):
 
     def _resolve_model_key(self, model: str) -> AvailableModelsKey:
         if model in self._models:
-            return  model
+            return model
 
         allowed = ", ".join(sorted(self._models.keys()))
         raise ValueError(
@@ -294,7 +302,7 @@ class LangChainLLMService(LLMService):
             raise TimeoutError(f"LLM call exceeded hard deadline {deadline_s}s") from e
 
     def _sleep_backoff(self, attempt: int) -> None:
-        sleep_s = self._rel.base_backoff_s * (2 ** attempt) * (0.8 + 0.4 * random.random())
+        sleep_s = self._rel.base_backoff_s * (2**attempt) * (0.8 + 0.4 * random.random())
         time.sleep(sleep_s)
 
     @staticmethod
@@ -355,7 +363,11 @@ class LangChainLLMService(LLMService):
                     parts.append(item)
                 elif isinstance(item, dict):
                     text = item.get("text")
-                    parts.append(text if isinstance(text, str) else json.dumps(item, ensure_ascii=False, default=str))
+                    parts.append(
+                        text
+                        if isinstance(text, str)
+                        else json.dumps(item, ensure_ascii=False, default=str)
+                    )
                 else:
                     parts.append(str(item))
             return "".join(parts)
@@ -367,7 +379,6 @@ class LangChainLLMService(LLMService):
             return json.dumps(content, ensure_ascii=False, default=str)
 
         return str(content)
-
 
     def _to_domain_response(self, *, ai: AIMessage, fallback_model: str | None) -> LLMResponse:
         content = self._content_to_str(ai.content).strip()

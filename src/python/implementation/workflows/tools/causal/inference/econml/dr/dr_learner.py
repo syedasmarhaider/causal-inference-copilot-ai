@@ -74,10 +74,13 @@ log = get_logger(__name__)
 # Helpers
 # =============================================================================
 
+
 class _ToDense(BaseEstimator, TransformerMixin):
     """Convert sparse -> dense for models that don't accept sparse."""
 
-    def fit(self, X, y=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def fit(
+        self, X, y=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return self
 
     def transform(self, X: Any) -> np.ndarray:
@@ -217,7 +220,9 @@ class _TransformFirstBlockPassthroughTail(BaseEstimator, TransformerMixin):
         self.pre_XW = pre_XW
         self.n_xw = int(n_xw)
 
-    def fit(self, X, y=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def fit(
+        self, X, y=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         X_head, _ = _split_first_block_and_tail(X, n_first=self.n_xw)
         self.pre_XW.fit(X_head, y)
         return self
@@ -269,6 +274,7 @@ def _wrap_xw_plus_t_model(
 # =============================================================================
 # Default nuisance candidates
 # =============================================================================
+
 
 def _build_propensity_candidates(
     *,
@@ -438,6 +444,7 @@ def _build_regression_candidates(
 # Base adapter shared by concrete DR learners
 # =============================================================================
 
+
 @dataclass(frozen=True, slots=True)
 class _ResolvedInferenceContext:
     inference_ready_spec: InferenceReadyCausalSpec
@@ -603,7 +610,9 @@ class _BaseDRLearnerAdapter(CausalModel):
             if discrete_outcome:
                 _set_if_supported(defaults, init_map, "discrete_outcome", True)
 
-            _set_if_supported(defaults, init_map, "categories", _treatment_categories_from_spec(specs))
+            _set_if_supported(
+                defaults, init_map, "categories", _treatment_categories_from_spec(specs)
+            )
             _set_if_supported(defaults, init_map, "allow_missing", missingness_W)
 
             if pre_xw is not None:
@@ -751,9 +760,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 model_id=command.fitted_model_id,
             )
             if model_record is None:
-                raise ModelSpecError(
-                    f"Fitted model with id {command.fitted_model_id} not found."
-                )
+                raise ModelSpecError(f"Fitted model with id {command.fitted_model_id} not found.")
 
             est = model_record.model
 
@@ -770,7 +777,9 @@ class _BaseDRLearnerAdapter(CausalModel):
             )
 
             item: dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
-            item["ate"] = est.ate(X=X, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+            item["ate"] = est.ate(
+                X=X, T0=t0, T1=t1
+            )  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
 
             try:
                 ate_interval = est.ate_interval(
@@ -789,7 +798,9 @@ class _BaseDRLearnerAdapter(CausalModel):
                 item["ate_interval"] = None
 
             try:
-                inf = est.ate_inference(X=X, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+                inf = est.ate_inference(
+                    X=X, T0=t0, T1=t1
+                )  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
                 if inf is None:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
                     item["ate_inference"] = None
@@ -899,7 +910,9 @@ class _BaseDRLearnerAdapter(CausalModel):
             effects: dict[CATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
 
             try:
-                effects["cate"] = est.effect(X_query, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+                effects["cate"] = est.effect(
+                    X_query, T0=t0, T1=t1
+                )  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
             except Exception as e:
                 return CommandFailure(
                     run_id=command.run_id,
@@ -931,7 +944,9 @@ class _BaseDRLearnerAdapter(CausalModel):
                 effects["cate_interval"] = None
 
             try:
-                inf = est.effect_inference(X_query, T0=t0, T1=t1)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+                inf = est.effect_inference(
+                    X_query, T0=t0, T1=t1
+                )  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
                 if inf is None:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_inference returned None")
                     effects["cate_inference"] = None
@@ -998,6 +1013,7 @@ class _BaseDRLearnerAdapter(CausalModel):
 # =============================================================================
 # Concrete adapters
 # =============================================================================
+
 
 @dataclass(frozen=True, slots=True)
 class LinearDRLearnerCausalModel(_BaseDRLearnerAdapter):

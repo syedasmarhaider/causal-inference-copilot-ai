@@ -38,6 +38,7 @@ class LLMServiceSettings:
 
     This object maps those aliases to concrete provider model names.
     """
+
     backend: Literal["langchain"] = "langchain"
     provider: Provider = "gemini"
 
@@ -124,7 +125,9 @@ def _build_chat_models(
 
 def _validate_settings(settings: LLMServiceSettings) -> None:
     if settings.timeout_s <= 0 or settings.timeout_s > MAX_TIMEOUT_S:
-        raise ValueError(f"timeout_s must be in (0, {MAX_TIMEOUT_S}] seconds. Got {settings.timeout_s}.")
+        raise ValueError(
+            f"timeout_s must be in (0, {MAX_TIMEOUT_S}] seconds. Got {settings.timeout_s}."
+        )
 
     if settings.hard_deadline_s is not None and (
         settings.hard_deadline_s <= 0 or settings.hard_deadline_s > MAX_TIMEOUT_S
@@ -146,11 +149,15 @@ def _validate_settings(settings: LLMServiceSettings) -> None:
     provided_keys = set(settings.model_map.keys())
     if provided_keys != required_keys:
         missing = sorted(required_keys - provided_keys)
-        extra = sorted(provided_keys - required_keys) # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType, reportOperatorIssue]
+        extra = sorted(
+            provided_keys - required_keys
+        )  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType, reportOperatorIssue]
         raise ValueError(
             f"model_map must contain exactly {sorted(required_keys)}. Missing={missing}, extra={extra}"
         )
 
     for alias, concrete_model_name in settings.model_map.items():
-        if not isinstance(concrete_model_name, str) or not concrete_model_name.strip(): # pyright: ignore[reportUnnecessaryIsInstance]
+        if (
+            not isinstance(concrete_model_name, str) or not concrete_model_name.strip()
+        ):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise ValueError(f"Concrete model name for alias '{alias}' must be a non-empty string.")

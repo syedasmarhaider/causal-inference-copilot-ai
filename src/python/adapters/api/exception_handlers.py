@@ -122,7 +122,11 @@ def _build_http_exception_response(exc: HTTPException) -> JSONResponse:
         )
         return _internal_server_error_response(exc)
 
-    phrase = HTTPStatus(exc.status_code).phrase if exc.status_code in HTTPStatus._value2member_map_ else "Request failed"
+    phrase = (
+        HTTPStatus(exc.status_code).phrase
+        if exc.status_code in HTTPStatus._value2member_map_
+        else "Request failed"
+    )
     spec = ErrorSpec(status_code=exc.status_code, message=phrase)
 
     detail_payload = exc.detail

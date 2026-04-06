@@ -460,7 +460,10 @@ def test_aborted_routes_to_recoverable_state_using_error_context() -> None:
     payload = json.loads(call["user_prompt"])
     assert payload["current_state"] == ModelTrainState.NAME
     assert payload["current_error"] == "fit failed"
-    assert payload["current_system_message"] == "recover by revisiting model choice if fit assumptions are broken"
+    assert (
+        payload["current_system_message"]
+        == "recover by revisiting model choice if fit assumptions are broken"
+    )
     assert [item["state_name"] for item in payload["recoverable_candidates"]] == [
         ProtocolDiscussionState.NAME,
         ModelSelectionState.NAME,

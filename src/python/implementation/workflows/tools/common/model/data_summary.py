@@ -96,11 +96,15 @@ ColumnProfileModel = (
 
 DiscriminatedColumnProfile = Annotated[ColumnProfileModel, Field(discriminator="inferred_kind")]
 
+
 class DatasetSummaryModel(BaseModel):
     """
     Deterministic order: profiles follow df.columns order.
     """
+
     model_config = ConfigDict(extra="forbid")
 
     n_rows: int
-    profiles: list[ColumnProfileModel] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
+    profiles: list[ColumnProfileModel] = Field(
+        default_factory=list
+    )  # pyright: ignore[reportUnknownVariableType]

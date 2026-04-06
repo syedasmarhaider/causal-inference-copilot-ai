@@ -126,7 +126,9 @@ def test_build_encoding_schema_rejects_invalid_role_inputs() -> None:
             effect_modifier_columns=["age"],
         )
 
-    with pytest.raises(ValueError, match=r"At least one covariate or effect_modifier column is required"):
+    with pytest.raises(
+        ValueError, match=r"At least one covariate or effect_modifier column is required"
+    ):
         tool.build_encoding_schema(data_summary=summary)
 
     with pytest.raises(ValueError, match=r"not present in dataset_summary"):

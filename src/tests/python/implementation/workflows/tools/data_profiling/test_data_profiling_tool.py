@@ -200,7 +200,9 @@ def test_extract_dataset_summary_other_summary_handles_unhashable_list_values() 
     assert summary.profiles[0].summary.distinct_values_sample == ["[1, 2]", "[3, 4]"]
 
 
-def test_extract_dataset_summary_categorical_summary_truncates_and_counts_remaining_values() -> None:
+def test_extract_dataset_summary_categorical_summary_truncates_and_counts_remaining_values() -> (
+    None
+):
     summary = DatasetProfilingTool().extract_dataset_summary(
         pd.DataFrame({"cat": ["a", "a", "b", "c", "d"]}),
         max_categories=2,

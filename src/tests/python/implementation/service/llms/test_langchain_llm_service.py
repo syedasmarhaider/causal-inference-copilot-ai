@@ -252,12 +252,17 @@ def test_generate_json_raises_after_max_attempts() -> None:
     ("policy", "error_pattern"),
     [
         (ReliabilityPolicy(timeout_s=0), r"timeout_s"),
-        (ReliabilityPolicy(timeout_s=2, hard_deadline_s=1), r"hard_deadline_s must be >= timeout_s"),
+        (
+            ReliabilityPolicy(timeout_s=2, hard_deadline_s=1),
+            r"hard_deadline_s must be >= timeout_s",
+        ),
         (ReliabilityPolicy(max_retries=-1), r"max_retries"),
         (ReliabilityPolicy(executor_workers=0), r"executor_workers"),
     ],
 )
-def test_constructor_rejects_invalid_reliability(policy: ReliabilityPolicy, error_pattern: str) -> None:
+def test_constructor_rejects_invalid_reliability(
+    policy: ReliabilityPolicy, error_pattern: str
+) -> None:
     stub = _InvokeStub()
     aliases: tuple[AvailableModelsKey, ...] = ("mini", "basic", "pro", "thinking")
 

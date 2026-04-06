@@ -79,6 +79,7 @@ class PlotSpecsPlan(BaseModel):
             },
         )
 
+
 @dataclass(frozen=True)
 class PlotTool(Tool):
     NAME: ClassVar[str] = "PLOT_TOOL"
@@ -164,7 +165,7 @@ class PlotTool(Tool):
             charts_count=len(final_specs),
             rows_injected=len(dataframe),
         )
-        
+
         return final_specs
 
     @staticmethod
@@ -414,9 +415,7 @@ def _validate_encoding_types_against_summary(
 def _extract_summary_field_names(summary: DatasetSummaryModel) -> tuple[str, ...]:
     field_names = tuple(
         dict.fromkeys(
-            str(profile.name).strip()
-            for profile in summary.profiles
-            if str(profile.name).strip()
+            str(profile.name).strip() for profile in summary.profiles if str(profile.name).strip()
         )
     )
     return field_names
@@ -439,6 +438,8 @@ def _validate_summary_headers_against_dataframe(
         raise ValueError("data_summary must contain at least one non-empty header")
 
     dataframe_columns_set = set(dataframe_columns)
-    missing = [field_name for field_name in summary_field_names if field_name not in dataframe_columns_set]
+    missing = [
+        field_name for field_name in summary_field_names if field_name not in dataframe_columns_set
+    ]
     if missing:
         raise ValueError(f"data_summary references unknown dataframe headers: {missing}")

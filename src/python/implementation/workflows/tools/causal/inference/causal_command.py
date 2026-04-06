@@ -16,6 +16,7 @@ ResultStatus = Literal["SUCCEEDED", "FAILED"]
 ATEModelResult = Literal["for_treatment", "ate", "ate_interval", "ate_inference"]
 CATEModelResult = Literal["for_treatment", "cate", "cate_interval", "cate_inference"]
 
+
 def _now_utc() -> datetime:
     return datetime.now(UTC)
 
@@ -27,7 +28,10 @@ class BaseCommand:
     run_id: UUID
     inference_ready_spec: InferenceReadyCausalSpec
     created_at: datetime = field(default_factory=_now_utc)
-    options: dict[str, Any] = field(default_factory=dict) # pyright: ignore[reportUnknownVariableType]
+    options: dict[str, Any] = field(
+        default_factory=dict
+    )  # pyright: ignore[reportUnknownVariableType]
+
 
 @dataclass(frozen=True, slots=True, eq=False)
 class FitInputs:
@@ -44,7 +48,9 @@ class FitCommand(BaseCommand):
 class ErrorInfo:
     code: str
     message: str
-    details: dict[str, Any] = field(default_factory=dict) # pyright: ignore[reportUnknownVariableType]
+    details: dict[str, Any] = field(
+        default_factory=dict
+    )  # pyright: ignore[reportUnknownVariableType]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True, eq=False)
@@ -54,7 +60,7 @@ class BaseResult:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     warnings: list[str] = field(default_factory=list)
-    meta: dict[str, Any] = field(default_factory=dict) # type: ignore
+    meta: dict[str, Any] = field(default_factory=dict)  # type: ignore
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -66,7 +72,7 @@ class CommandFailure(BaseResult):
 @dataclass(frozen=True, slots=True, eq=False)
 class FitSuccess(BaseResult):
     fitted_model_id: UUID
-    artifacts: dict[str, Any] = field(default_factory=dict) # type: ignore
+    artifacts: dict[str, Any] = field(default_factory=dict)  # type: ignore
     status: Literal["SUCCEEDED"] = field(init=False, default="SUCCEEDED")
 
 
@@ -90,7 +96,7 @@ class ATESuccess(BaseResult):
     fitted_model_id: UUID
     contrast: dict[str, Any]
     ate: list[dict[ATEModelResult, Any]]
-    artifacts: dict[str, Any] = field(default_factory=dict) # type: ignore
+    artifacts: dict[str, Any] = field(default_factory=dict)  # type: ignore
     status: Literal["SUCCEEDED"] = field(init=False, default="SUCCEEDED")
 
 
@@ -103,6 +109,7 @@ class CATEInputs:
     counterfactual: bool = False
     alpha: float = 0.05
 
+
 @dataclass(frozen=True, slots=True, kw_only=True, eq=False)
 class CATECommand(BaseCommand):
     fitted_model_id: UUID
@@ -114,7 +121,7 @@ class CATECommand(BaseCommand):
 class CATESuccess(BaseResult):
     fitted_model_id: UUID
     x_cols: list[str]
-    effects: dict[CATEModelResult, Any] = field(default_factory=dict) # type: ignore
+    effects: dict[CATEModelResult, Any] = field(default_factory=dict)  # type: ignore
     status: Literal["SUCCEEDED"] = field(init=False, default="SUCCEEDED")
 
 

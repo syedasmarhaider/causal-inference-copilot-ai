@@ -27,7 +27,7 @@ API_DESCRIPTION = (
     "- The authenticated Firebase identity is mapped to the internal workflow `user_id`.\n\n"
     "Workflow responses:\n"
     "- `invoke` and `lateststate` return assistant messages, workflow action, stage/status, and latest working dataset info.\n"
-    "- To trigger dataset-history revert inside workflow execution, send `user_text=\"revert_data_changes\"` to the invoke endpoint.\n\n"
+    '- To trigger dataset-history revert inside workflow execution, send `user_text="revert_data_changes"` to the invoke endpoint.\n\n'
     "Artifacts:\n"
     "- `artifact_kind` enum: `graph | data`\n"
     "- `artifact_format` enum: `json | csv`\n"

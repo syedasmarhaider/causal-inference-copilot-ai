@@ -27,6 +27,6 @@ class Node(ABC):
         conversation_id: UUID,
         state: State,
         previous_state_dependencies: Mapping[str, State],
-        messages_history: Sequence[ChatMessage] | None
+        messages_history: Sequence[ChatMessage] | None,
     ) -> State:
         raise NotImplementedError

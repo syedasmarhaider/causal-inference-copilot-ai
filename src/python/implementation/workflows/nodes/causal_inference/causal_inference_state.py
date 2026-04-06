@@ -53,7 +53,7 @@ class CausalInferenceState(State):
 
     def status(self) -> Status:
         return "PENDING"
-    
+
     def action(self) -> Action:
         return "NEEDS_INPUT"
 

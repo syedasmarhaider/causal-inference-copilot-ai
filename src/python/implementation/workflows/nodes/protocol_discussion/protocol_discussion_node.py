@@ -45,9 +45,7 @@ class _DiscussionDecisionModel(BaseModel):
         if self.next_action == "confirm" and not self.dataset_change_request:
             raise ValueError("dataset_change_request is required when next_action=confirm")
         if self.next_action != "confirm" and self.dataset_change_request is not None:
-            raise ValueError(
-                "dataset_change_request must be null unless next_action=confirm"
-            )
+            raise ValueError("dataset_change_request must be null unless next_action=confirm")
         return self
 
 
@@ -157,7 +155,9 @@ class ProtocolDiscussionNode(Node):
         _ = conversation_id
 
         if not isinstance(state, ProtocolDiscussionState):
-            raise TypeError(f"{self.name}: expected ProtocolDiscussionState, got {type(state).__name__}")
+            raise TypeError(
+                f"{self.name}: expected ProtocolDiscussionState, got {type(state).__name__}"
+            )
 
         deps = ProtocolDiscussionDeps.from_loaded(previous_state_dependencies)
         questions = get_questions()

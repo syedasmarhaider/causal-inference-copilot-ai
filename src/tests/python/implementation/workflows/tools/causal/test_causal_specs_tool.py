@@ -340,9 +340,7 @@ def test_post_validate_backdoor_spec_revalidates_generic_model_against_summary()
         _numeric_profile("outcome"),
         _numeric_profile("age"),
     )
-    generic_model = CausalSpec.model_validate(
-        _spec_payload(effect_modifiers=["unknown_modifier"])
-    )
+    generic_model = CausalSpec.model_validate(_spec_payload(effect_modifiers=["unknown_modifier"]))
     tool = CausalSpecsTool()
 
     with pytest.raises(ValidationError, match=r"unknown dataset_summary columns"):

@@ -150,7 +150,9 @@ class _StubDataflowApp:
 
 
 @pytest.fixture
-def api_client() -> Generator[tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser], None, None]:
+def api_client() -> (
+    Generator[tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser], None, None]
+):
     workflow = _StubWorkflowApp()
     dataflow = _StubDataflowApp()
     user = AuthenticatedUser(
@@ -170,7 +172,9 @@ def api_client() -> Generator[tuple[TestClient, _StubWorkflowApp, _StubDataflowA
     app.openapi_schema = None
 
 
-def test_healthz_returns_ok(api_client: tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser]) -> None:
+def test_healthz_returns_ok(
+    api_client: tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser],
+) -> None:
     client, _, _, _ = api_client
     response = client.get("/healthz")
 
@@ -487,7 +491,9 @@ def test_get_artifact_maps_validation_error_to_422(
     artifact_id = uuid4()
 
     def _raise_validation_error(**_: object) -> DataflowArtifactResponse:
-        raise ValidationError(field="artifact_format", reason="Graph artifacts must be in JSON format")
+        raise ValidationError(
+            field="artifact_format", reason="Graph artifacts must be in JSON format"
+        )
 
     dataflow.get_artifact = _raise_validation_error  # type: ignore[method-assign]
 
@@ -551,10 +557,14 @@ def test_openapi_mentions_revert_message_and_artifact_enums() -> None:
     assert response.status_code == 200
     schema = response.json()
 
-    invoke_description = schema["paths"]["/v1/conversations/{conversation_id}/invoke"]["post"]["description"]
+    invoke_description = schema["paths"]["/v1/conversations/{conversation_id}/invoke"]["post"][
+        "description"
+    ]
     assert "revert_data_changes" in invoke_description
 
-    artifact_operation = schema["paths"]["/v1/conversations/{conversation_id}/artifacts/{artifact_id}"]["get"]
+    artifact_operation = schema["paths"][
+        "/v1/conversations/{conversation_id}/artifacts/{artifact_id}"
+    ]["get"]
     parameters = {param["name"]: param for param in artifact_operation["parameters"]}
     assert parameters["artifact_kind"]["schema"]["enum"] == ["graph", "data"]
     assert parameters["artifact_format"]["schema"]["enum"] == ["json", "csv"]

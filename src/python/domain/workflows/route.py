@@ -19,15 +19,15 @@ class Router(ABC):
     @abstractmethod
     def get_initial_state_name(self) -> str:
         raise NotImplementedError
-    
+
     @abstractmethod
     def get_done_state_name(self) -> str:
         raise NotImplementedError
-    
+
     @abstractmethod
     def get_next_state_names(self, current_state_name: str) -> Sequence[str]:
         raise NotImplementedError
-    
+
     @abstractmethod
     def decide_next(
         self,

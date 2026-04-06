@@ -18,9 +18,7 @@ def test_execute_sql_returns_last_result_set_and_metadata() -> None:
     result = repo.execute_sql(dataframe=df, request=request)
 
     assert result.table_name == "input_table"
-    assert result.executed_statements == (
-        "SELECT a, b FROM input_table ORDER BY a DESC LIMIT 2",
-    )
+    assert result.executed_statements == ("SELECT a, b FROM input_table ORDER BY a DESC LIMIT 2",)
     assert result.columns == ("a", "b")
     assert result.row_count == 2
     assert result.has_result_set is True

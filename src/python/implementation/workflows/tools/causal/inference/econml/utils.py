@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import inspect
@@ -37,7 +36,8 @@ class ModelSpecError(ValueError):
 
 
 # a hack
-_EMPTY = inspect._empty # pyright: ignore[reportPrivateUsage]
+_EMPTY = inspect._empty  # pyright: ignore[reportPrivateUsage]
+
 
 def now_utc() -> datetime:
     return datetime.now(UTC)
@@ -50,14 +50,15 @@ def jsonish_default(v: Any) -> Any:
     if v is None or isinstance(v, (bool, int, float, str)):
         return v
     if isinstance(v, (list, tuple)) and all(
-        x is None or isinstance(x, (bool, int, float, str)) for x in v # pyright: ignore[reportUnknownVariableType]
+        x is None or isinstance(x, (bool, int, float, str))
+        for x in v  # pyright: ignore[reportUnknownVariableType]
     ):
         return list(v)  # type: ignore[return-value]
     if isinstance(v, dict):
         # keep dict only if it is JSON-ish
         ok = True
         out: dict[str, Any] = {}
-        for k, vv in v.items(): # pyright: ignore[reportUnknownVariableType]
+        for k, vv in v.items():  # pyright: ignore[reportUnknownVariableType]
             if not isinstance(k, str):
                 ok = False
                 break
@@ -66,8 +67,8 @@ def jsonish_default(v: Any) -> Any:
             else:
                 ok = False
                 break
-        return out if ok else repr(v) # pyright: ignore[reportUnknownArgumentType]
-    return repr(v) # pyright: ignore[reportUnknownArgumentType]
+        return out if ok else repr(v)  # pyright: ignore[reportUnknownArgumentType]
+    return repr(v)  # pyright: ignore[reportUnknownArgumentType]
 
 
 def _param_meta(p: inspect.Parameter) -> dict[str, Any]:
@@ -75,7 +76,7 @@ def _param_meta(p: inspect.Parameter) -> dict[str, Any]:
     return {
         "required": (p.default is _EMPTY),
         "default": jsonish_default(p.default),
-        "kind": str(p.kind),        # KEYWORD_ONLY, POSITIONAL_OR_KEYWORD, etc.
+        "kind": str(p.kind),  # KEYWORD_ONLY, POSITIONAL_OR_KEYWORD, etc.
         "annotation": ann,
     }
 
@@ -157,19 +158,22 @@ def split_flat_options(
             init_kwargs[k] = v
         else:
             fit_kwargs[k] = v
-            
+
     return init_kwargs, fit_kwargs
 
 
 def required_init_keys(cls: type[Any], init_map: Mapping[str, Any]) -> set[str]:
-        sig = inspect.signature(cls.__init__)
-        required = {p.name for p in sig.parameters.values() if p.default is p.empty and p.name in init_map}
-        return required  
+    sig = inspect.signature(cls.__init__)
+    required = {
+        p.name for p in sig.parameters.values() if p.default is p.empty and p.name in init_map
+    }
+    return required
 
 
 # =============================================================================
 # CausalSpec -> columns / arrays (strict to your Pydantic schema)
 # =============================================================================
+
 
 def has_missing(arr: Any) -> bool:
     if arr is None:
@@ -194,14 +198,10 @@ def _normalize_discrete_literal(v: Any) -> DiscreteKey:
     if isinstance(v, (bool, np.bool_)):
         return ("bool", bool(v))
 
-    if isinstance(v, (numbers.Integral, np.integer)) and not isinstance(
-        v, (bool, np.bool_)
-    ):
+    if isinstance(v, (numbers.Integral, np.integer)) and not isinstance(v, (bool, np.bool_)):
         return ("num", float(v))
 
-    if isinstance(v, (numbers.Real, np.floating)) and not isinstance(
-        v, (bool, np.bool_)
-    ):
+    if isinstance(v, (numbers.Real, np.floating)) and not isinstance(v, (bool, np.bool_)):
         fv = float(v)
         if math.isfinite(fv):
             return ("num", fv)
@@ -288,7 +288,9 @@ def get_input_params_from_spec(
     x_cols = [str(c) for c in specs.effect_modifiers]
     w_cols = [str(c) for c in specs.covariates]
 
-    X_order = [str(c) for c in (effect_modifiers_order if effect_modifiers_order is not None else x_cols)]
+    X_order = [
+        str(c) for c in (effect_modifiers_order if effect_modifiers_order is not None else x_cols)
+    ]
     W_order = [str(c) for c in (covariates_order if covariates_order is not None else w_cols)]
 
     validate_columns_exist(df, [y_col, t_col] + X_order + W_order)
@@ -312,7 +314,7 @@ def get_input_params_from_spec(
         y = pd.to_numeric(y_ser, errors="raise").to_numpy(dtype=float)
 
     # ---- Treatment T ----
-    if isinstance(t_spec, BinaryTreatmentSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
+    if isinstance(t_spec, BinaryTreatmentSpecModel):  # pyright: ignore[reportUnnecessaryIsInstance]
         T = _map_binary_series(
             t_ser,
             positive_value=t_spec.treated,
@@ -350,12 +352,15 @@ def get_input_params_from_spec(
     return y, T, X, W, meta
 
 
-def get_treatment_t0_t1_from_spec(spec: CausalSpec, is_global_counter_factual: bool) -> tuple[float, float]:
+def get_treatment_t0_t1_from_spec(
+    spec: CausalSpec, is_global_counter_factual: bool
+) -> tuple[float, float]:
     if spec.treatment_spec.kind == "binary":
         return (1.0, 0.0) if is_global_counter_factual else (0.0, 1.0)
     raise ModelSpecError(
         f"Unsupported treatment kind {spec.treatment_spec.kind!r} for encoded treatment contrast."
     )
+
 
 def validate_semantic_consistency(spec: CausalSpec, init_kwargs: Mapping[str, Any]) -> None:
     """
@@ -378,7 +383,6 @@ def validate_semantic_consistency(spec: CausalSpec, init_kwargs: Mapping[str, An
             raise ModelSpecError(
                 "Spec declares binary treatment but options.discrete_treatment is False."
             )
-
 
 
 def serialize_inference_obj(obj: Any) -> dict[str, Any]:
@@ -418,9 +422,10 @@ def materialize_x_query(
                 f"x_rows[{i}] feature mismatch. missing={missing}, extra={extra}. "
                 f"Expected exactly: {x_cols}"
             )
-        X_list.append([row[c] for c in x_cols]) # pyright: ignore[reportUnknownMemberType]
+        X_list.append([row[c] for c in x_cols])  # pyright: ignore[reportUnknownMemberType]
 
     return np.asarray(X_list, dtype=float)
+
 
 def raise_if_x_rows_not_exactly_match_fit_x_cols(
     *,
@@ -454,7 +459,7 @@ def raise_if_x_rows_not_exactly_match_fit_x_cols(
             "inputs.x_rows columns must match spec.X order exactly. "
             f"expected={expected}, got={got}"
         )
-        
+
 
 def validate_columns_exist(df: pd.DataFrame, cols: Sequence[str]) -> None:
     missing = [c for c in cols if c not in df.columns]
@@ -462,10 +467,9 @@ def validate_columns_exist(df: pd.DataFrame, cols: Sequence[str]) -> None:
         raise ValueError(f"Missing required columns in df: {missing}")
 
 
-
-#========================================================================
+# ========================================================================
 # Missingness allow or not
-#=========================================================================
+# =========================================================================
 def is_missing_handled(
     *,
     plan: TransformPlan,
@@ -485,7 +489,9 @@ def is_missing_handled(
         col_plan = plan_by_col.get(col)
         if col_plan is None:
             if strict:
-                raise ValueError(f"Column '{col}' is in col_name_list but not present in TransformPlan.")
+                raise ValueError(
+                    f"Column '{col}' is in col_name_list but not present in TransformPlan."
+                )
             continue
 
         enc = col_plan.encoding
@@ -496,7 +502,9 @@ def is_missing_handled(
         n_missing = missing_by_col.get(col)
         if n_missing is None:
             if strict:
-                raise ValueError(f"Column '{col}' is in col_name_list but not present in DatasetSummaryModel.")
+                raise ValueError(
+                    f"Column '{col}' is in col_name_list but not present in DatasetSummaryModel."
+                )
             continue
 
         if n_missing <= 0:
@@ -553,12 +561,10 @@ def _missingness_handling(enc: EncodingPresetSpec) -> str:
             return "FORBIDS"
         return "HANDLED"
 
-    if isinstance(enc, MapOrdinalParams): # pyright: ignore[reportUnnecessaryIsInstance]
+    if isinstance(enc, MapOrdinalParams):  # pyright: ignore[reportUnnecessaryIsInstance]
         if enc.missing == "error":
             return "FORBIDS"
         return "HANDLED"
 
     # Should be unreachable if EncodingPresetSpec is exhaustive
     return "UNHANDLED"
-
-    

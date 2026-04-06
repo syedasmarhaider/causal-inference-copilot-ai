@@ -286,7 +286,9 @@ def test_binary_map_transformer_handles_unknown_and_missing_modes() -> None:
         ("append", [2.0, 0.0, 1.0]),
     ],
 )
-def test_ordinal_map_transformer_handles_token_insertion(token_position: str, expected: list[float]) -> None:
+def test_ordinal_map_transformer_handles_token_insertion(
+    token_position: str, expected: list[float]
+) -> None:
     transformer = OrdinalMapTransformer(
         order=["low", "high"],
         start=0,
@@ -327,15 +329,15 @@ def test_ordinal_map_transformer_rejects_duplicates_and_unknowns() -> None:
         transformer.transform(np.asarray([["mid"]], dtype=object))
 
 
-def test_datetime_to_epoch_seconds_handles_parse_errors_missing_indicator_and_mixed_timezones() -> None:
+def test_datetime_to_epoch_seconds_handles_parse_errors_missing_indicator_and_mixed_timezones() -> (
+    None
+):
     transformer = DateTimeToEpochSecondsTransformer(
         errors="coerce",
         unit="s",
         add_missing_indicator=True,
     )
-    out = transformer.fit_transform(
-        np.asarray([["2026-01-01T00:00:00"], [None]], dtype=object)
-    )
+    out = transformer.fit_transform(np.asarray([["2026-01-01T00:00:00"], [None]], dtype=object))
     assert out.shape == (2, 2)
     assert out[1, 1] == 1.0
     assert out[0, 1] == 0.0

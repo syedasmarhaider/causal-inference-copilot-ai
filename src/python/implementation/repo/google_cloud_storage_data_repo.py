@@ -41,7 +41,7 @@ def _validate_image_bytes(mime: ImageMime, content: bytes) -> None:
         return
 
     if mime == "image/jpeg":
-        if not content.startswith(b"\xFF\xD8"):
+        if not content.startswith(b"\xff\xd8"):
             raise ValueError("content does not look like a JPEG (bad signature)")
         return
 
@@ -63,7 +63,9 @@ class GoogleCloudStorageDataRepo(DataRepo):
         client = storage.Client(project=project_id)
         bucket_name = os.getenv("GCS_DATA_BUCKET_NAME", "").strip()
         if not bucket_name:
-            raise ValueError("GCS_DATA_BUCKET_NAME must be configured for GoogleCloudStorageDataRepo")
+            raise ValueError(
+                "GCS_DATA_BUCKET_NAME must be configured for GoogleCloudStorageDataRepo"
+            )
         return client.bucket(bucket_name)
 
     def __post_init__(self) -> None:
@@ -133,7 +135,9 @@ class GoogleCloudStorageDataRepo(DataRepo):
             f"{ARTIFACT_BASENAME}{_MIME_TO_EXT[mime]}",
         )
 
-    def _artifact_meta_blob_name(self, user_id: UUID, conversation_id: UUID, artifact_id: UUID) -> str:
+    def _artifact_meta_blob_name(
+        self, user_id: UUID, conversation_id: UUID, artifact_id: UUID
+    ) -> str:
         return self._join(
             self._artifact_dir_prefix(user_id, conversation_id, artifact_id),
             ARTIFACT_META_FILENAME,
@@ -208,7 +212,9 @@ class GoogleCloudStorageDataRepo(DataRepo):
         try:
             blob.upload_from_string(**upload_kwargs)
         except PreconditionFailed as exc:
-            raise FileExistsError(f"Refusing to overwrite existing CSV for dataset_id={dataset_id}") from exc
+            raise FileExistsError(
+                f"Refusing to overwrite existing CSV for dataset_id={dataset_id}"
+            ) from exc
         except Exception as exc:
             raise ValueError(f"Failed to write CSV for dataset_id={dataset_id}: {exc}") from exc
 
@@ -263,7 +269,9 @@ class GoogleCloudStorageDataRepo(DataRepo):
         try:
             blob.upload_from_string(**upload_kwargs)
         except PreconditionFailed as exc:
-            raise FileExistsError(f"Refusing to overwrite existing JSON for dataset_id={dataset_id}") from exc
+            raise FileExistsError(
+                f"Refusing to overwrite existing JSON for dataset_id={dataset_id}"
+            ) from exc
         except Exception as exc:
             raise ValueError(f"Failed to write JSON for dataset_id={dataset_id}: {exc}") from exc
 
@@ -410,7 +418,9 @@ class GoogleCloudStorageDataRepo(DataRepo):
         except ValueError:
             raise
         except Exception as exc:
-            raise ValueError(f"Failed to resolve artifact mime for artifact_id={artifact_id}: {exc}") from exc
+            raise ValueError(
+                f"Failed to resolve artifact mime for artifact_id={artifact_id}: {exc}"
+            ) from exc
 
     def get_artifact_bytes(
         self,

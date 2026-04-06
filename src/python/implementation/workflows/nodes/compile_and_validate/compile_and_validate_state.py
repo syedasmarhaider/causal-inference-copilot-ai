@@ -65,7 +65,7 @@ class CompileAndValidateState(State):
         if self.payload.phase == "FAILED":
             return "ABORTED"
         return "PENDING"
-    
+
     def action(self) -> Action:
         if self.status() == "PENDING":
             return "NEEDS_INPUT"
@@ -75,7 +75,9 @@ class CompileAndValidateState(State):
         if self.payload.phase in ("CONFIRMED"):
             self.payload.freezed = True
         else:
-            raise ValueError(f"Can only freeze when phase is CONFIRMED, current phase: {self.payload.phase!r}")    
+            raise ValueError(
+                f"Can only freeze when phase is CONFIRMED, current phase: {self.payload.phase!r}"
+            )
 
     def set_status_pending(self) -> None:
         if self.payload.phase in ("CONFIRMED", "FAILED"):

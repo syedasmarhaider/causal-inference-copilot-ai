@@ -100,7 +100,7 @@ def _png_bytes() -> bytes:
 
 
 def _jpeg_bytes() -> bytes:
-    return b"\xFF\xD8" + b"payload"
+    return b"\xff\xd8" + b"payload"
 
 
 def _webp_bytes() -> bytes:
@@ -299,7 +299,9 @@ def test_save_artifact_rolls_back_binary_when_meta_upload_fails_with_no_overwrit
         artifact_id,
         mime="image/png",
     )
-    meta_blob_name = repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id)  # noqa: SLF001
+    meta_blob_name = repo._artifact_meta_blob_name(
+        user_id, conversation_id, artifact_id
+    )  # noqa: SLF001
 
     bucket.blob(meta_blob_name).next_upload_errors.append(RuntimeError("meta write failed"))
 
@@ -347,12 +349,16 @@ def test_get_artifact_mime_uses_metadata_when_valid() -> None:
     bucket = _FakeBucket(name="bucket")
     repo = GoogleCloudStorageDataRepo(bucket=bucket)
 
-    meta_blob = bucket.blob(repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id))  # noqa: SLF001
+    meta_blob = bucket.blob(
+        repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id)
+    )  # noqa: SLF001
     meta_blob.present = True
     meta_blob.data = b'{"mime":"image/webp"}'
 
     webp_blob = bucket.blob(
-        repo._artifact_blob_name(user_id, conversation_id, artifact_id, mime="image/webp")  # noqa: SLF001
+        repo._artifact_blob_name(
+            user_id, conversation_id, artifact_id, mime="image/webp"
+        )  # noqa: SLF001
     )
     webp_blob.present = True
 
@@ -364,12 +370,16 @@ def test_get_artifact_mime_falls_back_to_probe_on_bad_meta() -> None:
     bucket = _FakeBucket(name="bucket")
     repo = GoogleCloudStorageDataRepo(bucket=bucket)
 
-    meta_blob = bucket.blob(repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id))  # noqa: SLF001
+    meta_blob = bucket.blob(
+        repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id)
+    )  # noqa: SLF001
     meta_blob.present = True
     meta_blob.data = b"not-json"
 
     png_blob = bucket.blob(
-        repo._artifact_blob_name(user_id, conversation_id, artifact_id, mime="image/png")  # noqa: SLF001
+        repo._artifact_blob_name(
+            user_id, conversation_id, artifact_id, mime="image/png"
+        )  # noqa: SLF001
     )
     png_blob.present = True
 
@@ -385,7 +395,9 @@ def test_get_artifact_mime_rejects_ambiguous_probe() -> None:
         ("image/png", _png_bytes()),
         ("image/jpeg", _jpeg_bytes()),
     ):
-        blob = bucket.blob(repo._artifact_blob_name(user_id, conversation_id, artifact_id, mime=mime))  # noqa: SLF001
+        blob = bucket.blob(
+            repo._artifact_blob_name(user_id, conversation_id, artifact_id, mime=mime)
+        )  # noqa: SLF001
         blob.present = True
         blob.data = content
 
@@ -398,12 +410,16 @@ def test_get_artifact_bytes_checks_expected_mime_and_maps_not_found() -> None:
     bucket = _FakeBucket(name="bucket")
     repo = GoogleCloudStorageDataRepo(bucket=bucket)
 
-    meta_blob = bucket.blob(repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id))  # noqa: SLF001
+    meta_blob = bucket.blob(
+        repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id)
+    )  # noqa: SLF001
     meta_blob.present = True
     meta_blob.data = b'{"mime":"image/png"}'
 
     png_blob = bucket.blob(
-        repo._artifact_blob_name(user_id, conversation_id, artifact_id, mime="image/png")  # noqa: SLF001
+        repo._artifact_blob_name(
+            user_id, conversation_id, artifact_id, mime="image/png"
+        )  # noqa: SLF001
     )
     png_blob.present = True
     png_blob.data = _png_bytes()

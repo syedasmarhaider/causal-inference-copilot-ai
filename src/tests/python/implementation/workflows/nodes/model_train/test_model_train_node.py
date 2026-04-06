@@ -427,9 +427,7 @@ def test_model_train_retries_once_then_returns_aborted_state_on_command_failure(
         meta={},
         error=ErrorInfo(code="ESTIMATOR_ERROR", message="fit failed"),
     )
-    fake_model = _FakeCausalModel(
-        results=[failure, failure]
-    )
+    fake_model = _FakeCausalModel(results=[failure, failure])
     node = ModelTrainNode(
         llm=None,
         data_repo=_FakeDataRepo(dataframe=_build_dataframe()),

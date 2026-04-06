@@ -85,7 +85,9 @@ def _gcs_io_timeout_seconds() -> float:
 
 
 def _gcs_upload_timeout_seconds() -> float:
-    return _env_float_seconds("GCS_MODELS_UPLOAD_TIMEOUT_SECONDS", DEFAULT_GCS_UPLOAD_TIMEOUT_SECONDS)
+    return _env_float_seconds(
+        "GCS_MODELS_UPLOAD_TIMEOUT_SECONDS", DEFAULT_GCS_UPLOAD_TIMEOUT_SECONDS
+    )
 
 
 def _gcs_upload_retry_timeout_seconds() -> float:
@@ -151,16 +153,20 @@ def _safe_unlink(path: Path) -> None:
 @dataclass(frozen=True)
 class GoogleCloudStorageModelsRepo(ModelsRepo):
     bucket: storage.Bucket
-    
+
     @staticmethod
     def get_default_bucket() -> storage.Bucket:
         project_id = os.getenv("GOOGLE_CLOUD_PROJECT_ID", "").strip() or None
         if not project_id:
-            raise ValueError("GOOGLE_CLOUD_PROJECT_ID environment variable must be set for GoogleCloudStorageModelsRepo")
+            raise ValueError(
+                "GOOGLE_CLOUD_PROJECT_ID environment variable must be set for GoogleCloudStorageModelsRepo"
+            )
         client = storage.Client(project=project_id)
         bucket_name = os.getenv("GCS_MODELS_BUCKET_NAME", "").strip()
         if not bucket_name:
-            raise ValueError("GCS_MODELS_BUCKET_NAME must be configured for GoogleCloudStorageModelsRepo")
+            raise ValueError(
+                "GCS_MODELS_BUCKET_NAME must be configured for GoogleCloudStorageModelsRepo"
+            )
         return client.bucket(bucket_name)
 
     def __post_init__(self) -> None:
@@ -185,7 +191,9 @@ class GoogleCloudStorageModelsRepo(ModelsRepo):
     def _meta_blob_name(self, *, user_id: UUID, conversation_id: UUID, model_id: UUID) -> str:
         return f"{self._models_prefix(user_id=user_id, conversation_id=conversation_id)}/{model_id}.meta.json"
 
-    def _artifact_blob(self, *, user_id: UUID, conversation_id: UUID, model_id: UUID) -> storage.Blob:
+    def _artifact_blob(
+        self, *, user_id: UUID, conversation_id: UUID, model_id: UUID
+    ) -> storage.Blob:
         return self.bucket.blob(
             self._artifact_blob_name(
                 user_id=user_id,

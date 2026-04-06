@@ -20,6 +20,7 @@ from python.implementation.workflows.nodes.dataset.dataset_state import DatasetS
 
 # TODO: add distributed tnx or locks later
 
+
 @dataclass(frozen=True)
 class DataflowArtifactResponse:
     id: UUID
@@ -74,7 +75,7 @@ class DataflowApp:
             dataset_id=dataset_id,
             limit=limit,
         )
-        
+
     def get_all_working_dataset_ids(
         self,
         *,
@@ -92,7 +93,6 @@ class DataflowApp:
         if dataset_state is None:
             return ()
         return tuple(iteration.dataset_id for iteration in dataset_state.payload.dataset_iterations)
-    
 
     def get_current_working_dataset_info(
         self,
@@ -124,7 +124,9 @@ class DataflowApp:
             conversation_id=conversation_id,
         )
         try:
-            df = pd.read_csv(io.BytesIO(csv_bytes), low_memory=False)  # pyright: ignore[reportUnknownMemberType]
+            df = pd.read_csv(
+                io.BytesIO(csv_bytes), low_memory=False
+            )  # pyright: ignore[reportUnknownMemberType]
         except Exception as exc:
             self._log.info(
                 "csv upload rejected due to invalid payload",
@@ -189,10 +191,9 @@ class DataflowApp:
         )
         if artifact_kind == "graph" and artifact_format != "json":
             raise ValidationError(
-                  field="artifact_format",
-                  reason="Graph artifacts must be in JSON format"
+                field="artifact_format", reason="Graph artifacts must be in JSON format"
             )
-            
+
         try:
             mime: str
             content: bytes

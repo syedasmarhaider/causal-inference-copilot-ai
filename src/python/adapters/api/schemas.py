@@ -24,7 +24,9 @@ class ArtifactRefResponse(BaseModel):
 class ChatMessageResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    role: MessageRole = Field(description="Message role. Workflow API responses return assistant messages.")
+    role: MessageRole = Field(
+        description="Message role. Workflow API responses return assistant messages."
+    )
     content: str = Field(description="Assistant-visible message text.")
     id: str | None = Field(default=None, description="Optional message identifier.")
     artifact_refs: Sequence[ArtifactRefResponse] | None = Field(
@@ -51,7 +53,9 @@ class CreateConversationResponse(BaseModel):
         },
     )
 
-    user_id: UUID = Field(description="Authenticated internal user UUID derived from the Firebase token.")
+    user_id: UUID = Field(
+        description="Authenticated internal user UUID derived from the Firebase token."
+    )
     conversation_id: UUID = Field(description="Newly created conversation UUID.")
 
 
@@ -67,7 +71,9 @@ class UploadDatasetResponse(BaseModel):
         },
     )
 
-    user_id: UUID = Field(description="Authenticated internal user UUID derived from the Firebase token.")
+    user_id: UUID = Field(
+        description="Authenticated internal user UUID derived from the Firebase token."
+    )
     conversation_id: UUID = Field(description="Conversation UUID that owns the dataset.")
     dataset_id: UUID = Field(description="Stored dataset UUID.")
 
@@ -140,7 +146,9 @@ class InvokeResponse(BaseModel):
     )
 
     conversation_id: UUID = Field(description="Conversation UUID.")
-    user_id: UUID = Field(description="Authenticated internal user UUID derived from the Firebase token.")
+    user_id: UUID = Field(
+        description="Authenticated internal user UUID derived from the Firebase token."
+    )
     messages: Sequence[ChatMessageResponse] = Field(
         description="Assistant-visible messages returned by the workflow.",
     )
@@ -151,4 +159,3 @@ class InvokeResponse(BaseModel):
         default=None,
         description="Latest working dataset info from DataflowApp, if a dataset exists for this conversation.",
     )
-

@@ -8,6 +8,7 @@ import pandas as pd
 
 ImageMime = Literal["image/png", "image/jpeg", "image/webp"]
 
+
 class DataRepo(ABC):
     @abstractmethod
     def get_csv_data(
@@ -47,6 +48,7 @@ class DataRepo(ABC):
         :param overwrite: If False, raise if the target already exists.
         :param include_index: If True, write the DataFrame index into the CSV.
         """
+
     @abstractmethod
     def get_json_data(
         self,

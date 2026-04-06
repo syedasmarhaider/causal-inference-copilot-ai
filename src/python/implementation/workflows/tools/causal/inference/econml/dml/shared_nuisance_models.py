@@ -25,7 +25,9 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import Causa
 class _ToDense(BaseEstimator, TransformerMixin):
     """Convert sparse -> dense for models that don't accept sparse."""
 
-    def fit(self, X, y=None):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def fit(
+        self, X, y=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         return self
 
     def transform(self, X: Any) -> np.ndarray:

@@ -34,7 +34,6 @@ EncodingPreset = Literal[
     "map_binary",
     "map_ordinal",
 ]
-     
 
 
 # ----------------------------
@@ -68,7 +67,9 @@ class CatOneHotParams(_BaseParams):
             return self
         # missing == "impute_token"
         if not self.missing_token:
-            raise ValueError("cat_onehot: missing_token must be non-empty when missing='impute_token'.")
+            raise ValueError(
+                "cat_onehot: missing_token must be non-empty when missing='impute_token'."
+            )
         return self
 
 
@@ -84,7 +85,7 @@ class NumStandardParams(NumParams):
 class NumMinMaxParams(NumParams):
     preset: Literal["num_minmax"]
     eps: float = 1e-12
-    
+
     @model_validator(mode="after")
     def _validate_minmax(self) -> NumMinMaxParams:
         if not (self.eps > 0.0):
@@ -121,9 +122,13 @@ class MapBinaryParams(_BaseParams):
             raise ValueError("map_binary: missing_token required when missing='impute_token'.")
         # Strong safety: avoid NaNs escaping unless explicitly configured
         if self.allow_unknown and self.unknown_value is None:
-            raise ValueError("map_binary: unknown_value required when allow_unknown=True (avoid NaNs).")
+            raise ValueError(
+                "map_binary: unknown_value required when allow_unknown=True (avoid NaNs)."
+            )
         if self.missing == "as_unknown" and self.unknown_value is None:
-            raise ValueError("map_binary: unknown_value required when missing='as_unknown' (avoid NaNs).")
+            raise ValueError(
+                "map_binary: unknown_value required when missing='as_unknown' (avoid NaNs)."
+            )
         return self
 
 
@@ -151,14 +156,26 @@ class MapOrdinalParams(_BaseParams):
             )
         # Strong safety: avoid NaNs escaping unless explicitly configured
         if self.allow_unknown and self.unknown_value is None:
-            raise ValueError("map_ordinal: unknown_value required when allow_unknown=True (avoid NaNs).")
+            raise ValueError(
+                "map_ordinal: unknown_value required when allow_unknown=True (avoid NaNs)."
+            )
         if self.missing == "as_unknown" and self.unknown_value is None:
-            raise ValueError("map_ordinal: unknown_value required when missing='as_unknown' (avoid NaNs).")
+            raise ValueError(
+                "map_ordinal: unknown_value required when missing='as_unknown' (avoid NaNs)."
+            )
         return self
 
 
 EncodingPresetSpec = Annotated[
-    DropParams | PassthroughParams | CatOneHotParams | NumStandardParams | NumMinMaxParams | NumLog1pParams | DateTimeEpochParams | MapBinaryParams | MapOrdinalParams,
+    DropParams
+    | PassthroughParams
+    | CatOneHotParams
+    | NumStandardParams
+    | NumMinMaxParams
+    | NumLog1pParams
+    | DateTimeEpochParams
+    | MapBinaryParams
+    | MapOrdinalParams,
     Field(discriminator="preset"),
 ]
 
@@ -194,7 +211,9 @@ class TransformPlan(BaseModel):
         has_covariate = any(c.role == "covariate" for c in self.columns)
         has_effect_modifier = any(c.role == "effect_modifier" for c in self.columns)
         if not has_covariate and not has_effect_modifier:
-            raise ValueError("TransformPlan: must contain at least one covariate or effect_modifier column.")
+            raise ValueError(
+                "TransformPlan: must contain at least one covariate or effect_modifier column."
+            )
 
         summary_field_names = type(self).SUMMARY_FIELD_NAMES
         if summary_field_names is not None:
@@ -298,12 +317,13 @@ def _validate_transform_plan_against_constraints(
 ) -> None:
     plan_columns = [str(column_plan.column).strip() for column_plan in plan.columns]
     role_by_column = {
-        str(column_plan.column).strip(): str(column_plan.role)
-        for column_plan in plan.columns
+        str(column_plan.column).strip(): str(column_plan.role) for column_plan in plan.columns
     }
 
     summary_field_name_set = set(summary_field_names)
-    unknown_columns = sorted(set(column for column in plan_columns if column not in summary_field_name_set))
+    unknown_columns = sorted(
+        set(column for column in plan_columns if column not in summary_field_name_set)
+    )
     if unknown_columns:
         raise ValueError(
             f"encoding plan references unknown dataset_summary columns: {unknown_columns}"
@@ -364,8 +384,7 @@ def _validate_transform_plan_against_constraints(
 
     if incompatible_presets:
         raise ValueError(
-            "encoding plan has column type and preset incompatibilities: "
-            f"{incompatible_presets}"
+            "encoding plan has column type and preset incompatibilities: " f"{incompatible_presets}"
         )
 
 
@@ -446,13 +465,7 @@ def _structured_validation_issues(exc: ValidationError) -> list[dict[str, Any]]:
 def _normalize_column_sequence(columns: Sequence[str] | None) -> tuple[str, ...] | None:
     if columns is None:
         return None
-    return tuple(
-        dict.fromkeys(
-            str(column).strip()
-            for column in columns
-            if str(column).strip()
-        )
-    )
+    return tuple(dict.fromkeys(str(column).strip() for column in columns if str(column).strip()))
 
 
 def _build_expected_role_by_column(
@@ -464,10 +477,7 @@ def _build_expected_role_by_column(
     effect_modifier_columns = _normalize_column_sequence(effect_modifier_columns) or ()
     overlap = sorted(set(covariate_columns).intersection(effect_modifier_columns))
     if overlap:
-        raise ValueError(
-            "covariate_columns and effect_modifier_columns overlap: "
-            f"{overlap}"
-        )
+        raise ValueError("covariate_columns and effect_modifier_columns overlap: " f"{overlap}")
 
     expected_role_by_column: dict[str, EncodingRole] = {
         column: "covariate" for column in covariate_columns
@@ -507,11 +517,13 @@ def _extract_summary_known_values(
 
 
 def _known_values_from_profile(
-    profile: NumericColumnProfileModel
-    | DatetimeColumnProfileModel
-    | BooleanColumnProfileModel
-    | CategoricalColumnProfileModel
-    | OtherColumnProfileModel,
+    profile: (
+        NumericColumnProfileModel
+        | DatetimeColumnProfileModel
+        | BooleanColumnProfileModel
+        | CategoricalColumnProfileModel
+        | OtherColumnProfileModel
+    ),
 ) -> set[str] | None:
     if isinstance(profile, BooleanColumnProfileModel):
         return {str(value) for value in profile.summary.counts.keys()}

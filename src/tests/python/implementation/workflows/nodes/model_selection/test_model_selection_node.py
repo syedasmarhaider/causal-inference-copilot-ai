@@ -112,7 +112,9 @@ def _build_inference_ready_spec() -> InferenceReadyCausalSpec:
     )
 
 
-def _compile_state(*, warnings: list[ValidationIssueModel] | None = None) -> CompileAndValidateState:
+def _compile_state(
+    *, warnings: list[ValidationIssueModel] | None = None
+) -> CompileAndValidateState:
     spec = _build_inference_ready_spec()
     return CompileAndValidateState(
         CompileAndValidatePayloadModel(
@@ -236,7 +238,9 @@ def _supported_models() -> tuple[list[str], dict[str, str]]:
 
 
 def test_model_selection_info_and_state_roundtrip() -> None:
-    assert "confirmed inference-ready causal specification" in get_model_selection_node_info().lower()
+    assert (
+        "confirmed inference-ready causal specification" in get_model_selection_node_info().lower()
+    )
     assert "read-only clinician questions" in get_model_selection_freezed_answer_prompt().lower()
 
     state = ModelSelectionState.init_empty()
@@ -271,7 +275,9 @@ def test_model_selection_info_and_state_roundtrip() -> None:
             freezed=True,
         )
     )
-    assert "model selection is freezed" in default_freezed_message_state.messages()[0].content.lower()
+    assert (
+        "model selection is freezed" in default_freezed_message_state.messages()[0].content.lower()
+    )
 
 
 def test_model_selection_deps_require_confirmed_compile_and_extract_warn_only() -> None:
@@ -343,7 +349,10 @@ def test_model_selection_first_run_builds_clinician_friendly_shortlist() -> None
     assert result.payload.recommendations
     assert result.payload.assistant_message is not None
     assert "Flexible Heterogeneity Model (Causal Forest Model)" in result.payload.assistant_message
-    assert "Clinically Transparent Baseline Model (Doubly Robust Linear Model)" in result.payload.assistant_message
+    assert (
+        "Clinically Transparent Baseline Model (Doubly Robust Linear Model)"
+        in result.payload.assistant_message
+    )
     assert "econml." not in result.payload.assistant_message
 
     user_prompt = str(llm.generate_json_calls[0]["user_prompt"])
@@ -409,7 +418,9 @@ def test_model_selection_second_run_confirms_user_choice() -> None:
     assert result.status() == "DONE"
     assert result.payload.confirmed_model_selection is not None
     assert result.payload.confirmed_model_selection.selected_model == "econml.dml.CausalForestDML"
-    assert "Flexible Heterogeneity Model (Causal Forest Model)" in (result.payload.assistant_message or "")
+    assert "Flexible Heterogeneity Model (Causal Forest Model)" in (
+        result.payload.assistant_message or ""
+    )
 
 
 def test_model_selection_second_run_keeps_pending_when_user_is_unclear() -> None:
@@ -465,7 +476,10 @@ def test_model_selection_second_run_keeps_pending_when_user_is_unclear() -> None
 
     assert result.status() == "PENDING"
     assert result.payload.confirmed_model_selection is None
-    assert result.payload.assistant_message == "Do you want the most flexible subgroup model or the most interpretable baseline model?"
+    assert (
+        result.payload.assistant_message
+        == "Do you want the most flexible subgroup model or the most interpretable baseline model?"
+    )
 
 
 def test_model_selection_freezed_flag_answers_read_only_questions() -> None:

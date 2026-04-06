@@ -26,4 +26,3 @@ user_intent:
 dataset_summary:
 {data_summary}
 """.strip()
-

@@ -236,7 +236,9 @@ def _make_node_and_tools(
     generate_outputs: list[object] | None = None,
     manipulation_df: pd.DataFrame | None = None,
     plot_specs: list[dict[str, object]] | None = None,
-) -> tuple[DatasetNode, _FakeDataRepo, _FakeLLM, _FakeDataManipulationTool, _FakePlotTool, _FakeToolFactory]:
+) -> tuple[
+    DatasetNode, _FakeDataRepo, _FakeLLM, _FakeDataManipulationTool, _FakePlotTool, _FakeToolFactory
+]:
     data_repo = _FakeDataRepo(dataframe=dataframe, get_csv_error=get_csv_error)
     llm = _FakeLLM(
         json_outputs=list(json_outputs or []),
@@ -719,7 +721,11 @@ def test_dataset_node_saves_chart_specs_and_adds_artifact_ids() -> None:
         dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
         plot_specs=[
             {"mark": "bar", "data": {"values": [{"age": 65}]}, "encoding": {"x": {"field": "age"}}},
-            {"mark": "line", "data": {"values": [{"outcome": 1}]}, "encoding": {"y": {"field": "outcome"}}},
+            {
+                "mark": "line",
+                "data": {"values": [{"outcome": 1}]},
+                "encoding": {"y": {"field": "outcome"}},
+            },
         ],
         json_outputs=[
             DatasetIntentModel(
@@ -812,10 +818,16 @@ def test_dataset_node_uses_analytical_query_result_as_chart_input_without_new_it
     conversation_id = uuid4()
     analytical_df = pd.DataFrame([{"outcome": 1, "count": 2}, {"outcome": 0, "count": 1}])
     node, data_repo, _, manipulation_tool, plot_tool, _ = _make_node_and_tools(
-        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}, {"age": 72, "outcome": 1}]),
+        dataframe=pd.DataFrame(
+            [{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}, {"age": 72, "outcome": 1}]
+        ),
         manipulation_df=analytical_df,
         plot_specs=[
-            {"mark": "bar", "data": {"values": [{"outcome": 1, "count": 2}]}, "encoding": {"x": {"field": "outcome"}, "y": {"field": "count"}}},
+            {
+                "mark": "bar",
+                "data": {"values": [{"outcome": 1, "count": 2}]},
+                "encoding": {"x": {"field": "outcome"}, "y": {"field": "count"}},
+            },
         ],
         json_outputs=[
             DatasetIntentModel(
@@ -835,13 +847,17 @@ def test_dataset_node_uses_analytical_query_result_as_chart_input_without_new_it
         user_id=uuid4(),
         conversation_id=conversation_id,
         previous_state_dependencies={},
-        messages_history=[ChatMessage(role="user", content="aggregate outcome counts and plot them")],
+        messages_history=[
+            ChatMessage(role="user", content="aggregate outcome counts and plot them")
+        ],
         state=DatasetState.init_empty(),
     )
 
     assert len(manipulation_tool.calls) == 1
     assert len(plot_tool.calls) == 1
-    assert plot_tool.calls[0]["dataframe"].to_dict(orient="records") == analytical_df.to_dict(orient="records")
+    assert plot_tool.calls[0]["dataframe"].to_dict(orient="records") == analytical_df.to_dict(
+        orient="records"
+    )
     assert len(data_repo.saved_csv_calls) == 1
     assert len(data_repo.saved_json_calls) == 1
     assert state.latest_iteration is not None
