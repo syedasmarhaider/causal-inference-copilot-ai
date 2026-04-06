@@ -48,7 +48,7 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionState,
 )
-from python.implementation.workflows.router.llm_assisted_router_prompts import (
+from python.implementation.workflows.ochestrator.router.llm_assisted_router_prompts import (
     ABORTED_ROUTER_SYSTEM_PROMPT,
     PENDING_ROUTER_SYSTEM_PROMPT,
 )
@@ -118,6 +118,7 @@ class LLMAssistedRouterRouter(Router):
         self,
         *,
         current_state: State | None,
+        needs_state  
         messages_history: Sequence[ChatMessage],
     ) -> NextDecision:
         if current_state is None:

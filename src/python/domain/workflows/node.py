@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from uuid import UUID
 
 from python.domain.service.llm_service import ChatMessage
+from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
 from python.domain.workflows.state import State
 
 
@@ -26,7 +27,7 @@ class Node(ABC):
         user_id: UUID,
         conversation_id: UUID,
         state: State,
-        previous_state_dependencies: Mapping[str, State],
+        readonly_orchestrator_state: ReadOnlyOchestratorState,
         messages_history: Sequence[ChatMessage] | None,
     ) -> State:
         raise NotImplementedError

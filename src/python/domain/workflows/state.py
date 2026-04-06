@@ -21,7 +21,7 @@ class State(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_status_freez(self) -> None:
+    def set_status_freezed(self) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -39,11 +39,7 @@ class State(ABC):
     @abstractmethod
     def error(self) -> NodeExecutionError | None:
         raise NotImplementedError
-
-    @abstractmethod
-    def pre_required_states_names(self) -> Sequence[str]:
-        raise NotImplementedError
-
+    
     @abstractmethod
     def to_json_dict(self) -> dict[str, Any]:
         raise NotImplementedError
