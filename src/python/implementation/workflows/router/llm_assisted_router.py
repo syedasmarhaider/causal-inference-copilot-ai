@@ -232,7 +232,14 @@ class LLMAssistedRouterRouter(Router):
                 ),
             )
 
-        return NextDecision(state_name=decision.state_name, should_persists_by_workflow=False)
+        return NextDecision(
+            state_name=decision.state_name,
+            should_persists_by_workflow=_pending_should_persist_by_workflow(
+                current_state_name=current_state_name,
+                selected_state_name=decision.state_name,
+                callable_map=self._callable_map,
+            ),
+        )
 
     def _decide_aborted(
         self,
@@ -316,6 +323,22 @@ def _pending_candidates(
         if other.name not in candidates:
             candidates.append(other.name)
     return candidates
+
+
+def _pending_should_persist_by_workflow(
+    *,
+    current_state_name: str,
+    selected_state_name: str,
+    callable_map: Mapping[str, Sequence[OtherStateInfo]],
+) -> bool:
+    if selected_state_name == current_state_name:
+        return True
+
+    for other in callable_map.get(current_state_name, ()):
+        if other.name == selected_state_name:
+            return other.should_persists_by_workflow
+
+    return False
 
 
 def _recoverable_candidates(
