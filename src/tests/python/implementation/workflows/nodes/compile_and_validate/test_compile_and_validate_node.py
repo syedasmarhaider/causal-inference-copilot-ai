@@ -21,6 +21,7 @@ from python.implementation.workflows.nodes.compile_and_validate.compile_and_vali
     get_compile_and_validate_node_info,
     get_compile_causal_spec_prompt,
     get_compile_review_decision_prompt,
+    get_compile_review_summary_prompt,
     get_compile_transformation_plan_prompt,
 )
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
@@ -257,6 +258,7 @@ def test_compile_and_validate_prompts_and_info_have_expected_scope() -> None:
         in get_compile_transformation_plan_prompt().lower()
     )
     assert "full meaning of the user reply" in get_compile_review_decision_prompt().lower()
+    assert "clinician-facing review message" in get_compile_review_summary_prompt().lower()
 
 
 def test_compile_and_validate_state_roundtrip_and_statuses() -> None:
@@ -361,6 +363,16 @@ def test_compile_and_validate_node_compiles_and_waits_for_confirmation() -> None
                     },
                 ]
             },
+            {
+                "assistant_message": (
+                    "I compiled the confirmed protocol into a review-ready causal setup. "
+                    "The treatment is treatment (control vs drug), the outcome is outcome, "
+                    "age remains a baseline covariate with numeric standardization, and sex "
+                    "is retained as an effect modifier with an explicit binary mapping. "
+                    "There are no blocking validation issues. Please confirm this compiled "
+                    "setup if it matches your intent, or tell me exactly what should change."
+                )
+            },
         ]
     )
     node = CompileAndValidateNode(
@@ -391,8 +403,11 @@ def test_compile_and_validate_node_compiles_and_waits_for_confirmation() -> None
     assert result.payload.system_message is None
     assert result.payload.assistant_message is not None
     assert "please confirm this compiled setup" in result.payload.assistant_message.lower()
-    assert "age: num_standard" in result.payload.assistant_message
-    assert len(llm.generate_json_calls) == 2
+    assert "age remains a baseline covariate with numeric standardization" in (
+        result.payload.assistant_message
+    )
+    assert len(llm.generate_json_calls) == 3
+    assert llm.generate_json_calls[2]["system_prompt"] == get_compile_review_summary_prompt()
 
 
 def test_compile_and_validate_node_confirmed_review_marks_done() -> None:
