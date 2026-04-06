@@ -23,6 +23,7 @@ from python.implementation.workflows.nodes.compile_and_validate.compile_and_vali
     get_compile_causal_spec_prompt,
     get_compile_freezed_answer_prompt,
     get_compile_review_decision_prompt,
+    get_compile_review_summary_prompt,
     get_compile_transformation_plan_prompt,
 )
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
@@ -53,6 +54,12 @@ class _ReviewDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     action: Literal["confirm", "revise", "clarify"]
+    assistant_message: str = Field(..., min_length=1)
+
+
+class _ReviewSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     assistant_message: str = Field(..., min_length=1)
 
 
@@ -349,10 +356,12 @@ class CompileAndValidateNode(Node):
                 error_message="blocking validation issues prevent confirmation",
             )
 
-        assistant_message = _build_review_user_message(
+        assistant_message = self._build_review_summary_message(
+            protocol_discussion=protocol_discussion,
             causal_spec=causal_spec,
             transform_plan=transform_plan,
             issues=issues,
+            messages_history=messages_history,
         )
         return CompileAndValidateState(
             payload.model_copy(
@@ -457,6 +466,41 @@ class CompileAndValidateNode(Node):
                 }
             )
         )
+
+    def _build_review_summary_message(
+        self,
+        *,
+        protocol_discussion: str,
+        causal_spec: CausalSpec,
+        transform_plan: TransformPlan,
+        issues: Sequence[ValidationIssueModel],
+        messages_history: Sequence[ChatMessage] | None,
+    ) -> str:
+        history = list(messages_history[-4:]) if messages_history else None
+        context_payload = {
+            "protocol_discussion": protocol_discussion,
+            "compiled_causal_spec": causal_spec.model_dump(mode="json"),
+            "transformation_plan": transform_plan.model_dump(mode="json"),
+            "validation_issues": [issue.model_dump(mode="json") for issue in issues],
+        }
+
+        try:
+            review_summary = self._llm.generate_json(
+                schema=_ReviewSummary,
+                system_prompt=get_compile_review_summary_prompt(),
+                user_prompt=json.dumps(context_payload, ensure_ascii=False),
+                config=LLMConfig(model="basic", temperature=0.2),
+                history=history,
+                max_attempts=2,
+            )
+            return review_summary.assistant_message
+        except Exception as exc:
+            log.exception("COMPILE_AND_VALIDATE review summary failed", error=safe_err(exc))
+            return _build_review_user_message(
+                causal_spec=causal_spec,
+                transform_plan=transform_plan,
+                issues=issues,
+            )
 
 
 def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
@@ -592,17 +636,26 @@ def _build_review_user_message(
 ) -> str:
     treatment = causal_spec.treatment_spec
     outcome = causal_spec.outcome_spec
-    warning_lines = [f"- {issue.message}" for issue in issues if issue.severity == "WARN"]
     plan_lines = [
         f"- {column.column}: {column.encoding.preset}" for column in transform_plan.columns
     ]
+    warning_lines = _build_warning_review_lines(issues)
     lines = [
-        "I compiled the confirmed protocol into a causal specification and a baseline transformation plan.",
+        "I compiled the confirmed protocol into a candidate causal specification and baseline transformation plan.",
         "",
-        f"Treatment: {treatment.column} ({treatment.control} vs {treatment.treated})",
-        f"Outcome: {outcome.column} ({outcome.kind})",
-        f"Covariates: {', '.join(causal_spec.covariates) if causal_spec.covariates else 'None'}",
-        f"Effect modifiers: {', '.join(causal_spec.effect_modifiers) if causal_spec.effect_modifiers else 'None'}",
+        (
+            f"The current treatment definition is {treatment.column} "
+            f"({treatment.control} vs {treatment.treated})."
+        ),
+        f"The outcome is {outcome.column} ({outcome.kind}).",
+        (
+            "Baseline covariates: "
+            f"{', '.join(causal_spec.covariates) if causal_spec.covariates else 'None'}."
+        ),
+        (
+            "Effect modifiers: "
+            f"{', '.join(causal_spec.effect_modifiers) if causal_spec.effect_modifiers else 'None'}."
+        ),
         "",
         "Planned baseline transformations:",
         *plan_lines,
@@ -611,7 +664,7 @@ def _build_review_user_message(
         lines.extend(
             [
                 "",
-                "Validation warnings to review:",
+                "Points to review before confirmation:",
                 *warning_lines,
             ]
         )
@@ -626,10 +679,38 @@ def _build_review_user_message(
         [
             "",
             "If this matches your clinical intent, please confirm this compiled setup. "
-            "If something is wrong, tell me what should change.",
+            "If not, tell me exactly what should change in the treatment, outcome, covariates, "
+            "effect modifiers, or planned encodings.",
         ]
     )
     return "\n".join(lines)
+
+
+def _build_warning_review_lines(issues: Sequence[ValidationIssueModel]) -> list[str]:
+    grouped: dict[tuple[str, str | None], list[str]] = {}
+    ordered_keys: list[tuple[str, str | None]] = []
+
+    for issue in issues:
+        if issue.severity != "WARN":
+            continue
+        key = (issue.message, issue.fix_hint)
+        if key not in grouped:
+            grouped[key] = []
+            ordered_keys.append(key)
+        column_name = issue.evidence.get("column")
+        if isinstance(column_name, str) and column_name not in grouped[key]:
+            grouped[key].append(column_name)
+
+    lines: list[str] = []
+    for message, fix_hint in ordered_keys:
+        columns = grouped[(message, fix_hint)]
+        if columns:
+            lines.append(f"- {message} Columns: {', '.join(columns)}.")
+        else:
+            lines.append(f"- {message}")
+        if fix_hint:
+            lines.append(f"  Review point: {fix_hint}")
+    return lines
 
 
 __all__ = ["CompileAndValidateNode"]

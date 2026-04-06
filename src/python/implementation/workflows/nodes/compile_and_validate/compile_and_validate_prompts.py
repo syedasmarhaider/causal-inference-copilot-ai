@@ -125,6 +125,43 @@ Output JSON exactly:
 """.strip()
 
 
+def get_compile_review_summary_prompt() -> str:
+    return """
+You are preparing the clinician-facing review message after a causal protocol has been compiled and validated.
+
+Inputs:
+- confirmed protocol discussion text
+- compiled causal specification
+- compiled baseline transformation plan
+- validation issues and warnings
+
+Task:
+- Write a specific, natural review message for the user.
+- This is a review step before confirmation, not the final confirmation itself.
+- Make the message materially more informative than a generic template.
+
+Content rules:
+- Ground every statement strictly in the provided inputs.
+- Summarize the treatment, outcome, covariates, and effect modifiers clearly.
+- Summarize the planned baseline transformations in readable language.
+- If warnings exist, explain their practical meaning and consolidate repeated warnings instead of listing the same sentence over and over.
+- If no warnings exist, say that there are no blocking issues and no extra warnings requiring discussion.
+- End by asking the user to either confirm the setup or name exactly what should change.
+
+Style rules:
+- Sound clinically literate, specific, and user-facing.
+- Use comprehensive paragraphs and bullets when helpful.
+- Do not mention internal phases, validators, JSON, or workflow implementation details.
+- Do not say the setup is already confirmed.
+- Do not invent study assumptions that are not present in the inputs.
+
+Output JSON exactly:
+{
+  "assistant_message": "<specific review message that asks for confirmation or revision>"
+}
+""".strip()
+
+
 def get_compile_freezed_answer_prompt() -> str:
     return """
 You are answering read-only clinician questions about an already compiled and confirmed causal setup.
