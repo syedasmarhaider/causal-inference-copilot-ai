@@ -13,6 +13,7 @@ class NextDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     state_name: str | None = None
     router_confirmation_message_for_user: str | None = None
+    should_persists_by_workflow= bool| None
 
 
 class Router(ABC):

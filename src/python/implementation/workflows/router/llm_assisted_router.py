@@ -73,6 +73,7 @@ class _RouteDecision(BaseModel):
 class OtherStateInfo:
     name: str
     purpose: str
+    should_persists_by_workflow: bool
 
 
 class LLMAssistedRouterRouter(Router):
@@ -133,7 +134,7 @@ class LLMAssistedRouterRouter(Router):
             DatasetState.NAME,
             ProtocolDiscussionState.NAME,
         }:
-            return NextDecision(state_name=DatasetState.NAME)
+            return NextDecision(state_name=DatasetState.NAME,should_persists_by_workflow=False)
 
         if status in ("DONE", "FREEZED"):
             next_name = self._next_state_names_map.get(current_name)
@@ -527,42 +528,50 @@ def states_can_call_other_states_during_execution_map() -> Mapping[str, Sequence
             OtherStateInfo(
                 name=ProtocolDiscussionState.NAME,
                 purpose="Move to protocol discussion when user is working on causal protocol definition.",
+                should_persists_by_workflow= True
             ),
         ),
         ProtocolDiscussionState.NAME: (
             OtherStateInfo(
                 name=DatasetState.NAME,
                 purpose="Switch to dataset cleaning/inspection during protocol discussion.",
+                should_persists_by_workflow= False
             ),
         ),
         CompileAndValidateState.NAME: (
             OtherStateInfo(
                 name=DatasetState.NAME,
                 purpose="Answer questions related to data, data characteristics, and insights.",
+                should_persists_by_workflow= False
             ),
         ),
         ModelSelectionState.NAME: (
             OtherStateInfo(
                 name=DatasetState.NAME,
                 purpose="Answer questions related to data, data characteristics, and insights.",
+                should_persists_by_workflow= False
             ),
             OtherStateInfo(
                 name=CompileAndValidateState.NAME,
                 purpose="Answer questions related to the compiled causal, questions about validation.",
+                should_persists_by_workflow= False
             ),
         ),
         CausalInferenceState.NAME: (
             OtherStateInfo(
                 name=DatasetState.NAME,
                 purpose="Route raw data-graph or raw data-analysis requests back to dataset node.",
+                should_persists_by_workflow= False
             ),
             OtherStateInfo(
                 name=CompileAndValidateState.NAME,
                 purpose="Answer questions related to the compiled causal, questions about validation.",
+                should_persists_by_workflow= False
             ),
             OtherStateInfo(
                 name=ModelSelectionNode.NAME,
                 purpose="Answer questions related to model selection and selection rationale.",
+                should_persists_by_workflow= False
             ),
         ),
         NoopDoneState.NAME: (),
