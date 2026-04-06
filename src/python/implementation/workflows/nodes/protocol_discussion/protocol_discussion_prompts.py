@@ -85,6 +85,7 @@ dataset_change_request policy when next_action="confirm":
 - Make it self-contained, operational, and grounded.
 - State explicitly that this is a data-changing request.
 - Specify the confirmed treatment, outcome, covariates, effect modifiers, and any time-zero relevant columns that must be preserved.
+- End the request with one exact line in this format: `Final protocol-scope columns to keep exactly: col_a, col_b, col_c`
 - Specify row filters or cohort eligibility restrictions only when they are grounded in the discussion.
 - Specify columns to remove only when grounded; otherwise explicitly say not to drop columns beyond the confirmed protocol scope.
 - If treatment is binary, instruct normalization to exactly two canonical values and removal or mapping of unexpected values as grounded by the discussion.
@@ -197,7 +198,8 @@ def confirmed_cleaning_system_message_preamble() -> str:
         "- Apply the grounded target-population / cohort-eligibility filters described by the confirmed protocol.\n"
         "- Apply the grounded time-zero / baseline-definition rules before preparing the final working dataset only if user asked for.\n"
         "- You may use auxiliary columns while applying grounded filters, but after cleaning the final working dataset **must** retain only protocol-scope columns: treatment, outcome, covariates, effect modifiers.\n"
-        "- Remove columns outside the confirmed protocol scope unless the request\n"
+        "- Remove columns outside the confirmed protocol scope in the final saved working dataset.\n"
         "- If treatment is binary, normalize it to exactly two canonical values and handle unexpected labels only as grounded by the confirmed protocol.\n"
-        "- If outcome is binary, normalize it to exactly two canonical values and handle unexpected labels only as grounded by the confirmed protocol."
+        "- If outcome is binary, normalize it to exactly two canonical values and handle unexpected labels only as grounded by the confirmed protocol.\n"
+        "- The request should end with: Final protocol-scope columns to keep exactly: <comma-separated columns>."
     )

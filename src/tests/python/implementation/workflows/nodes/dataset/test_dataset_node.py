@@ -1075,3 +1075,71 @@ def test_dataset_node_applies_protocol_cleaning_request_and_freezes_dataset() ->
     assert llm.generate_json_calls == []
     assert llm.generate_calls == []
     assert plot_tool.calls == []
+
+
+def test_dataset_node_protocol_cleaning_manually_keeps_only_protocol_scope_columns() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, data_repo, llm, manipulation_tool, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame(
+            [
+                {
+                    "btransf": 1,
+                    "istatus": 2,
+                    "iage": 65,
+                    "isex": 1,
+                    "ncell": 4,
+                }
+            ]
+        ),
+        manipulation_df=pd.DataFrame(
+            [
+                {
+                    "btransf": 1,
+                    "outcome_status": 2,
+                    "iage": 65,
+                    "isex": 1,
+                    "ncell": 4,
+                    "nplasma": 2,
+                    "ndaysicu": 7,
+                }
+            ]
+        ),
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[
+            ChatMessage(
+                role="assistant",
+                content=(
+                    "The protocol discussion is now confirmed. I will hand off the required "
+                    "data cleaning and normalization steps next."
+                ),
+            ),
+            ChatMessage(
+                role="system",
+                content=(
+                    "PROTOCOL_DISCUSSION_CONFIRMED\n"
+                    "This is a data-changing request for the downstream data cleaning stage.\n\n"
+                    "This is a data-changing request. Preserve btransf, outcome_status, iage, "
+                    "and isex. Exclude post-treatment blood product volumes from the final "
+                    "working dataset."
+                ),
+            ),
+        ],
+        state=_base_dataset_state(iterations=[init_iteration]),
+    )
+
+    assert _status(state) == "FREEZED"
+    assert state.action() == "NONE"
+    assert len(data_repo.saved_csv_calls) == 1
+    saved_df = data_repo.saved_csv_calls[0]["df"]
+    assert isinstance(saved_df, pd.DataFrame)
+    assert list(saved_df.columns) == ["btransf", "outcome_status", "iage", "isex"]
+    assert "1 rows and 4 columns" in _message(state).content.lower()
+    assert len(manipulation_tool.calls) == 1
+    assert llm.generate_json_calls == []
+    assert llm.generate_calls == []
+    assert plot_tool.calls == []

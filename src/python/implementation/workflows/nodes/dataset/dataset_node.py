@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, cast
@@ -272,25 +273,35 @@ class DatasetNode(Node):
         protocol_cleaning_request = _latest_protocol_cleaning_request(messages_history)
         if protocol_cleaning_request and not is_freezed:
             try:
-                (
-                    _manipulation_result,
-                    _manipulation_artifact_refs,
-                    dataset_iterations,
-                    working_df,
-                    _working_summary,
-                    _working_summary_json,
-                    persisted_latest_summary,
-                ) = self._run_manipulation_intent(
+                working_df = self._run_data_manipulation_tool(
+                    dataframe=current_df,
+                    summary_json=current_summary_json,
+                    conversation_id=conversation_id,
+                    instructions=protocol_cleaning_request,
+                )
+                scope_columns = _extract_protocol_scope_columns(
+                    protocol_cleaning_request,
+                    [str(column) for column in working_df.columns],
+                )
+                if scope_columns:
+                    working_df = working_df.loc[:, scope_columns].copy()
+
+                new_dataset_id = uuid.uuid4()
+                self._data_repo.save_csv_data(
                     user_id=user_id,
                     conversation_id=conversation_id,
-                    dataset_iterations=dataset_iterations,
-                    dataframe=current_df,
-                    summary_model=current_summary,
-                    summary_json=current_summary_json,
-                    profiling_tool=self._profiling_tool,
-                    instructions=protocol_cleaning_request,
-                    analytical_query=False,
-                    prepare_chart_data=False,
+                    dataset_id=new_dataset_id,
+                    df=working_df,
+                    overwrite=True,
+                    include_index=False,
+                )
+                dataset_iterations.append(DatasetIterationModel(dataset_id=new_dataset_id))
+                persisted_latest_summary = self._profiling_tool.extract_dataset_summary(
+                    working_df,
+                    max_categories=200,
+                    sample_distinct=200,
+                    compute_quantiles=False,
+                    strict=True,
                 )
             except Exception as exc:
                 log.exception(
@@ -978,6 +989,74 @@ def _latest_protocol_cleaning_request(messages_history: Sequence[ChatMessage] | 
     if cleaned_request:
         return cleaned_request
     return latest_system.strip()
+
+
+def _extract_protocol_scope_columns(
+    request: str,
+    available_columns: Sequence[str],
+) -> list[str]:
+    normalized_map = {
+        _normalize_protocol_column_name(column): str(column)
+        for column in available_columns
+        if str(column).strip()
+    }
+    if len(normalized_map) < 2:
+        return []
+
+    candidate_segments: list[str] = []
+    for raw_segment in re.split(r"[\n\r]+|(?<=[.;])\s+", request):
+        segment = " ".join(raw_segment.strip().split())
+        if not segment:
+            continue
+        lowered = segment.casefold()
+        if (
+            "final protocol-scope columns to keep" in lowered
+            or "protocol scope columns to keep" in lowered
+            or "columns to keep exactly" in lowered
+        ):
+            candidate_segments.append(_segment_after_separator(segment))
+            continue
+        if lowered.startswith(("preserve ", "keep ", "retain ")):
+            candidate_segments.append(_trim_protocol_scope_segment(segment))
+            continue
+        if lowered.startswith(("treatment:", "outcome:", "covariates:", "effect modifiers:")):
+            candidate_segments.append(_segment_after_separator(segment))
+
+    extracted: list[str] = []
+    seen: set[str] = set()
+    for segment in candidate_segments:
+        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", segment):
+            resolved = normalized_map.get(_normalize_protocol_column_name(token))
+            if resolved is None or resolved in seen:
+                continue
+            extracted.append(resolved)
+            seen.add(resolved)
+
+    if len(extracted) < 2:
+        return []
+    return extracted
+
+
+def _normalize_protocol_column_name(value: str) -> str:
+    return value.strip().casefold()
+
+
+def _segment_after_separator(value: str) -> str:
+    for separator in (":",):
+        if separator in value:
+            _prefix, _sep, suffix = value.partition(separator)
+            return suffix.strip()
+    return value.strip()
+
+
+def _trim_protocol_scope_segment(value: str) -> str:
+    trimmed = value
+    for marker in (" drop ", " remove ", " exclude "):
+        marker_index = trimmed.casefold().find(marker)
+        if marker_index != -1:
+            trimmed = trimmed[:marker_index]
+            break
+    return _segment_after_separator(trimmed)
 
 
 def _normalize_message_text(value: str) -> str:
