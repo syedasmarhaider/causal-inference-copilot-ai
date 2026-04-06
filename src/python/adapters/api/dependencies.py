@@ -5,8 +5,6 @@ import inspect
 import os
 from functools import lru_cache
 
-from python.implementation.service.logging.default_logging import get_logger
-
 from fastapi import Depends, File, Header, HTTPException, Path, Query, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -16,6 +14,7 @@ from python.implementation.service.firebsae_auth_service import (
     FirebaseAuthService,
     InvalidTokenError,
 )
+from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.dataflow_app import DataflowApp
 from python.implementation.workflows.depinit import make_apps
 from python.implementation.workflows.workflow_app import WorkflowApp

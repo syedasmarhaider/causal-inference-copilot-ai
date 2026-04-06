@@ -10,7 +10,6 @@ from typing_extensions import TypedDict
 
 from python.domain.models.models import ChatMessage
 
-
 T = TypeVar("T", bound=BaseModel)
 AvailableModelsKey = Literal["mini","basic", "pro","thinking"]
 ProviderExtra = dict[str, Any]

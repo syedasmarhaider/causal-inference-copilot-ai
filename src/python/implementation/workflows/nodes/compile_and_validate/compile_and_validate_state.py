@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
+from python.domain.models.validation import ValidationIssueModel
 from python.domain.workflows.state import Action, State, Status
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_deps import (
     CompileAndValidateDeps,
@@ -16,7 +17,6 @@ from python.implementation.workflows.tools.causal.common.inference_ready_causal_
 )
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
-from python.domain.models.validation import ValidationIssueModel
 
 CompileAndValidatePhase = Literal["INIT", "REVIEW_READY", "CONFIRMED", "FAILED"]
 
@@ -26,7 +26,7 @@ class CompileAndValidatePayloadModel(BaseModel):
     compiled_causal_spec: CausalSpec | None = None
     transformation_plan: TransformPlan | None = None
     inference_ready_causal_spec: InferenceReadyCausalSpec | None = None
-    validation_issues: list[ValidationIssueModel] = Field(default_factory=lambda: [])
+    validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
     phase: CompileAndValidatePhase = "INIT"
     assistant_message: str | None = None
     system_message: str | None = None

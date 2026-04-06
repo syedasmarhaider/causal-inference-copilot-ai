@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 PENDING_ROUTER_SYSTEM_PROMPT = (
     "You are a strict workflow router. "
     "The current state is PENDING, so forward progression is not allowed. "

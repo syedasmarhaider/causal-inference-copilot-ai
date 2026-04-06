@@ -53,7 +53,7 @@ class BaseResult:
     status: ResultStatus
     started_at: datetime | None = None
     finished_at: datetime | None = None
-    warnings: list[str] = field(default_factory=lambda: [])
+    warnings: list[str] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict) # type: ignore
 
 

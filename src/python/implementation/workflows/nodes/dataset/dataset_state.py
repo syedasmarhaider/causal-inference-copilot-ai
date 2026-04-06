@@ -25,7 +25,7 @@ class DatasetIterationModel(BaseModel):
 class DatasetPayloadModel(BaseModel):
     # Ignore legacy payload fields like persisted message artifact refs during migration.
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
-    dataset_iterations: list[DatasetIterationModel] = Field(default_factory=lambda: [])
+    dataset_iterations: list[DatasetIterationModel] = Field(default_factory=list)
     latest_summary: DatasetSummaryModel | None = None
     freezed: bool = False
     user_message: str | None = None

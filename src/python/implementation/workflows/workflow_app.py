@@ -20,7 +20,6 @@ from python.implementation.workflows.dataflow_app import (
     DataflowArtifactResponse,
 )
 
-
 _MESSAGES_HISTORY_LIMIT = 15
 
 # TODO: add distributed tnx or locks later
@@ -345,10 +344,7 @@ class WorkflowApp:
         # is frozen, in which case that frozen state becomes the new active checkpoint.
         active_state_name_after_run = active_state_name_before_run
         active_state_status_after_run = active_state_status_before_run
-        if new_state_status == "FREEZED":
-            active_state_name_after_run = new_state_name
-            active_state_status_after_run = new_state_status
-        elif pre_state_to_run_status != "FREEZED":
+        if new_state_status == "FREEZED" or pre_state_to_run_status != "FREEZED":
             active_state_name_after_run = new_state_name
             active_state_status_after_run = new_state_status
         elif active_state_name_before_run == new_state_name:

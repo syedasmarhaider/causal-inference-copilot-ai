@@ -6,8 +6,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from python.adapters.api.dependencies import (
-    ARTIFACT_ID_PATH_PARAM,
     ARTIFACT_FORMAT_QUERY_PARAM,
+    ARTIFACT_ID_PATH_PARAM,
     ARTIFACT_KIND_QUERY_PARAM,
     AUTHENTICATED_USER_DEP,
     CONVERSATION_ID_PATH_PARAM,
@@ -16,8 +16,8 @@ from python.adapters.api.dependencies import (
     UPLOAD_DATASET_FILE_PARAM,
     WORKFLOW_APP_DEP,
     get_auth_service,
-    get_dataflow_app,
     get_authenticated_user,
+    get_dataflow_app,
     get_workflow_app,
 )
 from python.adapters.api.docs import (

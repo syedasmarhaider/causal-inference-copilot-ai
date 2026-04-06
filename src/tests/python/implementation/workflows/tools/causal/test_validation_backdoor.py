@@ -3,11 +3,11 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     DateTimeEpochParams,
     TransformPlan,
 )
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.validation import (
     validation_backdoor_tool as validator_module,
 )

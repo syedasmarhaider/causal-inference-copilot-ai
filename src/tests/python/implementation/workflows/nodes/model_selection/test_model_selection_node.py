@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -9,6 +8,7 @@ import pandas as pd
 import pytest
 
 from python.domain.models.errors import StateDependencyError
+from python.domain.models.validation import ValidationIssueModel
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMResponse
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
@@ -28,8 +28,8 @@ from python.implementation.workflows.nodes.model_selection.model_selection_node 
     ModelSelectionNode,
 )
 from python.implementation.workflows.nodes.model_selection.model_selection_prompts import (
-    get_model_selection_node_info,
     get_model_selection_freezed_answer_prompt,
+    get_model_selection_node_info,
 )
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
     InferenceReadyCausalSpec,
@@ -44,7 +44,6 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import Causa
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
 )
-from python.domain.models.validation import ValidationIssueModel
 
 
 def _build_dataframe() -> pd.DataFrame:

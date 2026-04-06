@@ -8,6 +8,7 @@ from uuid import UUID
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
+from python.domain.models.validation import ValidationIssueModel
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
@@ -44,7 +45,6 @@ from python.implementation.workflows.tools.causal.validation.validation_backdoor
 )
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.utils.utils import safe_err
-from python.domain.models.validation import ValidationIssueModel
 
 log = get_logger(__name__)
 

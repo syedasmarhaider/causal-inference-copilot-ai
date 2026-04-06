@@ -15,7 +15,6 @@ from python.implementation.workflows.tools.common.model.data_summary import (
     OtherColumnProfileModel,
 )
 
-
 # ----------------------------
 # Core types
 # ----------------------------

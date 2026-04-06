@@ -33,7 +33,7 @@ class ConfirmedModelSelectionPayload(BaseModel):
 class ModelSelectionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    recommendations: list[ModelRecommendationModel] = Field(default_factory=lambda: [])
+    recommendations: list[ModelRecommendationModel] = Field(default_factory=list)
     confirmed_model_selection: ConfirmedModelSelectionPayload | None = None
     assistant_message: str | None = None
     error_message: str | None = None

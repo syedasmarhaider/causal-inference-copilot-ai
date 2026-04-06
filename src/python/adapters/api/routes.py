@@ -27,7 +27,13 @@ from python.adapters.api.schemas import (
     WorkingDatasetInfoResponse,
 )
 from python.domain.models.errors import ConversationNotFoundError
-from python.domain.models.models import ArtifactFormat, ArtifactKind, ArtifactRef, ChatMessage, WorkingDatasetInfo
+from python.domain.models.models import (
+    ArtifactFormat,
+    ArtifactKind,
+    ArtifactRef,
+    ChatMessage,
+    WorkingDatasetInfo,
+)
 from python.domain.service.auth_service import AuthenticatedUser
 from python.implementation.workflows.dataflow_app import DataflowApp
 from python.implementation.workflows.workflow_app import WorkflowApp, WorkflowResponse

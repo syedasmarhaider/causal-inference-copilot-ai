@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from python.implementation.service.logging.default_logging import get_logger
 import os
 import tempfile
 from collections.abc import Mapping
@@ -18,6 +17,7 @@ from google.cloud import storage  # pyright: ignore[reportMissingTypeStubs]
 from google.cloud.storage.retry import DEFAULT_RETRY  # pyright: ignore[reportMissingTypeStubs]
 
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
+from python.implementation.service.logging.default_logging import get_logger
 
 DEFAULT_GCS_MODELS_PREFIX: Final[str] = "models"
 DEFAULT_GCS_TIMEOUT_SECONDS: Final[float] = 60.0

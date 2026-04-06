@@ -7,6 +7,7 @@ from uuid import UUID
 from python.domain.service.llm_service import ChatMessage
 from python.domain.workflows.state import State
 
+
 class Node(ABC):
     @property
     @abstractmethod

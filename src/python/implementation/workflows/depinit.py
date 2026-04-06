@@ -19,11 +19,11 @@ from python.implementation.repo.google_cloud_storage_data_repo import GoogleClou
 from python.implementation.repo.google_cloud_storage_model_repo import GoogleCloudStorageModelsRepo
 from python.implementation.repo.local_data_repo import LocalFileDataRepo
 from python.implementation.repo.local_models_repo import LocalFileModelsRepo
-from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.service.llms.llm_service_factory import (
     LLMServiceSettings,
     make_llm_service,
 )
+from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.dataflow_app import DataflowApp
 from python.implementation.workflows.router.llm_assisted_router import (
     LLMAssistedRouterRouter,

@@ -1,6 +1,7 @@
-from dataclasses import dataclass
 import json
-from typing import Annotated, Any, Literal, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import StringConstraints

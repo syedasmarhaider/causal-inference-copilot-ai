@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from python.domain.models.errors import StateDependencyError
+from python.domain.models.validation import ValidationIssueModel
 from python.domain.workflows.state import State
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
     CompileAndValidateState,
@@ -11,7 +12,6 @@ from python.implementation.workflows.nodes.compile_and_validate.compile_and_vali
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
     InferenceReadyCausalSpec,
 )
-from python.domain.models.validation import ValidationIssueModel
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,7 +8,6 @@ from uuid import UUID, uuid4
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from python.domain.repo.models_repo import ModelRecord
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (

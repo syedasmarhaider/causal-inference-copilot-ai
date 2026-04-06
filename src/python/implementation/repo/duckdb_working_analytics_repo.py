@@ -11,8 +11,6 @@ import pandas as pd
 
 from python.domain.repo.analytics_repo import AnalyticsRepo, AnalyticsSQLRequest, AnalyticsSQLResult
 
-
-
 _REGISTERED_DF_NAME = "__working_input_dataframe"
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 

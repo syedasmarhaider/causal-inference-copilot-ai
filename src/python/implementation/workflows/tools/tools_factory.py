@@ -21,7 +21,9 @@ from python.implementation.workflows.tools.causal.specs.causal_specs_tool import
 from python.implementation.workflows.tools.causal.validation.validation_backdoor_tool import (
     ValidationBackdoorTool,
 )
-from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import DataManipulationTool
+from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import (
+    DataManipulationTool,
+)
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
 )

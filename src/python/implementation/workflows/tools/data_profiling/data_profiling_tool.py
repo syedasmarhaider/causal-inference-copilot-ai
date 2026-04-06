@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import  Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 import pandas as pd
 from pandas.api.types import (
@@ -29,6 +29,7 @@ from python.implementation.workflows.tools.common.model.data_summary import (
     OtherColumnProfileModel,
     OtherSummaryModel,
 )
+
 InferredKind = Literal["NUMERIC", "DATETIME", "BOOLEAN", "CATEGORICAL", "OTHER"]
 
 # =============================================================================

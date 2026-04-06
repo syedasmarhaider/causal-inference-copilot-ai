@@ -11,13 +11,13 @@ from uuid import UUID
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from python.domain.models.models import ArtifactRef, get_chat_messages_role_and_message_json
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import (
     ChatMessage,
     LLMConfig,
     LLMService,
 )
-from python.domain.models.models import ArtifactRef, get_chat_messages_role_and_message_json
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory

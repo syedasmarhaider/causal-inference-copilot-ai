@@ -22,12 +22,12 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_dep
     CausalInferenceDeps,
 )
 from python.implementation.workflows.nodes.causal_inference.causal_inference_prompts import (
+    CATE_SUMMARY_SYSTEM_PROMPT,
+    CATE_SUMMARY_USER_PROMPT_TEMPLATE,
     CAUSAL_INFERENCE_ATE_SUMMARY_SYSTEM_PROMPT,
     CAUSAL_INFERENCE_ATE_SUMMARY_USER_PROMPT_TEMPLATE,
     CAUSAL_INFERENCE_ROUTE_SYSTEM_PROMPT,
     CAUSAL_INFERENCE_ROUTE_USER_PROMPT_TEMPLATE,
-    CATE_SUMMARY_SYSTEM_PROMPT,
-    CATE_SUMMARY_USER_PROMPT_TEMPLATE,
     INVALID_CATE_PLAN_SYSTEM_PROMPT,
     INVALID_CATE_PLAN_USER_PROMPT_TEMPLATE,
     get_causal_inference_node_info,

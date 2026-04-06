@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 prev_state_revert_message: str = "revert_data_changes"
 
 def dataset_node_info() -> str:

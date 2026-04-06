@@ -21,11 +21,11 @@ from python.implementation.workflows.nodes.model_selection.model_selection_deps 
     ModelSelectionDeps,
 )
 from python.implementation.workflows.nodes.model_selection.model_selection_prompts import (
-    get_model_selection_freezed_answer_prompt,
     MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
     MODEL_SELECTION_NEGOTIATOR_USER_PROMPT_TEMPLATE,
     MODEL_SELECTION_RECOMMENDER_SYSTEM_PROMPT,
     MODEL_SELECTION_RECOMMENDER_USER_PROMPT_TEMPLATE,
+    get_model_selection_freezed_answer_prompt,
     get_model_selection_node_info,
 )
 from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (

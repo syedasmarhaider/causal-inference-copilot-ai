@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from python.implementation.service.logging.default_logging import get_logger
 import os
 from uuid import UUID, uuid5
 
@@ -8,6 +7,7 @@ import firebase_admin
 from firebase_admin import auth, credentials
 
 from python.domain.service.auth_service import AuthenticatedUser, AuthService
+from python.implementation.service.logging.default_logging import get_logger
 
 _FIREBASE_USER_ID_NAMESPACE = UUID("2d5c4b6d-7f6b-4d8e-9a2d-1f5e9d9d8c11")
 log = get_logger(__name__)

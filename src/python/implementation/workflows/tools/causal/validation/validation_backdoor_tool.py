@@ -9,13 +9,8 @@ import pandas as pd
 import pandas.api.types as ptypes
 from pydantic import BaseModel, ConfigDict, Field
 
+from python.domain.models.validation import ValidationIssueModel, ValidationStatus
 from python.domain.workflows.tool import Tool
-from python.implementation.workflows.tools.causal.specs.causal_spec import (
-    BinaryOutcomeSpecModel,
-    BinaryTreatmentSpecModel,
-    CausalSpec,
-    ContinuousOutcomeSpecModel,
-)
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     CatOneHotParams,
     DateTimeEpochParams,
@@ -24,8 +19,15 @@ from python.implementation.workflows.tools.causal.encoding.encoding_plan import 
     NumLog1pParams,
     TransformPlan,
 )
-from python.implementation.workflows.tools.causal.encoding.encoding_util import compile_plan_to_transformers
-from python.domain.models.validation import ValidationIssueModel, ValidationStatus
+from python.implementation.workflows.tools.causal.encoding.encoding_util import (
+    compile_plan_to_transformers,
+)
+from python.implementation.workflows.tools.causal.specs.causal_spec import (
+    BinaryOutcomeSpecModel,
+    BinaryTreatmentSpecModel,
+    CausalSpec,
+    ContinuousOutcomeSpecModel,
+)
 
 
 class ValidationBackdoorReport(BaseModel):

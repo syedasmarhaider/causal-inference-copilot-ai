@@ -11,11 +11,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from python.implementation.workflows.tools.causal.specs.causal_spec import (
-    BinaryOutcomeSpecModel,
-    BinaryTreatmentSpecModel,
-    CausalSpec,
-)
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     CatOneHotParams,
     DateTimeEpochParams,
@@ -28,6 +23,11 @@ from python.implementation.workflows.tools.causal.encoding.encoding_plan import 
     NumStandardParams,
     PassthroughParams,
     TransformPlan,
+)
+from python.implementation.workflows.tools.causal.specs.causal_spec import (
+    BinaryOutcomeSpecModel,
+    BinaryTreatmentSpecModel,
+    CausalSpec,
 )
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Any, ClassVar
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.models.errors import NodeExecutionError
@@ -10,6 +11,8 @@ from python.domain.workflows.state import Action, State, Status
 from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import (
     CausalInferenceDeps,
 )
+
+
 class CausalInferencePayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

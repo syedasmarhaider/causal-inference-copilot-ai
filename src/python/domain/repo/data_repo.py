@@ -6,7 +6,6 @@ from uuid import UUID
 
 import pandas as pd
 
-
 ImageMime = Literal["image/png", "image/jpeg", "image/webp"]
 
 class DataRepo(ABC):

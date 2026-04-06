@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-from python.implementation.service.logging.default_logging import get_logger
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -29,6 +28,11 @@ from sklearn.linear_model import LogisticRegressionCV, RidgeCV
 from sklearn.pipeline import Pipeline
 
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
+from python.implementation.service.logging.default_logging import get_logger
+from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
+    InferenceReadyCausalSpec,
+)
+from python.implementation.workflows.tools.causal.encoding.encoding_util import EncodingUtil
 from python.implementation.workflows.tools.causal.inference.causal_command import (
     ATECommand,
     ATEModelResult,
@@ -47,10 +51,6 @@ from python.implementation.workflows.tools.causal.inference.causal_model import 
     CausalModel,
     CausalResult,
 )
-from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
-    InferenceReadyCausalSpec,
-)
-from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.inference.econml.models_info import (
     get_forest_dr_learner_causal_model_info,
     get_linear_dr_learner_causal_model_info,
@@ -66,7 +66,7 @@ from python.implementation.workflows.tools.causal.inference.econml.utils import 
     required_init_keys,
     serialize_inference_obj,
 )
-from python.implementation.workflows.tools.causal.encoding.encoding_util import EncodingUtil
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 
 log = get_logger(__name__)
 
