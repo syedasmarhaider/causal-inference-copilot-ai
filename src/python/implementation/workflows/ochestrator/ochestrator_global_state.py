@@ -96,17 +96,13 @@ class OchestratorWritableGlobalState(
     def init_empty(cls) -> OchestratorWritableGlobalState:
         return cls(GlobalStateModel())
 
-    # -----------------------------
-    # public getters / setters
-    # -----------------------------
-
     def get_last_active_node_name(self) -> str | None:
         return self._model.last_active_node_name
 
     def set_last_active_node_name(self, node_name: str) -> None:
         node_name = node_name.strip()
         if not node_name:
-                raise ValueError("last_active_node_name cannot be blank")
+            raise ValueError("last_active_node_name cannot be blank")
         self._model.last_active_node_name = node_name
 
     def set_working_dataset_id(self, dataset_id: UUID) -> None:
@@ -114,6 +110,8 @@ class OchestratorWritableGlobalState(
             return
 
         self._model.working_dataset_id = dataset_id
+
+        # new dataset => everything after dataset id is invalid
         self._clear_forward_from(
             "working_dataset_id",
             reason="working_dataset_id changed",
@@ -135,6 +133,23 @@ class OchestratorWritableGlobalState(
             return
 
         self._model.working_dataset_summary = summary
+
+        if summary is None:
+            # no summary => protocol can no longer remain valid
+            self._clear_forward_from(
+                "working_dataset_summary",
+                reason="working_dataset_summary cleared",
+            )
+            return
+
+        if self._model.protocol_discussed:
+            # same dataset, refreshed summary after cleaning/refinement:
+            # keep protocol_discussed, invalidate only what comes after it
+            self._clear_after_protocol_discussion(
+                reason="working_dataset_summary changed after protocol discussion",
+            )
+            return
+
         self._clear_forward_from(
             "working_dataset_summary",
             reason="working_dataset_summary changed",
@@ -330,6 +345,12 @@ class OchestratorWritableGlobalState(
     # -----------------------------
     # reset helpers
     # -----------------------------
+
+    def _clear_after_protocol_discussion(self, *, reason: str) -> None:
+        self._clear_forward_from(
+            "protocol_discussed",
+            reason=reason,
+        )
 
     def _clear_forward_from(self, field_name: str, *, reason: str) -> None:
         field_index = self._WORKFLOW_ORDER.index(field_name)

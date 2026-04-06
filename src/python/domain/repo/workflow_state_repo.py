@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from uuid import UUID
 
 from python.domain.models.models import ChatMessage
+from python.domain.workflows.ochestrator_state import WritableOchestratorState
 from python.domain.workflows.state import State
 
 
@@ -32,12 +33,12 @@ class WorkflowStateRepo(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def load_active_state_name(self, *, user_id: UUID, conversation_id: UUID) -> str | None:
+    def load_ochestrator_state(self, *, user_id: UUID, conversation_id: UUID) -> WritableOchestratorState | None:
         raise NotImplementedError
 
     @abstractmethod
-    def store_active_state_name(
-        self, *, user_id: UUID, conversation_id: UUID, state_name: str
+    def store_ochestrator_state(
+        self, *, user_id: UUID, conversation_id: UUID, state: WritableOchestratorState 
     ) -> None:
         raise NotImplementedError
 
