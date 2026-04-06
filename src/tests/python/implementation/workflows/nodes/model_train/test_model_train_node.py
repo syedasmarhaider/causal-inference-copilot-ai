@@ -9,7 +9,7 @@ import pytest
 
 from python.domain.models.errors import StateDependencyError
 from python.domain.repo.data_repo import DataRepo
-from python.domain.service.llm_service import ChatMessage
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMResponse, LLMService
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
     CompileAndValidatePayloadModel,
@@ -267,6 +267,35 @@ class _FakeCausalModel:
 
 
 @dataclass
+class _FakeLLM(LLMService):
+    generate_content: str = "LLM failure summary."
+
+    def generate(
+        self,
+        *,
+        system_prompt: str | None,
+        user_prompt: str,
+        config: LLMConfig,
+        history: list[ChatMessage] | None,
+    ) -> LLMResponse:
+        _ = system_prompt, user_prompt, config, history
+        return LLMResponse(content=self.generate_content)
+
+    def generate_json(
+        self,
+        *,
+        schema: type[Any],
+        system_prompt: str | None,
+        user_prompt: str,
+        config: LLMConfig,
+        history: list[ChatMessage] | None,
+        max_attempts: int = 3,
+    ) -> Any:
+        _ = schema, system_prompt, user_prompt, config, history, max_attempts
+        raise AssertionError("generate_json should not be called in this test")
+
+
+@dataclass
 class _FakeToolFactory(ToolFactory):
     model_factory: Any
 
@@ -504,6 +533,44 @@ def test_model_train_succeeds_on_second_attempt() -> None:
     assert result.payload.trained_model_id == fit_result.fitted_model_id
     assert "after 2 attempts" in (result.payload.assistant_message or "").lower()
     assert len(fake_model.commands) == 2
+
+
+def test_model_train_failure_uses_llm_summary_for_user_message() -> None:
+    compile_state = _compile_state()
+    selection_state = _selection_state()
+    dataset_state = _dataset_state()
+    failure = CommandFailure(
+        run_id=uuid4(),
+        started_at=None,
+        finished_at=None,
+        warnings=["Check positivity"],
+        meta={},
+        error=ErrorInfo(code="ESTIMATOR_ERROR", message="fit failed"),
+    )
+    fake_model = _FakeCausalModel(results=[failure, failure])
+    node = ModelTrainNode(
+        llm=_FakeLLM(generate_content="Training failed because the estimator saw invalid inputs."),
+        data_repo=_FakeDataRepo(dataframe=_build_dataframe()),
+        tool_factory=_FakeToolFactory(model_factory=_FakeModelFactory(model=fake_model)),
+    )
+
+    result = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        state=ModelTrainState.init_empty(),
+        previous_state_dependencies={
+            DatasetState.NAME: dataset_state,
+            CompileAndValidateState.NAME: compile_state,
+            ModelSelectionState.NAME: selection_state,
+        },
+        messages_history=None,
+    )
+
+    assert isinstance(result, ModelTrainState)
+    assert result.status() == "ABORTED"
+    assert result.payload.assistant_message is not None
+    assert "invalid inputs" in result.payload.assistant_message.lower()
+    assert "attempted 2 times" in result.payload.assistant_message.lower()
 
 
 def test_model_train_reuses_existing_fit_for_same_inputs() -> None:

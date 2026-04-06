@@ -31,6 +31,7 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_pro
     INVALID_CATE_PLAN_SYSTEM_PROMPT,
     INVALID_CATE_PLAN_USER_PROMPT_TEMPLATE,
     get_causal_inference_node_info,
+    get_model_failure_summary_prompt,
 )
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
     CausalInferencePayloadModel,
@@ -252,8 +253,16 @@ class CausalInferenceNode(Node):
             return CausalInferenceState(
                 _failed_payload(
                     payload=payload,
-                    assistant_message=(
-                        "The global treatment effect could not be computed because the estimator failed."
+                    assistant_message=_summarize_model_failure_for_user(
+                        llm=self._llm,
+                        operation="overall treatment-effect estimation",
+                        model_name=deps.selected_model,
+                        error_message=safe_err(exc),
+                        error_details={"exception": repr(exc)},
+                        warnings=[],
+                        fallback_message=(
+                            "The global treatment effect could not be computed because the estimator failed."
+                        ),
                     ),
                     error_message=f"ate execution failed: {safe_err(exc)}",
                 )
@@ -263,8 +272,16 @@ class CausalInferenceNode(Node):
             return CausalInferenceState(
                 _failed_payload(
                     payload=payload,
-                    assistant_message=(
-                        "I could not compute the overall treatment effect from the trained model."
+                    assistant_message=_summarize_model_failure_for_user(
+                        llm=self._llm,
+                        operation="overall treatment-effect estimation",
+                        model_name=deps.selected_model,
+                        error_message=result.error.message,
+                        error_details=result.error.details,
+                        warnings=result.warnings,
+                        fallback_message=(
+                            "I could not compute the overall treatment effect from the trained model."
+                        ),
                     ),
                     error_message=result.error.message,
                 )
@@ -525,6 +542,24 @@ class CausalInferenceNode(Node):
             request_summary=request_summary,
             effect_modifier_columns=effect_modifier_columns,
         )
+        if isinstance(cate_payload, dict) and cate_plot_df is None and cate_payload.get("errors"):
+            return CausalInferenceState(
+                _failed_payload(
+                    payload=payload,
+                    assistant_message=_summarize_model_failure_for_user(
+                        llm=self._llm,
+                        operation="subgroup effect estimation",
+                        model_name=deps.selected_model,
+                        error_message="CATE computation failed for all requested cohorts.",
+                        error_details={"cohort_errors": cate_payload.get("errors")},
+                        warnings=[],
+                        fallback_message=(
+                            "I could not compute the requested subgroup effects from the trained model."
+                        ),
+                    ),
+                    error_message=_format_cohort_error_details(cate_payload["errors"]),
+                )
+            )
         if cate_payload is None or cate_plot_df is None or cate_plot_df.empty:
             return CausalInferenceState(
                 payload.model_copy(
@@ -726,6 +761,12 @@ class CausalInferenceNode(Node):
             )
 
         if not plot_frames:
+            if cohort_errors:
+                return {
+                    "request_summary": request_summary,
+                    "effect_modifier_columns": list(effect_modifier_columns),
+                    "errors": cohort_errors,
+                }, None
             return None, None
 
         plot_df = pd.concat(plot_frames, ignore_index=True)
@@ -1004,6 +1045,43 @@ def _summarize_ate(
             "I computed the overall treatment effect successfully. "
             f"The estimated effect is {estimate} on the model outcome scale."
         )
+
+
+def _summarize_model_failure_for_user(
+    *,
+    llm: LLMService,
+    operation: str,
+    model_name: str,
+    error_message: str,
+    error_details: Mapping[str, Any] | None,
+    warnings: Sequence[str],
+    fallback_message: str,
+) -> str:
+    payload = {
+        "operation": operation,
+        "model_name": model_name,
+        "error_message": error_message,
+        "error_details": dict(error_details or {}),
+        "warnings": [str(item).strip() for item in warnings if str(item).strip()],
+    }
+    try:
+        return llm.generate(
+            system_prompt=get_model_failure_summary_prompt(),
+            user_prompt=_dumps(payload),
+            config=LLMConfig(model="basic", temperature=0.1),
+            history=None,
+        ).content.strip()
+    except Exception:
+        return fallback_message
+
+
+def _format_cohort_error_details(errors: Sequence[Mapping[str, Any]]) -> str:
+    parts: list[str] = []
+    for item in errors[:5]:
+        group_key = str(item.get("group_key", "")).strip() or "unknown"
+        error_text = str(item.get("error", "")).strip() or "unknown error"
+        parts.append(f"{group_key}: {error_text}")
+    return " | ".join(parts) if parts else "cate computation failed"
 
 
 def _summarize_cate(

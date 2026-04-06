@@ -7,13 +7,14 @@ from typing import Any, ClassVar, cast
 from uuid import UUID, uuid4
 
 from python.domain.repo.data_repo import DataRepo
-from python.domain.service.llm_service import ChatMessage, LLMService
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.nodes.model_train.model_train_prompts import (
+    get_model_failure_summary_prompt,
     get_model_train_node_info,
 )
 from python.implementation.workflows.nodes.model_train.model_train_state import (
@@ -145,9 +146,17 @@ class ModelTrainNode(Node):
                     max_attempts=_MAX_TRAINING_ATTEMPTS,
                 )
                 last_error_message = f"fit execution failed: {safe_err(exc)}"
-                last_user_message = (
-                    "Model training did not complete because the estimator failed during fitting. "
-                    "Please review the selected model and the cleaned dataset."
+                last_user_message = _summarize_model_failure_for_user(
+                    llm=self._llm,
+                    operation="model training",
+                    model_name=deps.selected_model,
+                    error_message=safe_err(exc),
+                    error_details={"exception": repr(exc)},
+                    warnings=[],
+                    fallback_message=(
+                        "Model training did not complete because the estimator failed during fitting. "
+                        "Please review the selected model and the cleaned dataset."
+                    ),
                 )
                 last_warnings = []
                 if attempt < _MAX_TRAINING_ATTEMPTS:
@@ -184,10 +193,18 @@ class ModelTrainNode(Node):
             if isinstance(result, CommandFailure):
                 last_warnings = list(result.warnings or [])
                 last_error_message = result.error.message
-                last_user_message = _failure_message(
+                last_user_message = _summarize_model_failure_for_user(
+                    llm=self._llm,
+                    operation="model training",
                     model_name=deps.selected_model,
                     error_message=result.error.message,
+                    error_details=result.error.details,
                     warnings=last_warnings,
+                    fallback_message=_failure_message(
+                        model_name=deps.selected_model,
+                        error_message=result.error.message,
+                        warnings=last_warnings,
+                    ),
                 )
                 if attempt < _MAX_TRAINING_ATTEMPTS:
                     continue
@@ -337,3 +354,35 @@ def _failure_message(
 
 def _retry_failure_message(*, base_message: str, attempts: int) -> str:
     return f"{base_message.strip()} Training was attempted {attempts} times before stopping."
+
+
+def _summarize_model_failure_for_user(
+    *,
+    llm: LLMService | None,
+    operation: str,
+    model_name: str,
+    error_message: str,
+    error_details: Mapping[str, Any] | None,
+    warnings: Sequence[str],
+    fallback_message: str,
+) -> str:
+    if llm is None:
+        return fallback_message
+
+    payload = {
+        "operation": operation,
+        "model_name": model_name,
+        "error_message": error_message,
+        "error_details": dict(error_details or {}),
+        "warnings": [str(item).strip() for item in warnings if str(item).strip()],
+    }
+
+    try:
+        return llm.generate(
+            system_prompt=get_model_failure_summary_prompt(),
+            user_prompt=json.dumps(payload, ensure_ascii=False),
+            config=LLMConfig(model="basic", temperature=0.1),
+            history=None,
+        ).content.strip()
+    except Exception:
+        return fallback_message
