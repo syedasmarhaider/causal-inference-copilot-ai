@@ -77,22 +77,121 @@ class Ochestrator:
         ochestrator_state = self._workflow_repo.load_ochestrator_state(user_id=user_id, conversation_id=conversation_id)
         if ochestrator_state is None:
             ochestrator_state = OchestratorWritableGlobalState.init_empty()
+            ochestrator_state.set_last_active_node_name(DatasetNode.NAME)
             self._workflow_repo.store_ochestrator_state(user_id=user_id, conversation_id=conversation_id, state=ochestrator_state)
         
         if not isinstance(ochestrator_state, OchestratorWritableGlobalState):    
             raise ValueError("Ochestrator state should be of type OchestratorWritableGlobalState")
         
         node_name_to_run = ochestrator_state.get_last_active_node_name()
-        if node_name_to_run is None:
+        latest_state_name = ochestrator_state.get_last_active_node_name()
+        if latest_state_name is None:
+            latest_state_name = DatasetState.NAME
             node_name_to_run = DatasetNode.NAME
+            
+        state = self._workflow_repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name=latest_state_name)
+        if state is None and node_name_to_run != DatasetNode.NAME:
+            raise ValueError(f"State {latest_state_name!r} should exist in the repo if last active node is not {DatasetNode.NAME}")
+        
+        if state is None:
+            state = DatasetState.init_empty()
+        
+        if state.status() == "PENDING":
+ 
+                
+        
+           
+        
+            
         
         
         
         raise NotImplementedError("Implement node name decision logic based on ochestrator state and messages history")
+    
+    def handle_abort(self, *,
+                    user_id: UUID,
+                    conversation_id: UUID,
+                    current_state: State,
+                    ochestrator_state: OchestratorWritableGlobalState,
+                    messages_history: Sequence[ChatMessage] | None,) -> Sequence[ChatMessage]:
         
-
+    def handle_done(self, *, 
+                    user_id: UUID,
+                    conversation_id: UUID,
+                    current_state: State,
+                    ochestrator_state: OchestratorWritableGlobalState,
+                    messages_history: Sequence[ChatMessage] | None,) -> Sequence[ChatMessage]:
+        next_node_name = self.decide_node_name_on_done(current_state=current_state)
+        if next_node_name is None:
+            raise ValueError(f"No next node defined for current state {current_state.name()!r}")
+        next_node = self.nodes_by_name.get(next_node_name)
+        if next_node is None:
+            raise ValueError(f"Node with name {next_node_name!r} was not found")
+        
             
+    
+    def handle_pending(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        current_state: State,
+        ochestrator_state: OchestratorWritableGlobalState,
+        messages_history: Sequence[ChatMessage] | None,
+    ) -> Sequence[ChatMessage]:
+        node_name_to_run = self._decide_node_name_or_ochestration_on_pending(
+                current_state=current_state,
+                ochestrator_state=ochestrator_state,
+                messages_history=messages_history,
+            )
+        if node_name_to_run == "ORCHESTRATOR_ANSWER":
+                orchestrator_answer_message = self._answer_orchestrator_question_on_pending(
+                    current_state=current_state,
+                    ochestrator_state=ochestrator_state,
+                    messages_history=messages_history,
+                )
+                self._workflow_repo.append_message(user_id=user_id, conversation_id=conversation_id, message=orchestrator_answer_message)
+                return [orchestrator_answer_message]
+            
+        if node_name_to_run == DatasetState.NAME:
+                state = self._workflow_repo.load_state(user_id=user_id, conversation_id=conversation_id, state_name=DatasetState.NAME)
+                if state is None:
+                    state = DatasetState.init_empty()
+                datasetNode = self.nodes_by_name[DatasetNode.NAME]
+                node_output_state = datasetNode.run(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    state=state,
+                    readonly_orchestrator_state=ochestrator_state,
+                    messages_history=messages_history,
+                ) 
+                ochestrator_state = self._update_ochestration_state_if_node_done_or_dataset(
+                        ochestrator_state=ochestrator_state,
+                        state=node_output_state,
+                    )
+                self._workflow_repo.store_ochestrator_state(user_id=user_id, conversation_id=conversation_id, state=ochestrator_state)
+                self._workflow_repo.store_state(user_id=user_id, conversation_id=conversation_id, state=node_output_state)
+                return node_output_state.messages()
         
+        node = self.nodes_by_name.get(node_name_to_run)
+        if node is None:
+            raise ValueError(f"Node with name {node_name_to_run!r} was not found")    
+        resulted_state = node.run(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state=current_state,
+            readonly_orchestrator_state=ochestrator_state,
+            messages_history=messages_history,
+        )
+        ochestrator_state = self._update_ochestration_state_if_node_done_or_dataset(
+            ochestrator_state=ochestrator_state,
+            state=resulted_state,
+        )
+        ochestrator_state.set_last_active_node_name(node_name_to_run)
+        self._workflow_repo.store_ochestrator_state(user_id=user_id, conversation_id=conversation_id, state=ochestrator_state)
+        self._workflow_repo.store_state(user_id=user_id, conversation_id=conversation_id, state=resulted_state)
+        return resulted_state.messages()
+            
         
 
     def _decide_node_name_or_ochestration_on_pending(
@@ -155,7 +254,7 @@ class Ochestrator:
         ochestrator_state: OchestratorReadOnlyGlobalState,
         messages_history: Sequence[ChatMessage] | None,
     ) -> ChatMessage:
-        last_4_messages = messages_history[-4:] if messages_history else []
+        last_4_messages: list[ChatMessage] = list(messages_history[-4:]) if messages_history else []
         latest_user_message = _latest_user_message(messages_history)
         if latest_user_message is None:
             raise ValueError("Latest user message is required for pending orchestrator answer")
@@ -185,9 +284,6 @@ class Ochestrator:
                 f"Next state after completion of current state: {next_state_name!r}\n"
                 f"Next state description: {next_state_description!r}\n"
                 f"User question: {latest_user_message!r}\n"
-                "Answer as the orchestrator. "
-                "Explain the current state and what the user can do now. "
-                "If useful, mention what comes next only as future context after completion."
             ),
             history=last_4_messages,
             config=LLMConfig(model="basic", temperature=0.2),  
