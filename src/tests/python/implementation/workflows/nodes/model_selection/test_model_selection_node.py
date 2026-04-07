@@ -28,7 +28,6 @@ from python.implementation.workflows.nodes.model_selection.model_selection_node 
     ModelSelectionNode,
 )
 from python.implementation.workflows.nodes.model_selection.model_selection_prompts import (
-    get_model_selection_freezed_answer_prompt,
     get_model_selection_node_info,
 )
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (

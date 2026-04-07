@@ -191,8 +191,10 @@ class WorkflowApp:
             stage_status=state.status(),
         )
 
+        assistant_messages = [msg for msg in response.messages if msg.role == "assistant"]
+
         return WorkflowResponse(
-            messages=list(response.messages),
+            messages=assistant_messages,
             current_stage_name=state.name(),
             current_stage_status=state.status(),
             action=state.action(),

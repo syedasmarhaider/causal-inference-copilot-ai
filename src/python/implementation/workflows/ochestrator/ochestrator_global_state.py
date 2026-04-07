@@ -89,6 +89,9 @@ class OchestratorWritableGlobalState(
     def from_json_dict(cls, payload: dict[str, Any]) -> OchestratorWritableGlobalState:
         model = GlobalStateModel.model_validate(payload)
         return cls(model)
+    
+    def name(self) -> str:
+        return "OCHESTRATOR_STATE"
 
     def to_json_dict(self) -> dict[str, Any]:
         return self._model.model_dump(mode="json")

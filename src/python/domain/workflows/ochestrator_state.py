@@ -5,12 +5,16 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 
-class ReadOnlyOchestratorState(ABC):
+class ReadOnlyOchestratorState(ABC):    
     @abstractmethod
     def get(self, key: str) -> Any:
         raise NotImplementedError
 
 class WritableOchestratorState(ReadOnlyOchestratorState):
+    @abstractmethod
+    def name(self) -> str:
+        raise NotImplementedError
+    
     @abstractmethod
     def to_json_dict(self) -> dict[str, Any]:
         raise NotImplementedError
