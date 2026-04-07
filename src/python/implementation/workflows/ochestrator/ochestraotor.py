@@ -104,6 +104,7 @@ class Ochestrator:
         self._state_classes_by_name = build_state_classes_by_name()
         self._node_name_by_state_name = build_node_name_by_state_name()
         self._state_name_by_node_name = build_state_name_by_node_name()
+        self._next_node_names_by_current_state_name = build_next_node_name_by_current_state_name()
         self._recoverable_candidates_map = recoverable_states_map()
 
         self._node_name_to_description_map = get_node_name_with_description()
@@ -317,6 +318,11 @@ class Ochestrator:
             state=input_state,
             readonly_orchestrator_state=ochestrator_state,
             messages_history=messages_history,
+        )
+
+        self._update_ochestration_working_state_if_node_done(
+            ochestrator_state=ochestrator_state,
+            state=resulted_state,
         )
         
         self._workflow_repo.store_ochestrator_state(
@@ -886,6 +892,18 @@ def build_state_name_by_node_name() -> Mapping[str, str]:
         ModelTrainNode.NAME: ModelTrainState.NAME,
         CausalInferenceNode.NAME: CausalInferenceState.NAME,
         NoopDoneNode.NAME: NoopDoneState.NAME,
+    }
+
+
+def build_next_node_name_by_current_state_name() -> Mapping[str, str]:
+    return {
+        DatasetState.NAME: ProtocolDiscussionNode.NAME,
+        ProtocolDiscussionState.NAME: CompileAndValidateNode.NAME,
+        CompileAndValidateState.NAME: ModelSelectionNode.NAME,
+        ModelSelectionState.NAME: ModelTrainNode.NAME,
+        ModelTrainState.NAME: CausalInferenceNode.NAME,
+        CausalInferenceState.NAME: NoopDoneNode.NAME,
+        NoopDoneState.NAME: NoopDoneNode.NAME,
     }
 
 

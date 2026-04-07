@@ -172,7 +172,7 @@ class WorkflowApp:
                 user_id=user_id,
                 conversation_id=conversation_id,
             )
-            if last is not None:
+            if last is not None and last.action != "NEEDS_DATA":
                 return last
 
         response = self._ochestrator.answer(
