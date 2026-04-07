@@ -109,10 +109,32 @@ Rules:
 """.strip()
 
 
+def dataset_protocol_cleaning_instructions_system_prompt() -> str:
+    return """
+You translate a confirmed protocol discussion into SQL-oriented data-cleaning instructions.
+
+You will receive JSON with:
+- protocol_discussion
+- dataset_summary
+- recent_chat_history (last few messages)
+
+Rules:
+- Return only user-intent text for a SQL data manipulation tool (no JSON, no markdown).
+- Keep it executable and concrete.
+- Include only grounded cleaning/transformation/filtering rules from the protocol discussion.
+- Enforce that final dataset keeps only protocol-scope columns (treatment, outcome, covariates, effect modifiers).
+- Use recent_chat_history only as supporting context for user refinements; do not override protocol grounding.
+- Include requested value normalization rules for treatment/outcome when grounded.
+- Do not add charts, visualization, plotting, or non-SQL tasks.
+- Do not mention internal workflow/state details.
+""".strip()
+
+
 __all__ = [
     "dataset_final_response_system_prompt",
     "dataset_intent_classification_system_prompt",
     "dataset_missing_data_system_prompt",
     "dataset_node_info",
+    "dataset_protocol_cleaning_instructions_system_prompt",
     "dataset_summary_answer_system_prompt",
 ]

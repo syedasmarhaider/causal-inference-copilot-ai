@@ -143,7 +143,7 @@ Rules:
 - action="revise" if the user asks to change, correct, add, remove, or reconsider protocol details.
 - action="clarify" if the reply is ambiguous or not enough to confirm or revise safely.
 - Keep the assistant_message direct and user-facing.
-- For confirm, say the protocol is now confirmed and that data cleaning will proceed next.
+- For confirm, you can briefly acknowledge the confirmation and say that sit back and relax meanwhile I can prepare this data set for training, by doing cleaning and preprocessing steps.
 - For clarify, ask one focused follow-up question.
 - For revise, acknowledge that the protocol is not yet confirmed and that the requested changes will be incorporated.
 

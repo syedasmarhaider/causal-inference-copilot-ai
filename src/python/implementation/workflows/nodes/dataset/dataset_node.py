@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-import re
 import uuid
 from collections.abc import Sequence
 from typing import Any, ClassVar, cast
@@ -29,6 +28,7 @@ from python.implementation.workflows.nodes.dataset.dataset_prompts import (
     dataset_intent_classification_system_prompt,
     dataset_missing_data_system_prompt,
     dataset_node_info,
+    dataset_protocol_cleaning_instructions_system_prompt,
     dataset_summary_answer_system_prompt,
     prev_state_revert_message,
 )
@@ -56,7 +56,6 @@ _ARTIFACT_KIND_WORKING_DATASET = "working_dataset"
 _ARTIFACT_KIND_ANALYTICAL_RESULT = "analytical_result"
 _ARTIFACT_KIND_CHART_SPEC = "chart_spec"
 _INITIAL_SUMMARY_MAX_COLUMNS = 8
-_PROTOCOL_DISCUSSION_CONFIRMED_MARKER = "PROTOCOL_DISCUSSION_CONFIRMED"
 _READY_DATASET_MESSAGE = (
     "Dataset is ready. Ask about the data, request analytical or statistical queries, ask "
     "for transformations, or ask for charts."
@@ -248,21 +247,20 @@ class DatasetNode(Node):
 
         persisted_latest_summary = current_summary
 
-        protocol_cleaning_request = _latest_protocol_cleaning_request(messages_history)
-        if protocol_cleaning_request:
+        protocol_discussion = _get_protocol_discussion(readonly_orchestrator_state)
+        if protocol_discussion is not None:
             try:
+                cleaning_instructions = self._build_protocol_cleaning_instructions(
+                    protocol_discussion=protocol_discussion,
+                    dataset_summary=current_summary_json,
+                    recent_chat_history=_last_n_messages_text(messages_history, limit=3),
+                )
                 working_df = self._run_data_manipulation_tool(
                     dataframe=current_df,
                     summary_json=current_summary_json,
                     conversation_id=conversation_id,
-                    instructions=protocol_cleaning_request,
+                    instructions=cleaning_instructions,
                 )
-                scope_columns = _extract_protocol_scope_columns(
-                    protocol_cleaning_request,
-                    [str(column) for column in working_df.columns],
-                )
-                if scope_columns:
-                    working_df = working_df.loc[:, scope_columns].copy()
 
                 new_dataset_id = uuid.uuid4()
                 self._data_repo.save_csv_data(
@@ -283,15 +281,15 @@ class DatasetNode(Node):
                 )
             except Exception as exc:
                 log.exception(
-                    "failed to apply confirmed protocol dataset cleaning request",
+                    "failed to apply protocol-driven dataset cleaning",
                     error=safe_err(exc),
                 )
                 return self._build_state(
                     dataset_iterations=dataset_iterations,
                     latest_summary=persisted_latest_summary,
                     user_message=(
-                        "I could not apply the confirmed protocol cleaning request to the "
-                        "dataset. Please review the confirmed protocol instructions and try again."
+                        "I could not apply protocol-driven cleaning to the current dataset. "
+                        "Please review the confirmed protocol discussion and try again."
                     ),
                 )
             return self._build_state(
@@ -606,6 +604,31 @@ class DatasetNode(Node):
             + (f": {column_preview}." if column_preview else ".")
         )
 
+    def _build_protocol_cleaning_instructions(
+        self,
+        *,
+        protocol_discussion: str,
+        dataset_summary: str,
+        recent_chat_history: str | None,
+    ) -> str:
+        response = self._llm.generate(
+            system_prompt=dataset_protocol_cleaning_instructions_system_prompt(),
+            user_prompt=json.dumps(
+                {
+                    "protocol_discussion": protocol_discussion,
+                    "dataset_summary": dataset_summary,
+                    "recent_chat_history": recent_chat_history,
+                },
+                ensure_ascii=False,
+            ),
+            config=LLMConfig(model="basic", temperature=0.0, top_p=1.0),
+            history=None,
+        )
+        instructions = response.content.strip()
+        if not instructions:
+            raise ValueError("Protocol cleaning instructions cannot be empty")
+        return instructions
+
     def _classify_intent(
         self,
         *,
@@ -919,97 +942,31 @@ def _latest_assistant_message(messages_history: Sequence[ChatMessage] | None) ->
     return None
 
 
-def _latest_system_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
-    if not messages_history:
+def _get_protocol_discussion(
+    readonly_orchestrator_state: ReadOnlyOchestratorState,
+) -> str | None:
+    protocol_discussion = readonly_orchestrator_state.get("protocol_discussion")
+    if not isinstance(protocol_discussion, str):
         return None
-    for message in reversed(messages_history):
-        if message.role != "system":
-            continue
-        content = message.content.strip()
-        if content:
-            return content
-    return None
-
-
-def _latest_protocol_cleaning_request(messages_history: Sequence[ChatMessage] | None) -> str | None:
-    latest_system = _latest_system_message(messages_history)
-    if not latest_system:
+    normalized_protocol_discussion = protocol_discussion.strip()
+    if not normalized_protocol_discussion:
         return None
-    if not latest_system.startswith(_PROTOCOL_DISCUSSION_CONFIRMED_MARKER):
+    return normalized_protocol_discussion
+
+
+def _last_n_messages_text(
+    messages_history: Sequence[ChatMessage] | None,
+    *,
+    limit: int,
+) -> str | None:
+    if not messages_history or limit <= 0:
         return None
-    _header, _sep, request = latest_system.partition("\n\n")
-    cleaned_request = request.strip()
-    if cleaned_request:
-        return cleaned_request
-    return latest_system.strip()
 
+    recent_messages = list(messages_history[-limit:])
+    if not recent_messages:
+        return None
 
-def _extract_protocol_scope_columns(
-    request: str,
-    available_columns: Sequence[str],
-) -> list[str]:
-    normalized_map = {
-        _normalize_protocol_column_name(column): str(column)
-        for column in available_columns
-        if str(column).strip()
-    }
-    if len(normalized_map) < 2:
-        return []
-
-    candidate_segments: list[str] = []
-    for raw_segment in re.split(r"[\n\r]+|(?<=[.;])\s+", request):
-        segment = " ".join(raw_segment.strip().split())
-        if not segment:
-            continue
-        lowered = segment.casefold()
-        if (
-            "final protocol-scope columns to keep" in lowered
-            or "protocol scope columns to keep" in lowered
-            or "columns to keep exactly" in lowered
-        ):
-            candidate_segments.append(_segment_after_separator(segment))
-            continue
-        if lowered.startswith(("preserve ", "keep ", "retain ")):
-            candidate_segments.append(_trim_protocol_scope_segment(segment))
-            continue
-        if lowered.startswith(("treatment:", "outcome:", "covariates:", "effect modifiers:")):
-            candidate_segments.append(_segment_after_separator(segment))
-
-    extracted: list[str] = []
-    seen: set[str] = set()
-    for segment in candidate_segments:
-        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", segment):
-            resolved = normalized_map.get(_normalize_protocol_column_name(token))
-            if resolved is None or resolved in seen:
-                continue
-            extracted.append(resolved)
-            seen.add(resolved)
-
-    if len(extracted) < 2:
-        return []
-    return extracted
-
-
-def _normalize_protocol_column_name(value: str) -> str:
-    return value.strip().casefold()
-
-
-def _segment_after_separator(value: str) -> str:
-    for separator in (":",):
-        if separator in value:
-            _prefix, _sep, suffix = value.partition(separator)
-            return suffix.strip()
-    return value.strip()
-
-
-def _trim_protocol_scope_segment(value: str) -> str:
-    trimmed = value
-    for marker in (" drop ", " remove ", " exclude "):
-        marker_index = trimmed.casefold().find(marker)
-        if marker_index != -1:
-            trimmed = trimmed[:marker_index]
-            break
-    return _segment_after_separator(trimmed)
+    return get_chat_messages_role_and_message_json(recent_messages)
 
 
 def _normalize_message_text(value: str) -> str:
