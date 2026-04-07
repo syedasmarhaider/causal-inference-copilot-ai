@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
+from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
@@ -25,7 +26,6 @@ from python.implementation.workflows.nodes.model_selection.model_selection_promp
     MODEL_SELECTION_NEGOTIATOR_USER_PROMPT_TEMPLATE,
     MODEL_SELECTION_RECOMMENDER_SYSTEM_PROMPT,
     MODEL_SELECTION_RECOMMENDER_USER_PROMPT_TEMPLATE,
-    get_model_selection_freezed_answer_prompt,
     get_model_selection_node_info,
 )
 from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
@@ -79,7 +79,7 @@ class ModelSelectionNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         state: State,
-        previous_state_dependencies: Mapping[str, State],
+        readonly_orchestrator_state: ReadOnlyOchestratorState,
         messages_history: Sequence[ChatMessage] | None,
     ) -> State:
         _ = user_id
@@ -89,23 +89,14 @@ class ModelSelectionNode(Node):
                 f"{self.name}: expected ModelSelectionState, got {type(state).__name__}"
             )
 
-        deps = ModelSelectionDeps.from_loaded(previous_state_dependencies)
+        deps = ModelSelectionDeps.from_loaded(readonly_orchestrator_state)
         history = list(messages_history[-5:]) if messages_history else None
 
         model_catalog = _build_supported_model_catalog(
             supported_estimators=self._model_factory.supported_estimators(),
             estimators_info=self._model_factory.get_all_esimators_info(),
         )
-        selection_context = _build_selection_context(deps=deps)
-        latest_user_message = _latest_user_message(messages_history)
-
-        if state.payload.freezed:
-            return self._answer_freezed_question(
-                state=state,
-                selection_context=selection_context,
-                latest_user_message=latest_user_message,
-                history=history,
-            )
+        selection_context = _build_selection_context(deps=deps) 
 
         if not state.payload.recommendations:
             shortlist = self._llm.generate_json(
@@ -204,102 +195,18 @@ class ModelSelectionNode(Node):
             )
         )
 
-    def _answer_freezed_question(
-        self,
-        *,
-        state: ModelSelectionState,
-        selection_context: Mapping[str, Any],
-        latest_user_message: str | None,
-        history: Sequence[ChatMessage] | None,
-    ) -> ModelSelectionState:
-        if not latest_user_message:
-            return state
-
-        try:
-            assistant_message = self._llm.generate(
-                system_prompt=get_model_selection_freezed_answer_prompt(),
-                user_prompt=_dumps(
-                    {
-                        "recommendations": [
-                            recommendation.model_dump(mode="json")
-                            for recommendation in state.payload.recommendations
-                        ],
-                        "confirmed_model_selection": (
-                            None
-                            if state.payload.confirmed_model_selection is None
-                            else state.payload.confirmed_model_selection.model_dump(mode="json")
-                        ),
-                        "selection_context": dict(selection_context),
-                        "latest_user_message": latest_user_message,
-                    }
-                ),
-                config=LLMConfig(model="basic", temperature=0.2),
-                history=history,
-            ).content.strip()
-        except Exception:
-            assistant_message = (
-                "This model-selection state is frozen. I can answer read-only questions about "
-                "the shortlisted options and the confirmed selection, but I could not answer "
-                "that question right now."
-            )
-
-        return ModelSelectionState(
-            state.payload.model_copy(
-                update={
-                    "assistant_message": assistant_message,
-                    "error_message": None,
-                }
-            )
-        )
-
-
 def _dumps(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True, default=str)
 
 
-def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
-    if not messages_history:
-        return None
-    for message in reversed(messages_history):
-        if message.role != "user":
-            continue
-        content = message.content.strip()
-        if content:
-            return content
-    return None
-
 
 def _build_selection_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
-    causal_spec = deps.inference_ready_spec.causal_spec
-    column_types = [
-        {
-            "name": str(profile.name),
-            "inferred_kind": str(profile.inferred_kind),
-        }
-        for profile in deps.inference_ready_spec.data_summary.profiles
-    ]
     return {
-        "treatment": {
-            "column": str(causal_spec.treatment_spec.column),
-            "kind": str(causal_spec.treatment_spec.kind),
-            "treated": str(causal_spec.treatment_spec.treated),
-            "control": str(causal_spec.treatment_spec.control),
-        },
-        "outcome": {
-            "column": str(causal_spec.outcome_spec.column),
-            "kind": str(causal_spec.outcome_spec.kind),
-        },
-        "experiment_type": str(causal_spec.experiment_type),
-        "covariates": list(causal_spec.covariates),
-        "effect_modifiers": list(causal_spec.effect_modifiers),
-        "column_types": column_types,
-        "validation_warnings": [
-            {
-                "message": issue.message,
-                "fix_hint": issue.fix_hint,
-            }
-            for issue in deps.validation_warnings
-        ],
+        "causal_spec": deps.causal_spec.model_dump(mode="json", exclude_none=True),
+        "data_transformation_plan": deps.data_transformation_plan.model_dump(mode="json", exclude_none=True),
+        "validation_issues": [
+            issue.model_dump(mode="json", exclude_none=True) for issue in deps.validation_issues
+        ],  
     }
 
 

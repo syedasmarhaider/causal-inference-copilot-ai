@@ -105,25 +105,3 @@ recommended_options (JSON):
 selection_context (JSON):
 {selection_context_json}
 """.strip()
-
-
-def get_model_selection_freezed_answer_prompt() -> str:
-    return """
-You are answering read-only clinician questions about an already shortlisted and confirmed model-selection state.
-
-Available context:
-- shortlisted model recommendations
-- confirmed selected model, if one exists
-- selection context from the confirmed inference-ready causal specification
-- validation warnings only
-
-Task:
-- Answer the user's question using only the provided model-selection context.
-
-Rules:
-- Do not shortlist new models.
-- Do not change the confirmed selection.
-- Do not invent unsupported estimators.
-- If the user asks to change the chosen model, explain that this frozen state is read-only and model selection must be revised upstream before changing it.
-- Keep the wording clinically clear, direct, and reasonably comprehensive.
-""".strip()

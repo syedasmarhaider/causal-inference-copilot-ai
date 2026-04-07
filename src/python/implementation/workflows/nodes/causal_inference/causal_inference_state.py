@@ -8,9 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ArtifactRef, ChatMessage
 from python.domain.workflows.state import Action, State, Status
-from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import (
-    CausalInferenceDeps,
-)
 
 
 class CausalInferencePayloadModel(BaseModel):
@@ -57,11 +54,8 @@ class CausalInferenceState(State):
     def action(self) -> Action:
         return "NEEDS_INPUT"
 
-    def set_status_freez(self) -> None:
-        return None
-
     def set_status_pending(self) -> None:
-        self.payload.error_message = None
+        self.payload = CausalInferencePayloadModel()
 
     def messages(self) -> Sequence[ChatMessage]:
         messages: list[ChatMessage] = []
@@ -89,9 +83,6 @@ class CausalInferenceState(State):
 
     def error(self) -> NodeExecutionError | None:
         return None
-
-    def pre_required_states_names(self) -> Sequence[str]:
-        return CausalInferenceDeps.pre_required_states_names()
 
     def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json", exclude_none=True)

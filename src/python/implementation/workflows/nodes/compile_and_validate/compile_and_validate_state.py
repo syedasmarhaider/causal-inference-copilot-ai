@@ -9,9 +9,6 @@ from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
 from python.domain.models.validation import ValidationIssueModel
 from python.domain.workflows.state import Action, State, Status
-from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_deps import (
-    CompileAndValidateDeps,
-)
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
     InferenceReadyCausalSpec,
 )
@@ -96,9 +93,6 @@ class CompileAndValidateState(State):
         if self.payload.error_message is None:
             return None
         return NodeExecutionError(state_name=self.NAME, error=self.payload.error_message)
-
-    def pre_required_states_names(self) -> Sequence[str]:
-        return CompileAndValidateDeps.pre_required_states_names()
 
     def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json", exclude_none=True)

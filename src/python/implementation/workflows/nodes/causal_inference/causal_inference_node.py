@@ -15,6 +15,7 @@ from python.domain.models.models import ArtifactRef
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
+from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_logger
@@ -146,7 +147,7 @@ class CausalInferenceNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         state: State,
-        previous_state_dependencies: Mapping[str, State],
+        readonly_orchestrator_state: ReadOnlyOchestratorState,
         messages_history: Sequence[ChatMessage] | None,
     ) -> State:
         if not isinstance(state, CausalInferenceState):
@@ -154,7 +155,7 @@ class CausalInferenceNode(Node):
                 f"{self.name}: expected CausalInferenceState, got {type(state).__name__}"
             )
 
-        deps = CausalInferenceDeps.from_loaded(previous_state_dependencies)
+        deps = CausalInferenceDeps.from_loaded(readonly_orchestrator_state)
         payload = _bind_payload(state=state)
         history = list(messages_history[-6:]) if messages_history else []
 

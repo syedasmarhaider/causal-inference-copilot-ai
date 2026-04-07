@@ -1,55 +1,34 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import field, dataclass
 
 from python.domain.models.errors import StateDependencyError
 from python.domain.models.validation import ValidationIssueModel
-from python.domain.workflows.state import State
-from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
-    CompileAndValidateState,
-)
-from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
-    InferenceReadyCausalSpec,
-)
-
+from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 
 @dataclass(frozen=True, slots=True)
 class ModelSelectionDeps:
-    causal_spec: Causel_Spec
-    validation_warnings: list[ValidationIssueModel]
+    causal_spec: CausalSpec
+    data_transformation_plan: TransformPlan
+    validation_issues: list[ValidationIssueModel] = field(default_factory=list)
 
     @classmethod
-    def pre_required_states_names(cls) -> Sequence[str]:
-        return [CompileAndValidateState.NAME]
-
-    @classmethod
-    def from_loaded(cls, loaded: Mapping[str, State]) -> ModelSelectionDeps:
-        state = loaded.get(CompileAndValidateState.NAME)
-        if state is None or not isinstance(state, CompileAndValidateState):
+    def from_loaded(cls, ready_only_ochestration_state: ReadOnlyOchestratorState) -> ModelSelectionDeps:
+        causal_spec = ready_only_ochestration_state.get("causal_spec")
+        data_transformation_plan = ready_only_ochestration_state.get("data_transformation_plan")
+        validation_issues: list[ValidationIssueModel] = ready_only_ochestration_state.get("validation_issues") or []
+        if causal_spec is None or data_transformation_plan is None:
             raise StateDependencyError(
                 "MODEL_SELECTION",
                 "MODEL_SELECTION",
-                [CompileAndValidateState.NAME],
+                ["COMPILE_AND_VALIDATE"],
             )
-
-        if state.payload.phase != "CONFIRMED":
-            raise StateDependencyError(
-                "MODEL_SELECTION",
-                "MODEL_SELECTION",
-                [CompileAndValidateState.NAME],
-            )
-
-        inference_ready = state.payload.inference_ready_causal_spec
-        if inference_ready is None:
-            raise StateDependencyError(
-                "MODEL_SELECTION",
-                "MODEL_SELECTION",
-                [CompileAndValidateState.NAME],
-            )
-
-        warnings = [issue for issue in state.payload.validation_issues if issue.severity == "WARN"]
         return cls(
-            inference_ready_spec=inference_ready,
-            validation_warnings=warnings,
+            causal_spec=causal_spec,
+            data_transformation_plan=data_transformation_plan,
+            validation_issues=validation_issues,
         )
+        
+      
