@@ -14,7 +14,6 @@ from python.domain.repo.models_repo import ModelsRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.domain.workflows.node import Node
-from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
 from python.domain.workflows.state import State
 from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
     CausalInferenceNode,
@@ -74,16 +73,6 @@ class OchestrationResponse:
 
 
 class Ochestrator:
-    """
-    Workflow semantics:
-
-    1. Local states are persisted by state-name.
-    2. Nodes are executed by node-name.
-    3. Dataset and protocol can bounce before protocol finalization.
-    4. After protocol finalization, dataset must rerun once to freeze/validate.
-    5. Any backward recovery must clear forward global fields and delete forward local states.
-    """
-
     _llm: LLMService
     _workflow_repo: WorkflowStateRepo
     _node_name_to_description_map: Mapping[str, str]
@@ -146,8 +135,10 @@ class Ochestrator:
             user_id=user_id,
             conversation_id=conversation_id,
         )
+        
         if ochestrator_state is None:
             ochestrator_state = OchestratorWritableGlobalState.init_empty()
+            ochestrator_state.set_last_active_node_name(DatasetState.NAME)
             self._workflow_repo.store_ochestrator_state(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -160,10 +151,7 @@ class Ochestrator:
             )
 
         needed_node_name = self._needs_node_name(ochestrator_state)
-        active_node_name = (
-            ochestrator_state.get_last_active_node_name() or needed_node_name
-        )
-
+        active_node_name = ochestrator_state.get_last_active_node_name() or needed_node_name    
         current_state = self._load_state_for_node_or_init(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -296,24 +284,6 @@ class Ochestrator:
             raise ValueError(
                 f"handle_done expected DONE state, got {current_state.status()!r}"
             )
-
-        current_node_name = self._node_name_by_state_name.get(current_state.name())
-        if current_node_name is None:
-            raise ValueError(
-                f"No node name registered for state {current_state.name()!r}"
-            )
-
-        ochestrator_state.set_last_active_node_name(current_node_name)
-        ochestrator_state = self._update_ochestration_state_if_node_done(
-            ochestrator_state=ochestrator_state,
-            state=current_state,
-        )
-        self._workflow_repo.store_ochestrator_state(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            state=ochestrator_state,
-        )
-
         next_node_name = self.decide_node_name_on_done(current_state=current_state)
 
         # If the nominal next node is already DONE and the global orchestration state
@@ -381,46 +351,15 @@ class Ochestrator:
             raise ValueError(
                 f"No node name registered for state {current_state.name()!r}"
             )
-
-        if node_name_to_run == current_node_name:
-            state_to_run = current_state
-        else:
-            target_state_name = self._state_name_by_node_name[node_name_to_run]
-
-            # Pre-finalization dataset <-> protocol bounce is special:
-            # do not destroy the sibling stage, just rerun the target from PENDING.
-            if not self._is_pre_protocol_bounce(
-                current_state_name=current_state.name(),
-                target_state_name=target_state_name,
-                ochestrator_state=ochestrator_state,
-            ):
-                ochestrator_state = self._rollback_orchestrator_global_state(
-                    ochestrator_state=ochestrator_state,
-                    recovery_state_name=target_state_name,
-                )
-                self._delete_forward_states_after_recovery_point(
+   
+        state_to_run = current_state
+        if node_name_to_run != current_node_name:
+                state_to_run = self._load_state_for_node_or_init(
                     user_id=user_id,
                     conversation_id=conversation_id,
-                    recovery_state_name=target_state_name,
-                )
-                self._workflow_repo.store_ochestrator_state(
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    state=ochestrator_state,
-                )
-
-            state_to_run = self._load_state_by_name_or_init(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                state_name=target_state_name,
-            )
-            state_to_run.set_status_pending()
-            self._workflow_repo.store_state(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                state=state_to_run,
-            )
-
+                    node_name=node_name_to_run,
+                )   
+                
         return self._run_node_and_persist(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -443,10 +382,7 @@ class Ochestrator:
         node = self.nodes_by_name.get(node_name)
         if node is None:
             raise ValueError(f"Node with name {node_name!r} was not found")
-
-        previous_messages = list(input_state.messages())
-
-        ochestrator_state.set_last_active_node_name(node_name)
+        
         resulted_state = node.run(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -454,7 +390,7 @@ class Ochestrator:
             readonly_orchestrator_state=ochestrator_state,
             messages_history=messages_history,
         )
-
+        ochestrator_state.set_last_active_node_name(node_name)
         ochestrator_state = self._update_ochestration_state_if_node_done(
             ochestrator_state=ochestrator_state,
             state=resulted_state,
@@ -471,11 +407,7 @@ class Ochestrator:
             state=resulted_state,
         )
 
-        delta_messages = _new_messages_since(
-            previous_messages=previous_messages,
-            current_messages=resulted_state.messages(),
-        )
-
+        delta_messages =  resulted_state.messages()
         return OchestrationResponse(
             messages= delta_messages,
             state=resulted_state,
@@ -562,23 +494,26 @@ class Ochestrator:
             current_state_name,
             "",
         )
-        dataset_state_description = self._state_name_to_description_map.get(
-            DatasetState.NAME,
-            "",
-        )
-        protocol_state_description = self._state_name_to_description_map.get(
-            ProtocolDiscussionState.NAME,
-            "",
-        )
-
+        
+        other_state_description = ""
+        if current_state.name() == DatasetState.NAME:
+            other_state_description = self._state_name_to_description_map.get(
+                ProtocolDiscussionState.NAME,
+                "",
+            )
+        else:
+             other_state_description = self._state_name_to_description_map.get(
+                DatasetState.NAME,
+                "",
+            )    
+             
         decision = self._llm.generate_json(
             schema=_PendingRouteDecision,
             system_prompt=OCHESTRATOR_PENDING_ROUTE_SYSTEM_PROMPT,
             user_prompt=(
                 f"Current pending state: {current_state_name!r}\n"
                 f"Current state description: {current_state_description!r}\n"
-                f"Dataset state description: {dataset_state_description!r}\n"
-                f"Protocol discussion state description: {protocol_state_description!r}\n"
+                f"Other state description: {other_state_description!r}\n"
                 f"Latest user message: {latest_user_message!r}\n"
                 f"Latest system message inside current state: {latest_state_system_message!r}\n"
                 "Return the best route intent."
@@ -593,8 +528,6 @@ class Ochestrator:
                 return current_node_name
             case "DATASET":
                 return DatasetNode.NAME
-            case "PROTOCOL_DISCUSSION":
-                return ProtocolDiscussionNode.NAME
             case "ORCHESTRATOR_ANSWER":
                 return "ORCHESTRATOR_ANSWER"
 
@@ -767,7 +700,7 @@ class Ochestrator:
         ochestrator_state: OchestratorWritableGlobalState,
         state: State,
     ) -> OchestratorWritableGlobalState:
-        if state.status() != "DONE":
+        if state.status() != "DONE" and state.name() != DatasetState.NAME:
             return ochestrator_state
 
         match state:
@@ -786,7 +719,7 @@ class Ochestrator:
                         "Latest dataset summary must be set when dataset state is DONE"
                     )
 
-                protocol_discussed = ochestrator_state.get("protocol_discussed") is not None
+                protocol_discussed = ochestrator_state.get("protocol_discussion") is not None
                 working_dataset_frozen = ochestrator_state.get("working_dataset_frozen") is True
 
                 if working_dataset_frozen:
@@ -1032,7 +965,6 @@ class _PendingRouteDecision(BaseModel):
     route_intent: Literal[
         "CURRENT_STATE",
         "DATASET",
-        "PROTOCOL_DISCUSSION",
         "ORCHESTRATOR_ANSWER",
     ]
 
