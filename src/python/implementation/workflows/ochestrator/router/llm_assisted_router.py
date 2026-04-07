@@ -68,7 +68,7 @@ class _RouteDecision(BaseModel):
     state_name: str | None = None
     router_confirmation_message_for_user: str | None = None
 
-
+_build_aborted_candidate_context
 @dataclass(frozen=True)
 class OtherStateInfo:
     name: str
@@ -242,76 +242,7 @@ class LLMAssistedRouterRouter(Router):
             ),
         )
 
-    def _decide_aborted(
-        self,
-        *,
-        current_state: State,
-        recent_messages: Sequence[ChatMessage],
-    ) -> NextDecision:
-        current_state_name = _state_name(current_state)
-        candidates = _recoverable_candidates(
-            current_state_name=current_state_name,
-            recoverable_map=self._recoverable_map,
-        )
-        if len(candidates) == 1:
-            return NextDecision(state_name=candidates[0], should_persists_by_workflow=True )
 
-        state_error = _state_error(current_state)
-        current_error = state_error.error if state_error is not None else None
-        current_system_message = _latest_system_message(_state_messages(current_state))
-
-        candidate_context = _build_aborted_candidate_context(
-            candidates=candidates,
-            node_descriptions=self._node_name_to_description_map,
-        )
-
-        try:
-            decision = self._llm.generate_json(
-                schema=_RouteDecision,
-                system_prompt=ABORTED_ROUTER_SYSTEM_PROMPT,
-                user_prompt=build_aborted_router_user_prompt(
-                    current_state_name=current_state_name,
-                    current_error=current_error,
-                    current_system_message=current_system_message,
-                    candidate_context=candidate_context,
-                    recent_messages=recent_messages,
-                ),
-                config=LLMConfig(model="basic", temperature=0.1),
-                history=None,
-                max_attempts=2,
-            )
-        except Exception as exc:
-            log.exception(
-                "aborted router llm decision failed",
-                current_state_name=current_state_name,
-                error=str(exc),
-            )
-            return NextDecision(
-                state_name=None,
-                should_persists_by_workflow=False,
-                router_confirmation_message_for_user=(
-                    "I could not determine the best recovery stage. Please clarify where you want to recover."
-                ),
-            )
-
-        if decision.state_name is None:
-            return NextDecision(
-                state_name=None,
-                should_persists_by_workflow=False,
-                router_confirmation_message_for_user=decision.router_confirmation_message_for_user
-                or "Please confirm which stage you want to recover from.",
-            )
-
-        if decision.state_name not in candidates:
-            return NextDecision(
-                state_name=None,
-                should_persists_by_workflow=False,
-                router_confirmation_message_for_user=(
-                    "I could not select a valid recoverable stage. Please clarify where to recover."
-                ),
-            )
-
-        return NextDecision(state_name=decision.state_name, should_persists_by_workflow=True)
 
 
 def _pending_candidates(
@@ -399,18 +330,7 @@ def _build_pending_fellow_state_context(
     ]
 
 
-def _build_aborted_candidate_context(
-    *,
-    candidates: Sequence[str],
-    node_descriptions: Mapping[str, str],
-) -> list[dict[str, str]]:
-    return [
-        {
-            "state_name": state_name,
-            "node_info": node_descriptions.get(state_name, ""),
-        }
-        for state_name in candidates
-    ]
+
 
 
 def _last_two_messages(messages_history: Sequence[ChatMessage] | None) -> list[ChatMessage]:

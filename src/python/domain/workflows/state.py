@@ -7,7 +7,7 @@ from typing import Any, Literal
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
 
-Status = Literal["PENDING", "DONE", "ABORTED", "FREEZED"]
+Status = Literal["PENDING", "DONE", "ABORTED"]
 Action = Literal["NONE", "NEEDS_INPUT", "NEEDS_DATA"]
 
 
@@ -19,11 +19,7 @@ class State(ABC):
     @abstractmethod
     def status(self) -> Status:
         raise NotImplementedError
-
-    @abstractmethod
-    def set_status_freezed(self) -> None:
-        raise NotImplementedError
-
+    
     @abstractmethod
     def action(self) -> Action:
         raise NotImplementedError

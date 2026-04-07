@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from copy import deepcopy
 from typing import Any, Final
 from uuid import UUID
@@ -12,6 +11,7 @@ from python.domain.workflows.ochestrator_state import (
     ReadOnlyOchestratorState,
     WritableOchestratorState,
 )
+from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     TransformPlan,
 )
@@ -20,7 +20,7 @@ from python.implementation.workflows.tools.common.model.data_summary import (
     DatasetSummaryModel,
 )
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 class GlobalStateModel(BaseModel):
@@ -45,12 +45,9 @@ class GlobalStateModel(BaseModel):
     validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
 
     # stage 5 fields
-    validation_issues_accepted: bool = False
-
-    # stage 6 fields
     selected_model: str | None = None
 
-    # stage 7 fields
+    # stage 6 fields
     model_training_id: UUID | None = None
 
 
@@ -75,7 +72,6 @@ class OchestratorWritableGlobalState(
         "causal_spec",
         "data_transformation_plan",
         "validation_issues",
-        "validation_issues_accepted",
         "selected_model",
         "model_training_id",
     )
@@ -100,188 +96,191 @@ class OchestratorWritableGlobalState(
         return self._model.last_active_node_name
 
     def set_last_active_node_name(self, node_name: str) -> None:
-        node_name = node_name.strip()
-        if not node_name:
+        normalized_node_name = node_name.strip()
+        if not normalized_node_name:
             raise ValueError("last_active_node_name cannot be blank")
-        self._model.last_active_node_name = node_name
+        self._model.last_active_node_name = normalized_node_name
 
-    def set_working_dataset_id(self, dataset_id: UUID) -> None:
-        if self._model.working_dataset_id == dataset_id:
+    # -----------------------------
+    # stage 1
+    # -----------------------------
+
+    def set_working_dataset(
+        self,
+        dataset_id: UUID,
+        summary: DatasetSummaryModel,
+    ) -> None:
+        previous_dataset_id = self._model.working_dataset_id
+        previous_summary = self._model.working_dataset_summary
+        previous_protocol_discussed = self._model.protocol_discussed
+
+        if previous_dataset_id == dataset_id and previous_summary == summary:
             return
 
         self._model.working_dataset_id = dataset_id
+        self._model.working_dataset_summary = summary
 
-        # new dataset => everything after dataset id is invalid
+        if (
+            previous_dataset_id == dataset_id
+            and previous_summary != summary
+            and previous_protocol_discussed
+        ):
+            # same dataset, refined summary after protocol discussion:
+            # preserve protocol_discussed, invalidate only downstream stages
+            self._clear_forward_from(
+                "protocol_discussed",
+                reason="working dataset summary changed after protocol discussion",
+            )
+            return
+
+        # stage 1 changed => invalidate stages after stage 1
         self._clear_forward_from(
-            "working_dataset_id",
-            reason="working_dataset_id changed",
+            "working_dataset_summary",
+            reason="working dataset changed",
         )
 
     def clear_working_dataset(self) -> None:
         self._reset_from(
             "working_dataset_id",
-            reason="working_dataset_id cleared",
+            reason="working dataset cleared",
         )
 
-    def set_working_dataset_summary(
-        self, summary: DatasetSummaryModel | None
-    ) -> None:
-        if summary is not None:
-            self._require_working_dataset_id()
+    # -----------------------------
+    # stage 2
+    # -----------------------------
 
-        if self._model.working_dataset_summary == summary:
-            return
-
-        self._model.working_dataset_summary = summary
-
-        if summary is None:
-            # no summary => protocol can no longer remain valid
-            self._clear_forward_from(
-                "working_dataset_summary",
-                reason="working_dataset_summary cleared",
-            )
-            return
+    def set_protocol_discussed(self) -> None:
+        self._require_stage_1_complete()
 
         if self._model.protocol_discussed:
-            # same dataset, refreshed summary after cleaning/refinement:
-            # keep protocol_discussed, invalidate only what comes after it
-            self._clear_after_protocol_discussion(
-                reason="working_dataset_summary changed after protocol discussion",
-            )
             return
 
-        self._clear_forward_from(
-            "working_dataset_summary",
-            reason="working_dataset_summary changed",
-        )
-
-    def clear_working_dataset_summary(self) -> None:
-        self.set_working_dataset_summary(None)
-
-    def set_protocol_discussed(self, discussed: bool) -> None:
-        if discussed:
-            self._require_stage_1_complete()
-
-        if self._model.protocol_discussed == discussed:
-            return
-
-        self._model.protocol_discussed = discussed
+        self._model.protocol_discussed = True
         self._clear_forward_from(
             "protocol_discussed",
             reason="protocol_discussed changed",
         )
 
-    def set_working_dataset_froozen(self, frozen: bool) -> None:
-        if frozen:
-            self._require_stage_2_complete()
-
-        if self._model.working_dataset_froozen == frozen:
+    def clear_protocol_discussed(self) -> None:
+        if not self._model.protocol_discussed:
             return
 
-        self._model.working_dataset_froozen = frozen
+        self._model.protocol_discussed = False
+        self._clear_forward_from(
+            "protocol_discussed",
+            reason="protocol_discussed cleared",
+        )
+
+    # -----------------------------
+    # stage 3
+    # -----------------------------
+
+    def set_freeze_working_dataset(
+        self, datasetid: UUID, datasetSummary: DatasetSummaryModel
+    ) -> None:
+        self._require_stage_2_complete()
+
+        if self._model.working_dataset_froozen:
+            return
+
+        self._model.working_dataset_froozen = True
+        self._model.working_dataset_id = datasetid
+        self._model.working_dataset_summary = datasetSummary
         self._clear_forward_from(
             "working_dataset_froozen",
             reason="working_dataset_froozen changed",
         )
 
     def freeze_working_dataset(self) -> None:
-        self.set_working_dataset_froozen(True)
+        self._require_stage_2_complete()
+
+        if self._model.working_dataset_froozen:
+            return
+
+        self._model.working_dataset_froozen = True
+        self._clear_forward_from(
+            "working_dataset_froozen",
+            reason="working_dataset_froozen changed",
+        )
 
     def unfreeze_working_dataset(self) -> None:
-        self.set_working_dataset_froozen(False)
+        self._require_stage_1_complete()
 
-    def set_causal_spec(self, causal_spec: CausalSpec | None) -> None:
-        if causal_spec is not None:
-            self._require_stage_3_complete()
+        if not self._model.working_dataset_froozen:
+            return
 
-        if self._model.causal_spec == causal_spec:
+        self._model.working_dataset_froozen = False
+        self._clear_forward_from(
+            "working_dataset_froozen",
+            reason="working_dataset_froozen changed",
+        )
+
+    # -----------------------------
+    # stage 4
+    # -----------------------------
+
+    def set_causal_configuration(
+        self,
+        causal_spec: CausalSpec,
+        data_transformation_plan: TransformPlan,
+        validation_issues: list[ValidationIssueModel],
+    ) -> None:
+        self._require_stage_3_complete()
+
+        normalized_issues = list(validation_issues)
+
+        if (
+            self._model.causal_spec == causal_spec
+            and self._model.data_transformation_plan == data_transformation_plan
+            and self._model.validation_issues == normalized_issues
+        ):
             return
 
         self._model.causal_spec = causal_spec
-        self._clear_forward_from(
-            "causal_spec",
-            reason="causal_spec changed",
-        )
-
-    def clear_causal_spec(self) -> None:
-        self.set_causal_spec(None)
-
-    def set_data_transformation_plan(self, plan: TransformPlan | None) -> None:
-        if plan is not None:
-            self._require_causal_spec_ready()
-
-        if self._model.data_transformation_plan == plan:
-            return
-
-        self._model.data_transformation_plan = plan
-        self._clear_forward_from(
-            "data_transformation_plan",
-            reason="data_transformation_plan changed",
-        )
-
-    def clear_data_transformation_plan(self) -> None:
-        self.set_data_transformation_plan(None)
-
-    def set_validation_issues(self, issues: list[ValidationIssueModel]) -> None:
-        normalized_issues = list(issues)
-
-        if normalized_issues:
-            self._require_transformation_plan_ready()
-
-        if self._model.validation_issues == normalized_issues:
-            return
-
+        self._model.data_transformation_plan = data_transformation_plan
         self._model.validation_issues = normalized_issues
+
+        # clear only downstream stages, keep stage 4 atomically applied
         self._clear_forward_from(
             "validation_issues",
-            reason="validation_issues changed",
+            reason="causal configuration changed",
         )
 
-    def clear_validation_issues(self) -> None:
-        self.set_validation_issues([])
-
-    def set_validation_issues_accepted(self, accepted: bool) -> None:
-        if accepted:
-            self._require_validation_issues_present()
-
-        if self._model.validation_issues_accepted == accepted:
-            return
-
-        self._model.validation_issues_accepted = accepted
-        self._clear_forward_from(
-            "validation_issues_accepted",
-            reason="validation_issues_accepted changed",
+    def clear_causal_configuration(self) -> None:
+        self._reset_from(
+            "causal_spec",
+            reason="causal configuration cleared",
         )
 
-    def accept_validation_issues(self) -> None:
-        self.set_validation_issues_accepted(True)
+    # -----------------------------
+    # stage 5
+    # -----------------------------
 
-    def reject_validation_issues(self) -> None:
-        self.set_validation_issues_accepted(False)
+    def set_selected_model(self, selected_model: str) -> None:
+        self._require_model_selection_ready()
 
-    def set_selected_model(self, model_name: str | None) -> None:
-        normalized_model_name: str | None = None
-        if model_name is not None:
-            normalized_model_name = model_name.strip()
-            if not normalized_model_name:
-                raise ValueError("selected_model cannot be blank")
-            self._require_model_selection_ready()
-
-        if self._model.selected_model == normalized_model_name:
-            return
-
-        self._model.selected_model = normalized_model_name
+        self._model.selected_model = selected_model
         self._clear_forward_from(
             "selected_model",
             reason="selected_model changed",
         )
 
     def clear_selected_model(self) -> None:
-        self.set_selected_model(None)
+        if self._model.selected_model is None:
+            return
 
-    def set_model_training_id(self, training_id: UUID | None) -> None:
-        if training_id is not None:
-            self._require_model_training_ready()
+        self._model.selected_model = None
+        self._clear_forward_from(
+            "selected_model",
+            reason="selected_model cleared",
+        )
+
+    # -----------------------------
+    # stage 6
+    # -----------------------------
+
+    def set_model_training_id(self, training_id: UUID) -> None:
+        self._require_model_training_ready()
 
         if self._model.model_training_id == training_id:
             return
@@ -289,15 +288,14 @@ class OchestratorWritableGlobalState(
         self._model.model_training_id = training_id
 
     def clear_model_training_id(self) -> None:
-        self.set_model_training_id(None)
+        if self._model.model_training_id is None:
+            return
+
+        self._model.model_training_id = None
 
     # -----------------------------
     # stage guards
     # -----------------------------
-
-    def _require_working_dataset_id(self) -> None:
-        if self._model.working_dataset_id is None:
-            raise ValueError("working_dataset_id must be set first")
 
     def _require_stage_1_complete(self) -> None:
         if self._model.working_dataset_id is None:
@@ -315,27 +313,15 @@ class OchestratorWritableGlobalState(
         if not self._model.working_dataset_froozen:
             raise ValueError("working_dataset_froozen must be True first")
 
-    def _require_causal_spec_ready(self) -> None:
+    def _require_stage_4_complete(self) -> None:
         self._require_stage_3_complete()
         if self._model.causal_spec is None:
             raise ValueError("causal_spec must be set first")
-
-    def _require_transformation_plan_ready(self) -> None:
-        self._require_causal_spec_ready()
         if self._model.data_transformation_plan is None:
             raise ValueError("data_transformation_plan must be set first")
 
-    def _require_validation_issues_present(self) -> None:
-        self._require_transformation_plan_ready()
-        if not self._model.validation_issues:
-            raise ValueError("validation_issues must be non-empty first")
-
     def _require_model_selection_ready(self) -> None:
-        self._require_transformation_plan_ready()
-        if self._model.validation_issues and not self._model.validation_issues_accepted:
-            raise ValueError(
-                "validation_issues must be accepted before selected_model is set"
-            )
+        self._require_stage_4_complete()
 
     def _require_model_training_ready(self) -> None:
         self._require_model_selection_ready()
@@ -345,12 +331,6 @@ class OchestratorWritableGlobalState(
     # -----------------------------
     # reset helpers
     # -----------------------------
-
-    def _clear_after_protocol_discussion(self, *, reason: str) -> None:
-        self._clear_forward_from(
-            "protocol_discussed",
-            reason=reason,
-        )
 
     def _clear_forward_from(self, field_name: str, *, reason: str) -> None:
         field_index = self._WORKFLOW_ORDER.index(field_name)
@@ -397,7 +377,6 @@ class OchestratorWritableGlobalState(
         if field_name in {
             "protocol_discussed",
             "working_dataset_froozen",
-            "validation_issues_accepted",
         }:
             return False
         if field_name == "validation_issues":
