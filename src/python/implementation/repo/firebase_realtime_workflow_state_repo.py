@@ -30,11 +30,6 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         /workflows/{user_id}/{conversation_id}/ochestrator_state: json-string
         /workflows/{user_id}/{conversation_id}/states/{state_name}: json-string
         /workflows/{user_id}/{conversation_id}/messages/{push_id}: ChatMessage dict
-
-    Design goals:
-    - Listing conversation IDs is cheap and reads only the dedicated index.
-    - Checking conversation existence is cheap and reads only the dedicated index.
-    - Full conversation payload is kept separate from the index.
     """
 
     _WORKFLOWS_ROOT = "/workflows"
@@ -42,10 +37,6 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
     @staticmethod
     def get_default_firebase_database_app() -> Any:
-        """
-        Returns the default Firebase app if already initialized,
-        otherwise initializes one from ADC + env vars.
-        """
         try:
             return firebase_admin.get_app()
         except ValueError:
@@ -74,14 +65,14 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         *,
         app: Any,
         state_classes_by_name: Mapping[str, type[State]],
-        ochestrator_state_cls: type[WritableOchestratorState],
+        ochestrator_state_classes_by_name: Mapping[str, type[WritableOchestratorState]],
     ) -> None:
         if app is None:
             raise ValueError("app must not be None")
         if not isinstance(state_classes_by_name, Mapping):
             raise ValueError("state_classes_by_name must be a mapping")
-        if ochestrator_state_cls is None:
-            raise ValueError("ochestrator_state_cls must not be None")
+        if not isinstance(ochestrator_state_classes_by_name, Mapping):
+            raise ValueError("ochestrator_state_classes_by_name must be a mapping")
 
         self._root_ref = db.reference("/", app=app)
         self._workflows_root_ref = db.reference(self._WORKFLOWS_ROOT, app=app)
@@ -90,20 +81,15 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             app=app,
         )
         self._state_classes_by_name = dict(state_classes_by_name)
-        self._ochestrator_state_cls = ochestrator_state_cls
+        self._ochestrator_state_classes_by_name = dict(
+            ochestrator_state_classes_by_name
+        )
 
     # ---------------------------------------------------------------------
     # Conversation persistence
     # ---------------------------------------------------------------------
 
     def save_conversation_id(self, *, user_id: UUID, conversation_id: UUID) -> None:
-        """
-        Ensures the conversation exists in both:
-        - lightweight index subtree
-        - full conversation payload subtree
-
-        Uses a single multi-location root update so the two writes succeed/fail together.
-        """
         updates = {
             self._conversation_index_path(
                 user_id=user_id,
@@ -117,10 +103,6 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         self._root_ref.update(updates)
 
     def get_conversation_ids_for_user(self, *, user_id: UUID) -> Sequence[UUID]:
-        """
-        Cheap read: loads only the dedicated conversation index subtree.
-        Does NOT read the full conversation payload subtree.
-        """
         data = self._conversation_index_user_ref(user_id=user_id).get()
         if not isinstance(data, dict):
             return []
@@ -139,9 +121,6 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         user_id: UUID,
         conversation_id: UUID,
     ) -> bool:
-        """
-        Cheap existence check: reads only the conversation index entry.
-        """
         value = self._conversation_index_ref(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -158,41 +137,70 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         user_id: UUID,
         conversation_id: UUID,
     ) -> WritableOchestratorState | None:
-        payload = (
+        raw_payload = (
             self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
             .child("ochestrator_state")
             .get()
         )
-        if payload is None:
+        if raw_payload is None:
             return None
 
-        if not isinstance(payload, str):
+        if not isinstance(raw_payload, str):
             raise ValueError(
                 f"Stored ochestrator_state for conversation_id={conversation_id!r} "
-                f"must be a JSON string blob, got {type(payload).__name__}"
+                f"must be a JSON string blob, got {type(raw_payload).__name__}"
             )
 
         try:
-            state_dict = json.loads(payload)
+            envelope = json.loads(raw_payload)
         except json.JSONDecodeError as exc:
             raise ValueError(
                 f"Stored ochestrator_state for conversation_id={conversation_id!r} "
                 f"is not valid JSON: {exc}"
             ) from exc
 
-        if not isinstance(state_dict, dict):
+        if not isinstance(envelope, dict):
             raise ValueError(
                 f"Decoded ochestrator_state for conversation_id={conversation_id!r} "
-                f"must be a dict, got {type(state_dict).__name__}"
+                f"must be a dict, got {type(envelope).__name__}"
+            )
+
+        state_name = envelope.get("name")
+        state_payload = envelope.get("payload")
+
+        if not isinstance(state_name, str) or not state_name.strip():
+            raise ValueError(
+                f"Decoded ochestrator_state for conversation_id={conversation_id!r} "
+                f"must contain a non-empty 'name'"
+            )
+
+        if not isinstance(state_payload, dict):
+            raise ValueError(
+                f"Decoded ochestrator_state for conversation_id={conversation_id!r} "
+                f"must contain a dict 'payload', got {type(state_payload).__name__}"
+            )
+
+        cls = self._ochestrator_state_classes_by_name.get(state_name)
+        if cls is None:
+            raise KeyError(
+                f"No WritableOchestratorState class registered for name={state_name!r}"
             )
 
         try:
-            return self._ochestrator_state_cls.from_json_dict(state_dict)
+            state = cls.from_json_dict(state_payload)
         except Exception as exc:
             raise ValueError(
-                f"Error deserializing ochestrator_state for "
-                f"conversation_id={conversation_id!r}: {exc}"
+                f"Error deserializing ochestrator_state '{state_name}': {exc}"
             ) from exc
+
+        loaded_state_name = self._state_name_of(state)
+        if loaded_state_name != state_name:
+            raise ValueError(
+                f"Loaded WritableOchestratorState.name mismatch: got {loaded_state_name!r}, "
+                f"expected {state_name!r}"
+            )
+
+        return state
 
     def store_ochestrator_state(
         self,
@@ -201,16 +209,30 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         conversation_id: UUID,
         state: WritableOchestratorState,
     ) -> None:
+        state_name = self._state_name_of(state)
+        if not isinstance(state_name, str) or not state_name.strip():
+            raise ValueError("ochestrator state name must be a non-empty string")
+
+        envelope = {
+            "name": state_name,
+            "payload": state.to_json_dict(),
+        }
+
+        try:
+            payload_json = json.dumps(
+                envelope,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Ochestrator state '{state_name}' is not JSON-serializable: {exc}"
+            ) from exc
+
         (
             self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
             .child("ochestrator_state")
-            .set(
-                json.dumps(
-                    state.to_json_dict(),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-            )
+            .set(payload_json)
         )
 
     # ---------------------------------------------------------------------

@@ -27,6 +27,7 @@ from python.implementation.workflows.ochestrator.ochestraotor import (
     Ochestrator,
     build_state_classes_by_name,
 )
+from python.implementation.workflows.ochestrator.ochestrator_global_state import OchestratorWritableGlobalState
 from python.implementation.workflows.workflow_app import WorkflowApp
 
 log = get_logger(__name__, component="workflow_depinit", log_type="dependency_bootstrap")
@@ -91,6 +92,7 @@ def _make_workflow_state_repo(
     return FirebaseRealtimeWorkflowStateRepo(
         app=app,
         state_classes_by_name=state_classes_by_name,
+        
     )
 
 
