@@ -706,9 +706,7 @@ class Ochestrator:
         match state:
             case DatasetState() as dataset_state:
                 if not dataset_state.payload.dataset_iterations:
-                    raise ValueError(
-                        "Dataset state is DONE but has no dataset iterations"
-                    )
+                    return ochestrator_state
 
                 latest_iteration_dataset_id = (
                     dataset_state.payload.dataset_iterations[-1].dataset_id
