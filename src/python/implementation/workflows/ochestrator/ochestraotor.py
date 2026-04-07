@@ -447,7 +447,7 @@ class Ochestrator:
                 f"Latest system message inside current state: {latest_state_system_message!r}\n"
                 "Return the best route intent."
             ),
-            config=LLMConfig(model="basic", temperature=0.1),
+            config=LLMConfig(model="mini", temperature=0.1),
             history=last_2_messages,
             max_attempts=2,
         )
@@ -471,8 +471,8 @@ class Ochestrator:
         ochestrator_state: OchestratorReadOnlyGlobalState,
         messages_history: Sequence[ChatMessage] | None,
     ) -> ChatMessage:
-        last_4_messages: list[ChatMessage] = (
-            list(messages_history[-4:]) if messages_history else []
+        last_3_messages: list[ChatMessage] = (
+            list(messages_history[-3:]) if messages_history else []
         )
         latest_user_message = _latest_user_message(messages_history)
         if latest_user_message is None:
@@ -508,7 +508,7 @@ class Ochestrator:
                 f"Next node description: {next_node_description!r}\n"
                 f"User question: {latest_user_message!r}\n"
             ),
-            history=last_4_messages,
+            history=last_3_messages,
             config=LLMConfig(model="basic", temperature=0.2),
         ).content
 
