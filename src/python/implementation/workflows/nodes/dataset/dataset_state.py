@@ -27,7 +27,6 @@ class DatasetPayloadModel(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
     dataset_iterations: list[DatasetIterationModel] = Field(default_factory=list)
     latest_summary: DatasetSummaryModel | None = None
-    freezed: bool = False
     user_message: str | None = None
 
 
@@ -51,24 +50,10 @@ class DatasetState(State):
     def name(self) -> str:
         return self.NAME
 
-    def get_working_dataset_info(self) -> WorkingDatasetInfo | None:
-        if not self.payload.dataset_iterations or len(self.payload.dataset_iterations) == 0:
-            return None
-        return WorkingDatasetInfo(
-            dataset_id=self.payload.dataset_iterations[-1].dataset_id,
-            is_freezed=self.payload.freezed,
-        )
-
     def status(self) -> Status:
-        if self.payload.freezed:
-            return "FREEZED"
         return "PENDING"
 
     def action(self) -> Action:
-        if self.payload.freezed:
-            return "NONE"
-        # Dataset is the only stage that can genuinely require data upload. Once at least one
-        # dataset iteration exists, the user can keep interacting with this node conversationally.
         if not self.payload.dataset_iterations:
             return "NEEDS_DATA"
         return "NEEDS_INPUT"
@@ -89,11 +74,8 @@ class DatasetState(State):
             )
         ]
 
-    def set_status_freez(self) -> None:
-        self.payload.freezed = True
-
     def set_status_pending(self) -> None:
-        self.payload.freezed = False
+        pass
 
     def error(self) -> None:
         return None
