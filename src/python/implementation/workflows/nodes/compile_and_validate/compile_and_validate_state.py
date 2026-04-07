@@ -31,7 +31,6 @@ class CompileAndValidatePayloadModel(BaseModel):
     assistant_message: str | None = None
     system_message: str | None = None
     error_message: str | None = None
-    freezed: bool = False
 
     @field_validator(
         "assistant_message",
@@ -58,8 +57,6 @@ class CompileAndValidateState(State):
         return self.NAME
 
     def status(self) -> Status:
-        if self.payload.freezed:
-            return "FREEZED"
         if self.payload.phase == "CONFIRMED":
             return "DONE"
         if self.payload.phase == "FAILED":
@@ -70,14 +67,6 @@ class CompileAndValidateState(State):
         if self.status() == "PENDING":
             return "NEEDS_INPUT"
         return "NONE"
-
-    def set_status_freez(self) -> None:
-        if self.payload.phase in ("CONFIRMED"):
-            self.payload.freezed = True
-        else:
-            raise ValueError(
-                f"Can only freeze when phase is CONFIRMED, current phase: {self.payload.phase!r}"
-            )
 
     def set_status_pending(self) -> None:
         if self.payload.phase in ("CONFIRMED", "FAILED"):

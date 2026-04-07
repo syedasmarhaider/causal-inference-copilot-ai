@@ -5,7 +5,7 @@ import inspect
 import json
 import re
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any, ClassVar, cast
 from uuid import UUID
 
@@ -20,6 +20,7 @@ from python.domain.service.llm_service import (
     LLMService,
 )
 from python.domain.workflows.node import Node
+from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_app_logger
@@ -56,17 +57,6 @@ _ARTIFACT_KIND_ANALYTICAL_RESULT = "analytical_result"
 _ARTIFACT_KIND_CHART_SPEC = "chart_spec"
 _INITIAL_SUMMARY_MAX_COLUMNS = 8
 _PROTOCOL_DISCUSSION_CONFIRMED_MARKER = "PROTOCOL_DISCUSSION_CONFIRMED"
-_FREEZED_DATASET_BLOCKED_MESSAGE = (
-    "Sorry, this dataset is freezed. I cannot modify the data or revert to a previous "
-    "dataset version in this workflow. You can still ask questions about the data, run "
-    "read-only analytical queries including statistical summaries, and generate charts. "
-    "To change the data, start a new conversation from scratch."
-)
-_FREEZED_DATASET_READY_MESSAGE = (
-    "Dataset is freezed. You can ask questions about the data, run read-only analytical "
-    "queries including statistics and summaries, and generate charts, but you cannot "
-    "modify or revert the data. To change the data, start a new conversation from scratch."
-)
 _READY_DATASET_MESSAGE = (
     "Dataset is ready. Ask about the data, request analytical or statistical queries, ask "
     "for transformations, or ask for charts."
@@ -164,12 +154,10 @@ class DatasetNode(Node):
         *,
         user_id: UUID,
         conversation_id: UUID,
-        previous_state_dependencies: Mapping[str, State],
-        messages_history: Sequence[ChatMessage] | None,
         state: State,
+        readonly_orchestrator_state: ReadOnlyOchestratorState,
+        messages_history: Sequence[ChatMessage] | None,
     ) -> State:
-        del previous_state_dependencies
-
         if not isinstance(state, DatasetState):
             raise TypeError(f"{self.name}: expected DatasetState, got {type(state).__name__}")
 
@@ -181,16 +169,8 @@ class DatasetNode(Node):
             if state.payload.latest_summary is not None
             else None
         )
-        is_freezed = bool(state.payload.freezed)
 
         if _is_revert_request(messages_history):
-            if is_freezed:
-                return self._build_state(
-                    dataset_iterations=dataset_iterations,
-                    latest_summary=latest_summary,
-                    freezed=True,
-                    user_message=_FREEZED_DATASET_BLOCKED_MESSAGE,
-                )
             return self._handle_revert(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -221,7 +201,6 @@ class DatasetNode(Node):
                 return self._build_state(
                     dataset_iterations=dataset_iterations,
                     latest_summary=latest_summary,
-                    freezed=is_freezed,
                     user_message=(
                         "I could not load the current working dataset. Please re-upload the CSV "
                         "or try again."
@@ -246,7 +225,6 @@ class DatasetNode(Node):
                 )
             except Exception:
                 return self._build_state(
-                    freezed=is_freezed,
                     user_message=self._build_missing_data_message(
                         messages_history=messages_history
                     ),
@@ -271,7 +249,7 @@ class DatasetNode(Node):
         persisted_latest_summary = current_summary
 
         protocol_cleaning_request = _latest_protocol_cleaning_request(messages_history)
-        if protocol_cleaning_request and not is_freezed:
+        if protocol_cleaning_request:
             try:
                 working_df = self._run_data_manipulation_tool(
                     dataframe=current_df,
@@ -311,7 +289,6 @@ class DatasetNode(Node):
                 return self._build_state(
                     dataset_iterations=dataset_iterations,
                     latest_summary=persisted_latest_summary,
-                    freezed=is_freezed,
                     user_message=(
                         "I could not apply the confirmed protocol cleaning request to the "
                         "dataset. Please review the confirmed protocol instructions and try again."
@@ -320,7 +297,6 @@ class DatasetNode(Node):
             return self._build_state(
                 dataset_iterations=dataset_iterations,
                 latest_summary=persisted_latest_summary,
-                freezed=True,
                 user_message=self._build_protocol_cleaning_completed_message(
                     rows=int(len(working_df)),
                     columns=[str(column) for column in working_df.columns],
@@ -332,11 +308,10 @@ class DatasetNode(Node):
             return self._build_state(
                 dataset_iterations=dataset_iterations,
                 latest_summary=persisted_latest_summary,
-                freezed=is_freezed,
                 user_message=(
                     self._build_loaded_dataset_message(summary=current_summary)
                     if loaded_this_turn
-                    else self._build_ready_message(freezed=is_freezed)
+                    else self._build_ready_message()
                 ),
             )
 
@@ -360,7 +335,6 @@ class DatasetNode(Node):
             return self._build_state(
                 dataset_iterations=dataset_iterations,
                 latest_summary=persisted_latest_summary,
-                freezed=is_freezed,
                 user_message=(
                     "Dataset is loaded, but I could not classify your request. Please ask again "
                     "more directly."
@@ -372,33 +346,18 @@ class DatasetNode(Node):
                 return self._build_state(
                     dataset_iterations=dataset_iterations,
                     latest_summary=persisted_latest_summary,
-                    freezed=is_freezed,
                     user_message=self._build_loaded_dataset_message(summary=current_summary),
                 )
             if _is_dataset_scope_message(_latest_assistant_message(messages_history)):
                 return self._build_state(
                     dataset_iterations=dataset_iterations,
                     latest_summary=persisted_latest_summary,
-                    freezed=is_freezed,
                     user_message=self._build_off_topic_clarification_message(),
                 )
             return self._build_state(
                 dataset_iterations=dataset_iterations,
                 latest_summary=persisted_latest_summary,
-                freezed=is_freezed,
                 user_message=self._build_off_topic_message(),
-            )
-
-        if (
-            is_freezed
-            and intent.intent_manupulation_question
-            and not intent.intent_manupulation_is_analytical_query
-        ):
-            return self._build_state(
-                dataset_iterations=dataset_iterations,
-                latest_summary=persisted_latest_summary,
-                freezed=True,
-                user_message=_FREEZED_DATASET_BLOCKED_MESSAGE,
             )
 
         summary_answer: str | None = None
@@ -445,7 +404,6 @@ class DatasetNode(Node):
                 return self._build_state(
                     dataset_iterations=dataset_iterations,
                     latest_summary=persisted_latest_summary,
-                    freezed=is_freezed,
                     user_message=(
                         "I could not complete that data query or transformation. "
                         "Please try rephrasing the request."
@@ -466,7 +424,6 @@ class DatasetNode(Node):
                 return self._build_state(
                     dataset_iterations=dataset_iterations,
                     latest_summary=persisted_latest_summary,
-                    freezed=is_freezed,
                     user_message=(
                         "I could not generate the requested chart output. "
                         "Please try rephrasing the chart request."
@@ -480,7 +437,6 @@ class DatasetNode(Node):
                 chart_result=chart_result,
                 dataset_context={
                     "dataset_loaded_this_turn": loaded_this_turn,
-                    "dataset_freezed": is_freezed,
                     "original_user_message": latest_user_message,
                     "handled_intents": {
                         "data_question": intent.intent_data_question,
@@ -501,7 +457,6 @@ class DatasetNode(Node):
         return self._build_state(
             dataset_iterations=dataset_iterations,
             latest_summary=persisted_latest_summary,
-            freezed=is_freezed,
             user_message=final_message,
             response_message_artifact_refs=[*manipulation_artifact_refs, *chart_artifact_refs],
         )
@@ -512,7 +467,6 @@ class DatasetNode(Node):
         user_message: str,
         dataset_iterations: Sequence[DatasetIterationModel] | None = None,
         latest_summary: DatasetSummaryModel | None = None,
-        freezed: bool = False,
         response_message_artifact_refs: Sequence[ArtifactRef] | None = None,
     ) -> DatasetState:
         normalized_iterations = [
@@ -524,12 +478,9 @@ class DatasetNode(Node):
                 latest_summary=(
                     latest_summary.model_copy(deep=True) if latest_summary is not None else None
                 ),
-                freezed=freezed,
                 user_message=user_message,
             ),
-            response_message_artifact_refs=[
-                dict(ref) for ref in (response_message_artifact_refs or [])
-            ],
+            response_message_artifact_refs=list(response_message_artifact_refs or []),
         )
         return state
 
@@ -592,9 +543,7 @@ class DatasetNode(Node):
             strict=True,
         )
 
-    def _build_ready_message(self, *, freezed: bool) -> str:
-        if freezed:
-            return _FREEZED_DATASET_READY_MESSAGE
+    def _build_ready_message(self) -> str:
         return _READY_DATASET_MESSAGE
 
     def _build_missing_data_message(
@@ -652,7 +601,7 @@ class DatasetNode(Node):
                 f"{column_preview}, +{column_count - _INITIAL_SUMMARY_MAX_COLUMNS} more columns"
             )
         return (
-            "Applied the confirmed protocol cleaning request and saved a frozen working dataset "
+            "Applied the confirmed protocol cleaning request and saved a working dataset "
             f"for validation. The cleaned dataset now has {rows} rows and {column_count} columns"
             + (f": {column_preview}." if column_preview else ".")
         )
@@ -881,7 +830,11 @@ class DatasetNode(Node):
             {
                 "status": "charts_saved",
                 "instruction": instructions,
-                "saved_chart_spec_ids": [str(saved_id["id"]) for saved_id in saved_ids],
+                "saved_chart_spec_ids": [
+                    str(artifact_id)
+                    for saved_id in saved_ids
+                    if (artifact_id := saved_id.get("id")) is not None
+                ],
                 "saved_chart_count": len(saved_ids),
             },
             saved_ids,

@@ -1,241 +1,491 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from typing import Any, Final, Literal, overload
-from collections.abc import Mapping
-from uuid import UUID
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
+from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from typing_extensions import override
-
-from python.domain.models.validation import ValidationIssueModel
-from python.domain.workflows.ochestrator_state import ReadOnlyGlobalState, WritableGlobalState
-from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
-
-_VALID_GLOBAL_STATE_KEYS: Final[frozenset[str]] = frozenset(
-    {
-        "working_dataset_id",
-        "working_dataset_summary",
-        "working_dataset_frozen",
-        "data_transformation_plan",
-        "validation_issues",
-        "validation_issues_accepted",
-        "selected_model",
-        "model_training_id",
-    }
+from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
+from python.domain.models.models import (
+    ArtifactRef,
+    ChatMessage,
+)
+from python.domain.repo.workflow_state_repo import WorkflowStateRepo
+from python.domain.workflows.node import Node
+from python.domain.workflows.route import Router
+from python.domain.workflows.state import Action, State, Status
+from python.domain.workflows.tool_factory import ToolFactory
+from python.implementation.service.logging.default_logging import get_app_logger
+from python.implementation.workflows.dataflow_app import (
+    DataflowArtifactResponse,
 )
 
-class GlobalStateModel(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid",
-        validate_assignment=True,
-    )
+_MESSAGES_HISTORY_LIMIT = 15
 
-    working_dataset_id: UUID | None = None
-    working_dataset_summary: DatasetSummaryModel | None = None
-    working_dataset_frozen: bool = False
-    data_transformation_plan: TransformPlan | None = None
-    validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
-    validation_issues_accepted: bool = False
-    selected_model: str | None = None
-    model_training_id: UUID | None = None
+# TODO: add distributed tnx or locks later
 
-    @field_validator("selected_model")
-    @classmethod
-    def _normalize_selected_model(cls, value: str | None) -> str | None:
-        if value is None:
+
+@dataclass(frozen=True)
+class WorkflowResponse:
+    _current_state: State
+    _assistant_messages_override: Sequence[ChatMessage] | None = None
+    _current_stage_name_override: str | None = None
+    _current_stage_status_override: Status | None = None
+    _action_override: Action | None = None
+
+    @property
+    def messages(self) -> Sequence[ChatMessage]:
+        if self._assistant_messages_override is not None:
+            return tuple(self._assistant_messages_override)
+        return tuple(_assistant_messages_for_user(self._current_state))
+
+    @property
+    def current_stage_name(self) -> str:
+        if self._current_stage_name_override is not None:
+            return self._current_stage_name_override
+        return self._current_state.name()
+
+    @property
+    def current_stage_status(self) -> Status:
+        if self._current_stage_status_override is not None:
+            return self._current_stage_status_override
+        return self._current_state.status()
+
+    @property
+    def action(self) -> Action:
+        if self._action_override is not None:
+            return self._action_override
+        return self._current_state.action()
+
+    @property
+    def artifact_refs(self) -> Sequence[ArtifactRef] | None:
+        artifact_refs: list[ArtifactRef] = []
+        for message in self.messages:
+            artifact_refs.extend(list(message.artifact_refs or ()))
+        return artifact_refs or None
+
+
+ArtifactResponse = DataflowArtifactResponse
+
+
+class WorkflowApp:
+    def __init__(
+        self,
+        *,
+        repo: WorkflowStateRepo,
+        router: Router,
+        nodes_by_state_name: Mapping[str, Node],
+        state_classes_by_name: Mapping[str, type[State]],
+        tool_factory: ToolFactory | None = None,
+        history_limit: int = _MESSAGES_HISTORY_LIMIT,
+        max_steps_per_call: int = 1,
+    ) -> None:
+        if max_steps_per_call <= 0:
+            raise ValueError("max_steps_per_call must be >= 1")
+
+        self._repo = repo
+        self._router = router
+        self._nodes = dict(nodes_by_state_name)
+        self._state_classes = dict(state_classes_by_name)
+        self._tool_factory = tool_factory
+        self._history_limit = history_limit
+        self._max_steps_per_call = max_steps_per_call
+        self._log = get_app_logger(
+            __name__,
+            component=self.__class__.__name__,
+            log_type="workflow_service",
+        )
+        self._log.info(
+            "workflow app initialized",
+            nodes_count=len(self._nodes),
+            state_classes_count=len(self._state_classes),
+            history_limit=self._history_limit,
+            max_steps_per_call=self._max_steps_per_call,
+        )
+
+    def raise_if_userid_not_relates_to_conversation_id(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+    ) -> None:
+        if not self._repo.is_conversation_id_for_user_id_exists(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        ):
+            self._log.info(
+                "conversation ownership check failed",
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+            raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation_id)
+
+    def create_conversation(self, user_id: UUID) -> UUID:
+        conversation_id = uuid4()
+        self._repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
+        self._log.info(
+            "conversation created",
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        return conversation_id
+
+    def list_conversations(self, user_id: UUID) -> Sequence[UUID]:
+        return self._repo.get_conversation_ids_for_user(user_id=user_id)
+
+    def get_last_conversation_state(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+    ) -> WorkflowResponse | None:
+        active_name = self._repo.load_active_state_name(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if not active_name:
+            self._log.debug(
+                "latest conversation state not found because active state is missing",
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
             return None
 
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("selected_model must not be blank")
-
-        return normalized
-
-    @model_validator(mode="after")
-    def _validate_cross_field_invariants(self) -> GlobalStateModel:
-        if self.working_dataset_summary is not None and self.working_dataset_id is None:
-            raise ValueError(
-                "working_dataset_id must be set when working_dataset_summary is set"
+        state = self._repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=active_name,
+        )
+        if state is None:
+            self._log.info(
+                "active state name exists but state payload is missing",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                active_state_name=active_name,
             )
+            return None
 
-        if self.data_transformation_plan is not None and self.working_dataset_id is None:
-            raise ValueError(
-                "working_dataset_id must be set when data_transformation_plan is set"
-            )
+        return WorkflowResponse(_current_state=state)
 
-        if self.validation_issues_accepted and not self.validation_issues:
-            raise ValueError(
-                "validation_issues_accepted cannot be True when validation_issues is empty"
-            )
-
-        if self.model_training_id is not None and self.selected_model is None:
-            raise ValueError(
-                "selected_model must be set when model_training_id is set"
-            )
-
-        return self
-
-
-class OrchestratorReadOnlyGlobalState(ReadOnlyGlobalState):
-    def __init__(self, model: GlobalStateModel) -> None:
-        self._model = model
-
-    @overload
-    def get(self, key: Literal["working_dataset_id"]) -> UUID | None: ...
-    @overload
-    def get(
-        self, key: Literal["working_dataset_summary"]
-    ) -> DatasetSummaryModel | None: ...
-    @overload
-    def get(self, key: Literal["working_dataset_frozen"]) -> bool: ...
-    @overload
-    def get(
-        self, key: Literal["data_transformation_plan"]
-    ) -> TransformPlan | None: ...
-    @overload
-    def get(
-        self, key: Literal["validation_issues"]
-    ) -> list[ValidationIssueModel]: ...
-    @overload
-    def get(self, key: Literal["validation_issues_accepted"]) -> bool: ...
-    @overload
-    def get(self, key: Literal["selected_model"]) -> str | None: ...
-    @overload
-    def get(self, key: Literal["model_training_id"]) -> UUID | None: ...
-
-    @override
-    def get(self, key: str) -> Any | None:
-        if key not in _VALID_GLOBAL_STATE_KEYS:
-            raise KeyError(f"unknown global state key: {key}")
-
-        return getattr(self._model, key)
-
-    def snapshot(self) -> GlobalStateModel:
-        """
-        Safe deep snapshot for callers that need the full state model.
-        """
-        return self._model.model_copy(deep=True)
-
-
-class OrchestratorWritableGlobalState(
-    OrchestratorReadOnlyGlobalState, WritableGlobalState
-):
-    def __init__(self, model: GlobalStateModel) -> None:
-        super().__init__(model)
-
-    @override
-    def to_json_dict(self) -> dict[str, Any]:
-        """
-        JSON-safe output for persistence.
-        """
-        return self._model.model_dump(mode="json")
-
-    @classmethod
-    def from_json_dict(
-        cls, payload: Mapping[str, Any]
-    ) -> OrchestratorWritableGlobalState:
-        normalized_payload = dict(payload)
-        model = GlobalStateModel.model_validate(normalized_payload)
-        return cls(model)
-
-    @classmethod
-    def init_empty(cls) -> OrchestratorWritableGlobalState:
-        return cls(GlobalStateModel())
-
-
-    def freeze_working_dataset(self) -> None:
-        self._model.working_dataset_frozen = True
-
-    def unfreeze_working_dataset(self) -> None:
-        self._model.working_dataset_frozen = False
-
-    def set_working_dataset_id(self, dataset_id: UUID) -> None:
-        self._assert_dataset_mutable()
-
-        if self._model.working_dataset_id == dataset_id:
-            return
-
-        self._model.working_dataset_id = dataset_id
-        self._clear_dataset_dependent_state()
-
-    def set_working_dataset_summary(
-        self, summary: DatasetSummaryModel | None
+    def revert_to_state(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        state_name: str,
     ) -> None:
-        self._assert_dataset_mutable()
+        state = self._repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=state_name,
+        )
+        if state is None:
+            self._log.info(
+                "revert requested for missing state",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=state_name,
+            )
+            raise StateNotFoundError(state_name=state_name)
 
-        if summary is not None and self._model.working_dataset_id is None:
-            raise ValueError(
-                "working_dataset_id must be set before working_dataset_summary"
+        state_names = self._router.get_next_state_names(state_name)
+        self._repo.delete_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=state_name,
+        )
+        for next_state_name in state_names:
+            self._repo.delete_state(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=next_state_name,
             )
 
-        self._model.working_dataset_summary = deepcopy(summary)
+        self._repo.store_active_state_name(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=state_name,
+        )
 
-    def set_data_transformation_plan(
-        self, plan: TransformPlan | None
-    ) -> None:
-        self._assert_dataset_mutable()
+        self._repo.append_message(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            message=ChatMessage(
+                role="system",
+                content=(
+                    f"User reverted to state {state_name}. Fresh start of this state. "
+                    f"Deleted states: {', '.join(state_names)}"
+                ),
+            ),
+        )
+        self._log.info(
+            "conversation reverted to state",
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=state_name,
+            deleted_states_count=len(state_names),
+        )
 
-        if plan is not None and self._model.working_dataset_id is None:
-            raise ValueError(
-                "working_dataset_id must be set before data_transformation_plan"
+    def handle(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        user_message: str | None,
+    ) -> WorkflowResponse:
+        self._log.debug(
+            "workflow handle requested",
+            user_id=user_id,
+            conversation_id=conversation_id,
+            user_message=user_message,
+        )
+        if user_message is not None and user_message.strip():
+            self._repo.append_message(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                message=ChatMessage(role="user", content=user_message),
             )
 
-        self._model.data_transformation_plan = deepcopy(plan)
+        history = list(
+            self._repo.load_message_history(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                limit=self._history_limit,
+            )
+        )
 
-    def set_validation_issues(
-        self, issues: list[ValidationIssueModel]
-    ) -> None:
-        self._model.validation_issues = issues
-        self._model.validation_issues_accepted = False
+        state_name_to_route = self._repo.load_active_state_name(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        state_name_to_run: str
+        state_to_run: State
+        pre_state_to_run_status: Status
+        active_state_name_before_run = state_name_to_route
+        active_state_status_before_run: Status | None = None
 
-    def clear_validation_issues(self) -> None:
-        self._model.validation_issues = []
-        self._model.validation_issues_accepted = False
+        if not state_name_to_route:
+            state_name_to_run = self._router.get_initial_state_name()
+            self._repo.store_active_state_name(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=state_name_to_run,
+            )
+            state_to_run = self._load_or_init_state(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=state_name_to_run,
+            )
+        else:
+            current_state = self._load_or_init_state(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=state_name_to_route,
+            )
+            active_state_status_before_run = current_state.status()
+            decision = self._router.decide_next(
+                current_state=current_state,
+                messages_history=history,
+            )
+            if decision.state_name is None:
+                confirmation_message = (
+                    decision.router_confirmation_message_for_user
+                    or "I need a bit more clarification before I can route this request."
+                )
+                # Persist the router clarification so history stays coherent even when execution stops.
+                self._repo.append_message(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    message=ChatMessage(role="assistant", content=confirmation_message),
+                )
+                return WorkflowResponse(
+                    _current_state=current_state,
+                    _assistant_messages_override=[
+                        ChatMessage(role="assistant", content=confirmation_message),
+                    ],
+                    _current_stage_name_override=state_name_to_route,
+                    _current_stage_status_override="PENDING",
+                    _action_override="NEEDS_INPUT",
+                )
 
-    def accept_validation_issues(self) -> None:
-        if not self._model.validation_issues:
-            raise ValueError(
-                "cannot accept validation issues when no validation issues exist"
+            state_name_to_run = decision.state_name
+            state_to_run = self._load_or_init_state(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=state_name_to_run,
+            )
+            if active_state_status_before_run == "ABORTED":
+                state_to_run.set_status_pending()
+
+        deps = self._load_deps(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            required=state_to_run.pre_required_states_names(),
+        )
+        node = self._nodes.get(state_name_to_run)
+        if node is None:
+            self._log.error(
+                "workflow node is not registered for state",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=state_name_to_run,
+            )
+            raise KeyError(f"WorkflowApp: no node registered for state_name={state_name_to_run!r}")
+
+        pre_state_to_run_status = state_to_run.status()
+        new_state = node.run(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state=state_to_run,
+            previous_state_dependencies=deps,
+            messages_history=history,
+        )
+
+        new_state_name = new_state.name()
+        new_state_status = new_state.status()
+
+        # If the routed state was already frozen before execution, treat it as a read-only detour and
+        # keep the active pointer where it was. The only exception is when the returned state itself
+        # is frozen, in which case that frozen state becomes the new active checkpoint.
+        active_state_name_after_run = active_state_name_before_run
+        active_state_status_after_run = active_state_status_before_run
+        if new_state_status == "FREEZED" or pre_state_to_run_status != "FREEZED":
+            active_state_name_after_run = new_state_name
+            active_state_status_after_run = new_state_status
+        elif active_state_name_before_run == new_state_name:
+            # Running the currently active frozen state in place rewrites that state's payload, so the
+            # response should reflect the newly stored status even though the active pointer does not move.
+            active_state_status_after_run = new_state_status
+
+        if new_state.status() == "DONE":
+            new_state.set_status_freez()
+            new_state_status = new_state.status()
+            if active_state_name_after_run == new_state_name:
+                active_state_status_after_run = new_state_status
+        self._repo.store_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state=new_state,
+        )
+
+        if (
+            active_state_name_after_run is not None
+            and active_state_name_after_run != active_state_name_before_run
+        ):
+            self._repo.store_active_state_name(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=active_state_name_after_run,
             )
 
-        self._model.validation_issues_accepted = True
-
-    def set_selected_model(self, model_name: str | None) -> None:
-        if model_name is None:
-            self._model.selected_model = None
-            self._model.model_training_id = None
-            return
-
-        if self._model.working_dataset_id is None:
-            raise ValueError(
-                "working_dataset_id must be set before selecting a model"
+        ordered_history_messages = _ordered_history_messages(new_state)
+        if ordered_history_messages:
+            self._repo.append_messages(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                messages=ordered_history_messages,
             )
 
-        self._model.selected_model = model_name
-        self._model.model_training_id = None
-
-    def set_model_training_id(self, training_id: UUID | None) -> None:
-        if training_id is not None and self._model.selected_model is None:
-            raise ValueError(
-                "selected_model must be set before model_training_id"
+        state_error = new_state.error()
+        if state_error is not None:
+            self._log.error(
+                "node returned workflow error",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=new_state_name,
+                state_status=new_state_status,
+                node_error=state_error.error,
+            )
+        else:
+            self._log.debug(
+                "workflow node completed",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=new_state_name,
+                state_status=new_state_status,
+                assistant_messages_count=len(_assistant_messages_for_user(new_state)),
             )
 
-        self._model.model_training_id = training_id
+        return WorkflowResponse(
+            _current_state=new_state,
+            _current_stage_name_override=active_state_name_after_run or new_state_name,
+            _current_stage_status_override=active_state_status_after_run or new_state_status,
+        )
 
-    def clear_training_state(self) -> None:
-        self._model.selected_model = None
-        self._model.model_training_id = None
+    def _init_empty_state(self, state_name: str) -> State:
+        cls = self._state_classes.get(state_name)
+        if cls is None:
+            raise KeyError(f"WorkflowApp: no State class registered for state_name={state_name!r}")
+        state = cls.init_empty()
+        state_name_from_state = state.name()
+        if state_name_from_state != state_name:
+            raise ValueError(
+                f"init_empty() returned name={state_name_from_state!r}, expected={state_name!r}"
+            )
+        return state
 
-    def _assert_dataset_mutable(self) -> None:
-        if self._model.working_dataset_frozen:
-            raise ValueError("working dataset is frozen")
+    def _load_or_init_state(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        state_name: str,
+    ) -> State:
+        loaded = self._repo.load_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state_name=state_name,
+        )
+        if loaded is not None:
+            return loaded
+        return self._init_empty_state(state_name)
 
-    def _clear_dataset_dependent_state(self) -> None:
-        self._model.working_dataset_summary = None
-        self._model.data_transformation_plan = None
-        self._model.validation_issues = []
-        self._model.validation_issues_accepted = False
-        self._model.selected_model = None
-        self._model.model_training_id = None
+    def _load_deps(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        required: Sequence[str],
+    ) -> Mapping[str, Any]:
+        deps: dict[str, Any] = {}
+        for dep_name in required:
+            dep_state = self._repo.load_state(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=dep_name,
+            )
+            if dep_state is not None:
+                deps[dep_name] = dep_state
+        return deps
+
+
+def _state_messages(state: State) -> Sequence[ChatMessage]:
+    value = state.messages()
+    return list(value)
+
+
+def _assistant_messages_for_user(state: State) -> list[ChatMessage]:
+    return [
+        ChatMessage(
+            role="assistant",
+            content=message.content,
+            artifact_refs=list(message.artifact_refs or ()) or None,
+            artifacts=list(message.artifacts or ()) or None,
+            id=message.id,
+        )
+        for message in _state_messages(state)
+        if message.role == "assistant"
+    ]
+
+
+def _ordered_history_messages(state: State) -> list[ChatMessage]:
+    messages = _state_messages(state)
+    assistants = [message for message in messages if message.role == "assistant"]
+    systems = [message for message in messages if message.role == "system"]
+    return [*assistants, *systems]
+
+
+__all__ = [
+    "ArtifactResponse",
+    "WorkflowApp",
+    "WorkflowResponse",
+]

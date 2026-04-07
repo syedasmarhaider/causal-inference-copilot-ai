@@ -8,9 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
 from python.domain.workflows.state import Action, State, Status
-from python.implementation.workflows.nodes.model_selection.model_selection_deps import (
-    ModelSelectionDeps,
-)
 
 
 class ModelRecommendationModel(BaseModel):
@@ -37,7 +34,6 @@ class ModelSelectionPayload(BaseModel):
     confirmed_model_selection: ConfirmedModelSelectionPayload | None = None
     assistant_message: str | None = None
     error_message: str | None = None
-    freezed: bool = False
 
     @field_validator("assistant_message", "error_message", mode="before")
     @classmethod
@@ -72,33 +68,14 @@ class ModelSelectionState(State):
             return "NEEDS_INPUT"
         return "NONE"
 
-    def set_status_freez(self) -> None:
-        if self.status() == "DONE":
-            self.payload.freezed = True
-        else:
-            raise ValueError(
-                f"Can only freeze when status is DONE, current status: {self.status()!r}"
-            )
-
     def set_status_pending(self) -> None:
-        if self.payload.error_message is not None:
-            self.payload.error_message = None
-        if self.payload.freezed:
-            self.payload.freezed = False
+        self.payload.confirmed_model_selection = None
+        self.payload.error_message = None
+        self.payload.assistant_message = None
 
     def messages(self) -> Sequence[ChatMessage]:
         if self.payload.assistant_message:
             return [ChatMessage(role="assistant", content=self.payload.assistant_message)]
-        if self.payload.freezed:
-            return [
-                ChatMessage(
-                    role="assistant",
-                    content=(
-                        "Model selection is freezed. You can ask read-only questions about "
-                        "the shortlisted options, the confirmed model, and the model-selection rationale."
-                    ),
-                )
-            ]
         return [
             ChatMessage(
                 role="assistant",
@@ -113,9 +90,6 @@ class ModelSelectionState(State):
         if self.payload.error_message is None:
             return None
         return NodeExecutionError(state_name=self.NAME, error=self.payload.error_message)
-
-    def pre_required_states_names(self) -> Sequence[str]:
-        return ModelSelectionDeps.pre_required_states_names()
 
     def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json", exclude_none=True)

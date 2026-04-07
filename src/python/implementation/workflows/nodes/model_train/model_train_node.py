@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
+from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_logger
@@ -62,14 +63,14 @@ class ModelTrainNode(Node):
         user_id: UUID,
         conversation_id: UUID,
         state: State,
-        previous_state_dependencies: Mapping[str, State],
+        readonly_orchestrator_state: ReadOnlyOchestratorState,
         messages_history: Sequence[ChatMessage] | None,
     ) -> State:
         _ = messages_history
         if not isinstance(state, ModelTrainState):
             raise TypeError(f"{self.name}: expected ModelTrainState, got {type(state).__name__}")
 
-        deps = ModelTrainDeps.from_loaded(previous_state_dependencies)
+        deps = ModelTrainDeps.from_loaded(readonly_orchestrator_state)
         payload = _bind_payload(state=state, deps=deps)
 
         if payload.trained_model_id is not None and payload.error_message is None:
@@ -259,23 +260,11 @@ def _bind_payload(
     payload = state.payload.model_copy(deep=True)
     current_signature = _training_signature(deps=deps)
 
-    reset_required = (
-        payload.dataset_id != deps.dataset_id or payload.training_signature != current_signature
-    )
 
     updates: dict[str, Any] = {
         "dataset_id": deps.dataset_id,
         "training_signature": current_signature,
     }
-    if reset_required:
-        updates.update(
-            {
-                "trained_model_id": None,
-                "training_warnings": [],
-                "assistant_message": None,
-                "error_message": None,
-            }
-        )
     return payload.model_copy(update=updates)
 
 

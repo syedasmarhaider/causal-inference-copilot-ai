@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
+from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
 from python.domain.workflows.state import State
 from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import (
@@ -219,7 +220,7 @@ class ProtocolDiscussionNode(Node):
         *,
         user_id: UUID,
         conversation_id: UUID,
-        previous_state_dependencies: Mapping[str, Any],
+        readonly_orchestrator_state: ReadOnlyOchestratorState,
         messages_history: Sequence[ChatMessage] | None,
         state: State,
     ) -> State:
@@ -231,7 +232,7 @@ class ProtocolDiscussionNode(Node):
                 f"{self.name}: expected ProtocolDiscussionState, got {type(state).__name__}"
             )
 
-        deps = ProtocolDiscussionDeps.from_loaded(previous_state_dependencies)
+        deps = ProtocolDiscussionDeps.from_loaded(readonly_orchestrator_state)
         questions = get_questions()
         prior_dataset_id = state.payload.dataset_id
         dataset_changed = prior_dataset_id is not None and prior_dataset_id != deps.dataset_id

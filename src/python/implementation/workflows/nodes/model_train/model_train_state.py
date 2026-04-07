@@ -9,21 +9,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
 from python.domain.workflows.state import Action, State, Status
-from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.utils.utils import uuid_from_any
 
 
 class ModelTrainPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    dataset_id: UUID | None = None
     training_signature: str | None = None
     trained_model_id: UUID | None = None
     training_warnings: list[str] = Field(default_factory=list)
     assistant_message: str | None = None
     error_message: str | None = None
 
-    @field_validator("dataset_id", "trained_model_id", mode="before")
+    @field_validator("trained_model_id", mode="before")
     @classmethod
     def _parse_uuid(cls, value: Any) -> UUID | None:
         return uuid_from_any(value)
@@ -57,11 +54,8 @@ class ModelTrainState(State):
     def action(self) -> Action:
         return "NONE"
 
-    def set_status_freez(self) -> None:
-        return None
-
     def set_status_pending(self) -> None:
-        self.payload.error_message = None
+        self.payload = ModelTrainPayloadModel()
 
     def messages(self) -> Sequence[ChatMessage]:
         if self.payload.assistant_message:
@@ -80,9 +74,6 @@ class ModelTrainState(State):
         if self.payload.error_message is None:
             return None
         return NodeExecutionError(state_name=self.NAME, error=self.payload.error_message)
-
-    def pre_required_states_names(self) -> Sequence[str]:
-        return ModelTrainDeps.pre_required_states_names()
 
     def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json", exclude_none=True)

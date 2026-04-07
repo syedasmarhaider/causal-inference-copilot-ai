@@ -43,12 +43,15 @@ class DatasetState(State):
         self.payload = payload
         # Artifact refs are response-only. They are useful for the latest turn but should not
         # become part of long-lived workflow state.
-        self._response_message_artifact_refs = [
-            dict(ref) for ref in (response_message_artifact_refs or [])
-        ]
+        self._response_message_artifact_refs = list(response_message_artifact_refs or [])
 
     def name(self) -> str:
         return self.NAME
+
+    def get_working_dataset_info(self) -> WorkingDatasetInfo | None:
+        if not self.payload.dataset_iterations or len(self.payload.dataset_iterations) == 0:
+            return None
+        return WorkingDatasetInfo(self.payload.dataset_iterations[-1].dataset_id, False)
 
     def status(self) -> Status:
         return "PENDING"
@@ -75,7 +78,7 @@ class DatasetState(State):
         ]
 
     def set_status_pending(self) -> None:
-        pass
+        return None
 
     def error(self) -> None:
         return None

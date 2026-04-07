@@ -29,25 +29,25 @@ class GlobalStateModel(BaseModel):
     # configuration fields
     last_active_node_name: str | None = None
 
-    # stage 1 fields
+    # stage 1
     working_dataset_id: UUID | None = None
     working_dataset_summary: DatasetSummaryModel | None = None
 
-    # stage 2 fields
-    protocol_discussed: bool = False
+    # stage 2
+    protocol_discussion: str | None = None
 
-    # stage 3 fields
-    working_dataset_froozen: bool = False
+    # stage 3
+    working_dataset_frozen: bool = False
 
-    # stage 4 fields
+    # stage 4
     causal_spec: CausalSpec | None = None
     data_transformation_plan: TransformPlan | None = None
     validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
 
-    # stage 5 fields
+    # stage 5
     selected_model: str | None = None
 
-    # stage 6 fields
+    # stage 6
     model_training_id: UUID | None = None
 
 
@@ -57,18 +57,19 @@ class OchestratorReadOnlyGlobalState(ReadOnlyOchestratorState):
 
     def get(self, key: str) -> Any | None:
         if key not in GlobalStateModel.model_fields:
-            raise KeyError(f"unknown global state key {key}")
+            raise KeyError(f"unknown global state key: {key}")
         return deepcopy(getattr(self._model, key))
 
 
 class OchestratorWritableGlobalState(
-    OchestratorReadOnlyGlobalState, WritableOchestratorState
+    OchestratorReadOnlyGlobalState,
+    WritableOchestratorState,
 ):
     _WORKFLOW_ORDER: Final[tuple[str, ...]] = (
         "working_dataset_id",
         "working_dataset_summary",
-        "protocol_discussed",
-        "working_dataset_froozen",
+        "protocol_discussion",
+        "working_dataset_frozen",
         "causal_spec",
         "data_transformation_plan",
         "validation_issues",
@@ -80,17 +81,21 @@ class OchestratorWritableGlobalState(
         super().__init__(model)
         self._model = model
 
-    def to_json_dict(self) -> dict[str, Any]:
-        return self._model.model_dump(mode="json")
+    @classmethod
+    def init_empty(cls) -> OchestratorWritableGlobalState:
+        return cls(GlobalStateModel())
 
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> OchestratorWritableGlobalState:
         model = GlobalStateModel.model_validate(payload)
         return cls(model)
 
-    @classmethod
-    def init_empty(cls) -> OchestratorWritableGlobalState:
-        return cls(GlobalStateModel())
+    def to_json_dict(self) -> dict[str, Any]:
+        return self._model.model_dump(mode="json")
+
+    # -------------------------------------------------------------------------
+    # configuration
+    # -------------------------------------------------------------------------
 
     def get_last_active_node_name(self) -> str | None:
         return self._model.last_active_node_name
@@ -101,9 +106,12 @@ class OchestratorWritableGlobalState(
             raise ValueError("last_active_node_name cannot be blank")
         self._model.last_active_node_name = normalized_node_name
 
-    # -----------------------------
-    # stage 1
-    # -----------------------------
+    def clear_last_active_node_name(self) -> None:
+        self._model.last_active_node_name = None
+
+    # -------------------------------------------------------------------------
+    # stage 1: working dataset
+    # -------------------------------------------------------------------------
 
     def set_working_dataset(
         self,
@@ -112,7 +120,7 @@ class OchestratorWritableGlobalState(
     ) -> None:
         previous_dataset_id = self._model.working_dataset_id
         previous_summary = self._model.working_dataset_summary
-        previous_protocol_discussed = self._model.protocol_discussed
+        had_protocol_discussion = self._has_protocol_discussion()
 
         if previous_dataset_id == dataset_id and previous_summary == summary:
             return
@@ -120,104 +128,112 @@ class OchestratorWritableGlobalState(
         self._model.working_dataset_id = dataset_id
         self._model.working_dataset_summary = summary
 
-        if (
+        same_dataset_refined_summary = (
             previous_dataset_id == dataset_id
             and previous_summary != summary
-            and previous_protocol_discussed
-        ):
-            # same dataset, refined summary after protocol discussion:
-            # preserve protocol_discussed, invalidate only downstream stages
-            self._clear_forward_from(
-                "protocol_discussed",
-                reason="working dataset summary changed after protocol discussion",
+        )
+
+        if same_dataset_refined_summary and had_protocol_discussion:
+            self._invalidate_downstream_of(
+                "protocol_discussion",
+                reason="working dataset summary changed for same dataset; preserving protocol discussion",
             )
             return
 
-        # stage 1 changed => invalidate stages after stage 1
-        self._clear_forward_from(
+        self._invalidate_downstream_of(
             "working_dataset_summary",
             reason="working dataset changed",
         )
 
-    def clear_working_dataset(self) -> None:
-        self._reset_from(
+    def invalidate_working_dataset_and_downstream(self) -> None:
+        self._reset_from_including(
             "working_dataset_id",
-            reason="working dataset cleared",
+            reason="working dataset invalidated",
         )
 
-    # -----------------------------
-    # stage 2
-    # -----------------------------
+    # -------------------------------------------------------------------------
+    # stage 2: protocol discussion
+    # -------------------------------------------------------------------------
 
-    def set_protocol_discussed(self) -> None:
+    def set_protocol_discussion(self, protocol_discussion: str) -> None:
         self._require_stage_1_complete()
 
-        if self._model.protocol_discussed:
-            return
-
-        self._model.protocol_discussed = True
-        self._clear_forward_from(
-            "protocol_discussed",
-            reason="protocol_discussed changed",
+        normalized_protocol_discussion = self._normalize_non_blank_text(
+            value=protocol_discussion,
+            field_name="protocol_discussion",
         )
 
-    def clear_protocol_discussed(self) -> None:
-        if not self._model.protocol_discussed:
+        if self._model.protocol_discussion == normalized_protocol_discussion:
             return
 
-        self._model.protocol_discussed = False
-        self._clear_forward_from(
-            "protocol_discussed",
-            reason="protocol_discussed cleared",
+        self._model.protocol_discussion = normalized_protocol_discussion
+        self._invalidate_downstream_of(
+            "protocol_discussion",
+            reason="protocol discussion changed",
         )
 
-    # -----------------------------
-    # stage 3
-    # -----------------------------
-
-    def set_freeze_working_dataset(
-        self, datasetid: UUID, datasetSummary: DatasetSummaryModel
-    ) -> None:
-        self._require_stage_2_complete()
-
-        if self._model.working_dataset_froozen:
-            return
-
-        self._model.working_dataset_froozen = True
-        self._model.working_dataset_id = datasetid
-        self._model.working_dataset_summary = datasetSummary
-        self._clear_forward_from(
-            "working_dataset_froozen",
-            reason="working_dataset_froozen changed",
+    def invalidate_protocol_discussion_and_downstream(self) -> None:
+        self._reset_from_including(
+            "protocol_discussion",
+            reason="protocol discussion invalidated",
         )
+
+    # -------------------------------------------------------------------------
+    # stage 3: dataset freeze
+    # -------------------------------------------------------------------------
 
     def freeze_working_dataset(self) -> None:
         self._require_stage_2_complete()
 
-        if self._model.working_dataset_froozen:
+        if self._model.working_dataset_frozen:
             return
 
-        self._model.working_dataset_froozen = True
-        self._clear_forward_from(
-            "working_dataset_froozen",
-            reason="working_dataset_froozen changed",
+        self._model.working_dataset_frozen = True
+        self._invalidate_downstream_of(
+            "working_dataset_frozen",
+            reason="working dataset frozen",
         )
 
-    def unfreeze_working_dataset(self) -> None:
+    def freeze_working_dataset_snapshot(
+        self,
+        dataset_id: UUID,
+        dataset_summary: DatasetSummaryModel,
+    ) -> None:
+        self._require_stage_2_complete()
+
+        dataset_changed = (
+            self._model.working_dataset_id != dataset_id
+            or self._model.working_dataset_summary != dataset_summary
+        )
+        frozen_changed = not self._model.working_dataset_frozen
+
+        if not dataset_changed and not frozen_changed:
+            return
+
+        self._model.working_dataset_id = dataset_id
+        self._model.working_dataset_summary = dataset_summary
+        self._model.working_dataset_frozen = True
+
+        self._invalidate_downstream_of(
+            "working_dataset_frozen",
+            reason="working dataset snapshot frozen",
+        )
+
+    def unfreeze_working_dataset_and_downstream(self) -> None:
         self._require_stage_1_complete()
 
-        if not self._model.working_dataset_froozen:
+        if not self._model.working_dataset_frozen:
             return
 
-        self._model.working_dataset_froozen = False
-        self._clear_forward_from(
-            "working_dataset_froozen",
-            reason="working_dataset_froozen changed",
+        self._model.working_dataset_frozen = False
+        self._invalidate_downstream_of(
+            "working_dataset_frozen",
+            reason="working dataset unfrozen",
         )
 
-    # -----------------------------
-    # stage 4
-    # -----------------------------
+    # -------------------------------------------------------------------------
+    # stage 4: causal configuration
+    # -------------------------------------------------------------------------
 
     def set_causal_configuration(
         self,
@@ -240,44 +256,47 @@ class OchestratorWritableGlobalState(
         self._model.data_transformation_plan = data_transformation_plan
         self._model.validation_issues = normalized_issues
 
-        # clear only downstream stages, keep stage 4 atomically applied
-        self._clear_forward_from(
+        self._invalidate_downstream_of(
             "validation_issues",
             reason="causal configuration changed",
         )
 
-    def clear_causal_configuration(self) -> None:
-        self._reset_from(
+    def invalidate_causal_configuration_and_downstream(self) -> None:
+        self._reset_from_including(
             "causal_spec",
-            reason="causal configuration cleared",
+            reason="causal configuration invalidated",
         )
 
-    # -----------------------------
-    # stage 5
-    # -----------------------------
+    # -------------------------------------------------------------------------
+    # stage 5: model selection
+    # -------------------------------------------------------------------------
 
     def set_selected_model(self, selected_model: str) -> None:
         self._require_model_selection_ready()
 
-        self._model.selected_model = selected_model
-        self._clear_forward_from(
-            "selected_model",
-            reason="selected_model changed",
+        normalized_selected_model = self._normalize_non_blank_text(
+            value=selected_model,
+            field_name="selected_model",
         )
 
-    def clear_selected_model(self) -> None:
-        if self._model.selected_model is None:
+        if self._model.selected_model == normalized_selected_model:
             return
 
-        self._model.selected_model = None
-        self._clear_forward_from(
+        self._model.selected_model = normalized_selected_model
+        self._invalidate_downstream_of(
             "selected_model",
-            reason="selected_model cleared",
+            reason="selected model changed",
         )
 
-    # -----------------------------
-    # stage 6
-    # -----------------------------
+    def invalidate_selected_model_and_downstream(self) -> None:
+        self._reset_from_including(
+            "selected_model",
+            reason="selected model invalidated",
+        )
+
+    # -------------------------------------------------------------------------
+    # stage 6: training
+    # -------------------------------------------------------------------------
 
     def set_model_training_id(self, training_id: UUID) -> None:
         self._require_model_training_ready()
@@ -290,12 +309,11 @@ class OchestratorWritableGlobalState(
     def clear_model_training_id(self) -> None:
         if self._model.model_training_id is None:
             return
-
         self._model.model_training_id = None
 
-    # -----------------------------
-    # stage guards
-    # -----------------------------
+    # -------------------------------------------------------------------------
+    # guards
+    # -------------------------------------------------------------------------
 
     def _require_stage_1_complete(self) -> None:
         if self._model.working_dataset_id is None:
@@ -305,13 +323,13 @@ class OchestratorWritableGlobalState(
 
     def _require_stage_2_complete(self) -> None:
         self._require_stage_1_complete()
-        if not self._model.protocol_discussed:
-            raise ValueError("protocol_discussed must be True first")
+        if not self._has_protocol_discussion():
+            raise ValueError("protocol_discussion must be set first")
 
     def _require_stage_3_complete(self) -> None:
         self._require_stage_2_complete()
-        if not self._model.working_dataset_froozen:
-            raise ValueError("working_dataset_froozen must be True first")
+        if not self._model.working_dataset_frozen:
+            raise ValueError("working_dataset_frozen must be True first")
 
     def _require_stage_4_complete(self) -> None:
         self._require_stage_3_complete()
@@ -328,11 +346,14 @@ class OchestratorWritableGlobalState(
         if self._model.selected_model is None:
             raise ValueError("selected_model must be set first")
 
-    # -----------------------------
-    # reset helpers
-    # -----------------------------
+    # -------------------------------------------------------------------------
+    # helpers
+    # -------------------------------------------------------------------------
 
-    def _clear_forward_from(self, field_name: str, *, reason: str) -> None:
+    def _has_protocol_discussion(self) -> bool:
+        return self._model.protocol_discussion is not None
+
+    def _invalidate_downstream_of(self, field_name: str, *, reason: str) -> None:
         field_index = self._WORKFLOW_ORDER.index(field_name)
         cleared_fields: list[str] = []
 
@@ -342,12 +363,12 @@ class OchestratorWritableGlobalState(
 
         if cleared_fields:
             log.warning(
-                "%s; cleared forward fields: %s",
+                "%s; cleared downstream fields: %s",
                 reason,
                 ", ".join(cleared_fields),
             )
 
-    def _reset_from(self, field_name: str, *, reason: str) -> None:
+    def _reset_from_including(self, field_name: str, *, reason: str) -> None:
         field_index = self._WORKFLOW_ORDER.index(field_name)
         cleared_fields: list[str] = []
 
@@ -374,11 +395,15 @@ class OchestratorWritableGlobalState(
 
     @staticmethod
     def _default_value_for(field_name: str) -> Any:
-        if field_name in {
-            "protocol_discussed",
-            "working_dataset_froozen",
-        }:
+        if field_name == "working_dataset_frozen":
             return False
         if field_name == "validation_issues":
             return []
         return None
+
+    @staticmethod
+    def _normalize_non_blank_text(*, value: str, field_name: str) -> str:
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError(f"{field_name} cannot be blank")
+        return normalized_value

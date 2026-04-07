@@ -1,18 +1,9 @@
 from __future__ import annotations
-
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
 from python.domain.models.errors import StateDependencyError
-from python.domain.workflows.state import State
-from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import (
-    CompileAndValidateState,
-)
-from python.implementation.workflows.nodes.dataset.dataset_state import DatasetState
-from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
-    ModelSelectionState,
-)
+from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
     InferenceReadyCausalSpec,
 )
@@ -24,71 +15,20 @@ class ModelTrainDeps:
     inference_ready_spec: InferenceReadyCausalSpec
     selected_model: str
 
-    @classmethod
-    def pre_required_states_names(cls) -> Sequence[str]:
-        return [CompileAndValidateState.NAME, ModelSelectionState.NAME, DatasetState.NAME]
 
     @classmethod
-    def from_loaded(cls, loaded: Mapping[str, State]) -> ModelTrainDeps:
-        dataset_state = loaded.get(DatasetState.NAME)
-        if dataset_state is None or not isinstance(dataset_state, DatasetState):
+    def from_loaded(cls, readonly_orchestrator_state: ReadOnlyOchestratorState) -> ModelTrainDeps:
+        dataset_id = readonly_orchestrator_state.get("working_dataset_id")
+        inference_ready = readonly_orchestrator_state.get("inference_ready_spec")
+        selected = readonly_orchestrator_state.get("selected_model")
+        if dataset_id is None or inference_ready is None or selected is None:
             raise StateDependencyError(
                 "MODEL_TRAIN",
                 "MODEL_TRAIN",
-                [DatasetState.NAME],
+                ["working_dataset_id", "inference_ready_spec", "selected_model"],
             )
-
-        dataset_state_payload = dataset_state.payload.dataset_iterations
-        if not dataset_state_payload or len(dataset_state_payload) == 0:
-            raise StateDependencyError(
-                "MODEL_TRAIN",
-                "MODEL_TRAIN",
-                [DatasetState.NAME],
-            )
-        dataset_id = dataset_state_payload[-1].dataset_id
-
-        compile_state = loaded.get(CompileAndValidateState.NAME)
-        if compile_state is None or not isinstance(compile_state, CompileAndValidateState):
-            raise StateDependencyError(
-                "MODEL_TRAIN",
-                "MODEL_TRAIN",
-                [CompileAndValidateState.NAME],
-            )
-
-        if compile_state.payload.phase != "CONFIRMED":
-            raise StateDependencyError(
-                "MODEL_TRAIN",
-                "MODEL_TRAIN",
-                [CompileAndValidateState.NAME],
-            )
-
-        inference_ready = compile_state.payload.inference_ready_causal_spec
-
-        if inference_ready is None:
-            raise StateDependencyError(
-                "MODEL_TRAIN",
-                "MODEL_TRAIN",
-                [CompileAndValidateState.NAME],
-            )
-
-        model_selection_state = loaded.get(ModelSelectionState.NAME)
-        if model_selection_state is None or not isinstance(
-            model_selection_state, ModelSelectionState
-        ):
-            raise StateDependencyError(
-                "MODEL_TRAIN",
-                "MODEL_TRAIN",
-                [ModelSelectionState.NAME],
-            )
-
-        selected = model_selection_state.payload.confirmed_model_selection
-        if selected is None or selected.selected_model is None:
-            raise StateDependencyError(
-                "MODEL_TRAIN",
-                "MODEL_TRAIN",
-                [ModelSelectionState.NAME],
-            )
-
+    
+    
         return cls(
             dataset_id=dataset_id,
             inference_ready_spec=inference_ready,

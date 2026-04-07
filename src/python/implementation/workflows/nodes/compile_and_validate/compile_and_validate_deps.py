@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
-from python.domain.models.errors import NodeExecutionError, StateDependencyError
-from python.domain.workflows.state import State
+from python.domain.models.errors import  StateDependencyError
+from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
 from python.implementation.workflows.nodes.dataset.dataset_state import DatasetState
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionState,
@@ -20,58 +19,19 @@ class CompileAndValidateDeps:
     protocol_discussion: str
 
     @classmethod
-    def pre_required_states_names(cls) -> Sequence[str]:
-        return [DatasetState.NAME, ProtocolDiscussionState.NAME]
-
-    @classmethod
-    def from_loaded(cls, loaded: Mapping[str, State]) -> CompileAndValidateDeps:
-        dataset_state = loaded.get(DatasetState.NAME)
-        if dataset_state is None or not isinstance(dataset_state, DatasetState):
+    def from_loaded(cls, readonly_orchestrator_state: ReadOnlyOchestratorState) -> CompileAndValidateDeps:
+        dataset_id = readonly_orchestrator_state.get("working_dataset_id")
+        summary    = readonly_orchestrator_state.get("working_dataset_summary")
+        protocol_discussion = readonly_orchestrator_state.get("protocol_discussion")
+        if dataset_id is None or summary is None or protocol_discussion is None:
             raise StateDependencyError(
                 "COMPILE_AND_VALIDATE",
                 "COMPILE_AND_VALIDATE",
-                [DatasetState.NAME],
-            )
-
-        if not dataset_state.payload.dataset_iterations:
-            raise StateDependencyError(
-                "COMPILE_AND_VALIDATE",
-                "COMPILE_AND_VALIDATE",
-                [DatasetState.NAME],
-            )
-
-        latest_iteration = dataset_state.payload.dataset_iterations[-1]
-        latest_summary = dataset_state.payload.latest_summary
-        if latest_summary is None:
-            raise StateDependencyError(
-                "COMPILE_AND_VALIDATE",
-                "COMPILE_AND_VALIDATE",
-                [DatasetState.NAME],
-            )
-
-        protocol_state = loaded.get(ProtocolDiscussionState.NAME)
-        if protocol_state is None or not isinstance(protocol_state, ProtocolDiscussionState):
-            raise StateDependencyError(
-                "COMPILE_AND_VALIDATE",
-                "COMPILE_AND_VALIDATE",
-                [ProtocolDiscussionState.NAME],
-            )
-
-        if protocol_state.payload.phase != "CONFIRMED":
-            raise StateDependencyError(
-                "COMPILE_AND_VALIDATE",
-                "COMPILE_AND_VALIDATE",
-                [ProtocolDiscussionState.NAME],
-            )
-
-        if not protocol_state.payload.discussion.strip():
-            raise NodeExecutionError(
-                state_name="COMPILE_AND_VALIDATE",
-                error="Protocol discussion is empty and cannot be compiled.",
+                [DatasetState.NAME, ProtocolDiscussionState.NAME],
             )
 
         return cls(
-            dataset_id=latest_iteration.dataset_id,
-            dataset_summary=latest_summary,
-            protocol_discussion=protocol_state.payload.discussion,
+            dataset_id=dataset_id,
+            dataset_summary=summary,
+            protocol_discussion=protocol_discussion,
         )

@@ -16,7 +16,7 @@ from python.implementation.workflows.tools.causal.common.inference_ready_causal_
 
 @dataclass(frozen=True, slots=True)
 class ModelSelectionDeps:
-    inference_ready_spec: InferenceReadyCausalSpec
+    causal_spec: Causel_Spec
     validation_warnings: list[ValidationIssueModel]
 
     @classmethod

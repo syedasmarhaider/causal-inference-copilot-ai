@@ -73,9 +73,6 @@ class ProtocolDiscussionState(State):
             return "NONE"
         return "NEEDS_INPUT"
 
-    def set_status_freez(self) -> None:
-        return None
-
     def set_status_pending(self) -> None:
         if self.payload.phase == "CONFIRMED":
             self.payload.phase = "DISCUSSING"
