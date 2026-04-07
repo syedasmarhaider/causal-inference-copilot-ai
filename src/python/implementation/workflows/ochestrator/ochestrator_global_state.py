@@ -12,6 +12,8 @@ from python.domain.workflows.ochestrator_state import (
     WritableOchestratorState,
 )
 from python.implementation.service.logging.default_logging import get_logger
+from python.implementation.workflows.nodes.dataset.dataset_node import DatasetNode
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import ProtocolDiscussionNode
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     TransformPlan,
 )
@@ -107,6 +109,8 @@ class OchestratorWritableGlobalState(
         normalized_node_name = node_name.strip()
         if not normalized_node_name:
             raise ValueError("last_active_node_name cannot be blank")
+        if node_name == DatasetNode.NAME and self._has_protocol_discussion() and self._model.last_active_node_name != ProtocolDiscussionNode.NAME:
+            return
         self._model.last_active_node_name = normalized_node_name
 
     def clear_last_active_node_name(self) -> None:

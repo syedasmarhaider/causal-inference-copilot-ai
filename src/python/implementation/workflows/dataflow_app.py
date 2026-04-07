@@ -166,13 +166,7 @@ class DataflowApp:
             df=df,
             overwrite=True,
         )
-        
-        DatasetState(
-            payload=DatasetPayloadModel(
-                dataset_iterations=[
-        
-        
-        
+            
         self._log.info(
             "csv dataset uploaded",
             user_id=user_id,
