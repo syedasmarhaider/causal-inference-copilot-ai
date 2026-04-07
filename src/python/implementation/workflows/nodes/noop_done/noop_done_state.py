@@ -5,7 +5,7 @@ from typing import Any, ClassVar
 
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
-from python.domain.workflows.state import State, Status
+from python.domain.workflows.state import Action, State, Status
 
 
 class NoopDoneState(State):
@@ -16,10 +16,10 @@ class NoopDoneState(State):
 
     def status(self) -> Status:
         return "DONE"
-
-    def set_status_freez(self) -> None:
-        return None
-
+    
+    def action(self) -> Action:
+        return "NONE"
+    
     def set_status_pending(self) -> None:
         return None
 

@@ -15,22 +15,40 @@ class ModelTrainDeps:
     inference_ready_spec: InferenceReadyCausalSpec
     selected_model: str
 
-
     @classmethod
     def from_loaded(cls, readonly_orchestrator_state: ReadOnlyOchestratorState) -> ModelTrainDeps:
         dataset_id = readonly_orchestrator_state.get("working_dataset_id")
-        inference_ready = readonly_orchestrator_state.get("inference_ready_spec")
-        selected = readonly_orchestrator_state.get("selected_model")
-        if dataset_id is None or inference_ready is None or selected is None:
+        causal_spec = readonly_orchestrator_state.get("causal_spec")
+        data_transformation_plan = readonly_orchestrator_state.get("data_transformation_plan")
+        dataset_summary = readonly_orchestrator_state.get("working_dataset_summary")
+        selected_model = readonly_orchestrator_state.get("selected_model")
+        if (
+            dataset_id is None
+            or causal_spec is None
+            or data_transformation_plan is None
+            or dataset_summary is None
+            or selected_model is None
+        ):
             raise StateDependencyError(
                 "MODEL_TRAIN",
                 "MODEL_TRAIN",
-                ["working_dataset_id", "inference_ready_spec", "selected_model"],
+                [
+                    "working_dataset_id",
+                    "working_dataset_summary",
+                    "causal_spec",
+                    "data_transformation_plan",
+                    "selected_model",
+                ],
             )
-    
-    
+
+        inference_ready_spec = InferenceReadyCausalSpec(
+            causal_spec=causal_spec,
+            transformation_plan=data_transformation_plan,
+            data_summary=dataset_summary,
+        )
+
         return cls(
             dataset_id=dataset_id,
-            inference_ready_spec=inference_ready,
-            selected_model=selected.selected_model,
+            inference_ready_spec=inference_ready_spec,
+            selected_model=selected_model,
         )
