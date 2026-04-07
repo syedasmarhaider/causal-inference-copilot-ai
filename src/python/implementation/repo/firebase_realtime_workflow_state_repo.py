@@ -12,8 +12,8 @@ from firebase_admin import credentials, db
 
 from python.domain.models.models import ChatMessage
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
-from python.domain.workflows.state import State
 from python.domain.workflows.ochestrator_state import WritableOchestratorState
+from python.domain.workflows.state import State
 
 
 class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
@@ -27,7 +27,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         /workflows/{user_id}/{conversation_id}/_meta:
             created: true
 
-        /workflows/{user_id}/{conversation_id}/active_state_name: str
+        /workflows/{user_id}/{conversation_id}/ochestrator_state: json-string
         /workflows/{user_id}/{conversation_id}/states/{state_name}: json-string
         /workflows/{user_id}/{conversation_id}/messages/{push_id}: ChatMessage dict
 
@@ -57,7 +57,9 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
             database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
             if not database_url:
-                raise ValueError("FIREBASE_DATABASE_URL environment variable must be set") from None
+                raise ValueError(
+                    "FIREBASE_DATABASE_URL environment variable must be set"
+                ) from None
 
             return firebase_admin.initialize_app(
                 credentials.ApplicationDefault(),
@@ -72,16 +74,23 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         *,
         app: Any,
         state_classes_by_name: Mapping[str, type[State]],
+        ochestrator_state_cls: type[WritableOchestratorState],
     ) -> None:
         if app is None:
             raise ValueError("app must not be None")
         if not isinstance(state_classes_by_name, Mapping):
             raise ValueError("state_classes_by_name must be a mapping")
+        if ochestrator_state_cls is None:
+            raise ValueError("ochestrator_state_cls must not be None")
 
         self._root_ref = db.reference("/", app=app)
         self._workflows_root_ref = db.reference(self._WORKFLOWS_ROOT, app=app)
-        self._conversation_index_root_ref = db.reference(self._CONVERSATION_INDEX_ROOT, app=app)
+        self._conversation_index_root_ref = db.reference(
+            self._CONVERSATION_INDEX_ROOT,
+            app=app,
+        )
         self._state_classes_by_name = dict(state_classes_by_name)
+        self._ochestrator_state_cls = ochestrator_state_cls
 
     # ---------------------------------------------------------------------
     # Conversation persistence
@@ -104,23 +113,6 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
                 user_id=user_id,
                 conversation_id=conversation_id,
             ): {"created": True},
-        }
-        self._root_ref.update(updates)
-
-    def delete_conversation(self, *, user_id: UUID, conversation_id: UUID) -> None:
-        """
-        Removes both the index entry and the full conversation payload
-        with a single multi-location root update.
-        """
-        updates = {
-            self._conversation_index_path(
-                user_id=user_id,
-                conversation_id=conversation_id,
-            ): None,
-            self._conversation_path(
-                user_id=user_id,
-                conversation_id=conversation_id,
-            ): None,
         }
         self._root_ref.update(updates)
 
@@ -157,10 +149,6 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         return value is not None
 
     # ---------------------------------------------------------------------
-    # Active state pointer
-    # ---------------------------------------------------------------------
-
-    # ---------------------------------------------------------------------
     # Orchestrator state
     # ---------------------------------------------------------------------
 
@@ -170,10 +158,6 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         user_id: UUID,
         conversation_id: UUID,
     ) -> WritableOchestratorState | None:
-        from python.implementation.workflows.ochestrator.ochestrator_global_state import (
-            OchestratorWritableGlobalState,
-        )
-
         payload = (
             self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
             .child("ochestrator_state")
@@ -184,11 +168,31 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
         if not isinstance(payload, str):
             raise ValueError(
-                f"Stored ochestrator_state for conversation_id={conversation_id!r} must be a "
-                f"JSON string blob, got {type(payload).__name__}"
+                f"Stored ochestrator_state for conversation_id={conversation_id!r} "
+                f"must be a JSON string blob, got {type(payload).__name__}"
             )
 
-        return OchestratorWritableGlobalState.from_json_dict(json.loads(payload))
+        try:
+            state_dict = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Stored ochestrator_state for conversation_id={conversation_id!r} "
+                f"is not valid JSON: {exc}"
+            ) from exc
+
+        if not isinstance(state_dict, dict):
+            raise ValueError(
+                f"Decoded ochestrator_state for conversation_id={conversation_id!r} "
+                f"must be a dict, got {type(state_dict).__name__}"
+            )
+
+        try:
+            return self._ochestrator_state_cls.from_json_dict(state_dict)
+        except Exception as exc:
+            raise ValueError(
+                f"Error deserializing ochestrator_state for "
+                f"conversation_id={conversation_id!r}: {exc}"
+            ) from exc
 
     def store_ochestrator_state(
         self,
@@ -200,40 +204,13 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         (
             self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
             .child("ochestrator_state")
-            .set(json.dumps(state.to_json_dict()))
-        )
-
-    # ---------------------------------------------------------------------
-    # Active state pointer (kept for backward-compat with old persisted data)
-    # ---------------------------------------------------------------------
-
-    def load_active_state_name(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-    ) -> str | None:
-        value = (
-            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
-            .child("active_state_name")
-            .get()
-        )
-        return value if isinstance(value, str) and value.strip() else None
-
-    def store_active_state_name(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-        state_name: str,
-    ) -> None:
-        if not isinstance(state_name, str) or not state_name.strip():
-            raise ValueError("state_name must be a non-empty string")
-
-        (
-            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
-            .child("active_state_name")
-            .set(state_name)
+            .set(
+                json.dumps(
+                    state.to_json_dict(),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
         )
 
     # ---------------------------------------------------------------------
@@ -334,16 +311,12 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         if not isinstance(state_name, str) or not state_name.strip():
             raise ValueError("state_name must be a non-empty string")
 
-        conversation_ref = self._conversation_ref(
-            user_id=user_id,
-            conversation_id=conversation_id,
+        (
+            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
+            .child("states")
+            .child(state_name)
+            .delete()
         )
-
-        active_state_name = conversation_ref.child("active_state_name").get()
-        conversation_ref.child("states").child(state_name).delete()
-
-        if active_state_name == state_name:
-            conversation_ref.child("active_state_name").delete()
 
     # ---------------------------------------------------------------------
     # Message history
@@ -373,7 +346,8 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             return
 
         messages_ref = self._conversation_ref(
-            user_id=user_id, conversation_id=conversation_id
+            user_id=user_id,
+            conversation_id=conversation_id,
         ).child("messages")
 
         for message in messages:
@@ -437,7 +411,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         user_id: UUID,
         conversation_id: UUID,
     ) -> str:
-        return f"{self._CONVERSATION_INDEX_ROOT.strip('/')}/" f"{user_id}/{conversation_id}"
+        return f"{self._CONVERSATION_INDEX_ROOT.strip('/')}/{user_id}/{conversation_id}"
 
     def _conversation_path(
         self,
