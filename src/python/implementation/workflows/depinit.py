@@ -92,6 +92,7 @@ def _make_workflow_state_repo(
     return FirebaseRealtimeWorkflowStateRepo(
         app=app,
         state_classes_by_name=state_classes_by_name,
+        ochestrator_state_classes_by_name={"OCHESTRATOR_STATE": OchestratorWritableGlobalState},
         
     )
 

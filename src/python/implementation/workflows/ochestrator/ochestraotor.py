@@ -861,12 +861,11 @@ class Ochestrator:
     ) -> str:
         working_dataset_id = global_state.get("working_dataset_id")
         working_dataset_summary = global_state.get("working_dataset_summary")
-        protocol_discussed = global_state.get("protocol_discussed") is not None
+        protocol_discussed = global_state.get("protocol_discussion") is not None
         working_dataset_frozen = global_state.get("working_dataset_frozen") is True
         causal_spec = global_state.get("causal_spec")
         data_transformation_plan = global_state.get("data_transformation_plan")
         validation_issues = global_state.get("validation_issues") or []
-        validation_issues_accepted = global_state.get("validation_issues_accepted") is True
         selected_model = global_state.get("selected_model")
         model_training_id = global_state.get("model_training_id")
 
@@ -886,9 +885,6 @@ class Ochestrator:
             return CompileAndValidateNode.NAME
 
         if data_transformation_plan is None:
-            return CompileAndValidateNode.NAME
-
-        if validation_issues and not validation_issues_accepted:
             return CompileAndValidateNode.NAME
 
         if selected_model is None:

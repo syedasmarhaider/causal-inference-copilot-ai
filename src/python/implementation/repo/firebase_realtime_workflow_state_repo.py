@@ -169,10 +169,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         state_payload = envelope.get("payload")
 
         if not isinstance(state_name, str) or not state_name.strip():
-            raise ValueError(
-                f"Decoded ochestrator_state for conversation_id={conversation_id!r} "
-                f"must contain a non-empty 'name'"
-            )
+            return None
 
         if not isinstance(state_payload, dict):
             raise ValueError(
