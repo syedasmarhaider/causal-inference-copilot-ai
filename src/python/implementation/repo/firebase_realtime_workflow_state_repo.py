@@ -13,6 +13,7 @@ from firebase_admin import credentials, db
 from python.domain.models.models import ChatMessage
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.workflows.state import State
+from python.domain.workflows.ochestrator_state import WritableOchestratorState
 
 
 class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
@@ -157,6 +158,53 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
     # ---------------------------------------------------------------------
     # Active state pointer
+    # ---------------------------------------------------------------------
+
+    # ---------------------------------------------------------------------
+    # Orchestrator state
+    # ---------------------------------------------------------------------
+
+    def load_ochestrator_state(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+    ) -> WritableOchestratorState | None:
+        from python.implementation.workflows.ochestrator.ochestrator_global_state import (
+            OchestratorWritableGlobalState,
+        )
+
+        payload = (
+            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
+            .child("ochestrator_state")
+            .get()
+        )
+        if payload is None:
+            return None
+
+        if not isinstance(payload, str):
+            raise ValueError(
+                f"Stored ochestrator_state for conversation_id={conversation_id!r} must be a "
+                f"JSON string blob, got {type(payload).__name__}"
+            )
+
+        return OchestratorWritableGlobalState.from_json_dict(json.loads(payload))
+
+    def store_ochestrator_state(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        state: WritableOchestratorState,
+    ) -> None:
+        (
+            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
+            .child("ochestrator_state")
+            .set(json.dumps(state.to_json_dict()))
+        )
+
+    # ---------------------------------------------------------------------
+    # Active state pointer (kept for backward-compat with old persisted data)
     # ---------------------------------------------------------------------
 
     def load_active_state_name(

@@ -15,7 +15,7 @@ from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
-from python.domain.workflows.state import Action, State
+from python.domain.workflows.state import State
 from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
     CausalInferenceNode,
 )
@@ -69,8 +69,8 @@ from python.implementation.workflows.tools.tools_factory import DefaultToolFacto
 @dataclass(frozen=True)
 class OchestrationResponse:
     messages: Sequence[ChatMessage]
-    action: Action
-    state: ReadOnlyOchestratorState
+    state: State
+    ochestrator_state: OchestratorReadOnlyGlobalState
 
 
 class Ochestrator:
@@ -217,8 +217,8 @@ class Ochestrator:
 
         return OchestrationResponse(
             messages=response.messages,
-            action=response.action,
             state=response.state,
+            ochestrator_state=response.ochestrator_state,
         )
 
     def handle_abort(
@@ -372,8 +372,8 @@ class Ochestrator:
             )
             return OchestrationResponse(
                 messages=[orchestrator_answer_message],
-                action=current_state.action(),
-                state=ochestrator_state,
+                state=current_state,
+                ochestrator_state=ochestrator_state,
             )
 
         current_node_name = self._node_name_by_state_name.get(current_state.name())
@@ -478,8 +478,8 @@ class Ochestrator:
 
         return OchestrationResponse(
             messages= delta_messages,
-            action=resulted_state.action(),    
-            state=ochestrator_state,
+            state=resulted_state,
+            ochestrator_state=ochestrator_state,
         )
 
     def _load_state_for_node_or_init(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import cast
 from uuid import UUID
 
 import pandas as pd
@@ -17,6 +18,7 @@ from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.dataset.dataset_state import DatasetState
+from python.implementation.workflows.ochestrator.ochestrator_global_state import OchestratorWritableGlobalState
 
 # TODO: add distributed tnx or locks later
 
@@ -136,24 +138,22 @@ class DataflowApp:
             )
             raise ValueError(f"Uploaded file is not a valid CSV: {exc}") from exc
 
-        active_name = self._repo.load_active_state_name(
+        ochestrator_state = self._repo.load_ochestrator_state(
             user_id=user_id,
             conversation_id=conversation_id,
         )
-        if not active_name:
-            active_name = DatasetState.NAME
-            self._repo.store_active_state_name(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                state_name=active_name,
-            )
+        if not ochestrator_state:
+            ochestrator_state = OchestratorWritableGlobalState.init_empty()
+            ochestrator_state.set_last_active_node_name(DatasetState.NAME)
+        
+        ochestrator_state = cast(OchestratorWritableGlobalState, ochestrator_state)    
 
-        if active_name != DatasetState.NAME:
+        if ochestrator_state.get_last_active_node_name() != DatasetState.NAME:
             self._log.info(
                 "csv upload rejected because conversation is not at dataset state",
                 user_id=user_id,
                 conversation_id=conversation_id,
-                active_state_name=active_name,
+                active_state_name=ochestrator_state.get_last_active_node_name(),
                 required_state_name=DatasetState.NAME,
             )
             raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation_id)

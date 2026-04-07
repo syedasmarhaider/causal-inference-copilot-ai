@@ -8,8 +8,6 @@ from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import LLMService
-from python.domain.workflows.node import Node
-from python.domain.workflows.route import Router
 from python.domain.workflows.state import State
 from python.implementation.repo.duckdb_working_analytics_repo import DuckDBAnalyticsRepo
 from python.implementation.repo.firebase_realtime_workflow_state_repo import (
@@ -25,8 +23,10 @@ from python.implementation.service.llms.llm_service_factory import (
 )
 from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.dataflow_app import DataflowApp
-from python.implementation.workflows.ochestrator.ochestraotor import build_state_classes_by_name
-from python.implementation.workflows.tools.tools_factory import DefaultToolFactory
+from python.implementation.workflows.ochestrator.ochestraotor import (
+    Ochestrator,
+    build_state_classes_by_name,
+)
 from python.implementation.workflows.workflow_app import WorkflowApp
 
 log = get_logger(__name__, component="workflow_depinit", log_type="dependency_bootstrap")
@@ -45,16 +45,12 @@ def make_apps(*, use_local_files: bool = False) -> tuple[WorkflowApp, DataflowAp
     analytics_repo: AnalyticsRepo = _make_analytics_repo()
 
     state_classes_by_name = build_state_classes_by_name()
-
     workflow_repo = _make_workflow_state_repo(
         state_classes_by_name=state_classes_by_name,
     )
 
-    router: Router = LLMAssistedRouterRouter(
-        llm=llm,
-    )
-
-    nodes_by_state_name: dict[str, Node] = init_all_nodoes_with_name_as_key(
+    ochestrator = Ochestrator(
+        workflow_repo=workflow_repo,
         llm=llm,
         data_repo=data_repo,
         models_repo=models_repo,
@@ -65,24 +61,11 @@ def make_apps(*, use_local_files: bool = False) -> tuple[WorkflowApp, DataflowAp
         data_repo=data_repo,
     )
 
-    log.info(
-        "workflow app dependencies created",
-        states_count=len(state_classes_by_name),
-        nodes_count=len(nodes_by_state_name),
-        use_local_files=use_local_files,
-    )
+    log.info("workflow app dependencies created", use_local_files=use_local_files)
     return (
         WorkflowApp(
             repo=workflow_repo,
-            router=router,
-            nodes_by_state_name=nodes_by_state_name,
-            state_classes_by_name=state_classes_by_name,
-            tool_factory=DefaultToolFactory(
-                data_repo=data_repo,
-                models_repo=models_repo,
-                llm_service=llm,
-                analytics_repo=analytics_repo,
-            ),
+            ochestrator=ochestrator,
         ),
         dataflow_app,
     )
