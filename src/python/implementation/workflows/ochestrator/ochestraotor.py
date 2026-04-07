@@ -15,6 +15,7 @@ from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.state import State
+from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
     CausalInferenceNode,
 )
@@ -103,7 +104,6 @@ class Ochestrator:
         self._state_classes_by_name = build_state_classes_by_name()
         self._node_name_by_state_name = build_node_name_by_state_name()
         self._state_name_by_node_name = build_state_name_by_node_name()
-        self._next_node_names_by_current_state_name = init_next_state_names()
         self._recoverable_candidates_map = recoverable_states_map()
 
         self._node_name_to_description_map = get_node_name_with_description()
@@ -111,6 +111,11 @@ class Ochestrator:
             state_name: self._node_name_to_description_map.get(node_name, "")
             for state_name, node_name in self._node_name_by_state_name.items()
         }
+        self._log = get_app_logger(
+            __name__,
+            component=self.__class__.__name__,
+            log_type="workflow_service",
+        )
 
     def answer(
         self,
@@ -138,41 +143,23 @@ class Ochestrator:
         
         if ochestrator_state is None:
             ochestrator_state = OchestratorWritableGlobalState.init_empty()
-            ochestrator_state.set_last_active_node_name(DatasetState.NAME)
-            self._workflow_repo.store_ochestrator_state(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                state=ochestrator_state,
-            )
 
         if not isinstance(ochestrator_state, OchestratorWritableGlobalState):
             raise ValueError(
                 "Ochestrator state should be of type OchestratorWritableGlobalState"
             )
 
-        needed_node_name = self._needs_node_name(ochestrator_state)
-        active_node_name = ochestrator_state.get_last_active_node_name() or needed_node_name    
+        needed_node_name = ochestrator_state.needs_node_name() 
         current_state = self._load_state_for_node_or_init(
             user_id=user_id,
             conversation_id=conversation_id,
-            node_name=active_node_name,
+            node_name=needed_node_name,
         )
 
         # If the stored active node is stale, move to the canonical needed node.
-        if current_state.status() == "DONE" and active_node_name != needed_node_name:
-            active_node_name = needed_node_name
-            current_state = self._load_state_for_node_or_init(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                node_name=active_node_name,
-            )
-            
-        ochestrator_state.set_last_active_node_name(active_node_name)
-        self._workflow_repo.store_ochestrator_state(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            state=ochestrator_state,
-        )
+        if current_state.status() == "DONE":
+            self._log.exception("Active node cannot be DONE when needed by the ochestrator is called", active_node_name=needed_node_name, needed_node_name=needed_node_name)
+            raise ValueError("Active node cannot be DONE when needed by the ochestrator is called")
 
         match current_state.status():
             case "PENDING":
@@ -183,14 +170,7 @@ class Ochestrator:
                     ochestrator_state=ochestrator_state,
                     messages_history=messages_history,
                 )
-            case "DONE":
-                response = self.handle_done(
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    current_state=current_state,
-                    ochestrator_state=ochestrator_state,
-                    messages_history=messages_history,
-                )
+                
             case "ABORTED":
                 response = self.handle_abort(
                     user_id=user_id,
@@ -228,10 +208,7 @@ class Ochestrator:
         )
         recovery_node_name = self._node_name_by_state_name[recovery_state_name]
 
-        ochestrator_state = self._rollback_orchestrator_global_state(
-            ochestrator_state=ochestrator_state,
-            recovery_state_name=recovery_state_name,
-        )
+        ochestrator_state.rollback_orchestrator_global_state(recovery_node_name)
 
         self._delete_forward_states_after_recovery_point(
             user_id=user_id,
@@ -249,8 +226,7 @@ class Ochestrator:
             )
 
         recovery_state.set_status_pending()
-        ochestrator_state.set_last_active_node_name(recovery_node_name)
-
+        
         self._workflow_repo.store_ochestrator_state(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -270,55 +246,7 @@ class Ochestrator:
             ochestrator_state=ochestrator_state,
             messages_history=messages_history,
         )
-
-    def handle_done(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-        current_state: State,
-        ochestrator_state: OchestratorWritableGlobalState,
-        messages_history: Sequence[ChatMessage] | None,
-    ) -> OchestrationResponse:
-        if current_state.status() != "DONE":
-            raise ValueError(
-                f"handle_done expected DONE state, got {current_state.status()!r}"
-            )
-        next_node_name = self.decide_node_name_on_done(current_state=current_state)
-
-        # If the nominal next node is already DONE and the global orchestration state
-        # clearly needs something later, skip forward. Otherwise rerun the nominal next node.
-        while True:
-            next_state = self._load_state_for_node_or_init(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                node_name=next_node_name,
-            )
-            needed_node_name = self._needs_node_name(ochestrator_state)
-
-            if next_state.status() == "DONE" and next_node_name != needed_node_name:
-                next_node_name = needed_node_name
-                continue
-
-            break
-
-        if next_state.status() != "PENDING":
-            next_state.set_status_pending()
-            self._workflow_repo.store_state(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                state=next_state,
-            )
-
-        return self._run_node_and_persist(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            node_name=next_node_name,
-            input_state=next_state,
-            ochestrator_state=ochestrator_state,
-            messages_history=messages_history,
-        )
-
+        
     def handle_pending(
         self,
         *,
@@ -390,12 +318,7 @@ class Ochestrator:
             readonly_orchestrator_state=ochestrator_state,
             messages_history=messages_history,
         )
-        ochestrator_state.set_last_active_node_name(node_name)
-        ochestrator_state = self._update_ochestration_state_if_node_done(
-            ochestrator_state=ochestrator_state,
-            state=resulted_state,
-        )
-
+        
         self._workflow_repo.store_ochestrator_state(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -585,15 +508,6 @@ class Ochestrator:
 
         return ChatMessage(role="assistant", content=answer_text)
 
-    def decide_node_name_on_done(self, *, current_state: State) -> str:
-        current_state_name = current_state.name()
-        next_node_name = self._next_node_names_by_current_state_name.get(
-            current_state_name
-        )
-        if next_node_name is None:
-            raise ValueError(f"Unsupported state name: {current_state_name!r}")
-        return next_node_name
-
     def _decide_recovery_state_name_on_abort(
         self,
         *,
@@ -643,38 +557,6 @@ class Ochestrator:
 
         return decision.state_name
 
-    def _rollback_orchestrator_global_state(
-        self,
-        *,
-        ochestrator_state: OchestratorWritableGlobalState,
-        recovery_state_name: str,
-    ) -> OchestratorWritableGlobalState:
-        # Protocol rollback invalidates the frozen dataset and everything after it.
-        if recovery_state_name == ProtocolDiscussionState.NAME:
-            ochestrator_state.invalidate_protocol_discussion_and_downstream()
-            return ochestrator_state
-        if recovery_state_name == DatasetState.NAME:
-            ochestrator_state.invalidate_protocol_discussion_and_downstream()
-            return ochestrator_state
-
-        if recovery_state_name == CompileAndValidateState.NAME:
-            ochestrator_state.invalidate_causal_configuration_and_downstream()
-            return ochestrator_state
-
-        if recovery_state_name == ModelSelectionState.NAME:
-            ochestrator_state.invalidate_selected_model_and_downstream()
-            return ochestrator_state
-
-        if recovery_state_name == ModelTrainState.NAME:
-            ochestrator_state.clear_model_training_id()
-            return ochestrator_state
-
-        if recovery_state_name in (CausalInferenceState.NAME, NoopDoneState.NAME):
-            return ochestrator_state
-
-        raise ValueError(
-            f"Unsupported recovery state for rollback: {recovery_state_name!r}"
-        )
 
     def _delete_forward_states_after_recovery_point(
         self,
@@ -693,8 +575,8 @@ class Ochestrator:
                 conversation_id=conversation_id,
                 state_name=state_name,
             )
-
-    def _update_ochestration_state_if_node_done(
+        
+    def _update_ochestration_working_state_if_node_done(
         self,
         *,
         ochestrator_state: OchestratorWritableGlobalState,
@@ -786,46 +668,6 @@ class Ochestrator:
 
         return ochestrator_state
 
-    def _needs_node_name(
-        self,
-        global_state: OchestratorReadOnlyGlobalState,
-    ) -> str:
-        working_dataset_id = global_state.get("working_dataset_id")
-        working_dataset_summary = global_state.get("working_dataset_summary")
-        protocol_discussed = global_state.get("protocol_discussion") is not None
-        working_dataset_frozen = global_state.get("working_dataset_frozen") is True
-        causal_spec = global_state.get("causal_spec")
-        data_transformation_plan = global_state.get("data_transformation_plan")
-        validation_issues = global_state.get("validation_issues") or []
-        selected_model = global_state.get("selected_model")
-        model_training_id = global_state.get("model_training_id")
-
-        if working_dataset_id is None:
-            return DatasetNode.NAME
-
-        if working_dataset_summary is None:
-            return DatasetNode.NAME
-
-        if not protocol_discussed:
-            return ProtocolDiscussionNode.NAME
-
-        if not working_dataset_frozen:
-            return DatasetNode.NAME
-
-        if causal_spec is None:
-            return CompileAndValidateNode.NAME
-
-        if data_transformation_plan is None:
-            return CompileAndValidateNode.NAME
-
-        if selected_model is None:
-            return ModelSelectionNode.NAME
-
-        if model_training_id is None:
-            return ModelTrainNode.NAME
-
-        return CausalInferenceNode.NAME
-
     def _is_pre_protocol_bounce(
         self,
         *,
@@ -878,30 +720,6 @@ def _latest_system_message(messages: Sequence[ChatMessage]) -> str | None:
         if message.role == "system" and message.content.strip():
             return message.content.strip()
     return None
-
-
-def _new_messages_since(
-    *,
-    previous_messages: Sequence[ChatMessage],
-    current_messages: Sequence[ChatMessage],
-) -> list[ChatMessage]:
-    if not previous_messages:
-        return list(current_messages)
-
-    if len(previous_messages) <= len(current_messages):
-        prefix_matches = True
-        for previous, current in zip(previous_messages, current_messages):
-            if not _same_message(previous, current):
-                prefix_matches = False
-                break
-        if prefix_matches:
-            return list(current_messages[len(previous_messages):])
-
-    return list(current_messages)
-
-
-def _same_message(left: ChatMessage, right: ChatMessage) -> bool:
-    return left.role == right.role and left.content == right.content
 
 def _forward_state_names_to_delete_after_recovery(
     *,
@@ -977,19 +795,6 @@ def _build_pending_orchestrator_payload(
         "selected_model",
     )
     return {key: ochestrator_state.get(key) for key in keys}
-
-
-def init_next_state_names() -> Mapping[str, str]:
-    return {
-        ProtocolDiscussionState.NAME: DatasetNode.NAME,
-        DatasetState.NAME: CompileAndValidateNode.NAME,
-        CompileAndValidateState.NAME: ModelSelectionNode.NAME,
-        ModelSelectionState.NAME: ModelTrainNode.NAME,
-        ModelTrainState.NAME: CausalInferenceNode.NAME,
-        CausalInferenceState.NAME: NoopDoneNode.NAME,
-        NoopDoneState.NAME: NoopDoneNode.NAME,
-    }
-
 
 class _AbortedRouteDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)

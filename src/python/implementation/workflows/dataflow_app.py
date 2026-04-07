@@ -144,16 +144,15 @@ class DataflowApp:
         )
         if not ochestrator_state:
             ochestrator_state = OchestratorWritableGlobalState.init_empty()
-            ochestrator_state.set_last_active_node_name(DatasetState.NAME)
         
         ochestrator_state = cast(OchestratorWritableGlobalState, ochestrator_state)    
 
-        if ochestrator_state.get_last_active_node_name() != DatasetState.NAME:
+        if ochestrator_state.needs_node_name() != DatasetState.NAME:
             self._log.info(
                 "csv upload rejected because conversation is not at dataset state",
                 user_id=user_id,
                 conversation_id=conversation_id,
-                active_state_name=ochestrator_state.get_last_active_node_name(),
+                active_state_name=ochestrator_state.needs_node_name(),
                 required_state_name=DatasetState.NAME,
             )
             raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation_id)

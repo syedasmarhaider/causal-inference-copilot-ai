@@ -57,7 +57,7 @@ class DatasetState(State):
         return "PENDING"
 
     def action(self) -> Action:
-        if not self.payload.dataset_iterations:
+        if not self.payload.dataset_iterations or len(self.payload.dataset_iterations) == 0:
             return "NEEDS_DATA"
         return "NEEDS_INPUT"
 

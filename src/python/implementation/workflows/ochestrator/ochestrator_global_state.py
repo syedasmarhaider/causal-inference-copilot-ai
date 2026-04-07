@@ -12,7 +12,12 @@ from python.domain.workflows.ochestrator_state import (
     WritableOchestratorState,
 )
 from python.implementation.service.logging.default_logging import get_logger
+from python.implementation.workflows.nodes.causal_inference.causal_inference_node import CausalInferenceNode
+from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_node import CompileAndValidateNode
 from python.implementation.workflows.nodes.dataset.dataset_node import DatasetNode
+from python.implementation.workflows.nodes.model_selection.model_selection_node import ModelSelectionNode
+from python.implementation.workflows.nodes.model_train.model_train_node import ModelTrainNode
+from python.implementation.workflows.nodes.noop_done.noop_done_node import NoopDoneNode
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import ProtocolDiscussionNode
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     TransformPlan,
@@ -27,10 +32,7 @@ log = get_logger(__name__)
 
 class GlobalStateModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    # configuration fields
-    last_active_node_name: str | None = None
-
+    
     # stage 1
     working_dataset_id: UUID | None = None
     working_dataset_summary: DatasetSummaryModel | None = None
@@ -97,24 +99,6 @@ class OchestratorWritableGlobalState(
 
     def to_json_dict(self) -> dict[str, Any]:
         return self._model.model_dump(mode="json")
-
-    # -------------------------------------------------------------------------
-    # configuration
-    # -------------------------------------------------------------------------
-
-    def get_last_active_node_name(self) -> str | None:
-        return self._model.last_active_node_name
-
-    def set_last_active_node_name(self, node_name: str) -> None:
-        normalized_node_name = node_name.strip()
-        if not normalized_node_name:
-            raise ValueError("last_active_node_name cannot be blank")
-        if node_name == DatasetNode.NAME and self._has_protocol_discussion() and self._model.last_active_node_name != ProtocolDiscussionNode.NAME:
-            return
-        self._model.last_active_node_name = normalized_node_name
-
-    def clear_last_active_node_name(self) -> None:
-        self._model.last_active_node_name = None
 
     # -------------------------------------------------------------------------
     # stage 1: working dataset
@@ -317,6 +301,60 @@ class OchestratorWritableGlobalState(
         if self._model.model_training_id is None:
             return
         self._model.model_training_id = None
+    
+    
+    # -------------------------------------------------------------------------
+    # active node tracking and rollback
+    # -------------------------------------------------------------------------
+    def needs_node_name(
+        self,
+    ) -> str:
+
+        if self._model.working_dataset_id is None:
+            return DatasetNode.NAME
+
+        if self._model.working_dataset_summary is None:
+            return DatasetNode.NAME
+
+        if not self._has_protocol_discussion():
+            return ProtocolDiscussionNode.NAME
+
+        if not self._model.working_dataset_frozen:
+            return DatasetNode.NAME
+
+        if self._model.causal_spec is None:
+            return CompileAndValidateNode.NAME
+
+        if self._model.data_transformation_plan is None:
+            return CompileAndValidateNode.NAME
+
+        if self._model.selected_model is None:
+            return ModelSelectionNode.NAME
+
+        if self._model.model_training_id is None:
+            return ModelTrainNode.NAME
+
+        return CausalInferenceNode.NAME
+    
+    
+    def rollback_orchestrator_global_state(
+        self,
+        recovery_state_name: str,
+    ) -> None:
+        if recovery_state_name == ProtocolDiscussionNode.NAME:
+            self.invalidate_protocol_discussion_and_downstream()
+    
+        if recovery_state_name == DatasetNode.NAME:
+            self.invalidate_protocol_discussion_and_downstream()
+
+        if recovery_state_name == CompileAndValidateNode.NAME:
+            self.invalidate_causal_configuration_and_downstream()
+
+        if recovery_state_name == ModelSelectionNode.NAME:
+            self.invalidate_selected_model_and_downstream()
+
+        if recovery_state_name == ModelTrainNode.NAME:
+            self.clear_model_training_id()        
 
     # -------------------------------------------------------------------------
     # guards

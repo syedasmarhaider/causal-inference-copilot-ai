@@ -125,7 +125,7 @@ class WorkflowApp:
         if not isinstance(ochestrator_state, OchestratorWritableGlobalState):
             return None
 
-        last_node_name = ochestrator_state.get_last_active_node_name()
+        last_node_name = ochestrator_state.needs_node_name()
         if not last_node_name:
             return None
 
@@ -219,7 +219,7 @@ class WorkflowApp:
             raise StateNotFoundError(state_name=state_name)
 
         # Roll back the global orchestrator state to the recovery point.
-        _rollback_global_state(ochestrator_state, state_name)
+        ochestrator_state.rollback_orchestrator_global_state(recovery_state_name=state_name)
 
         # Delete all states at and after the recovery point so they re-execute fresh.
         for name_to_delete in _state_names_from(state_name):
@@ -228,14 +228,7 @@ class WorkflowApp:
                 conversation_id=conversation_id,
                 state_name=name_to_delete,
             )
-
-        # Point the active node back to the recovery node.
-        from python.implementation.workflows.ochestrator.ochestraotor import (
-            build_node_name_by_state_name,
-        )
-        node_name = build_node_name_by_state_name().get(state_name, state_name)
-        ochestrator_state.set_last_active_node_name(node_name)
-
+            
         self._repo.store_ochestrator_state(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -247,26 +240,6 @@ class WorkflowApp:
             conversation_id=conversation_id,
             state_name=state_name,
         )
-
-
-# ------------------------------------------------------------------
-# Module-level helpers
-# ------------------------------------------------------------------
-
-def _rollback_global_state(
-    global_state: OchestratorWritableGlobalState,
-    recovery_state_name: str,
-) -> None:
-    if recovery_state_name in (DatasetState.NAME, ProtocolDiscussionState.NAME):
-        global_state.invalidate_protocol_discussion_and_downstream()
-    elif recovery_state_name == CompileAndValidateState.NAME:
-        global_state.invalidate_causal_configuration_and_downstream()
-    elif recovery_state_name == ModelSelectionState.NAME:
-        global_state.invalidate_selected_model_and_downstream()
-    elif recovery_state_name == ModelTrainState.NAME:
-        global_state.clear_model_training_id()
-    # CausalInferenceState / NoopDoneState → nothing to clear
-
 
 def _state_names_from(state_name: str) -> tuple[str, ...]:
     """Return state_name plus all states that come after it in the workflow order."""
