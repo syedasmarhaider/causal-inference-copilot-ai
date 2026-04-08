@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import io
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 import pandas as pd
@@ -197,15 +198,7 @@ class DataflowApp:
         try:
             mime: str
             content: bytes
-            if artifact_format == "csv":
-                dataframe = self._data_repo.get_csv_data(
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    dataset_id=artifact_id,
-                )
-                mime = "text/csv"
-                content = dataframe.to_csv(index=False).encode("utf-8")
-            elif artifact_format == "json":
+            if artifact_kind == "graph":
                 json_data = self._data_repo.get_json_data(
                     user_id=user_id,
                     conversation_id=conversation_id,
@@ -213,7 +206,45 @@ class DataflowApp:
                 )
                 mime = "application/json"
                 content = json_data.encode("utf-8")
+            elif artifact_format == "csv":
+                dataframe = self._data_repo.get_csv_data(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    dataset_id=artifact_id,
+                )
+                mime = "text/csv"
+                content = dataframe.to_csv(index=False).encode("utf-8")
+            else:
+                try:
+                    json_data = self._data_repo.get_json_data(
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        dataset_id=artifact_id,
+                    )
+                    mime = "application/json"
+                    content = json_data.encode("utf-8")
+                except FileNotFoundError:
+                    dataframe = self._data_repo.get_csv_data(
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        dataset_id=artifact_id,
+                    )
+                    payload: dict[str, Any] = {
+                        "columns": [str(column) for column in dataframe.columns],
+                        "row_count": int(len(dataframe)),
+                        "rows": dataframe.to_dict(orient="records"),
+                    }
+                    mime = "application/json"
+                    content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         except FileNotFoundError as exc:
+            self._log.warning(
+                "artifact fetch failed: not found",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                artifact_id=artifact_id,
+                artifact_kind=artifact_kind,
+                artifact_format=artifact_format,
+            )
             raise ArtifactNotFoundError(artifact_id=artifact_id) from exc
 
         self._log.debug(
