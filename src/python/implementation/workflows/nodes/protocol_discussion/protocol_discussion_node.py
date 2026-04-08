@@ -155,7 +155,7 @@ class ProtocolDiscussionNode(Node):
             schema=_DiscussionDecisionModel,
             system_prompt=get_protocol_discussion_update_prompt(),
             user_prompt=json.dumps(payload, ensure_ascii=False),
-            config=LLMConfig(model="pro", temperature=0.2),
+            config=LLMConfig(model="pro", temperature=0.6),
             history=history,
             max_attempts=2,
         )
@@ -176,7 +176,7 @@ class ProtocolDiscussionNode(Node):
                 },
                 ensure_ascii=False,
             ),
-            config=LLMConfig(model="mini", temperature=0.2),
+            config=LLMConfig(model="basic", temperature=0.6),
             history=None,
             max_attempts=2,
         )
@@ -199,7 +199,7 @@ class ProtocolDiscussionNode(Node):
                 },
                 ensure_ascii=False,
             ),
-            config=LLMConfig(model="mini", temperature=0.0),
+            config=LLMConfig(model="mini", temperature=0.6),
             history=None,
             max_attempts=2,
         )
