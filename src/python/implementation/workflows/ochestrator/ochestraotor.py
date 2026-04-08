@@ -626,6 +626,7 @@ class Ochestrator:
                 ochestrator_state.set_protocol_discussion(
                     protocol_discussion=state.payload.discussion
                 )
+                ochestrator_state.mark_dataset_cleaning_pending()
 
             case CompileAndValidateState() as compile_and_validate_state:
                 inference_ready_spec = (

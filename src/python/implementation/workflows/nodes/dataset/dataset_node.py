@@ -247,7 +247,7 @@ class DatasetNode(Node):
 
         persisted_latest_summary = current_summary
 
-        protocol_discussion = _get_protocol_discussion(readonly_orchestrator_state)
+        protocol_discussion = _get_pending_protocol_discussion(readonly_orchestrator_state)
         if protocol_discussion is not None:
             try:
                 cleaning_instructions = self._build_protocol_cleaning_instructions(
@@ -945,9 +945,13 @@ def _latest_assistant_message(messages_history: Sequence[ChatMessage] | None) ->
     return None
 
 
-def _get_protocol_discussion(
+def _get_pending_protocol_discussion(
     readonly_orchestrator_state: ReadOnlyOchestratorState,
 ) -> str | None:
+    dataset_cleaning_pending = readonly_orchestrator_state.get("dataset_cleaning_pending")
+    if dataset_cleaning_pending is not True:
+        return None
+
     protocol_discussion = readonly_orchestrator_state.get("protocol_discussion")
     if not isinstance(protocol_discussion, str):
         return None

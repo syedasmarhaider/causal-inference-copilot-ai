@@ -81,7 +81,7 @@ class DatasetState(State):
         ]
 
     def set_status_pending(self) -> None:
-        self._awaiting_user_input = True
+        self.payload.awaiting_user_input = True
         return None
 
     def error(self) -> None:

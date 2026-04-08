@@ -39,6 +39,7 @@ class GlobalStateModel(BaseModel):
 
     # stage 2
     protocol_discussion: str | None = None
+    dataset_cleaning_pending: bool = False
 
     # stage 3
     working_dataset_frozen: bool = False
@@ -73,6 +74,7 @@ class OchestratorWritableGlobalState(
         "working_dataset_id",
         "working_dataset_summary",
         "protocol_discussion",
+        "dataset_cleaning_pending",
         "working_dataset_frozen",
         "causal_spec",
         "data_transformation_plan",
@@ -169,6 +171,18 @@ class OchestratorWritableGlobalState(
             reason="protocol discussion invalidated",
         )
 
+    def mark_dataset_cleaning_pending(self) -> None:
+        self._require_stage_2_complete()
+
+        if self._model.dataset_cleaning_pending:
+            return
+
+        self._model.dataset_cleaning_pending = True
+        self._invalidate_downstream_of(
+            "dataset_cleaning_pending",
+            reason="dataset cleaning pending",
+        )
+
     # -------------------------------------------------------------------------
     # stage 3: dataset freeze
     # -------------------------------------------------------------------------
@@ -176,9 +190,10 @@ class OchestratorWritableGlobalState(
     def freeze_working_dataset(self) -> None:
         self._require_stage_2_complete()
 
-        if self._model.working_dataset_frozen:
+        if self._model.working_dataset_frozen and not self._model.dataset_cleaning_pending:
             return
 
+        self._model.dataset_cleaning_pending = False
         self._model.working_dataset_frozen = True
         self._invalidate_downstream_of(
             "working_dataset_frozen",
@@ -197,12 +212,14 @@ class OchestratorWritableGlobalState(
             or self._model.working_dataset_summary != dataset_summary
         )
         frozen_changed = not self._model.working_dataset_frozen
+        pending_changed = self._model.dataset_cleaning_pending
 
-        if not dataset_changed and not frozen_changed:
+        if not dataset_changed and not frozen_changed and not pending_changed:
             return
 
         self._model.working_dataset_id = dataset_id
         self._model.working_dataset_summary = dataset_summary
+        self._model.dataset_cleaning_pending = False
         self._model.working_dataset_frozen = True
 
         self._invalidate_downstream_of(
@@ -216,6 +233,7 @@ class OchestratorWritableGlobalState(
         if not self._model.working_dataset_frozen:
             return
 
+        self._model.dataset_cleaning_pending = False
         self._model.working_dataset_frozen = False
         self._invalidate_downstream_of(
             "working_dataset_frozen",
@@ -318,6 +336,9 @@ class OchestratorWritableGlobalState(
 
         if not self._has_protocol_discussion():
             return ProtocolDiscussionNode.NAME
+
+        if self._model.dataset_cleaning_pending:
+            return DatasetNode.NAME
 
         if not self._model.working_dataset_frozen:
             return DatasetNode.NAME
@@ -440,6 +461,8 @@ class OchestratorWritableGlobalState(
 
     @staticmethod
     def _default_value_for(field_name: str) -> Any:
+        if field_name == "dataset_cleaning_pending":
+            return False
         if field_name == "working_dataset_frozen":
             return False
         if field_name == "validation_issues":
