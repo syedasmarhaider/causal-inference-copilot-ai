@@ -299,6 +299,7 @@ class DatasetNode(Node):
                     rows=int(len(working_df)),
                     columns=[str(column) for column in working_df.columns],
                 ),
+                awaiting_user_input=False,
             )
 
         latest_user_message = _latest_user_message(messages_history)
@@ -466,6 +467,7 @@ class DatasetNode(Node):
         dataset_iterations: Sequence[DatasetIterationModel] | None = None,
         latest_summary: DatasetSummaryModel | None = None,
         response_message_artifact_refs: Sequence[ArtifactRef] | None = None,
+        awaiting_user_input: bool = True,
     ) -> DatasetState:
         normalized_iterations = [
             iteration.model_copy(deep=True) for iteration in (dataset_iterations or [])
@@ -477,6 +479,7 @@ class DatasetNode(Node):
                     latest_summary.model_copy(deep=True) if latest_summary is not None else None
                 ),
                 user_message=user_message,
+                awaiting_user_input=awaiting_user_input,
             ),
             response_message_artifact_refs=list(response_message_artifact_refs or []),
         )
