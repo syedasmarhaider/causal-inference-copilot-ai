@@ -8,9 +8,6 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from python.domain.models.models import ChatMessage
 from python.domain.workflows.state import Action, State, Status
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import (
-    ProtocolDiscussionDeps,
-)
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
     initial_user_message,
 )
@@ -95,9 +92,6 @@ class ProtocolDiscussionState(State):
 
     def error(self) -> None:
         return None
-
-    def pre_required_states_names(self) -> Sequence[str]:
-        return ProtocolDiscussionDeps.pre_required_states_names()
 
     def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json", exclude_none=True)

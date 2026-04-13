@@ -28,7 +28,6 @@ class DatasetPayloadModel(BaseModel):
     dataset_iterations: list[DatasetIterationModel] = Field(default_factory=list)
     latest_summary: DatasetSummaryModel | None = None
     user_message: str | None = None
-    awaiting_user_input: bool = True
 
 
 class DatasetState(State):
@@ -60,7 +59,7 @@ class DatasetState(State):
     def action(self) -> Action:
         if not self.payload.dataset_iterations or len(self.payload.dataset_iterations) == 0:
             return "NEEDS_DATA"
-        if not self.payload.awaiting_user_input:
+        if not self.payload.user_message:
             return "NONE"
         return "NEEDS_INPUT"
 
@@ -81,7 +80,7 @@ class DatasetState(State):
         ]
 
     def set_status_pending(self) -> None:
-        self.payload.awaiting_user_input = True
+        self.payload.user_message = None
         return None
 
     def error(self) -> None:

@@ -11,14 +11,31 @@ from python.domain.workflows.ochestrator_state import (
     ReadOnlyOchestratorState,
     WritableOchestratorState,
 )
+from python.domain.workflows.state import State
 from python.implementation.service.logging.default_logging import get_logger
-from python.implementation.workflows.nodes.causal_inference.causal_inference_node import CausalInferenceNode
-from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_node import CompileAndValidateNode
+from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
+    CausalInferenceNode,
+)
+from python.implementation.workflows.nodes.causal_inference.causal_inference_state import CausalInferenceState
+from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_node import (
+    CompileAndValidateNode,
+)
+from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_state import CompileAndValidateState
 from python.implementation.workflows.nodes.dataset.dataset_node import DatasetNode
-from python.implementation.workflows.nodes.model_selection.model_selection_node import ModelSelectionNode
-from python.implementation.workflows.nodes.model_train.model_train_node import ModelTrainNode
-from python.implementation.workflows.nodes.noop_done.noop_done_node import NoopDoneNode
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import ProtocolDiscussionNode
+from python.implementation.workflows.nodes.dataset.dataset_state import DatasetState
+from python.implementation.workflows.nodes.model_selection.mode_selection_state import ModelSelectionState
+from python.implementation.workflows.nodes.model_selection.model_selection_node import (
+    ModelSelectionNode,
+)
+from python.implementation.workflows.nodes.model_train.model_train_node import (
+    ModelTrainNode,
+)
+from python.implementation.workflows.nodes.model_train.model_train_state import ModelTrainState
+from python.implementation.workflows.nodes.noop_done.noop_done_state import NoopDoneState
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import (
+    ProtocolDiscussionNode,
+)
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     TransformPlan,
 )
@@ -29,17 +46,18 @@ from python.implementation.workflows.tools.common.model.data_summary import (
 
 log = get_logger(__name__)
 
-
 class GlobalStateModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
-    
+
     # stage 1
     working_dataset_id: UUID | None = None
     working_dataset_summary: DatasetSummaryModel | None = None
 
     # stage 2
     protocol_discussion: str | None = None
-    dataset_cleaning_pending: bool = False
+
+    # stage 2.5
+    data_cleaned: bool = False
 
     # stage 3
     working_dataset_frozen: bool = False
@@ -47,7 +65,7 @@ class GlobalStateModel(BaseModel):
     # stage 4
     causal_spec: CausalSpec | None = None
     data_transformation_plan: TransformPlan | None = None
-    validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
+    validation_issues: list[ValidationIssueModel] = Field(default_factory=lambda: [])
 
     # stage 5
     selected_model: str | None = None
@@ -74,7 +92,7 @@ class OchestratorWritableGlobalState(
         "working_dataset_id",
         "working_dataset_summary",
         "protocol_discussion",
-        "dataset_cleaning_pending",
+        "data_cleaned",
         "working_dataset_frozen",
         "causal_spec",
         "data_transformation_plan",
@@ -93,9 +111,17 @@ class OchestratorWritableGlobalState(
 
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> OchestratorWritableGlobalState:
-        model = GlobalStateModel.model_validate(payload)
+        normalized_payload = dict(payload)
+        legacy_data_cleaning_pending = normalized_payload.pop(
+            "dataset_cleaning_pending",
+            None,
+        )
+        if "data_cleaned" not in normalized_payload and legacy_data_cleaning_pending is not None:
+            normalized_payload["data_cleaned"] = not bool(legacy_data_cleaning_pending)
+
+        model = GlobalStateModel.model_validate(normalized_payload)
         return cls(model)
-    
+
     def name(self) -> str:
         return "OCHESTRATOR_STATE"
 
@@ -110,33 +136,27 @@ class OchestratorWritableGlobalState(
         self,
         dataset_id: UUID,
         summary: DatasetSummaryModel,
+        preserve_protocol_discussion: bool,
     ) -> None:
         previous_dataset_id = self._model.working_dataset_id
         previous_summary = self._model.working_dataset_summary
-        had_protocol_discussion = self._has_protocol_discussion()
 
         if previous_dataset_id == dataset_id and previous_summary == summary:
             return
 
         self._model.working_dataset_id = dataset_id
         self._model.working_dataset_summary = summary
-
-        same_dataset_refined_summary = (
-            previous_dataset_id == dataset_id
-            and previous_summary != summary
-        )
-
-        if same_dataset_refined_summary and had_protocol_discussion:
+        
+        if preserve_protocol_discussion:
             self._invalidate_downstream_of(
                 "protocol_discussion",
-                reason="working dataset summary changed for same dataset; preserving protocol discussion",
+                reason="working dataset changed with protocol discussion preserved",
             )
-            return
-
-        self._invalidate_downstream_of(
-            "working_dataset_summary",
-            reason="working dataset changed",
-        )
+        else:
+            self._invalidate_downstream_of(
+                "working_dataset_summary",
+                reason="working dataset changed",
+            )
 
     def invalidate_working_dataset_and_downstream(self) -> None:
         self._reset_from_including(
@@ -171,15 +191,30 @@ class OchestratorWritableGlobalState(
             reason="protocol discussion invalidated",
         )
 
+    # -------------------------------------------------------------------------
+    # stage 2.5: dataset cleaning
+    # -------------------------------------------------------------------------
+
+    def mark_data_cleaned(self) -> None:
+        self._require_stage_2_complete()
+
+        if self._model.data_cleaned:
+            return
+
+        self._model.data_cleaned = True
+        self._invalidate_downstream_of(
+            "data_cleaned",
+            reason="dataset cleaned",
+        )
+
     def mark_dataset_cleaning_pending(self) -> None:
         self._require_stage_2_complete()
 
-        if self._model.dataset_cleaning_pending:
+        if not self._model.data_cleaned and not self._model.working_dataset_frozen:
             return
 
-        self._model.dataset_cleaning_pending = True
-        self._invalidate_downstream_of(
-            "dataset_cleaning_pending",
+        self._reset_from_including(
+            "data_cleaned",
             reason="dataset cleaning pending",
         )
 
@@ -190,10 +225,9 @@ class OchestratorWritableGlobalState(
     def freeze_working_dataset(self) -> None:
         self._require_stage_2_complete()
 
-        if self._model.working_dataset_frozen and not self._model.dataset_cleaning_pending:
+        if self._model.data_cleaned and self._model.working_dataset_frozen:
             return
 
-        self._model.dataset_cleaning_pending = False
         self._model.working_dataset_frozen = True
         self._invalidate_downstream_of(
             "working_dataset_frozen",
@@ -207,19 +241,17 @@ class OchestratorWritableGlobalState(
     ) -> None:
         self._require_stage_2_complete()
 
-        dataset_changed = (
-            self._model.working_dataset_id != dataset_id
-            or self._model.working_dataset_summary != dataset_summary
-        )
-        frozen_changed = not self._model.working_dataset_frozen
-        pending_changed = self._model.dataset_cleaning_pending
-
-        if not dataset_changed and not frozen_changed and not pending_changed:
+        if (
+            self._model.working_dataset_id == dataset_id
+            and self._model.working_dataset_summary == dataset_summary
+            and self._model.data_cleaned
+            and self._model.working_dataset_frozen
+        ):
             return
 
         self._model.working_dataset_id = dataset_id
         self._model.working_dataset_summary = dataset_summary
-        self._model.dataset_cleaning_pending = False
+        self._model.data_cleaned = True
         self._model.working_dataset_frozen = True
 
         self._invalidate_downstream_of(
@@ -230,13 +262,11 @@ class OchestratorWritableGlobalState(
     def unfreeze_working_dataset_and_downstream(self) -> None:
         self._require_stage_1_complete()
 
-        if not self._model.working_dataset_frozen:
+        if not self._model.data_cleaned and not self._model.working_dataset_frozen:
             return
 
-        self._model.dataset_cleaning_pending = False
-        self._model.working_dataset_frozen = False
-        self._invalidate_downstream_of(
-            "working_dataset_frozen",
+        self._reset_from_including(
+            "data_cleaned",
             reason="working dataset unfrozen",
         )
 
@@ -319,15 +349,12 @@ class OchestratorWritableGlobalState(
         if self._model.model_training_id is None:
             return
         self._model.model_training_id = None
-    
-    
+
     # -------------------------------------------------------------------------
     # active node tracking and rollback
     # -------------------------------------------------------------------------
-    def needs_node_name(
-        self,
-    ) -> str:
 
+    def needs_node_name(self) -> str:
         if self._model.working_dataset_id is None:
             return DatasetNode.NAME
 
@@ -337,7 +364,7 @@ class OchestratorWritableGlobalState(
         if not self._has_protocol_discussion():
             return ProtocolDiscussionNode.NAME
 
-        if self._model.dataset_cleaning_pending:
+        if not self._model.data_cleaned:
             return DatasetNode.NAME
 
         if not self._model.working_dataset_frozen:
@@ -356,15 +383,14 @@ class OchestratorWritableGlobalState(
             return ModelTrainNode.NAME
 
         return CausalInferenceNode.NAME
-    
-    
+
     def rollback_orchestrator_global_state(
         self,
         recovery_state_name: str,
     ) -> None:
         if recovery_state_name == ProtocolDiscussionNode.NAME:
             self.invalidate_protocol_discussion_and_downstream()
-    
+
         if recovery_state_name == DatasetNode.NAME:
             self.invalidate_protocol_discussion_and_downstream()
 
@@ -375,7 +401,7 @@ class OchestratorWritableGlobalState(
             self.invalidate_selected_model_and_downstream()
 
         if recovery_state_name == ModelTrainNode.NAME:
-            self.clear_model_training_id()        
+            self.clear_model_training_id()
 
     # -------------------------------------------------------------------------
     # guards
@@ -394,8 +420,8 @@ class OchestratorWritableGlobalState(
 
     def _require_stage_3_complete(self) -> None:
         self._require_stage_2_complete()
-        if not self._model.working_dataset_frozen:
-            raise ValueError("working_dataset_frozen must be True first")
+        if not self._model.data_cleaned:
+            raise ValueError("data_cleaned must be True first")
 
     def _require_stage_4_complete(self) -> None:
         self._require_stage_3_complete()
@@ -403,6 +429,8 @@ class OchestratorWritableGlobalState(
             raise ValueError("causal_spec must be set first")
         if self._model.data_transformation_plan is None:
             raise ValueError("data_transformation_plan must be set first")
+        if not self._model.working_dataset_frozen:
+            raise ValueError("working_dataset must be frozen first")
 
     def _require_model_selection_ready(self) -> None:
         self._require_stage_4_complete()
@@ -461,9 +489,7 @@ class OchestratorWritableGlobalState(
 
     @staticmethod
     def _default_value_for(field_name: str) -> Any:
-        if field_name == "dataset_cleaning_pending":
-            return False
-        if field_name == "working_dataset_frozen":
+        if field_name in {"data_cleaned", "working_dataset_frozen"}:
             return False
         if field_name == "validation_issues":
             return []
@@ -475,3 +501,104 @@ class OchestratorWritableGlobalState(
         if not normalized_value:
             raise ValueError(f"{field_name} cannot be blank")
         return normalized_value
+    
+    
+    def update_ochestration_working_state_if_node_done(
+        self,
+        *,
+        state: State,
+    ) -> None:
+        if state.status() != "DONE" and state.name() != DatasetState.NAME:
+            return
+
+        match state:
+            case DatasetState() as dataset_state:
+                if not dataset_state.payload.dataset_iterations:
+                    return 
+
+                latest_iteration_dataset_id = (
+                    dataset_state.payload.dataset_iterations[-1].dataset_id
+                )
+                latest_iteration_dataset_summary = dataset_state.payload.latest_summary
+                if latest_iteration_dataset_summary is None:
+                    raise ValueError(
+                        "Latest dataset summary must be set when dataset state is DONE"
+                    )
+
+                protocol_discussed = self._has_protocol_discussion()
+                data_cleaned = self.get("data_cleaned") is True
+                data_frozen = self.get("working_dataset_frozen") is True
+                
+                if data_frozen:
+                    return
+
+                if data_cleaned and protocol_discussed:
+                    self.set_working_dataset(
+                        dataset_id=latest_iteration_dataset_id,
+                        summary=latest_iteration_dataset_summary,
+                        preserve_protocol_discussion=True,
+                    )
+                    
+                if protocol_discussed and not data_cleaned:
+                    self.set_working_dataset(
+                        latest_iteration_dataset_id,
+                        latest_iteration_dataset_summary,
+                        preserve_protocol_discussion=True,
+                    )
+                else:
+                    self.set_working_dataset(
+                        dataset_id=latest_iteration_dataset_id,
+                        summary=latest_iteration_dataset_summary,
+                        preserve_protocol_discussion=False,
+                    )
+                    
+
+            case ProtocolDiscussionState():
+                self.set_protocol_discussion(
+                    protocol_discussion=state.payload.discussion
+                )
+
+            case CompileAndValidateState() as compile_and_validate_state:
+                inference_ready_spec = (
+                    compile_and_validate_state.payload.inference_ready_causal_spec
+                )
+                if inference_ready_spec is None:
+                    raise ValueError(
+                        "Inference ready causal spec must be set when compile-and-validate is DONE"
+                    )
+
+                self.set_causal_configuration(
+                    causal_spec=inference_ready_spec.causal_spec,
+                    data_transformation_plan=inference_ready_spec.transformation_plan,
+                    validation_issues=compile_and_validate_state.payload.validation_issues,
+                )
+
+            case ModelSelectionState() as model_selection_state:
+                confirmed = model_selection_state.payload.confirmed_model_selection
+                if confirmed is None or confirmed.selected_model is None:
+                    raise ValueError(
+                        "Confirmed model selection must be set when model selection is DONE"
+                    )
+
+                self.set_selected_model(confirmed.selected_model)
+
+            case ModelTrainState() as model_train_state:
+                if model_train_state.payload.trained_model_id is None:
+                    raise ValueError(
+                        "Trained model ID must be set when model-train is DONE"
+                    )
+
+                self.set_model_training_id(
+                    model_train_state.payload.trained_model_id
+                )
+
+            case CausalInferenceState():
+                pass
+
+            case NoopDoneState():
+                pass
+
+            case _:
+                raise ValueError(
+                    f"Unsupported DONE-state update for state {state.name()!r}"
+                )

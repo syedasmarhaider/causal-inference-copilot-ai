@@ -320,8 +320,7 @@ class Ochestrator:
             messages_history=messages_history,
         )
 
-        self._update_ochestration_working_state_if_node_done(
-            ochestrator_state=ochestrator_state,
+        ochestrator_state.update_ochestration_working_state_if_node_done(
             state=resulted_state,
         )
         
@@ -581,115 +580,7 @@ class Ochestrator:
                 conversation_id=conversation_id,
                 state_name=state_name,
             )
-        
-    def _update_ochestration_working_state_if_node_done(
-        self,
-        *,
-        ochestrator_state: OchestratorWritableGlobalState,
-        state: State,
-    ) -> OchestratorWritableGlobalState:
-        if state.status() != "DONE" and state.name() != DatasetState.NAME:
-            return ochestrator_state
 
-        match state:
-            case DatasetState() as dataset_state:
-                if not dataset_state.payload.dataset_iterations:
-                    return ochestrator_state
-
-                latest_iteration_dataset_id = (
-                    dataset_state.payload.dataset_iterations[-1].dataset_id
-                )
-                latest_iteration_dataset_summary = dataset_state.payload.latest_summary
-                if latest_iteration_dataset_summary is None:
-                    raise ValueError(
-                        "Latest dataset summary must be set when dataset state is DONE"
-                    )
-
-                protocol_discussed = ochestrator_state.get("protocol_discussion") is not None
-                working_dataset_frozen = ochestrator_state.get("working_dataset_frozen") is True
-
-                if working_dataset_frozen:
-                    return ochestrator_state
-
-                if protocol_discussed:
-                    ochestrator_state.freeze_working_dataset_snapshot(
-                        latest_iteration_dataset_id,
-                        latest_iteration_dataset_summary,
-                    )
-                else:
-                    ochestrator_state.set_working_dataset(
-                        dataset_id=latest_iteration_dataset_id,
-                        summary=latest_iteration_dataset_summary,
-                    )
-
-            case ProtocolDiscussionState():
-                ochestrator_state.set_protocol_discussion(
-                    protocol_discussion=state.payload.discussion
-                )
-                ochestrator_state.mark_dataset_cleaning_pending()
-
-            case CompileAndValidateState() as compile_and_validate_state:
-                inference_ready_spec = (
-                    compile_and_validate_state.payload.inference_ready_causal_spec
-                )
-                if inference_ready_spec is None:
-                    raise ValueError(
-                        "Inference ready causal spec must be set when compile-and-validate is DONE"
-                    )
-
-                ochestrator_state.set_causal_configuration(
-                    causal_spec=inference_ready_spec.causal_spec,
-                    data_transformation_plan=inference_ready_spec.transformation_plan,
-                    validation_issues=compile_and_validate_state.payload.validation_issues,
-                )
-
-            case ModelSelectionState() as model_selection_state:
-                confirmed = model_selection_state.payload.confirmed_model_selection
-                if confirmed is None or confirmed.selected_model is None:
-                    raise ValueError(
-                        "Confirmed model selection must be set when model selection is DONE"
-                    )
-
-                ochestrator_state.set_selected_model(confirmed.selected_model)
-
-            case ModelTrainState() as model_train_state:
-                if model_train_state.payload.trained_model_id is None:
-                    raise ValueError(
-                        "Trained model ID must be set when model-train is DONE"
-                    )
-
-                ochestrator_state.set_model_training_id(
-                    model_train_state.payload.trained_model_id
-                )
-
-            case CausalInferenceState():
-                pass
-
-            case NoopDoneState():
-                pass
-
-            case _:
-                raise ValueError(
-                    f"Unsupported DONE-state update for state {state.name()!r}"
-                )
-
-        return ochestrator_state
-
-    def _is_pre_protocol_bounce(
-        self,
-        *,
-        current_state_name: str,
-        target_state_name: str,
-        ochestrator_state: OchestratorReadOnlyGlobalState,
-    ) -> bool:
-        if ochestrator_state.get("protocol_discussed") is not True:
-            return False
-
-        bounce_states = {DatasetState.NAME, ProtocolDiscussionState.NAME}
-        return (
-            current_state_name in bounce_states
-            and target_state_name in bounce_states
-        )
 
 def _last_two_messages(
     messages_history: Sequence[ChatMessage] | None,
