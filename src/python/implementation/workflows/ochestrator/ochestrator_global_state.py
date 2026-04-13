@@ -517,7 +517,7 @@ class OchestratorWritableGlobalState(
                     return 
 
                 latest_iteration_dataset_id = (
-                    dataset_state.payload.dataset_iterations[-1].dataset_id
+                    dataset_state.payload.dataset_iterations[-1]
                 )
                 latest_iteration_dataset_summary = dataset_state.payload.latest_summary
                 if latest_iteration_dataset_summary is None:

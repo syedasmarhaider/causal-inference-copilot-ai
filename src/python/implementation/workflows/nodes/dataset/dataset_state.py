@@ -14,18 +14,10 @@ from python.implementation.workflows.tools.data_profiling.data_profiling_tool im
 )
 
 
-class DatasetIterationModel(BaseModel):
-    # Ignore legacy persisted fields like per-iteration summaries while migrating to the
-    # leaner "IDs only" iteration history.
-    model_config = ConfigDict(extra="ignore")
-
-    dataset_id: UUID
-
-
 class DatasetPayloadModel(BaseModel):
     # Ignore legacy payload fields like persisted message artifact refs during migration.
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
-    dataset_iterations: list[DatasetIterationModel] = Field(default_factory=list)
+    dataset_iterations: list[UUID] = Field(default_factory=lambda: [])
     latest_summary: DatasetSummaryModel | None = None
     user_message: str | None = None
 
@@ -51,7 +43,7 @@ class DatasetState(State):
     def get_working_dataset_info(self) -> WorkingDatasetInfo | None:
         if not self.payload.dataset_iterations or len(self.payload.dataset_iterations) == 0:
             return None
-        return WorkingDatasetInfo(self.payload.dataset_iterations[-1].dataset_id, False)
+        return WorkingDatasetInfo(self.payload.dataset_iterations[-1], False)
 
     def status(self) -> Status:
         return "PENDING"
@@ -59,7 +51,7 @@ class DatasetState(State):
     def action(self) -> Action:
         if not self.payload.dataset_iterations or len(self.payload.dataset_iterations) == 0:
             return "NEEDS_DATA"
-        if not self.payload.user_message:
+        if self.payload.user_message is None:
             return "NONE"
         return "NEEDS_INPUT"
 
@@ -78,26 +70,12 @@ class DatasetState(State):
                 content="Data set is not uploaded yet. Please upload the dataset to proceed.",
             )
         ]
-
+    
     def set_status_pending(self) -> None:
-        self.payload.user_message = None
-        return None
+        self._status = "PENDING"    
 
     def error(self) -> None:
         return None
-
-    @property
-    def latest_iteration(self) -> DatasetIterationModel | None:
-        if not self.payload.dataset_iterations:
-            return None
-        return self.payload.dataset_iterations[-1]
-
-    @property
-    def latest_summary(self) -> DatasetSummaryModel | None:
-        return self.payload.latest_summary
-
-    def pre_required_states_names(self) -> Sequence[str]:
-        return ()
 
     def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json", exclude_none=True)
@@ -109,10 +87,3 @@ class DatasetState(State):
     @classmethod
     def init_empty(cls) -> DatasetState:
         return cls(payload=DatasetPayloadModel())
-
-
-__all__ = [
-    "DatasetIterationModel",
-    "DatasetPayloadModel",
-    "DatasetState",
-]

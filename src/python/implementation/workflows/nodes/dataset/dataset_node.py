@@ -33,7 +33,6 @@ from python.implementation.workflows.nodes.dataset.dataset_prompts import (
     prev_state_revert_message,
 )
 from python.implementation.workflows.nodes.dataset.dataset_state import (
-    DatasetIterationModel,
     DatasetPayloadModel,
     DatasetState,
 )
@@ -161,15 +160,28 @@ class DatasetNode(Node):
             raise TypeError(f"{self.name}: expected DatasetState, got {type(state).__name__}")
 
         dataset_iterations = [
-            item.model_copy(deep=True) for item in state.payload.dataset_iterations
+            item for item in state.payload.dataset_iterations
         ]
         latest_summary = (
             state.payload.latest_summary.model_copy(deep=True)
             if state.payload.latest_summary is not None
             else None
         )
-
+        
+        data_set_frozen = readonly_orchestrator_state.get("working_dataset_frozen")
+        data_set_clean = readonly_orchestrator_state.get("data_cleaned")
+        protocol_discussion = readonly_orchestrator_state.get("protocol_discussion")
+        state._status = "PENDING"  # pyright: ignore[reportPrivateUsage]
         if _is_revert_request(messages_history):
+            if data_set_frozen:
+                return self._build_state(
+                    dataset_iterations=dataset_iterations,
+                    latest_summary=latest_summary,
+                    user_message=(
+                        "The working dataset is currently frozen. "
+                        "You can always revert to the previous dataset version, but I won't be able to apply that change until the freeze is lifted. "
+                    ),
+                )
             return self._handle_revert(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -188,13 +200,13 @@ class DatasetNode(Node):
                 current_df = self._data_repo.get_csv_data(
                     user_id=user_id,
                     conversation_id=conversation_id,
-                    dataset_id=latest_iteration.dataset_id,
+                    dataset_id=latest_iteration,
                     limit=1_000_000,
                 )
             except Exception as exc:
                 log.exception(
                     "failed to load latest dataset iteration",
-                    dataset_id=str(latest_iteration.dataset_id),
+                    dataset_id=str(latest_iteration),
                     error=safe_err(exc),
                 )
                 return self._build_state(
@@ -237,18 +249,14 @@ class DatasetNode(Node):
                 strict=True,
             )
             current_summary_json = self._profiling_tool.dataset_summary_to_json(current_summary)
-            dataset_iterations.append(
-                DatasetIterationModel(
-                    dataset_id=DatasetState.INIT_DATA_ID,
-                )
-            )
+            dataset_iterations.append(DatasetState.INIT_DATA_ID)
             latest_summary = current_summary
             loaded_this_turn = True
 
         persisted_latest_summary = current_summary
 
-        protocol_discussion = readonly_orchestrator_state.get("protocol_discussion")
-        if protocol_discussion is not None:
+
+        if protocol_discussion is not None and data_set_clean is False and data_set_frozen is not True:
             try:
                 cleaning_instructions = self._build_protocol_cleaning_instructions(
                     protocol_discussion=protocol_discussion,
@@ -271,7 +279,7 @@ class DatasetNode(Node):
                     overwrite=True,
                     include_index=False,
                 )
-                dataset_iterations.append(DatasetIterationModel(dataset_id=new_dataset_id))
+                dataset_iterations.append(new_dataset_id)
                 persisted_latest_summary = self._profiling_tool.extract_dataset_summary(
                     working_df,
                     max_categories=200,
@@ -375,6 +383,17 @@ class DatasetNode(Node):
         working_df = current_df
         working_summary = current_summary
         working_summary_json = current_summary_json
+        
+        if data_set_frozen and intent.intent_manupulation_question and intent.intent_manupulation_is_analytical_query is not True:
+            return self._build_state(
+                dataset_iterations=dataset_iterations,
+                latest_summary=persisted_latest_summary,
+                user_message=(
+                    "The working dataset is currently frozen. I cannot apply that transformation right now. "
+                    "You can still ask questions about the data or request charts, but I won't be able to apply any transformations until the freeze is lifted. "
+                ),
+            )
+            
 
         if intent.intent_manupulation_question:
             try:
@@ -464,13 +483,13 @@ class DatasetNode(Node):
         self,
         *,
         user_message: str,
-        dataset_iterations: Sequence[DatasetIterationModel] | None = None,
+        dataset_iterations: Sequence[UUID] | None = None,
         latest_summary: DatasetSummaryModel | None = None,
         response_message_artifact_refs: Sequence[ArtifactRef] | None = None,
         awaiting_user_input: bool = True,
     ) -> DatasetState:
         normalized_iterations = [
-            iteration.model_copy(deep=True) for iteration in (dataset_iterations or [])
+            iteration for iteration in (dataset_iterations or [])
         ]
         state = DatasetState(
             DatasetPayloadModel(
@@ -479,7 +498,6 @@ class DatasetNode(Node):
                     latest_summary.model_copy(deep=True) if latest_summary is not None else None
                 ),
                 user_message=user_message,
-                awaiting_user_input=awaiting_user_input,
             ),
             response_message_artifact_refs=list(response_message_artifact_refs or []),
         )
@@ -490,7 +508,7 @@ class DatasetNode(Node):
         *,
         user_id: UUID,
         conversation_id: UUID,
-        dataset_iterations: list[DatasetIterationModel],
+        dataset_iterations: list[UUID],
         current_latest_summary: DatasetSummaryModel | None,
     ) -> DatasetState:
         if not dataset_iterations:
@@ -507,7 +525,7 @@ class DatasetNode(Node):
         reverted_summary = self._load_latest_summary(
             user_id=user_id,
             conversation_id=conversation_id,
-            dataset_id=reverted_iterations[-1].dataset_id,
+            dataset_id=reverted_iterations[-1],
         )
         return self._build_state(
             dataset_iterations=reverted_iterations,
@@ -684,7 +702,7 @@ class DatasetNode(Node):
         *,
         user_id: UUID,
         conversation_id: UUID,
-        dataset_iterations: list[DatasetIterationModel],
+        dataset_iterations: list[UUID],
         dataframe: pd.DataFrame,
         summary_model: DatasetSummaryModel,
         summary_json: str,
@@ -695,7 +713,7 @@ class DatasetNode(Node):
     ) -> tuple[
         JSONDict,
         list[ArtifactRef],
-        list[DatasetIterationModel],
+        list[UUID],
         pd.DataFrame,
         DatasetSummaryModel,
         str,
@@ -770,11 +788,7 @@ class DatasetNode(Node):
             compute_quantiles=False,
             strict=True,
         )
-        dataset_iterations.append(
-            DatasetIterationModel(
-                dataset_id=new_dataset_id,
-            )
-        )
+        dataset_iterations.append(new_dataset_id)
         new_summary_json = profiling_tool.dataset_summary_to_json(new_summary)
         return (
             {

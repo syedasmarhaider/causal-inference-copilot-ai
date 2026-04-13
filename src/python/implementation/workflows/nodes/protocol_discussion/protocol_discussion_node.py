@@ -138,8 +138,7 @@ class ProtocolDiscussionNode(Node):
                     "system_message": None,
                 }
             )
-        elif payload.dataset_summary is None:
-            updates["dataset_summary"] = deps.dataset_summary
+            
         return payload.model_copy(update=updates)
 
     def _call_update(

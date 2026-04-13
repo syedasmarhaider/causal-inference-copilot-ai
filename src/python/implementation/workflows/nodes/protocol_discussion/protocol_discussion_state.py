@@ -11,9 +11,7 @@ from python.domain.workflows.state import Action, State, Status
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
     initial_user_message,
 )
-from python.implementation.workflows.tools.common.model.data_summary import (
-    DatasetSummaryModel,
-)
+
 from python.implementation.workflows.utils.utils import uuid_from_any
 
 ProtocolDiscussionPhase = Literal["DISCUSSING", "REVIEW_READY", "CONFIRMED"]
@@ -23,7 +21,6 @@ class ProtocolDiscussionPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     dataset_id: UUID | None = None
-    dataset_summary: DatasetSummaryModel | None = None
     discussion: str = ""
     phase: ProtocolDiscussionPhase = "DISCUSSING"
     pending_dataset_change_request: str | None = None
