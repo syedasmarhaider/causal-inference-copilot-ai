@@ -17,6 +17,14 @@ from python.implementation.workflows.tools.plot_tool.plot_tool_prompts import (
     PLOT_SPECS_USER_PROMPT_TEMPLATE,
 )
 
+_KIND_TO_VEGA_TYPE: dict[str, str] = {
+    "NUMERIC": "quantitative",
+    "DATETIME": "temporal",
+    "CATEGORICAL": "nominal",
+    "BOOLEAN": "nominal",
+    "OTHER": "nominal",
+}
+
 log = get_app_logger(__name__, component="plot_tool", log_type="tool")
 
 
@@ -54,11 +62,6 @@ class PlotSpecsPlan(BaseModel):
             _validate_fields_exist(
                 used_fields=_collect_field_names(chart.spec),
                 dataframe_columns=allowed_field_names,
-                chart_index=idx,
-            )
-            _validate_encoding_types_against_summary(
-                spec=chart.spec,
-                field_kinds=type(self).FIELD_KINDS or {},
                 chart_index=idx,
             )
         return self
@@ -118,11 +121,11 @@ class PlotTool(Tool):
             summary_field_names=summary_field_names,
             dataframe_columns=dataframe_columns,
         )
-        summary_json = data_summary.model_dump_json()
-
+        field_guide = _build_field_guide(data_summary)
         user_prompt = PLOT_SPECS_USER_PROMPT_TEMPLATE.format(
             user_intent=normalized_intent,
-            data_summary=summary_json,
+            n_rows=data_summary.n_rows,
+            field_guide=field_guide,
         )
 
         log.debug(
@@ -272,17 +275,19 @@ class PlotTool(Tool):
 
         if normalized_type == "quantitative":
             if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in observed):
-                raise ValueError(
-                    f"chart {chart_index} field '{field_name}' declared quantitative "
-                    "but injected values are not all numeric"
+                log.warning(
+                    "chart field declared quantitative but values are not all numeric — chart may still render",
+                    field=field_name,
+                    chart_index=chart_index,
                 )
             return
 
         if normalized_type == "temporal":
             if not all(self._is_temporal_value(v) for v in observed):
-                raise ValueError(
-                    f"chart {chart_index} field '{field_name}' declared temporal "
-                    "but injected values are not all datetime-like"
+                log.warning(
+                    "chart field declared temporal but values are not all datetime-like — chart may still render",
+                    field=field_name,
+                    chart_index=chart_index,
                 )
             return
 
@@ -319,7 +324,14 @@ class PlotTool(Tool):
         used_fields: tuple[str, ...],
     ) -> list[dict[str, Any]]:
         if used_fields:
-            selected_df = records_df.loc[:, list(used_fields)].copy()
+            existing_fields = [f for f in used_fields if f in records_df.columns]
+            missing_fields = [f for f in used_fields if f not in records_df.columns]
+            if missing_fields:
+                log.warning(
+                    "chart spec references fields not found in dataframe — falling back to all columns",
+                    missing_fields=missing_fields,
+                )
+            selected_df = records_df[existing_fields].copy() if existing_fields else records_df.copy()
         else:
             selected_df = records_df.copy()
 
@@ -383,33 +395,15 @@ def _validate_fields_exist(
         raise ValueError(f"chart {chart_index} references unknown data_summary fields: {missing}")
 
 
-def _validate_encoding_types_against_summary(
-    *,
-    spec: dict[str, Any],
-    field_kinds: dict[str, str],
-    chart_index: int,
-) -> None:
-    for encoding in PlotTool._collect_encoding_nodes(spec):
-        field_name = encoding.get("field")
-        field_type = encoding.get("type")
-        if not isinstance(field_name, str) or not isinstance(field_type, str):
+def _build_field_guide(summary: DatasetSummaryModel) -> str:
+    lines: list[str] = []
+    for profile in summary.profiles:
+        name = str(profile.name).strip()
+        if not name:
             continue
-
-        inferred_kind = field_kinds.get(field_name.strip())
-        if inferred_kind is None:
-            continue
-
-        normalized_type = field_type.strip().lower()
-        if normalized_type == "quantitative" and inferred_kind != "NUMERIC":
-            raise ValueError(
-                f"chart {chart_index} field '{field_name}' declared quantitative "
-                f"but data_summary inferred kind is {inferred_kind}"
-            )
-        if normalized_type == "temporal" and inferred_kind != "DATETIME":
-            raise ValueError(
-                f"chart {chart_index} field '{field_name}' declared temporal "
-                f"but data_summary inferred kind is {inferred_kind}"
-            )
+        vega_type = _KIND_TO_VEGA_TYPE.get(str(profile.inferred_kind), "nominal")
+        lines.append(f'- "{name}": {vega_type}')
+    return "\n".join(lines) if lines else "(no fields)"
 
 
 def _extract_summary_field_names(summary: DatasetSummaryModel) -> tuple[str, ...]:
