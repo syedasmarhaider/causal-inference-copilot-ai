@@ -67,8 +67,13 @@ def _resolve_provider(provider: ProviderSetting) -> Provider:
     if _has_any_env_value("GOOGLE_API_KEY", "GEMINI_API_KEY"):
         return "gemini"
 
-    if _has_any_env_value("VERTEX_AI_API_KEY"):
-        return "vertex_api"
+    if _has_any_env_value(
+        "VERTEXAI_PROJECT",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_PROJECT_ID",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    ):
+        return "vertex_ai"
 
     return "gemini"
 
@@ -77,7 +82,7 @@ def _normalize_provider(provider: str) -> Provider:
     if provider == "gemini":
         return "gemini"
     if provider in {"vertex_api", "vertex_ai"}:
-        return "vertex_api"
+        return "vertex_ai"
     raise ValueError(
         "Unsupported provider. Expected one of: auto, gemini, vertex_api, vertex_ai."
     )

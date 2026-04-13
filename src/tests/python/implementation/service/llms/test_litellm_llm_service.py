@@ -147,8 +147,8 @@ def test_generate_builds_messages_and_uses_gemini_kwargs(
     ]
 
 
-def test_generate_builds_vertex_api_key_route(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VERTEX_AI_API_KEY", "vertex-key")
+def test_generate_builds_vertex_ai_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VERTEXAI_PROJECT", "project-x")
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT_ID", "project-x")
     monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
     stub = _CompletionStub(
@@ -156,7 +156,7 @@ def test_generate_builds_vertex_api_key_route(monkeypatch: pytest.MonkeyPatch) -
     )
     service = _build_service(
         stub,
-        provider="vertex_api",
+        provider="vertex_ai",
         model_names={
             "mini": "gemini/fake-mini",
             "basic": "gemini/fake-basic",
@@ -174,14 +174,9 @@ def test_generate_builds_vertex_api_key_route(monkeypatch: pytest.MonkeyPatch) -
 
     assert response.content == "vertex-ok"
     kwargs = stub.calls[0]
-    assert kwargs["model"] == "fake-basic"
-    assert kwargs["custom_llm_provider"] == "gemini"
-    assert kwargs["api_key"] == "vertex-key"
-    assert kwargs["gemini_api_key"] == "vertex-key"
-    assert (
-        kwargs["api_base"]
-        == "https://us-central1-aiplatform.googleapis.com/v1/projects/project-x/locations/us-central1/publishers/google"
-    )
+    assert kwargs["model"] == "vertex_ai/fake-basic"
+    assert kwargs["vertex_project"] == "project-x"
+    assert kwargs["vertex_location"] == "us-central1"
 
 
 def test_generate_handles_non_choice_return_shape(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -291,15 +286,14 @@ def test_generate_json_raises_after_max_attempts(monkeypatch: pytest.MonkeyPatch
         )
 
 
-def test_vertex_api_requires_project(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VERTEX_AI_API_KEY", "vertex-key")
+def test_vertex_ai_requires_project(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VERTEXAI_PROJECT", raising=False)
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT_ID", raising=False)
     stub = _CompletionStub(
         responses=[_Response(choices=[_Choice(message=_Message(content="unused"))])]
     )
-    service = _build_service(stub, provider="vertex_api")
+    service = _build_service(stub, provider="vertex_ai")
 
     with pytest.raises(ValueError, match="Missing Vertex project"):
         service.generate(
@@ -339,7 +333,7 @@ def test_factory_prefers_gemini_keys_over_vertex_in_auto_mode(
 ) -> None:
     monkeypatch.delenv("LITELLM_PROVIDER", raising=False)
     monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
-    monkeypatch.setenv("VERTEX_AI_API_KEY", "vertex-key")
+    monkeypatch.setenv("VERTEXAI_PROJECT", "vertex-project")
     monkeypatch.setattr(
         LiteLLMService,
         "_load_completion_fn",
@@ -353,11 +347,11 @@ def test_factory_prefers_gemini_keys_over_vertex_in_auto_mode(
     service.close()
 
 
-def test_factory_auto_detects_vertex_api_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_factory_auto_detects_vertex_ai_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LITELLM_PROVIDER", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.setenv("VERTEX_AI_API_KEY", "vertex-key")
+    monkeypatch.setenv("VERTEXAI_PROJECT", "vertex-project")
     monkeypatch.setattr(
         LiteLLMService,
         "_load_completion_fn",
@@ -367,12 +361,12 @@ def test_factory_auto_detects_vertex_api_provider(monkeypatch: pytest.MonkeyPatc
     service = make_llm_service(LLMServiceSettings())
 
     assert isinstance(service, LiteLLMService)
-    assert service._provider == "vertex_api"  # noqa: SLF001
+    assert service._provider == "vertex_ai"  # noqa: SLF001
     service.close()
 
 
-def test_factory_maps_legacy_vertex_ai_provider_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LITELLM_PROVIDER", "vertex_ai")
+def test_factory_maps_legacy_vertex_api_provider_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LITELLM_PROVIDER", "vertex_api")
     monkeypatch.setattr(
         LiteLLMService,
         "_load_completion_fn",
@@ -382,7 +376,7 @@ def test_factory_maps_legacy_vertex_ai_provider_name(monkeypatch: pytest.MonkeyP
     service = make_llm_service(LLMServiceSettings())
 
     assert isinstance(service, LiteLLMService)
-    assert service._provider == "vertex_api"  # noqa: SLF001
+    assert service._provider == "vertex_ai"  # noqa: SLF001
     service.close()
 
 
@@ -424,11 +418,9 @@ def test_generate_with_live_gemini_key() -> None:
 
 
 @pytest.mark.integration
-def test_generate_json_with_live_vertex_api_key() -> None:
+def test_generate_json_with_live_vertex_ai() -> None:
     if not _env_truthy("RUN_LIVE_LLM_TESTS"):
         pytest.skip("Set RUN_LIVE_LLM_TESTS=true to enable live LLM tests")
-    if not os.environ.get("VERTEX_AI_API_KEY", "").strip():
-        pytest.skip("No Vertex API key configured")
     if not any(
         os.environ.get(key, "").strip()
         for key in ("VERTEXAI_PROJECT", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID")
@@ -436,7 +428,7 @@ def test_generate_json_with_live_vertex_api_key() -> None:
         pytest.skip("No Vertex project configured")
 
     service = LiteLLMService(
-        provider="vertex_api",
+        provider="vertex_ai",
         model_names={
             "mini": "gemini-3.1-flash-lite-preview",
             "basic": "gemini-3-flash-preview",
@@ -458,7 +450,7 @@ def test_generate_json_with_live_vertex_api_key() -> None:
                 "Return valid JSON only. The answer field must contain the lowercase word pong. "
                 "The provider field must echo the provider name you were asked to return."
             ),
-            user_prompt='Return JSON with {"answer":"pong","provider":"vertex_api"} and nothing else.',
+            user_prompt='Return JSON with {"answer":"pong","provider":"vertex_ai"} and nothing else.',
             config=LLMConfig(model="mini", temperature=0.0, top_p=1.0, max_tokens=64),
             history=None,
             max_attempts=2,
@@ -467,4 +459,4 @@ def test_generate_json_with_live_vertex_api_key() -> None:
         service.close()
 
     assert response.answer == "pong"
-    assert response.provider == "vertex_api"
+    assert response.provider == "vertex_ai"

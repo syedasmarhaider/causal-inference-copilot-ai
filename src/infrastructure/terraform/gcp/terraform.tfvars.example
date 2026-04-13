@@ -14,6 +14,13 @@ container_image = "europe-west3-docker.pkg.dev/your-gcp-project-dev/causal-dev-i
 firebase_database_region = "europe-west1"
 firebase_database_type   = "DEFAULT_DATABASE"
 
+vertex_ai_project_id = "your-gcp-project-dev"
+vertex_ai_location   = "us-central1"
+vertex_runtime_custom_role_id = "cloudRunVertexCaller"
+vertex_runtime_custom_role_permissions = [
+  "aiplatform.endpoints.predict",
+]
+
 cloud_run_cpu             = "1"
 cloud_run_memory          = "2Gi"
 cloud_run_concurrency     = 10
@@ -38,17 +45,19 @@ extra_plain_env_vars = {
   APP_ENV = "dev"
 }
 
+# Vertex auth uses the attached Cloud Run service account via ADC.
 # Existing Secret Manager secrets only. Terraform will not create them here.
 secret_env_vars = {
-  GEMINI_API_KEY = {
-    secret_id = "gemini-api-key"
-    version   = "latest"
-  }
   LANGFUSE_SECRET_KEY = {
     secret_id = "langfuse-secret-key"
     version   = "latest"
   }
 }
+
+# Principals allowed to deploy Cloud Run with this runtime identity.
+runtime_service_account_user_members = [
+  "serviceAccount:terraform-deployer@your-gcp-project-dev.iam.gserviceaccount.com",
+]
 
 runtime_extra_project_roles = [
   "roles/firebaseauth.viewer",

@@ -111,6 +111,38 @@ variable "firebase_database_instance_id" {
   default     = null
 }
 
+variable "vertex_ai_project_id" {
+  description = "Vertex AI project ID used by the runtime. Defaults to var.project_id when null."
+  type        = string
+  default     = null
+}
+
+variable "vertex_ai_location" {
+  description = "Vertex AI location used by the runtime. Defaults to var.region when null."
+  type        = string
+  default     = null
+}
+
+variable "vertex_runtime_custom_role_id" {
+  description = "Project-level custom IAM role ID granted to the Cloud Run runtime for Vertex access."
+  type        = string
+  default     = "cloudRunVertexCaller"
+}
+
+variable "vertex_runtime_custom_role_title" {
+  description = "Human-readable title for the runtime Vertex custom role."
+  type        = string
+  default     = "Cloud Run Vertex Caller"
+}
+
+variable "vertex_runtime_custom_role_permissions" {
+  description = "Least-privilege Vertex permissions granted to the Cloud Run runtime. For prompt generation, Google documents aiplatform.endpoints.predict as the required permission."
+  type        = set(string)
+  default = [
+    "aiplatform.endpoints.predict",
+  ]
+}
+
 variable "runtime_extra_project_roles" {
   description = "Extra project-level roles for the runtime service account."
   type        = list(string)
@@ -119,10 +151,16 @@ variable "runtime_extra_project_roles" {
   ]
 }
 
+variable "runtime_service_account_user_members" {
+  description = "Principals allowed to attach and use the runtime service account for deployments, for example CI/CD deployer identities."
+  type        = set(string)
+  default     = []
+}
+
 variable "runtime_bucket_role" {
   description = "Bucket-level IAM role granted to the runtime service account on both buckets."
   type        = string
-  default     = "roles/storage.admin"
+  default     = "roles/storage.objectAdmin"
 }
 
 variable "cloud_run_cpu" {

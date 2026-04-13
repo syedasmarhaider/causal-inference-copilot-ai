@@ -21,7 +21,7 @@ from python.domain.service.llm_service import (
     ToolCall,
 )
 
-Provider = Literal["gemini", "vertex_api"]
+Provider = Literal["gemini", "vertex_ai"]
 CompletionFn = Callable[..., Any]
 T = TypeVar("T", bound=BaseModel)
 F = TypeVar("F", bound=Callable[..., Any])
@@ -248,15 +248,10 @@ class LiteLLMService(LLMService):
                 "api_key": self._require_gemini_api_key(),
             }
 
-        project = self._require_vertex_project()
-        location = self._resolve_vertex_location()
-        api_key = self._require_vertex_api_key()
         return {
             "model": self._normalize_vertex_model_name(model_name),
-            "custom_llm_provider": "gemini",
-            "api_base": self._build_vertex_api_base(project=project, location=location),
-            "api_key": api_key,
-            "gemini_api_key": api_key,
+            "vertex_project": self._require_vertex_project(),
+            "vertex_location": self._resolve_vertex_location(),
         }
 
     @staticmethod
@@ -272,7 +267,7 @@ class LiteLLMService(LLMService):
         for prefix in prefixes:
             if normalized.startswith(prefix):
                 normalized = normalized[len(prefix) :]
-        return normalized
+        return f"vertex_ai/{normalized}"
 
     @staticmethod
     def _require_gemini_api_key() -> str:
@@ -281,13 +276,6 @@ class LiteLLMService(LLMService):
             if value:
                 return value
         raise ValueError("Missing Gemini API key. Set GOOGLE_API_KEY or GEMINI_API_KEY.")
-
-    @staticmethod
-    def _require_vertex_api_key() -> str:
-        api_key = os.environ.get("VERTEX_AI_API_KEY", "").strip()
-        if not api_key:
-            raise ValueError("Missing Vertex API key. Set VERTEX_AI_API_KEY.")
-        return api_key
 
     @staticmethod
     def _require_vertex_project() -> str:
@@ -307,15 +295,6 @@ class LiteLLMService(LLMService):
             if value:
                 return value
         return _DEFAULT_VERTEX_LOCATION
-
-    @staticmethod
-    def _build_vertex_api_base(*, project: str, location: str) -> str:
-        host = "aiplatform.googleapis.com"
-        if location != _DEFAULT_VERTEX_LOCATION:
-            host = f"{location}-aiplatform.googleapis.com"
-        return (
-            f"https://{host}/v1/projects/{project}/locations/{location}/publishers/google"
-        )
 
     @staticmethod
     def _build_messages(
