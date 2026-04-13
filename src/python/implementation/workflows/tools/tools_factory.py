@@ -26,6 +26,9 @@ from python.implementation.workflows.tools.data_manupulation_tool.data_manipulat
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
 )
+from python.implementation.workflows.tools.advanced_analytics.advanced_analytics_tool import (
+    AdvancedAnalyticsTool,
+)
 from python.implementation.workflows.tools.plot_tool.plot_tool import PlotTool
 
 
@@ -46,6 +49,7 @@ class DefaultToolFactory(ToolFactory):
                 analytics_repo=analytics_repo,
             ),
             PlotTool.NAME: PlotTool(llm=llm_service),
+            AdvancedAnalyticsTool.NAME: AdvancedAnalyticsTool(llm=llm_service),
             CausalSpecsTool.NAME: CausalSpecsTool(),
             EncodingPlanTool.NAME: EncodingPlanTool(),
             ValidationBackdoorTool.NAME: ValidationBackdoorTool(),
