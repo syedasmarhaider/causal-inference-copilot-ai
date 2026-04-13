@@ -157,10 +157,17 @@ class Ochestrator:
             node_name=needed_node_name,
         )
 
-        # If the stored active node is stale, move to the canonical needed node.
         if current_state.status() == "DONE":
-            self._log.exception("Active node cannot be DONE when needed by the ochestrator is called", active_node_name=needed_node_name, needed_node_name=needed_node_name)
-            raise ValueError("Active node cannot be DONE when needed by the ochestrator is called")
+            self._log.warning(
+                "Resetting stale DONE state before rerun",
+                state_name=current_state.name(),
+                needed_node_name=needed_node_name,
+            )
+            current_state.set_status_pending()
+            if current_state.status() == "DONE":
+                raise ValueError(
+                    f"State {current_state.name()!r} remained DONE after stale-state reset"
+                )
 
         match current_state.status():
             case "PENDING":

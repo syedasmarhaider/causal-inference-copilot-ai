@@ -19,10 +19,10 @@ duckdb==1.4.4
 joblib==1.5.3
 
 # LLM stack
-langchain-core==1.2.13
-langchain-google-genai==4.2.0
+litellm
 langfuse==3.14.5
 
 # Cloud services
 firebase-admin==7.2.0
+google-cloud-aiplatform==1.147.0
 google-cloud-storage==3.9.0

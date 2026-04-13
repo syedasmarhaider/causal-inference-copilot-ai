@@ -105,8 +105,11 @@ class CompileAndValidateNode(Node):
             )
 
         deps = CompileAndValidateDeps.from_loaded(readonly_orchestrator_state)
+        payload = self._bind_payload_to_dataset(
+            payload=state.payload.model_copy(deep=True),
+            dataset_id=deps.dataset_id,
+        )
         latest_user_message = _latest_user_message(messages_history)
-        payload = state.payload.model_copy(deep=True)
 
         if payload.phase == "REVIEW_READY":
             return self._handle_review_response(
@@ -125,6 +128,21 @@ class CompileAndValidateNode(Node):
             protocol_discussion=deps.protocol_discussion,
             messages_history=messages_history,
         )
+
+    @staticmethod
+    def _bind_payload_to_dataset(
+        *,
+        payload: CompileAndValidatePayloadModel,
+        dataset_id: UUID,
+    ) -> CompileAndValidatePayloadModel:
+        if payload.dataset_id == dataset_id:
+            return payload
+
+        if payload.dataset_id is None and payload.phase == "INIT":
+            return payload.bind_dataset(dataset_id)
+
+        return payload.reset_for_recompile(dataset_id=dataset_id)
+
     def _compile_and_validate(
         self,
         *,

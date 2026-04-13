@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Any, ClassVar, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
@@ -14,12 +15,15 @@ from python.implementation.workflows.tools.causal.common.inference_ready_causal_
 )
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.utils.utils import uuid_from_any
 
 CompileAndValidatePhase = Literal["INIT", "REVIEW_READY", "CONFIRMED", "FAILED"]
 
 
 class CompileAndValidatePayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    dataset_id: UUID | None = None
     compiled_causal_spec: CausalSpec | None = None
     transformation_plan: TransformPlan | None = None
     inference_ready_causal_spec: InferenceReadyCausalSpec | None = None
@@ -28,6 +32,22 @@ class CompileAndValidatePayloadModel(BaseModel):
     assistant_message: str | None = None
     system_message: str | None = None
     error_message: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_dataset_id(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+
+        normalized = dict(value)
+        if "dataset_id" not in normalized and "data_set_id" in normalized:
+            normalized["dataset_id"] = normalized.pop("data_set_id")
+        return normalized
+
+    @field_validator("dataset_id", mode="before")
+    @classmethod
+    def _parse_dataset_id(cls, value: Any) -> UUID | None:
+        return uuid_from_any(value)
 
     @field_validator(
         "assistant_message",
@@ -42,6 +62,24 @@ class CompileAndValidatePayloadModel(BaseModel):
         if isinstance(value, str):
             return value.strip()
         raise TypeError("text fields must be str|null")
+
+    def bind_dataset(self, dataset_id: UUID) -> CompileAndValidatePayloadModel:
+        return self.model_copy(update={"dataset_id": dataset_id})
+
+    def reset_for_recompile(self, *, dataset_id: UUID | None) -> CompileAndValidatePayloadModel:
+        return self.model_copy(
+            update={
+                "dataset_id": dataset_id,
+                "compiled_causal_spec": None,
+                "transformation_plan": None,
+                "inference_ready_causal_spec": None,
+                "validation_issues": [],
+                "phase": "INIT",
+                "assistant_message": None,
+                "system_message": None,
+                "error_message": None,
+            }
+        )
 
 
 class CompileAndValidateState(State):
@@ -67,8 +105,8 @@ class CompileAndValidateState(State):
 
     def set_status_pending(self) -> None:
         if self.payload.phase in ("CONFIRMED", "FAILED"):
-            self.payload.phase = "INIT"
-            self.payload.error_message = None
+            dataset_id = self.payload.dataset_id
+            self.payload = self.payload.reset_for_recompile(dataset_id=dataset_id)
 
     def messages(self) -> Sequence[ChatMessage]:
         messages: list[ChatMessage] = []
