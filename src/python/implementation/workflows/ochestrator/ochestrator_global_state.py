@@ -368,7 +368,7 @@ class OchestratorWritableGlobalState(
             return DatasetNode.NAME
 
         if not self._model.working_dataset_frozen:
-            return DatasetNode.NAME
+            return CompileAndValidateNode.NAME
 
         if self._model.causal_spec is None:
             return CompileAndValidateNode.NAME
@@ -526,25 +526,18 @@ class OchestratorWritableGlobalState(
                     )
 
                 protocol_discussed = self._has_protocol_discussion()
-                data_cleaned = self.get("data_cleaned") is True
                 data_frozen = self.get("working_dataset_frozen") is True
                 
                 if data_frozen:
                     return
 
-                if data_cleaned and protocol_discussed:
+                if protocol_discussed:
                     self.set_working_dataset(
                         dataset_id=latest_iteration_dataset_id,
                         summary=latest_iteration_dataset_summary,
                         preserve_protocol_discussion=True,
                     )
-                    
-                if protocol_discussed and not data_cleaned:
-                    self.set_working_dataset(
-                        latest_iteration_dataset_id,
-                        latest_iteration_dataset_summary,
-                        preserve_protocol_discussion=True,
-                    )
+                    self.mark_data_cleaned()
                 else:
                     self.set_working_dataset(
                         dataset_id=latest_iteration_dataset_id,
@@ -566,12 +559,13 @@ class OchestratorWritableGlobalState(
                     raise ValueError(
                         "Inference ready causal spec must be set when compile-and-validate is DONE"
                     )
-
+                    
                 self.set_causal_configuration(
                     causal_spec=inference_ready_spec.causal_spec,
                     data_transformation_plan=inference_ready_spec.transformation_plan,
                     validation_issues=compile_and_validate_state.payload.validation_issues,
                 )
+                self.freeze_working_dataset()
 
             case ModelSelectionState() as model_selection_state:
                 confirmed = model_selection_state.payload.confirmed_model_selection
