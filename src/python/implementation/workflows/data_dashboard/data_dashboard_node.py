@@ -19,7 +19,7 @@ from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
 from python.domain.workflows.state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_app_logger
-from python.implementation.workflows.nodes.data_dashboard.data_dashboard_prompts import (
+from python.implementation.workflows.data_dashboard.data_dashboard_prompts import (
     ANALYTICS_INTERPRETATION_SYSTEM_PROMPT,
     FINAL_RESPONSE_SYSTEM_PROMPT,
     INTENT_CLASSIFICATION_SYSTEM_PROMPT,
@@ -27,7 +27,7 @@ from python.implementation.workflows.nodes.data_dashboard.data_dashboard_prompts
     SUMMARY_ANSWER_SYSTEM_PROMPT,
     prev_state_revert_message,
 )
-from python.implementation.workflows.nodes.data_dashboard.data_dashboard_state import (
+from python.implementation.workflows.data_dashboard.data_dashboard_state import (
     DataDashboardPayloadModel,
     DataDashboardState,
 )
