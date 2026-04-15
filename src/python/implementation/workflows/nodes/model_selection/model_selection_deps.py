@@ -1,34 +1,110 @@
 from __future__ import annotations
 
-from dataclasses import field, dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, cast
+from uuid import UUID
 
-from python.domain.models.errors import StateDependencyError
-from python.domain.models.validation import ValidationIssueModel
-from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
+from python.domain.models.validation import ValidationIssueModel, ValidationStatus
+from python.domain.workflows.node import NodeRequest
+from python.implementation.workflows.nodes.data_compilation.data_compilation_state import (
+    DataCompilationState,
+)
+from python.implementation.workflows.nodes.data_validation.data_validation_state import (
+    DataValidationState,
+)
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.common.model.data_summary import (
+    DatasetSummaryModel,
+)
 
-@dataclass(frozen=True, slots=True)
+
+@dataclass(frozen=True)
 class ModelSelectionDeps:
-    causal_spec: CausalSpec
-    data_transformation_plan: TransformPlan
-    validation_issues: list[ValidationIssueModel] = field(default_factory=list)
+    dataset_id: UUID | None
+    dataset_summary: DatasetSummaryModel | None
+    causal_spec: CausalSpec | None
+    transformation_plan: TransformPlan | None
+    validation_issues: list[ValidationIssueModel]
+    validation_status: ValidationStatus | None
 
     @classmethod
-    def from_loaded(cls, ready_only_ochestration_state: ReadOnlyOchestratorState) -> ModelSelectionDeps:
-        causal_spec = ready_only_ochestration_state.get("causal_spec")
-        data_transformation_plan = ready_only_ochestration_state.get("data_transformation_plan")
-        validation_issues: list[ValidationIssueModel] = ready_only_ochestration_state.get("validation_issues") or []
-        if causal_spec is None or data_transformation_plan is None:
-            raise StateDependencyError(
-                "MODEL_SELECTION",
-                "MODEL_SELECTION",
-                ["COMPILE_AND_VALIDATE"],
+    def from_request(cls, request: NodeRequest) -> ModelSelectionDeps:
+        compilation_raw = request.orchestrator_state.get(DataCompilationState.NAME)
+        validation_raw = request.orchestrator_state.get(DataValidationState.NAME)
+
+        if compilation_raw is not None and not isinstance(compilation_raw, Mapping):
+            raise TypeError(
+                "DATA_COMPILATION payload must be a dict with compiled dataset and setup values"
             )
-        return cls(
-            causal_spec=causal_spec,
-            data_transformation_plan=data_transformation_plan,
-            validation_issues=validation_issues,
+        if validation_raw is not None and not isinstance(validation_raw, Mapping):
+            raise TypeError(
+                "DATA_VALIDATION payload must be a dict with validation results"
+            )
+
+        compilation = cast(Mapping[str, Any] | None, compilation_raw)
+        validation = cast(Mapping[str, Any] | None, validation_raw)
+
+        dataset_id = cast(UUID | None, None if compilation is None else compilation.get("new_dataset_id"))
+
+        dataset_summary_raw = None if compilation is None else compilation.get("new_dataset_summary")
+        if dataset_summary_raw is None:
+            dataset_summary = None
+        elif isinstance(dataset_summary_raw, DatasetSummaryModel):
+            dataset_summary = dataset_summary_raw
+        elif isinstance(dataset_summary_raw, str):
+            dataset_summary = DatasetSummaryModel.model_validate_json(dataset_summary_raw)
+        else:
+            dataset_summary = DatasetSummaryModel.model_validate(dataset_summary_raw)
+
+        causal_spec_raw = None if compilation is None else compilation.get("causal_spec")
+        if causal_spec_raw is None:
+            causal_spec = None
+        elif isinstance(causal_spec_raw, CausalSpec):
+            causal_spec = causal_spec_raw
+        else:
+            causal_spec = CausalSpec.model_validate(causal_spec_raw)
+
+        transformation_plan_raw = (
+            None
+            if compilation is None
+            else compilation.get(
+                "transformation_plan",
+                compilation.get("data_transformation_plan"),
+            )
         )
-        
-      
+        if transformation_plan_raw is None:
+            transformation_plan = None
+        elif isinstance(transformation_plan_raw, TransformPlan):
+            transformation_plan = transformation_plan_raw
+        else:
+            transformation_plan = TransformPlan.model_validate(transformation_plan_raw)
+
+        validation_issues_raw = [] if validation is None else list(validation.get("validation_issues") or [])
+        validation_issues = [
+            issue
+            if isinstance(issue, ValidationIssueModel)
+            else ValidationIssueModel.model_validate(issue)
+            for issue in validation_issues_raw
+        ]
+
+        validation_status_raw = None if validation is None else validation.get("validation_status")
+        if validation_status_raw is None:
+            validation_status = None
+        elif validation_status_raw in {"PASS", "WARN", "FAIL"}:
+            validation_status = cast(ValidationStatus, validation_status_raw)
+        else:
+            raise TypeError("validation_status must be one of PASS, WARN, FAIL, or null")
+
+        return cls(
+            dataset_id=dataset_id,
+            dataset_summary=dataset_summary,
+            causal_spec=causal_spec,
+            transformation_plan=transformation_plan,
+            validation_issues=validation_issues,
+            validation_status=validation_status,
+        )
+
+
+__all__ = ["ModelSelectionDeps"]

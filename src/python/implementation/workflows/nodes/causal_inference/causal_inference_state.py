@@ -1,32 +1,30 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from python.domain.models.errors import NodeExecutionError
-from python.domain.models.models import ArtifactRef, ChatMessage
-from python.domain.workflows.node_state import Action, State, Status
+from python.domain.models.models import ArtifactRef
+from python.domain.workflows.node_state import NodeState
 
 
 class CausalInferencePayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
+    source_signature: str | None = None
     ate_result_raw_json_str: str | None = None
     latest_cate_result_raw_json_str: str | None = None
     latest_cate_request_summary: str | None = None
     assistant_message: str | None = None
-    system_message: str | None = None
     message_artifact_refs: list[ArtifactRef] = Field(default_factory=list)
     error_message: str | None = None
 
     @field_validator(
+        "source_signature",
         "ate_result_raw_json_str",
         "latest_cate_result_raw_json_str",
         "latest_cate_request_summary",
         "assistant_message",
-        "system_message",
         "error_message",
         mode="before",
     )
@@ -35,54 +33,35 @@ class CausalInferencePayloadModel(BaseModel):
         if value is None:
             return None
         if isinstance(value, str):
-            return value.strip()
+            normalized = value.strip()
+            return normalized or None
         raise TypeError("text fields must be str|null")
 
+    def reset_for_signature(self, *, source_signature: str) -> CausalInferencePayloadModel:
+        return self.model_copy(
+            update={
+                "source_signature": source_signature,
+                "ate_result_raw_json_str": None,
+                "latest_cate_result_raw_json_str": None,
+                "latest_cate_request_summary": None,
+                "assistant_message": None,
+                "message_artifact_refs": [],
+                "error_message": None,
+            }
+        )
 
-class CausalInferenceState(State):
+
+class CausalInferenceState(NodeState):
     NAME: ClassVar[str] = "CAUSAL_INFERENCE"
 
-    def __init__(self, payload: CausalInferencePayloadModel) -> None:
-        self.payload = payload
+    def __init__(self, payload: CausalInferencePayloadModel | None = None) -> None:
+        self.payload = payload or CausalInferencePayloadModel()
 
     def name(self) -> str:
         return self.NAME
 
-    def status(self) -> Status:
-        return "PENDING"
-
-    def action(self) -> Action:
-        return "NEEDS_INPUT"
-
-    def set_status_pending(self) -> None:
+    def clear_state(self) -> None:
         self.payload = CausalInferencePayloadModel()
-
-    def messages(self) -> Sequence[ChatMessage]:
-        messages: list[ChatMessage] = []
-        if self.payload.system_message:
-            messages.append(ChatMessage(role="system", content=self.payload.system_message))
-        if self.payload.assistant_message:
-            messages.append(
-                ChatMessage(
-                    role="assistant",
-                    content=self.payload.assistant_message,
-                    artifact_refs=list(self.payload.message_artifact_refs) or None,
-                )
-            )
-        if messages:
-            return messages
-        return [
-            ChatMessage(
-                role="assistant",
-                content=(
-                    "I will now compute and explain the causal effect estimates from the "
-                    "trained model, including subgroup effects when clinically requested."
-                ),
-            )
-        ]
-
-    def error(self) -> NodeExecutionError | None:
-        return None
 
     def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json", exclude_none=True)
@@ -93,4 +72,10 @@ class CausalInferenceState(State):
 
     @classmethod
     def init_empty(cls) -> CausalInferenceState:
-        return cls(CausalInferencePayloadModel())
+        return cls()
+
+
+__all__ = [
+    "CausalInferencePayloadModel",
+    "CausalInferenceState",
+]

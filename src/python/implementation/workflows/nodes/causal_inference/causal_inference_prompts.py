@@ -3,10 +3,9 @@ from __future__ import annotations
 
 def get_causal_inference_node_info() -> str:
     return (
-        "CausalInferenceNode: computes and caches ATE from the trained causal model, "
-        "answers follow-up questions from the cached inference context, computes CATE for "
-        "effect-modifier-defined cohorts, generates causal effect graphs, and hands raw data "
-        "graph requests back to the dataset flow."
+        "Conversational causal inference stage. It computes and caches ATE from the "
+        "trained causal model, answers follow-up questions from cached inference context, "
+        "computes CATE for effect-modifier-defined cohorts, and generates causal effect graphs."
     )
 
 
@@ -62,7 +61,6 @@ Allowed actions
 - compute_cate
 - generate_ate_graph
 - generate_cate_graph
-- handoff_dataset_graph
 - clarify
 
 Decision rules
@@ -70,14 +68,12 @@ Decision rules
 - Use compute_cate when the user requests a new subgroup effect estimate or subgroup comparison that requires cohort filtering on effect modifiers.
 - Use generate_ate_graph only for effect visualizations of the global ATE.
 - Use generate_cate_graph only for effect visualizations of subgroup/CATE results.
-- Use handoff_dataset_graph for raw data graphs, distributions, histograms, scatterplots, missingness plots, descriptive data charts, or any non-causal data visualization.
-- Use clarify if the request is too vague to safely answer or compute.
+- Use clarify if the request is too vague to safely answer or compute, or if it is a raw descriptive data-chart request that does not belong to causal inference.
 
 Important
 - Raw data charts do NOT belong to this node.
 - CATE cohort definitions may only be based on confirmed effect modifiers.
 - For compute_cate and generate_cate_graph, provide a short cate_request_summary that captures the subgroup intent.
-- For handoff_dataset_graph, provide a short dataset_graph_request describing the desired chart.
 - For answer_from_context and clarify, provide the final assistant_message directly.
 
 Return STRICT JSON only.
