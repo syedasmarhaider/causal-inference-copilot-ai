@@ -77,6 +77,7 @@ Use `make help` to print the full list. Core commands:
 - `make install`: create `.venv` and install `requirements.txt`
 - `make lint`: run Ruff checks
 - `make test`: run pytest (`pytest.ini`)
+- `make test-deepeval`: run opt-in DeepEval prompt evals against the configured LLM provider
 - `make run-api`: start API with auto-reload on `0.0.0.0:8080`
 - `make run-api-local`: start API with env values loaded from `.env`
 - `make run-api-prod`: start API without reload
@@ -106,6 +107,12 @@ Authenticated (`Authorization: Bearer <firebase_id_token>`):
 2. Upload CSV dataset.
 3. Call `invoke` repeatedly until stage completion or user input is requested.
 4. Download artifacts by ID when returned in `artifact_ids`.
+
+## LLM Evals
+
+- DeepEval prompt-eval tests are opt-in and require working LLM credentials plus network access.
+- Run them with `make test-deepeval`.
+- These tests are marked `deepeval` and `integration`, so they do not run in the default `make test` loop.
 
 ## Environment Variables
 

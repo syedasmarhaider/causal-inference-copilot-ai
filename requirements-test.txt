@@ -2,3 +2,4 @@
 
 # Test dependencies
 pytest==9.0.2
+deepeval==3.9.7

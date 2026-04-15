@@ -45,6 +45,7 @@ help:
 	@echo "make format-fix          - black ."
 	@echo "make test                - run test suite"
 	@echo "make test-quick          - run test suite (fast fail)"
+	@echo "make test-deepeval       - run opt-in DeepEval prompt evals"
 	@echo "make run-cli ARGS='...'  - run console copilot CLI (args forwarded)"
 	@echo "make run-api             - run FastAPI (REST + WebSocket) with reload"
 	@echo "make run-api-prod        - run FastAPI (REST + WebSocket) without reload"
@@ -99,6 +100,14 @@ test: test-tools
 .PHONY: test-quick
 test-quick: test-tools
 	@$(PYBIN)/pytest -c pytest.ini --maxfail=1 -q
+
+.PHONY: test-deepeval
+test-deepeval: test-tools
+	@RUN_DEEPEVAL_TESTS=1 \
+	DEEPEVAL_TELEMETRY_OPT_OUT=1 \
+	DEEPEVAL_DISABLE_DOTENV=1 \
+	DEEPEVAL_CACHE_FOLDER=/tmp/.deepeval \
+	$(PYBIN)/pytest -c pytest.ini -q -m deepeval
 
 .PHONY: run-cli
 run-cli: venv
