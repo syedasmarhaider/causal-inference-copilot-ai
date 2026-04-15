@@ -1,105 +1,118 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any
+from typing import Any, ClassVar, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.models.validation import ValidationIssueModel
 from python.domain.workflows.ochestrator_state import OchestratorState
 from python.implementation.service.logging.default_logging import get_logger
-from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
-    CausalInferenceNode,
-)
-from python.implementation.workflows.nodes.causal_inference.causal_inference_state import CausalInferenceState
-from python.implementation.workflows.nodes.model_selection.mode_selection_state import ModelSelectionState
-from python.implementation.workflows.nodes.model_selection.model_selection_node import (
-    ModelSelectionNode,
-)
-from python.implementation.workflows.nodes.model_train.model_train_node import (
-    ModelTrainNode,
-)
-from python.implementation.workflows.nodes.model_train.model_train_state import ModelTrainState
-from python.implementation.workflows.nodes.noop_done.noop_done_state import NoopDoneState
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import (
-    ProtocolDiscussionNode,
-)
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
-from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
-    TransformPlan,
-)
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
-from python.implementation.workflows.tools.common.model.data_summary import (
-    DatasetSummaryModel,
-)
+from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 log = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Node name constants — avoids circular imports with node modules
+# ---------------------------------------------------------------------------
+
+_NODE_DATA_STATISTICS: str = "DATA_STATISTICS"
+_NODE_DATA_MANUPULATION: str = "DATA_MANUPULATION"
+_NODE_PROTOCOL_DISCUSSION: str = "PROTOCOL_DISCUSSION"
+_NODE_DATA_COMPILATION: str = "DATA_COMPILATION"
+_NODE_DATA_VALIDATION: str = "DATA_VALIDATION"
+_NODE_MODEL_SELECTION: str = "MODEL_SELECTION"
+_NODE_MODEL_TRAIN: str = "MODEL_TRAIN"
+_NODE_CAUSAL_INFERENCE: str = "CAUSAL_INFERENCE"
+_NODE_NOOP_DONE: str = "NOOP_DONE"
+
+
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
+
 
 class GlobalStateModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    # stage 1
-    working_dataset_id: UUID | None = None
-    working_dataset_summary: DatasetSummaryModel | None = None
+    # stage 1 — dataset
+    working_dataset_ids: list[UUID] = Field(default_factory=list)
+    latest_dataset_summary: DatasetSummaryModel | None = None
 
-    # stage 2
+    # stage 2 — protocol discussion
     protocol_discussion: str | None = None
 
-    # stage 2.5
+    # stage 3 — data cleaning
     data_cleaned: bool = False
 
-    # stage 3
-    working_dataset_frozen: bool = False
-
-    # stage 4
+    # stage 4 — causal spec + dataset freeze
     causal_spec: CausalSpec | None = None
     data_transformation_plan: TransformPlan | None = None
-    validation_issues: list[ValidationIssueModel] = Field(default_factory=lambda: [])
+    working_dataset_frozen: bool = False
 
-    # stage 5
+    # stage 5 — validation + model selection
+    validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
     selected_model: str | None = None
+    selection_reasoning: str | None = None
 
-    # stage 6
-    model_training_id: UUID | None = None
+    # stage 6 — model training
+    trained_model_id: UUID | None = None
+    training_warnings: list[str] = Field(default_factory=list)
+
+    @field_validator("working_dataset_ids", mode="before")
+    @classmethod
+    def _parse_ids(cls, v: Any) -> list[UUID]:
+        if v is None:
+            return []
+        if isinstance(v, (list, tuple)):
+            return [item if isinstance(item, UUID) else UUID(str(item)) for item in v]
+        raise ValueError(f"working_dataset_ids must be a list, got {type(v).__name__}")
+
+    @field_validator("trained_model_id", mode="before")
+    @classmethod
+    def _parse_trained_model_id(cls, v: Any) -> UUID | None:
+        if v is None:
+            return None
+        return v if isinstance(v, UUID) else UUID(str(v))
 
 
-
-
+# ---------------------------------------------------------------------------
+# Orchestrator state
+# ---------------------------------------------------------------------------
 
 
 class OchestratorWritableGlobalState(OchestratorState):
+    _WORKFLOW_ORDER: ClassVar[list[str]] = [
+        "working_dataset_ids",
+        "latest_dataset_summary",
+        "protocol_discussion",
+        "data_cleaned",
+        "causal_spec",
+        "data_transformation_plan",
+        "working_dataset_frozen",
+        "validation_issues",
+        "selected_model",
+        "selection_reasoning",
+        "trained_model_id",
+        "training_warnings",
+    ]
+
+    _BOOL_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {"data_cleaned", "working_dataset_frozen"}
+    )
+    _LIST_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {"working_dataset_ids", "validation_issues", "training_warnings"}
+    )
 
     def __init__(self, model: GlobalStateModel) -> None:
-        super().__init__(model)
         self._model = model
 
-    @classmethod
-    def init_empty(cls) -> OchestratorWritableGlobalState:
-        return cls(GlobalStateModel())
-    
-    
-    def get(self, key: str) -> Any | None:
-        if key not in GlobalStateModel.model_fields:
-            raise KeyError(f"unknown global state key: {key}")
-        return deepcopy(getattr(self._model, key))
-    
-    
-    def set(self, key: str, value: Any) -> None:
-        
-
-    @classmethod
-    def from_json_dict(cls, payload: dict[str, Any]) -> OchestratorWritableGlobalState:
-        normalized_payload = dict(payload)
-        legacy_data_cleaning_pending = normalized_payload.pop(
-            "dataset_cleaning_pending",
-            None,
-        )
-        if "data_cleaned" not in normalized_payload and legacy_data_cleaning_pending is not None:
-            normalized_payload["data_cleaned"] = not bool(legacy_data_cleaning_pending)
-
-        model = GlobalStateModel.model_validate(normalized_payload)
-        return cls(model)
+    # -------------------------------------------------------------------------
+    # OchestratorState ABC
+    # -------------------------------------------------------------------------
 
     def name(self) -> str:
         return "OCHESTRATOR_STATE"
@@ -107,471 +120,388 @@ class OchestratorWritableGlobalState(OchestratorState):
     def to_json_dict(self) -> dict[str, Any]:
         return self._model.model_dump(mode="json")
 
+    @classmethod
+    def from_json_dict(cls, payload: dict[str, Any]) -> OchestratorWritableGlobalState:
+        normalized = dict(payload)
+        # migrate legacy field name
+        if "working_dataset_id" in normalized and "working_dataset_ids" not in normalized:
+            old = normalized.pop("working_dataset_id")
+            normalized["working_dataset_ids"] = [old] if old is not None else []
+        # migrate legacy summary field name
+        if "working_dataset_summary" in normalized and "latest_dataset_summary" not in normalized:
+            normalized["latest_dataset_summary"] = normalized.pop("working_dataset_summary")
+        # migrate legacy training_id field
+        if "model_training_id" in normalized and "trained_model_id" not in normalized:
+            normalized["trained_model_id"] = normalized.pop("model_training_id")
+        # migrate legacy data_cleaning_pending flag
+        legacy_pending = normalized.pop("dataset_cleaning_pending", None)
+        if "data_cleaned" not in normalized and legacy_pending is not None:
+            normalized["data_cleaned"] = not bool(legacy_pending)
+        return cls(GlobalStateModel.model_validate(normalized))
+
+    @classmethod
+    def init_empty(cls) -> OchestratorWritableGlobalState:
+        return cls(GlobalStateModel())
+
     # -------------------------------------------------------------------------
-    # stage 1: working dataset
+    # Public get / set (generic key-value interface)
     # -------------------------------------------------------------------------
 
-    def set_working_dataset(
+    def get(self, key: str) -> Any:
+        if key not in GlobalStateModel.model_fields:
+            raise KeyError(f"Unknown global state key: {key!r}")
+        return deepcopy(getattr(self._model, key))
+
+    def set(self, key: str, value: dict[str, Any]) -> None:  # noqa: C901
+        """key = node name; value = dict of field updates that node is allowed to write.
+        Each node owns specific global state fields and dispatches to the
+        appropriate private stage setter so cascading invalidation fires."""
+        match key:
+            case _ if key == _NODE_DATA_MANUPULATION:
+                if "working_dataset_ids" in value or "latest_dataset_summary" in value:
+                    protocol_discusson = self._model.protocol_discussion if self._model.protocol_discussion else None
+                    self._set_stage1(
+                        working_dataset_ids=self._parse_dataset_ids(
+                            value.get("working_dataset_ids", self._model.working_dataset_ids)
+                        ),
+                        latest_dataset_summary=self._parse_dataset_summary(
+                            value.get("latest_dataset_summary", self._model.latest_dataset_summary)
+                        ),
+                    )
+                    if protocol_discusson is not None:
+                            self._set_stage2(protocol_discussion=protocol_discusson)    
+                if "data_cleaned" in value:
+                    self._set_stage3(data_cleaned=bool(value["data_cleaned"]))
+
+            case _ if key == _NODE_PROTOCOL_DISCUSSION:
+                raw_text = value.get("protocol_discussion")
+                self._set_stage2(
+                    protocol_discussion=str(raw_text).strip() if raw_text is not None else None
+                )
+
+            case _ if key == _NODE_DATA_COMPILATION:
+                raw_spec = value.get("causal_spec", self._model.causal_spec)
+                raw_plan = value.get("data_transformation_plan", self._model.data_transformation_plan)
+                self._set_stage4(
+                    causal_spec=(
+                        raw_spec if isinstance(raw_spec, CausalSpec) or raw_spec is None
+                        else CausalSpec.model_validate(raw_spec)
+                    ),
+                    data_transformation_plan=(
+                        raw_plan if isinstance(raw_plan, TransformPlan) or raw_plan is None
+                        else TransformPlan.model_validate(raw_plan)
+                    ),
+                    working_dataset_frozen=True,
+                )
+
+            case _ if key == _NODE_DATA_VALIDATION:
+                raw_issues = cast(list[Any], value.get("validation_issues", self._model.validation_issues))
+                issues = [
+                    v if isinstance(v, ValidationIssueModel) else ValidationIssueModel.model_validate(v)
+                    for v in raw_issues
+                ]
+                self._set_stage5(
+                    validation_issues=issues,
+                )
+
+            case _ if key == _NODE_MODEL_SELECTION:
+                raw_model = value.get("selected_model", self._model.selected_model)
+                raw_reasoning = value.get("selection_reasoning", self._model.selection_reasoning)
+                self._set_stage5(
+                    validation_issues=self._model.validation_issues,
+                    selected_model=str(raw_model).strip() if raw_model else None,
+                    selection_reasoning=str(raw_reasoning).strip() if raw_reasoning else None,
+                )
+
+            case _ if key == _NODE_MODEL_TRAIN:
+                raw_tid = value.get("trained_model_id", self._model.trained_model_id)
+                tid = raw_tid if isinstance(raw_tid, UUID) or raw_tid is None else UUID(str(raw_tid))
+                raw_warnings = cast(list[Any], value.get("training_warnings", self._model.training_warnings))
+                self._set_stage6(
+                    trained_model_id=tid,
+                    training_warnings=[str(w) for w in raw_warnings],
+                )
+
+            case _ if key in {_NODE_CAUSAL_INFERENCE, _NODE_NOOP_DONE}:
+                pass  # terminal nodes — no global state writes
+
+            case _:
+                raise KeyError(f"Unknown node name for set: {key!r}")
+
+    # -------------------------------------------------------------------------
+    # Private stage setters — each invalidates all downstream fields
+    # -------------------------------------------------------------------------
+
+    def _set_stage1(
         self,
-        dataset_id: UUID,
-        summary: DatasetSummaryModel,
-        preserve_protocol_discussion: bool,
+        *,
+        working_dataset_ids: list[UUID],
+        latest_dataset_summary: DatasetSummaryModel | None,
+        preserve_protocol_discussion: bool = False,
     ) -> None:
-        previous_dataset_id = self._model.working_dataset_id
-        previous_summary = self._model.working_dataset_summary
+        changed = (
+            self._model.working_dataset_ids != working_dataset_ids
+            or self._model.latest_dataset_summary != latest_dataset_summary
+        )
+        self._model.working_dataset_ids = working_dataset_ids
+        self._model.latest_dataset_summary = latest_dataset_summary
+        if changed:
+              self._invalidate_downstream_of("latest_dataset_summary", reason="stage-1 dataset updated")
 
-        if previous_dataset_id == dataset_id and previous_summary == summary:
+    def _set_stage2(self, *, protocol_discussion: str | None) -> None:
+        self._require_stage1()
+        if self._model.protocol_discussion == protocol_discussion:
             return
+        self._model.protocol_discussion = protocol_discussion
+        self._invalidate_downstream_of("protocol_discussion", reason="stage-2 protocol discussion updated")
 
-        self._model.working_dataset_id = dataset_id
-        self._model.working_dataset_summary = summary
-        
-        if preserve_protocol_discussion:
-            self._invalidate_downstream_of(
-                "protocol_discussion",
-                reason="working dataset changed with protocol discussion preserved",
-            )
-        else:
-            self._invalidate_downstream_of(
-                "working_dataset_summary",
-                reason="working dataset changed",
-            )
-
-    def invalidate_working_dataset_and_downstream(self) -> None:
-        self._reset_from_including(
-            "working_dataset_id",
-            reason="working dataset invalidated",
-        )
-
-    # -------------------------------------------------------------------------
-    # stage 2: protocol discussion
-    # -------------------------------------------------------------------------
-
-    def set_protocol_discussion(self, protocol_discussion: str) -> None:
-        self._require_stage_1_complete()
-
-        normalized_protocol_discussion = self._normalize_non_blank_text(
-            value=protocol_discussion,
-            field_name="protocol_discussion",
-        )
-
-        if self._model.protocol_discussion == normalized_protocol_discussion:
+    def _set_stage3(self, *, data_cleaned: bool) -> None:
+        self._require_stage2()
+        if self._model.data_cleaned == data_cleaned:
             return
+        self._model.data_cleaned = data_cleaned
+        self._invalidate_downstream_of("data_cleaned", reason="stage-3 data cleaning updated")
 
-        self._model.protocol_discussion = normalized_protocol_discussion
-        self._invalidate_downstream_of(
-            "protocol_discussion",
-            reason="protocol discussion changed",
-        )
-
-    def invalidate_protocol_discussion_and_downstream(self) -> None:
-        self._reset_from_including(
-            "protocol_discussion",
-            reason="protocol discussion invalidated",
-        )
-
-    # -------------------------------------------------------------------------
-    # stage 2.5: dataset cleaning
-    # -------------------------------------------------------------------------
-
-    def mark_data_cleaned(self) -> None:
-        self._require_stage_2_complete()
-
-        if self._model.data_cleaned:
-            return
-
-        self._model.data_cleaned = True
-        self._invalidate_downstream_of(
-            "data_cleaned",
-            reason="dataset cleaned",
-        )
-
-    def mark_dataset_cleaning_pending(self) -> None:
-        self._require_stage_2_complete()
-
-        if not self._model.data_cleaned and not self._model.working_dataset_frozen:
-            return
-
-        self._reset_from_including(
-            "data_cleaned",
-            reason="dataset cleaning pending",
-        )
-
-    # -------------------------------------------------------------------------
-    # stage 3: dataset freeze
-    # -------------------------------------------------------------------------
-
-    def freeze_working_dataset(self) -> None:
-        self._require_stage_2_complete()
-
-        if self._model.data_cleaned and self._model.working_dataset_frozen:
-            return
-
-        self._model.working_dataset_frozen = True
-        self._invalidate_downstream_of(
-            "working_dataset_frozen",
-            reason="working dataset frozen",
-        )
-
-    def freeze_working_dataset_snapshot(
+    def _set_stage4(
         self,
-        dataset_id: UUID,
-        dataset_summary: DatasetSummaryModel,
+        *,
+        causal_spec: CausalSpec | None,
+        data_transformation_plan: TransformPlan | None,
+        working_dataset_frozen: bool,
     ) -> None:
-        self._require_stage_2_complete()
-
-        if (
-            self._model.working_dataset_id == dataset_id
-            and self._model.working_dataset_summary == dataset_summary
-            and self._model.data_cleaned
-            and self._model.working_dataset_frozen
-        ):
-            return
-
-        self._model.working_dataset_id = dataset_id
-        self._model.working_dataset_summary = dataset_summary
-        self._model.data_cleaned = True
-        self._model.working_dataset_frozen = True
-
-        self._invalidate_downstream_of(
-            "working_dataset_frozen",
-            reason="working dataset snapshot frozen",
+        self._require_stage3()
+        changed = (
+            self._model.causal_spec != causal_spec
+            or self._model.data_transformation_plan != data_transformation_plan
+            or self._model.working_dataset_frozen != working_dataset_frozen
         )
-
-    def unfreeze_working_dataset_and_downstream(self) -> None:
-        self._require_stage_1_complete()
-
-        if not self._model.data_cleaned and not self._model.working_dataset_frozen:
-            return
-
-        self._reset_from_including(
-            "data_cleaned",
-            reason="working dataset unfrozen",
-        )
-
-    # -------------------------------------------------------------------------
-    # stage 4: causal configuration
-    # -------------------------------------------------------------------------
-
-    def set_causal_configuration(
-        self,
-        causal_spec: CausalSpec,
-        data_transformation_plan: TransformPlan,
-        validation_issues: list[ValidationIssueModel],
-    ) -> None:
-        self._require_stage_3_complete()
-
-        normalized_issues = list(validation_issues)
-
-        if (
-            self._model.causal_spec == causal_spec
-            and self._model.data_transformation_plan == data_transformation_plan
-            and self._model.validation_issues == normalized_issues
-        ):
-            return
-
         self._model.causal_spec = causal_spec
         self._model.data_transformation_plan = data_transformation_plan
-        self._model.validation_issues = normalized_issues
+        self._model.working_dataset_frozen = working_dataset_frozen
+        if changed:
+            self._invalidate_downstream_of("working_dataset_frozen", reason="stage-4 causal config updated")
 
-        self._invalidate_downstream_of(
-            "validation_issues",
-            reason="causal configuration changed",
+    def _set_stage5(
+        self,
+        *,
+        validation_issues: list[ValidationIssueModel],
+    ) -> None:
+        self._require_stage4()
+        changed = (
+            self._model.validation_issues != validation_issues
+            or self._model.selected_model != selected_model
+            or self._model.selection_reasoning != selection_reasoning
         )
+        self._model.validation_issues = validation_issues
+        self._model.selected_model = selected_model
+        self._model.selection_reasoning = selection_reasoning
+        if changed:
+            self._invalidate_downstream_of("selection_reasoning", reason="stage-5 model selection updated")
 
-    def invalidate_causal_configuration_and_downstream(self) -> None:
-        self._reset_from_including(
-            "causal_spec",
-            reason="causal configuration invalidated",
-        )
+    def _set_stage6(
+        self,
+        *,
+        trained_model_id: UUID | None,
+        training_warnings: list[str],
+    ) -> None:
+        self._require_stage5()
+        self._model.trained_model_id = trained_model_id
+        self._model.training_warnings = training_warnings
 
     # -------------------------------------------------------------------------
-    # stage 5: model selection
-    # -------------------------------------------------------------------------
-
-    def set_selected_model(self, selected_model: str) -> None:
-        self._require_model_selection_ready()
-
-        normalized_selected_model = self._normalize_non_blank_text(
-            value=selected_model,
-            field_name="selected_model",
-        )
-
-        if self._model.selected_model == normalized_selected_model:
-            return
-
-        self._model.selected_model = normalized_selected_model
-        self._invalidate_downstream_of(
-            "selected_model",
-            reason="selected model changed",
-        )
-
-    def invalidate_selected_model_and_downstream(self) -> None:
-        self._reset_from_including(
-            "selected_model",
-            reason="selected model invalidated",
-        )
-
-    # -------------------------------------------------------------------------
-    # stage 6: training
-    # -------------------------------------------------------------------------
-
-    def set_model_training_id(self, training_id: UUID) -> None:
-        self._require_model_training_ready()
-
-        if self._model.model_training_id == training_id:
-            return
-
-        self._model.model_training_id = training_id
-
-    def clear_model_training_id(self) -> None:
-        if self._model.model_training_id is None:
-            return
-        self._model.model_training_id = None
-
-    # -------------------------------------------------------------------------
-    # active node tracking and rollback
+    # needs_node_name — returns which node the workflow currently requires
     # -------------------------------------------------------------------------
 
     def needs_node_name(self) -> str:
-        if self._model.working_dataset_id is None:
-            return DatasetNode.NAME
+        if not self._model.working_dataset_ids or self._model.latest_dataset_summary is None:
+            return _NODE_DATA_STATISTICS
 
-        if self._model.working_dataset_summary is None:
-            return DatasetNode.NAME
-
-        if not self._has_protocol_discussion():
-            return ProtocolDiscussionNode.NAME
+        if not self._model.protocol_discussion:
+            return _NODE_PROTOCOL_DISCUSSION
 
         if not self._model.data_cleaned:
-            return DatasetNode.NAME
+            return _NODE_DATA_MANUPULATION
 
-        if not self._model.working_dataset_frozen:
-            return CompileAndValidateNode.NAME
-
-        if self._model.causal_spec is None:
-            return CompileAndValidateNode.NAME
-
-        if self._model.data_transformation_plan is None:
-            return CompileAndValidateNode.NAME
+        if (
+            self._model.causal_spec is None
+            or self._model.data_transformation_plan is None
+            or not self._model.working_dataset_frozen
+        ):
+            return _NODE_DATA_COMPILATION
 
         if self._model.selected_model is None:
-            return ModelSelectionNode.NAME
+            return _NODE_MODEL_SELECTION
 
-        if self._model.model_training_id is None:
-            return ModelTrainNode.NAME
+        if self._model.trained_model_id is None:
+            return _NODE_MODEL_TRAIN
 
-        return CausalInferenceNode.NAME
-
-    def rollback_orchestrator_global_state(
-        self,
-        recovery_state_name: str,
-    ) -> None:
-        if recovery_state_name == ProtocolDiscussionNode.NAME:
-            self.invalidate_protocol_discussion_and_downstream()
-
-        if recovery_state_name == DatasetNode.NAME:
-            self.invalidate_protocol_discussion_and_downstream()
-
-        if recovery_state_name == CompileAndValidateNode.NAME:
-            self.invalidate_causal_configuration_and_downstream()
-
-        if recovery_state_name == ModelSelectionNode.NAME:
-            self.invalidate_selected_model_and_downstream()
-
-        if recovery_state_name == ModelTrainNode.NAME:
-            self.clear_model_training_id()
+        return _NODE_CAUSAL_INFERENCE
 
     # -------------------------------------------------------------------------
-    # guards
+    # companion — which other nodes can run alongside a given node
     # -------------------------------------------------------------------------
 
-    def _require_stage_1_complete(self) -> None:
-        if self._model.working_dataset_id is None:
-            raise ValueError("working_dataset_id must be set first")
-        if self._model.working_dataset_summary is None:
-            raise ValueError("working_dataset_summary must be set first")
+    def companion(self, node_name: str) -> list[str]:
+        """Given a node name, return which other nodes are valid companions
+        based on the current workflow stage."""
+        has_dataset = bool(self._model.working_dataset_ids)
+        has_protocol = bool(self._model.protocol_discussion)
+        data_ready = has_dataset and has_protocol and self._model.data_cleaned
+        spec_ready = (
+            data_ready
+            and self._model.causal_spec is not None
+            and self._model.data_transformation_plan is not None
+            and self._model.working_dataset_frozen
+        )
+        model_selected = spec_ready and self._model.selected_model is not None
 
-    def _require_stage_2_complete(self) -> None:
-        self._require_stage_1_complete()
-        if not self._has_protocol_discussion():
-            raise ValueError("protocol_discussion must be set first")
+        match node_name:
+            case _ if node_name in {
+                _NODE_DATA_STATISTICS,
+                _NODE_DATA_MANUPULATION,
+                _NODE_DATA_DASHBOARD,
+            }:
+                companions = [
+                    n for n in [
+                        _NODE_DATA_STATISTICS,
+                        _NODE_DATA_MANUPULATION,
+                        _NODE_DATA_DASHBOARD,
+                    ]
+                    if n != node_name
+                ]
+                if has_dataset:
+                    companions.append(_NODE_PROTOCOL_DISCUSSION)
+                return companions
 
-    def _require_stage_3_complete(self) -> None:
-        self._require_stage_2_complete()
+            case _ if node_name == _NODE_PROTOCOL_DISCUSSION:
+                return [_NODE_DATA_STATISTICS, _NODE_DATA_MANUPULATION, _NODE_DATA_DASHBOARD]
+
+            case _ if node_name == _NODE_DATA_COMPILATION:
+                return [_NODE_DATA_VALIDATION] if data_ready else []
+
+            case _ if node_name == _NODE_DATA_VALIDATION:
+                return [_NODE_DATA_COMPILATION, _NODE_MODEL_SELECTION] if spec_ready else [_NODE_DATA_COMPILATION]
+
+            case _ if node_name == _NODE_MODEL_SELECTION:
+                return [_NODE_DATA_VALIDATION] if spec_ready else []
+
+            case _ if node_name == _NODE_MODEL_TRAIN:
+                return []
+
+            case _ if node_name == _NODE_CAUSAL_INFERENCE:
+                return [_NODE_NOOP_DONE] if model_selected else []
+
+            case _:
+                return []
+
+    # -------------------------------------------------------------------------
+    # Rollback
+    # -------------------------------------------------------------------------
+
+    def rollback(self, recovery_node_name: str) -> None:
+        match recovery_node_name:
+            case _ if recovery_node_name in {_NODE_DATA_STATISTICS, _NODE_DATA_MANUPULATION, _NODE_DATA_DASHBOARD}:
+                self._reset_from("working_dataset_ids", reason=f"rollback to {recovery_node_name}")
+            case _ if recovery_node_name == _NODE_PROTOCOL_DISCUSSION:
+                self._reset_from("protocol_discussion", reason="rollback to PROTOCOL_DISCUSSION")
+            case _ if recovery_node_name == _NODE_DATA_COMPILATION:
+                self._reset_from("causal_spec", reason="rollback to DATA_COMPILATION")
+            case _ if recovery_node_name == _NODE_MODEL_SELECTION:
+                self._reset_from("selected_model", reason="rollback to MODEL_SELECTION")
+            case _ if recovery_node_name == _NODE_MODEL_TRAIN:
+                self._model.trained_model_id = None
+                self._model.training_warnings = []
+            case _:
+                pass
+
+    # -------------------------------------------------------------------------
+    # Guards
+    # -------------------------------------------------------------------------
+
+    def _require_stage1(self) -> None:
+        if not self._model.working_dataset_ids:
+            raise ValueError("Stage 1 incomplete: no working dataset")
+        if self._model.latest_dataset_summary is None:
+            raise ValueError("Stage 1 incomplete: no dataset summary")
+
+    def _require_stage2(self) -> None:
+        self._require_stage1()
+        if not self._model.protocol_discussion:
+            raise ValueError("Stage 2 incomplete: protocol discussion not set")
+
+    def _require_stage3(self) -> None:
+        self._require_stage2()
         if not self._model.data_cleaned:
-            raise ValueError("data_cleaned must be True first")
+            raise ValueError("Stage 3 incomplete: data not cleaned")
 
-    def _require_stage_4_complete(self) -> None:
-        self._require_stage_3_complete()
+    def _require_stage4(self) -> None:
+        self._require_stage3()
         if self._model.causal_spec is None:
-            raise ValueError("causal_spec must be set first")
+            raise ValueError("Stage 4 incomplete: causal_spec not set")
         if self._model.data_transformation_plan is None:
-            raise ValueError("data_transformation_plan must be set first")
+            raise ValueError("Stage 4 incomplete: data_transformation_plan not set")
         if not self._model.working_dataset_frozen:
-            raise ValueError("working_dataset must be frozen first")
+            raise ValueError("Stage 4 incomplete: dataset not frozen")
 
-    def _require_model_selection_ready(self) -> None:
-        self._require_stage_4_complete()
-
-    def _require_model_training_ready(self) -> None:
-        self._require_model_selection_ready()
+    def _require_stage5(self) -> None:
+        self._require_stage4()
         if self._model.selected_model is None:
-            raise ValueError("selected_model must be set first")
+            raise ValueError("Stage 5 incomplete: selected_model not set")
 
     # -------------------------------------------------------------------------
-    # helpers
+    # Parse helpers (used by set dispatch)
     # -------------------------------------------------------------------------
 
-    def _has_protocol_discussion(self) -> bool:
-        return self._model.protocol_discussion is not None
+    @staticmethod
+    def _parse_dataset_ids(raw: Any) -> list[UUID]:
+        if raw is None:
+            return []
+        items = cast(list[Any], raw)
+        return [v if isinstance(v, UUID) else UUID(str(v)) for v in items]
+
+    @staticmethod
+    def _parse_dataset_summary(raw: Any) -> DatasetSummaryModel | None:
+        if raw is None:
+            return None
+        return raw if isinstance(raw, DatasetSummaryModel) else DatasetSummaryModel.model_validate(raw)
+
+    # -------------------------------------------------------------------------
+    # Cascade invalidation helpers
+    # -------------------------------------------------------------------------
 
     def _invalidate_downstream_of(self, field_name: str, *, reason: str) -> None:
-        field_index = self._WORKFLOW_ORDER.index(field_name)
-        cleared_fields: list[str] = []
+        idx = self._WORKFLOW_ORDER.index(field_name)
+        cleared: list[str] = []
+        for field in self._WORKFLOW_ORDER[idx + 1:]:
+            if self._reset_field(field):
+                cleared.append(field)
+        if cleared:
+            log.warning("%s; cleared downstream: %s", reason, ", ".join(cleared))
 
-        for downstream_field in self._WORKFLOW_ORDER[field_index + 1 :]:
-            if self._reset_field_if_needed(downstream_field):
-                cleared_fields.append(downstream_field)
+    def _reset_from(self, field_name: str, *, reason: str) -> None:
+        idx = self._WORKFLOW_ORDER.index(field_name)
+        cleared: list[str] = []
+        for field in self._WORKFLOW_ORDER[idx:]:
+            if self._reset_field(field):
+                cleared.append(field)
+        if cleared:
+            log.warning("%s; cleared: %s", reason, ", ".join(cleared))
 
-        if cleared_fields:
-            log.warning(
-                "%s; cleared downstream fields: %s",
-                reason,
-                ", ".join(cleared_fields),
-            )
-
-    def _reset_from_including(self, field_name: str, *, reason: str) -> None:
-        field_index = self._WORKFLOW_ORDER.index(field_name)
-        cleared_fields: list[str] = []
-
-        for current_field in self._WORKFLOW_ORDER[field_index:]:
-            if self._reset_field_if_needed(current_field):
-                cleared_fields.append(current_field)
-
-        if cleared_fields:
-            log.warning(
-                "%s; cleared fields: %s",
-                reason,
-                ", ".join(cleared_fields),
-            )
-
-    def _reset_field_if_needed(self, field_name: str) -> bool:
-        current_value = getattr(self._model, field_name)
-        default_value = self._default_value_for(field_name)
-
-        if current_value == default_value:
+    def _reset_field(self, field_name: str) -> bool:
+        default = self._default(field_name)
+        current = getattr(self._model, field_name)
+        if current == default:
             return False
-
-        setattr(self._model, field_name, default_value)
+        setattr(self._model, field_name, default)
         return True
 
     @staticmethod
-    def _default_value_for(field_name: str) -> Any:
+    def _default(field_name: str) -> Any:
         if field_name in {"data_cleaned", "working_dataset_frozen"}:
             return False
-        if field_name == "validation_issues":
+        if field_name in {"working_dataset_ids", "validation_issues", "training_warnings"}:
             return []
         return None
 
-    @staticmethod
-    def _normalize_non_blank_text(*, value: str, field_name: str) -> str:
-        normalized_value = value.strip()
-        if not normalized_value:
-            raise ValueError(f"{field_name} cannot be blank")
-        return normalized_value
-    
-    
-    def update_ochestration_working_state_if_node_done(
-        self,
-        *,
-        state: State,
-    ) -> None:
-        if state.status() != "DONE" and state.name() != DatasetState.NAME:
-            return
 
-        match state:
-            case DatasetState() as dataset_state:
-                if not dataset_state.payload.dataset_iterations:
-                    return 
-
-                latest_iteration_dataset_id = (
-                    dataset_state.payload.dataset_iterations[-1]
-                )
-                latest_iteration_dataset_summary = dataset_state.payload.latest_summary
-                if latest_iteration_dataset_summary is None:
-                    raise ValueError(
-                        "Latest dataset summary must be set when dataset state is DONE"
-                    )
-
-                protocol_discussed = self._has_protocol_discussion()
-                data_frozen = self.get("working_dataset_frozen") is True
-                
-                if data_frozen:
-                    return
-
-                if protocol_discussed:
-                    self.set_working_dataset(
-                        dataset_id=latest_iteration_dataset_id,
-                        summary=latest_iteration_dataset_summary,
-                        preserve_protocol_discussion=True,
-                    )
-                    self.mark_data_cleaned()
-                else:
-                    self.set_working_dataset(
-                        dataset_id=latest_iteration_dataset_id,
-                        summary=latest_iteration_dataset_summary,
-                        preserve_protocol_discussion=False,
-                    )
-                    
-
-            case ProtocolDiscussionState():
-                self.set_protocol_discussion(
-                    protocol_discussion=state.payload.discussion
-                )
-
-            case CompileAndValidateState() as compile_and_validate_state:
-                inference_ready_spec = (
-                    compile_and_validate_state.payload.inference_ready_causal_spec
-                )
-                if inference_ready_spec is None:
-                    raise ValueError(
-                        "Inference ready causal spec must be set when compile-and-validate is DONE"
-                    )
-                    
-                self.set_causal_configuration(
-                    causal_spec=inference_ready_spec.causal_spec,
-                    data_transformation_plan=inference_ready_spec.transformation_plan,
-                    validation_issues=compile_and_validate_state.payload.validation_issues,
-                )
-                self.freeze_working_dataset()
-
-            case ModelSelectionState() as model_selection_state:
-                confirmed = model_selection_state.payload.confirmed_model_selection
-                if confirmed is None or confirmed.selected_model is None:
-                    raise ValueError(
-                        "Confirmed model selection must be set when model selection is DONE"
-                    )
-
-                self.set_selected_model(confirmed.selected_model)
-
-            case ModelTrainState() as model_train_state:
-                if model_train_state.payload.trained_model_id is None:
-                    raise ValueError(
-                        "Trained model ID must be set when model-train is DONE"
-                    )
-
-                self.set_model_training_id(
-                    model_train_state.payload.trained_model_id
-                )
-
-            case CausalInferenceState():
-                pass
-
-            case NoopDoneState():
-                pass
-
-            case _:
-                raise ValueError(
-                    f"Unsupported DONE-state update for state {state.name()!r}"
-                )
+__all__ = ["GlobalStateModel", "OchestratorWritableGlobalState"]
