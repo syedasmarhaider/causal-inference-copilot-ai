@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
-from python.domain.workflows.state import State
+from python.domain.workflows.node_state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
     ConfirmedModelSelectionPayload,

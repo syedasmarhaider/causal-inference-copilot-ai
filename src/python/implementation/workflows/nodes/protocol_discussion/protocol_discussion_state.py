@@ -7,7 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from python.domain.models.models import ChatMessage
-from python.domain.workflows.state import Action, State, Status
+from python.domain.workflows.node_state import Action, State, Status
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
     initial_user_message,
 )

@@ -14,7 +14,7 @@ from python.domain.repo.models_repo import ModelsRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.domain.workflows.node import Node
-from python.domain.workflows.state import State
+from python.domain.workflows.node_state import State
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
     CausalInferenceNode,

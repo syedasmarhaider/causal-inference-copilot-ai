@@ -20,7 +20,7 @@ from python.domain.service.llm_service import (
 )
 from python.domain.workflows.node import Node
 from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
-from python.domain.workflows.state import State
+from python.domain.workflows.node_state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.dataset.dataset_prompts import (

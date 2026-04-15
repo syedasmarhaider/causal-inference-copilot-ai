@@ -1,21 +1,16 @@
 from __future__ import annotations
 
-
 from abc import ABC, abstractmethod
 from typing import Any
 
 
-class OchestratorState(ABC):
+class NodeState(ABC):
     @abstractmethod
     def name(self) -> str:
         raise NotImplementedError
-   
-    @abstractmethod
-    def get(self, key: str) -> Any:
-     raise NotImplementedError
     
     @abstractmethod
-    def set(self, key: str, value: Any) -> None:
+    def clear_state(self) -> None:
         raise NotImplementedError
     
     @abstractmethod
@@ -24,23 +19,10 @@ class OchestratorState(ABC):
 
     @classmethod
     @abstractmethod
-    def from_json_dict(cls, payload: dict[str, Any]) -> OchestratorState:
+    def from_json_dict(cls, payload: dict[str, Any]) -> NodeState:
         raise NotImplementedError
 
     @classmethod
     @abstractmethod
-    def init_empty(cls) -> OchestratorState:
+    def init_empty(cls) -> NodeState:
         raise NotImplementedError
-
-   
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    

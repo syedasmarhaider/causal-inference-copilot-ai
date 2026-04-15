@@ -8,7 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.models.models import ArtifactRef, ChatMessage, WorkingDatasetInfo
-from python.domain.workflows.state import Action, State, Status
+from python.domain.workflows.node_state import Action, State, Status
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetSummaryModel,
 )

@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Final
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.models.validation import ValidationIssueModel
-from python.domain.workflows.ochestrator_state import (
-    ReadOnlyOchestratorState,
-    WritableOchestratorState,
-)
-from python.domain.workflows.state import State
+from python.domain.workflows.ochestrator_state import OchestratorState
 from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
     CausalInferenceNode,
@@ -74,32 +70,11 @@ class GlobalStateModel(BaseModel):
     model_training_id: UUID | None = None
 
 
-class OchestratorReadOnlyGlobalState(ReadOnlyOchestratorState):
-    def __init__(self, model: GlobalStateModel) -> None:
-        self._model = model
-
-    def get(self, key: str) -> Any | None:
-        if key not in GlobalStateModel.model_fields:
-            raise KeyError(f"unknown global state key: {key}")
-        return deepcopy(getattr(self._model, key))
 
 
-class OchestratorWritableGlobalState(
-    OchestratorReadOnlyGlobalState,
-    WritableOchestratorState,
-):
-    _WORKFLOW_ORDER: Final[tuple[str, ...]] = (
-        "working_dataset_id",
-        "working_dataset_summary",
-        "protocol_discussion",
-        "data_cleaned",
-        "working_dataset_frozen",
-        "causal_spec",
-        "data_transformation_plan",
-        "validation_issues",
-        "selected_model",
-        "model_training_id",
-    )
+
+
+class OchestratorWritableGlobalState(OchestratorState):
 
     def __init__(self, model: GlobalStateModel) -> None:
         super().__init__(model)
@@ -108,6 +83,16 @@ class OchestratorWritableGlobalState(
     @classmethod
     def init_empty(cls) -> OchestratorWritableGlobalState:
         return cls(GlobalStateModel())
+    
+    
+    def get(self, key: str) -> Any | None:
+        if key not in GlobalStateModel.model_fields:
+            raise KeyError(f"unknown global state key: {key}")
+        return deepcopy(getattr(self._model, key))
+    
+    
+    def set(self, key: str, value: Any) -> None:
+        
 
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> OchestratorWritableGlobalState:

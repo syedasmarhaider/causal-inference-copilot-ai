@@ -10,25 +10,17 @@ from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
 from python.domain.models.validation import ValidationIssueModel
 from python.domain.workflows.node_state import Action, State, Status
-from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
-    InferenceReadyCausalSpec,
-)
-from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.utils.utils import uuid_from_any
 
-CompileAndValidatePhase = Literal["INIT", "REVIEW_READY", "CONFIRMED", "FAILED"]
+ValidatePhase = Literal["INIT", "REVIEW_READY", "CONFIRMED", "FAILED"]
 
 
-class CompileAndValidatePayloadModel(BaseModel):
+class ValidatePayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     dataset_id: UUID | None = None
-    compiled_causal_spec: CausalSpec | None = None
-    transformation_plan: TransformPlan | None = None
-    inference_ready_causal_spec: InferenceReadyCausalSpec | None = None
     validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
-    phase: CompileAndValidatePhase = "INIT"
+    phase: ValidatePhase = "INIT"
     assistant_message: str | None = None
     system_message: str | None = None
     error_message: str | None = None
@@ -63,16 +55,13 @@ class CompileAndValidatePayloadModel(BaseModel):
             return value.strip()
         raise TypeError("text fields must be str|null")
 
-    def bind_dataset(self, dataset_id: UUID) -> CompileAndValidatePayloadModel:
+    def bind_dataset(self, dataset_id: UUID) -> ValidatePayloadModel:
         return self.model_copy(update={"dataset_id": dataset_id})
 
-    def reset_for_recompile(self, *, dataset_id: UUID | None) -> CompileAndValidatePayloadModel:
+    def reset_for_recompile(self, *, dataset_id: UUID | None) -> ValidatePayloadModel:
         return self.model_copy(
             update={
                 "dataset_id": dataset_id,
-                "compiled_causal_spec": None,
-                "transformation_plan": None,
-                "inference_ready_causal_spec": None,
                 "validation_issues": [],
                 "phase": "INIT",
                 "assistant_message": None,
@@ -82,10 +71,10 @@ class CompileAndValidatePayloadModel(BaseModel):
         )
 
 
-class CompileAndValidateState(State):
-    NAME: ClassVar[str] = "COMPILE_AND_VALIDATE"
+class ValidateState(State):
+    NAME: ClassVar[str] = "VALIDATE"
 
-    def __init__(self, payload: CompileAndValidatePayloadModel) -> None:
+    def __init__(self, payload: ValidatePayloadModel) -> None:
         self.payload = payload
 
     def name(self) -> str:
@@ -120,9 +109,9 @@ class CompileAndValidateState(State):
             ChatMessage(
                 role="assistant",
                 content=(
-                    "I will now compile the confirmed protocol into a causal specification "
-                    "and a preprocessing plan, validate them against the active dataset, "
-                    "and then ask for confirmation if everything is clinically coherent."
+                    "I will now validate the accepted causal specification and accepted "
+                    "preprocessing plan against the active scoped dataset, then ask for final "
+                    "confirmation if there are no blocking failures."
                 ),
             )
         ]
@@ -136,9 +125,24 @@ class CompileAndValidateState(State):
         return self.payload.model_dump(mode="json", exclude_none=True)
 
     @classmethod
-    def from_json_dict(cls, payload: dict[str, Any]) -> CompileAndValidateState:
-        return cls(CompileAndValidatePayloadModel.model_validate(payload))
+    def from_json_dict(cls, payload: dict[str, Any]) -> ValidateState:
+        return cls(ValidatePayloadModel.model_validate(payload))
 
     @classmethod
-    def init_empty(cls) -> CompileAndValidateState:
-        return cls(CompileAndValidatePayloadModel())
+    def init_empty(cls) -> ValidateState:
+        return cls(ValidatePayloadModel())
+
+
+CompileAndValidatePhase = ValidatePhase
+CompileAndValidatePayloadModel = ValidatePayloadModel
+CompileAndValidateState = ValidateState
+
+
+__all__ = [
+    "CompileAndValidatePayloadModel",
+    "CompileAndValidatePhase",
+    "CompileAndValidateState",
+    "ValidatePayloadModel",
+    "ValidatePhase",
+    "ValidateState",
+]

@@ -7,7 +7,7 @@ from uuid import UUID
 from python.domain.service.llm_service import ChatMessage
 from python.domain.workflows.node import Node
 from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
-from python.domain.workflows.state import State
+from python.domain.workflows.node_state import State
 from python.implementation.workflows.nodes.noop_done.noop_done_state import NoopDoneState
 
 

@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
-from python.domain.workflows.state import Action, State, Status
+from python.domain.workflows.node_state import Action, State, Status
 
 
 class ModelRecommendationModel(BaseModel):

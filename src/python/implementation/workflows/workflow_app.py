@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
 from python.domain.models.models import ArtifactRef, ChatMessage
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
-from python.domain.workflows.state import Action, Status
+from python.domain.workflows.node_state import Action, Status
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.dataflow_app import DataflowArtifactResponse
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (

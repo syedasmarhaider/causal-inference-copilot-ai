@@ -8,7 +8,7 @@ from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import LLMService
-from python.domain.workflows.state import State
+from python.domain.workflows.node_state import State
 from python.implementation.repo.duckdb_working_analytics_repo import DuckDBAnalyticsRepo
 from python.implementation.repo.firebase_realtime_workflow_state_repo import (
     FirebaseRealtimeWorkflowStateRepo,

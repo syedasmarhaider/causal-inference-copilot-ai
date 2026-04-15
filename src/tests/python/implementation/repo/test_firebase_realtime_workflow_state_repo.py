@@ -11,7 +11,7 @@ import pytest
 import python.implementation.repo.firebase_realtime_workflow_state_repo as repo_module
 from python.domain.models.errors import NodeExecutionError
 from python.domain.models.models import ChatMessage
-from python.domain.workflows.state import Action, State
+from python.domain.workflows.node_state import Action, State
 from python.implementation.repo.firebase_realtime_workflow_state_repo import (
     FirebaseRealtimeWorkflowStateRepo,
 )

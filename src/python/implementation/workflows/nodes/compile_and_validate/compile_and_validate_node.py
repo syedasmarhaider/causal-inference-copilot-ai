@@ -13,7 +13,7 @@ from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node
 from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
-from python.domain.workflows.state import State
+from python.domain.workflows.node_state import State
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.nodes.compile_and_validate.compile_and_validate_deps import (

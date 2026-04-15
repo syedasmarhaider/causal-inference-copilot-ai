@@ -6,7 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.models.models import ArtifactFormat, ArtifactKind, MessageRole
-from python.domain.workflows.state import Action, Status
+from python.domain.workflows.node_state import Action, Status
 
 
 class ArtifactRefResponse(BaseModel):

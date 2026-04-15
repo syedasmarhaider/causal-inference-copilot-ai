@@ -6,7 +6,7 @@ from uuid import UUID
 
 from python.domain.models.models import ChatMessage
 from python.domain.workflows.ochestrator_state import WritableOchestratorState
-from python.domain.workflows.state import State
+from python.domain.workflows.node_state import State
 
 
 class WorkflowStateRepo(ABC):
