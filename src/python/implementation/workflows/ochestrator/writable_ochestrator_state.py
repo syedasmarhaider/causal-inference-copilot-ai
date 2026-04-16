@@ -175,11 +175,10 @@ class WritableOchestratorState(OchestratorState):
                 self._set_stage1(
                     working_dataset_ids=[*existing_ids, new_dataset_id],
                     latest_dataset_summary=value["latest_dataset_summary"],
-                    preserve_protocol_discussion=True,
                 ) 
                 if protocol_discusson is not None:
-                            self._set_stage2(protocol_discussion=protocol_discusson)    
-                if "data_cleaned" in value:
+                    self._set_stage2(protocol_discussion=protocol_discusson)    
+                if "data_cleaned" in value and isinstance(value["data_cleaned"], bool):
                     self._set_stage3(data_cleaned=bool(value["data_cleaned"]))
 
             case _ if key == ProtocolDiscussionState.NAME:
@@ -191,11 +190,13 @@ class WritableOchestratorState(OchestratorState):
                 )
 
             case _ if key == DataCompilationState.NAME:
-                if "causal_spec" not in value or "data_transformation_plan" not in value:
-                    raise KeyError("DATA_COMPILATION updates must include at least one of causal_spec or data_transformation_plan")
+                if "causal_spec" not in value or "data_transformation_plan" not in value or "working_dataset_id" not in value or "latest_dataset_summary" not in value:
+                    raise KeyError("DATA_COMPILATION updates must include causal_spec, data_transformation_plan, working_dataset_id and latest_dataset_summary")
                 raw_spec = value.get("causal_spec", self._model.causal_spec)
                 raw_plan = value.get("data_transformation_plan", self._model.data_transformation_plan)
                 self._set_stage4(
+                    working_dataset_id=value["working_dataset_id"],
+                    latest_dataset_summary=value["latest_dataset_summary"],
                     causal_spec=(
                         raw_spec if isinstance(raw_spec, CausalSpec) or raw_spec is None
                         else CausalSpec.model_validate(raw_spec)
@@ -248,7 +249,6 @@ class WritableOchestratorState(OchestratorState):
         *,
         working_dataset_ids: list[UUID],
         latest_dataset_summary: DatasetSummaryModel | None,
-        preserve_protocol_discussion: bool = False,
     ) -> None:
         changed = (
             self._model.working_dataset_ids != working_dataset_ids
@@ -276,21 +276,19 @@ class WritableOchestratorState(OchestratorState):
     def _set_stage4(
         self,
         *,
-        causal_spec: CausalSpec | None,
-        data_transformation_plan: TransformPlan | None,
+        working_dataset_id: UUID,
+        latest_dataset_summary: DatasetSummaryModel,
+        causal_spec: CausalSpec,
+        data_transformation_plan: TransformPlan,
         working_dataset_frozen: bool,
     ) -> None:
         self._require_stage3()
-        changed = (
-            self._model.causal_spec != causal_spec
-            or self._model.data_transformation_plan != data_transformation_plan
-            or self._model.working_dataset_frozen != working_dataset_frozen
-        )
+        self._model.working_dataset_ids = self._model.working_dataset_ids + [working_dataset_id]
+        self._model.latest_dataset_summary = latest_dataset_summary
         self._model.causal_spec = causal_spec
         self._model.data_transformation_plan = data_transformation_plan
         self._model.working_dataset_frozen = working_dataset_frozen
-        if changed:
-            self._invalidate_downstream_of("working_dataset_frozen", reason="stage-4 causal config updated")
+        self._invalidate_downstream_of("working_dataset_frozen", reason="stage-4 causal config updated")
 
     def _set_stage5(self, *, validation_issues: list[ValidationIssueModel]) -> None:
         self._require_stage4()
@@ -446,7 +444,7 @@ class WritableOchestratorState(OchestratorState):
             case _ if state_name == DataCompilationState.NAME:
                 self._reset_from("causal_spec", reason=f"rollback to {state_name}")
                 self._reset_from("data_transformation_plan", reason=f"rollback to {state_name}")
-             case _ if state_name == DataValidationState.NAME:
+            case _ if state_name == DataValidationState.NAME:
                 self._reset_from("validation_issues", reason=f"rollback to {state_name}")
             case _ if state_name == ModelSelectionState.NAME:
                 self._reset_from("selected_model", reason=f"rollback to {state_name}")

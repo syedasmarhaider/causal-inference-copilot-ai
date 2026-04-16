@@ -46,9 +46,9 @@ class ModelSelectionDeps:
         compilation = cast(Mapping[str, Any] | None, compilation_raw)
         validation = cast(Mapping[str, Any] | None, validation_raw)
 
-        dataset_id = cast(UUID | None, None if compilation is None else compilation.get("new_dataset_id"))
+        dataset_id = cast(UUID | None, None if compilation is None else compilation.get("working_dataset_id"))
 
-        dataset_summary_raw = None if compilation is None else compilation.get("new_dataset_summary")
+        dataset_summary_raw = None if compilation is None else compilation.get("latest_dataset_summary")
         if dataset_summary_raw is None:
             dataset_summary = None
         elif isinstance(dataset_summary_raw, DatasetSummaryModel):
@@ -70,8 +70,7 @@ class ModelSelectionDeps:
             None
             if compilation is None
             else compilation.get(
-                "transformation_plan",
-                compilation.get("data_transformation_plan"),
+                "data_transformation_plan",
             )
         )
         if transformation_plan_raw is None:
@@ -88,15 +87,14 @@ class ModelSelectionDeps:
             else ValidationIssueModel.model_validate(issue)
             for issue in validation_issues_raw
         ]
+        validation_status = None
+        for issue in validation_issues:
+            if issue.status == ValidationStatus.WARN:
+                validation_status = ValidationStatus.WARN
+            elif issue.status == ValidationStatus.FAIL:
+                raise Exception(f"Validation failed: {issue}")
 
-        validation_status_raw = None if validation is None else validation.get("validation_status")
-        if validation_status_raw is None:
-            validation_status = None
-        elif validation_status_raw in {"PASS", "WARN", "FAIL"}:
-            validation_status = cast(ValidationStatus, validation_status_raw)
-        else:
-            raise TypeError("validation_status must be one of PASS, WARN, FAIL, or null")
-
+        
         return cls(
             dataset_id=dataset_id,
             dataset_summary=dataset_summary,

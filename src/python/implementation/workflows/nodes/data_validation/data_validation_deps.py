@@ -32,12 +32,9 @@ class DataValidationDeps:
                 "causal_spec, and transformation_plan"
             )
 
-        dataset_id_raw: Any = raw_context.get("dataset_id", raw_context.get("new_dataset_id"))
+        dataset_id_raw: Any = raw_context.get("working_dataset_id")
         causal_spec_raw: Any = raw_context.get("causal_spec")
-        transformation_plan_raw: Any = raw_context.get(
-            "transformation_plan",
-            raw_context.get("data_transformation_plan"),
-        )
+        transformation_plan_raw: Any = raw_context.get("data_transformation_plan")
 
         if dataset_id_raw is not None and not isinstance(dataset_id_raw, UUID):
             raise TypeError("dataset_id must be a UUID")
