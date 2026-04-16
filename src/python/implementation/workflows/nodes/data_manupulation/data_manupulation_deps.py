@@ -24,10 +24,6 @@ class DataManupulationDeps:
     def from_request(cls, request: NodeRequest) -> DataManupulationDeps:
         dataset_id_raw: Any = request.orchestrator_state.get("working_dataset_id")
         dataset_summary_raw: Any = request.orchestrator_state.get("latest_dataset_summary")
-
-        if dataset_id_raw is None:
-            raise _missing_dependency_error("dataset_id")
-
         if not isinstance(dataset_id_raw, UUID):
             raise TypeError("dataset_id must be a UUID")
         if dataset_summary_raw is not None and not isinstance(
@@ -39,14 +35,5 @@ class DataManupulationDeps:
             dataset_id=dataset_id_raw,
             dataset_summary=dataset_summary_raw,
         )
-
-
-def _missing_dependency_error(*missing: str) -> StateDependencyError:
-    return StateDependencyError(
-        DataManupulationState.NAME,
-        DataManupulationState.NAME,
-        list(missing),
-    )
-
 
 __all__ = ["DataManupulationDeps"]

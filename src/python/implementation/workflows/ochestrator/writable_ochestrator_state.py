@@ -150,12 +150,12 @@ class WritableOchestratorState(OchestratorState):
     # -------------------------------------------------------------------------
 
     def get(self, key: str) -> Any:
-        if key not in GlobalStateModel.model_fields:
-            raise KeyError(f"Unknown global state key: {key!r}")
         if key == "working_dataset_id" and len(self._model.working_dataset_ids) == 0:
-            return [self.INIT_DATA_ID]
+            return self.INIT_DATA_ID
         if key == "working_dataset_id":
             return self._model.working_dataset_ids[-1]
+        if key not in GlobalStateModel.model_fields:
+            raise KeyError(f"Unknown global state key: {key!r}")
         
         return deepcopy(getattr(self._model, key))
 

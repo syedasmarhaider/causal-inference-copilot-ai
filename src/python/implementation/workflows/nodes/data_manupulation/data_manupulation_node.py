@@ -142,8 +142,7 @@ class DataManupulationNode(Node):
             return self._needs_data_result(
                 request=request,
                 user_message=(
-                    "I could not load the working dataset for data manipulation. Please "
-                    "re-upload or reselect the dataset and try again."
+                    "Upload dataset csv"
                 ),
             )
 
