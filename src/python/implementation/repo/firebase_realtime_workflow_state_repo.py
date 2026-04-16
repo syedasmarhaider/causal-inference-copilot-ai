@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import itertools
 import json
 import os
+import time
+import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 from uuid import UUID
@@ -13,6 +16,10 @@ from python.domain.models.models import ChatMessage
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.workflows.node_state import NodeState
 from python.domain.workflows.ochestrator_state import OchestratorState
+
+# Monotonically increasing counter for push IDs — ensures same-millisecond messages
+# are always stored and returned in insertion order.
+_PUSH_ID_COUNTER: itertools.count[int] = itertools.count()
 
 
 class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
@@ -82,11 +89,6 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             raise ValueError("ochestrator_state_classes_by_name must be a mapping")
 
         self._root_ref = db.reference("/", app=app)
-        self._workflows_root_ref = db.reference(self._WORKFLOWS_ROOT, app=app)
-        self._conversation_index_root_ref = db.reference(
-            self._CONVERSATION_INDEX_ROOT,
-            app=app,
-        )
         self._state_classes_by_name = dict(state_classes_by_name)
         self._ochestrator_state_classes_by_name = dict(
             ochestrator_state_classes_by_name
@@ -233,11 +235,8 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
                 f"OchestratorState '{state_name}' is not JSON-serializable: {exc}"
             ) from exc
 
-        (
-            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
-            .child("ochestrator_state")
-            .set(payload_json)
-        )
+        path = self._conversation_path(user_id=user_id, conversation_id=conversation_id)
+        self._root_ref.update({f"{path}/ochestrator_state": payload_json})
 
     # ------------------------------------------------------------------
     # Per-state persistence
@@ -327,12 +326,8 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
                 f"State '{state_name}' is not JSON-serializable: {exc}"
             ) from exc
 
-        (
-            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
-            .child("states")
-            .child(state_name)
-            .set(payload_json)
-        )
+        path = self._conversation_path(user_id=user_id, conversation_id=conversation_id)
+        self._root_ref.update({f"{path}/states/{state_name}": payload_json})
 
     def delete_state(
         self,
@@ -344,12 +339,8 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         if not isinstance(state_name, str) or not state_name.strip():
             raise ValueError("state_name must be a non-empty string")
 
-        (
-            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
-            .child("states")
-            .child(state_name)
-            .delete()
-        )
+        path = self._conversation_path(user_id=user_id, conversation_id=conversation_id)
+        self._root_ref.update({f"{path}/states/{state_name}": None})
 
     # ------------------------------------------------------------------
     # Message history
@@ -378,13 +369,12 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         if not messages:
             return
 
-        messages_ref = self._conversation_ref(
-            user_id=user_id,
-            conversation_id=conversation_id,
-        ).child("messages")
-
+        base_path = self._conversation_path(user_id=user_id, conversation_id=conversation_id)
+        updates: dict[str, Any] = {}
         for message in messages:
-            messages_ref.push(self._chat_message_to_dict(message))
+            key = self._push_id()
+            updates[f"{base_path}/messages/{key}"] = self._chat_message_to_dict(message)
+        self._root_ref.update(updates)
 
     def load_message_history(
         self,
@@ -416,18 +406,15 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         return messages
 
     def clear_message_history(self, *, user_id: UUID, conversation_id: UUID) -> None:
-        (
-            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
-            .child("messages")
-            .delete()
-        )
+        path = self._conversation_path(user_id=user_id, conversation_id=conversation_id)
+        self._root_ref.update({f"{path}/messages": None})
 
     # ------------------------------------------------------------------
     # Internal — Firebase references & paths
     # ------------------------------------------------------------------
 
     def _conversation_index_user_ref(self, *, user_id: UUID) -> Any:
-        return self._conversation_index_root_ref.child(str(user_id))
+        return self._root_ref.child("workflow_conversation_index").child(str(user_id))
 
     def _conversation_index_ref(
         self, *, user_id: UUID, conversation_id: UUID
@@ -437,7 +424,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         )
 
     def _user_ref(self, *, user_id: UUID) -> Any:
-        return self._workflows_root_ref.child(str(user_id))
+        return self._root_ref.child("workflows").child(str(user_id))
 
     def _conversation_ref(
         self, *, user_id: UUID, conversation_id: UUID
@@ -670,6 +657,13 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     # ------------------------------------------------------------------
     # Internal — misc helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _push_id() -> str:
+        """Generate a time-sortable key for RTDB message entries."""
+        ts_ms = int(time.time() * 1000)
+        seq = next(_PUSH_ID_COUNTER)
+        return f"{ts_ms:016d}_{seq:020d}_{uuid.uuid4().hex}"
 
     @staticmethod
     def _state_name_of(state: Any) -> str | None:
