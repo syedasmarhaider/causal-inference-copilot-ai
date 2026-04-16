@@ -155,17 +155,38 @@ class DataStatisticsNode(Node):
                 f"{type(request.node_state).__name__}"
             )
 
-        
-        deps = DataStatisticsDeps.from_request(request)
-       
+        try:
+            deps = DataStatisticsDeps.from_request(request)
+        except Exception as exc:
+            log.info("missing data statistics dependencies", error=safe_err(exc))
+            return self._needs_data_result(
+                request=request,
+                user_message=(
+                    "I do not have a working dataset available for data statistics yet. "
+                    "Please upload or select a dataset first."
+                ),
+            )
 
-        current_df = self._data_repo.get_csv_data(
+        try:
+            current_df = self._data_repo.get_csv_data(
                 user_id=request.user_id,
                 conversation_id=request.conversation_id,
                 dataset_id=deps.dataset_id,
                 limit=1_000_000,
             )
-     
+        except Exception as exc:
+            log.exception(
+                "failed to load data statistics dataset",
+                dataset_id=str(deps.dataset_id),
+                error=safe_err(exc),
+            )
+            return self._needs_data_result(
+                request=request,
+                user_message=(
+                    "I could not load the working dataset for data statistics. Please "
+                    "re-upload or reselect the dataset and try again."
+                ),
+            )
 
         current_summary = deps.dataset_summary
         current_summary_json = self._profiling_tool.dataset_summary_to_json(current_summary)
@@ -614,7 +635,10 @@ class DataStatisticsNode(Node):
             config=LLMConfig(model="basic", temperature=0.3),
             history=None,
         )
-        return response.content
+        content = response.content.strip()
+        if not content:
+            raise ValueError("LLM returned empty final response")
+        return content
 
     def _build_final_message_fallback(
         self,
