@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, is_dataclass
 from typing import Any
 from uuid import UUID
 
@@ -20,7 +19,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     """
     Firebase RTDB-backed workflow state repository.
 
-    Storage layout:
+    Storage layout::
 
         /workflow_conversation_index/{user_id}/{conversation_id}: true
 
@@ -34,6 +33,10 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
     _WORKFLOWS_ROOT = "/workflows"
     _CONVERSATION_INDEX_ROOT = "/workflow_conversation_index"
+
+    # ------------------------------------------------------------------
+    # Factory
+    # ------------------------------------------------------------------
 
     @staticmethod
     def get_default_firebase_database_app() -> Any:
@@ -60,6 +63,10 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
                 },
             )
 
+    # ------------------------------------------------------------------
+    # Constructor
+    # ------------------------------------------------------------------
+
     def __init__(
         self,
         *,
@@ -85,9 +92,9 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             ochestrator_state_classes_by_name
         )
 
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Conversation persistence
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     def save_conversation_id(self, *, user_id: UUID, conversation_id: UUID) -> None:
         updates = {
@@ -127,9 +134,9 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         ).get()
         return value is not None
 
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Orchestrator state
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     def load_ochestrator_state(
         self,
@@ -137,22 +144,22 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         user_id: UUID,
         conversation_id: UUID,
     ) -> OchestratorState | None:
-        raw_payload = (
+        raw = (
             self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
             .child("ochestrator_state")
             .get()
         )
-        if raw_payload is None:
+        if raw is None:
             return None
 
-        if not isinstance(raw_payload, str):
+        if not isinstance(raw, str):
             raise ValueError(
                 f"Stored ochestrator_state for conversation_id={conversation_id!r} "
-                f"must be a JSON string blob, got {type(raw_payload).__name__}"
+                f"must be a JSON string blob, got {type(raw).__name__}"
             )
 
         try:
-            envelope = json.loads(raw_payload)
+            envelope = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError(
                 f"Stored ochestrator_state for conversation_id={conversation_id!r} "
@@ -180,7 +187,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         cls = self._ochestrator_state_classes_by_name.get(state_name)
         if cls is None:
             raise KeyError(
-                f"No WritableOchestratorState class registered for name={state_name!r}"
+                f"No OchestratorState class registered for name={state_name!r}"
             )
 
         try:
@@ -190,10 +197,10 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
                 f"Error deserializing ochestrator_state '{state_name}': {exc}"
             ) from exc
 
-        loaded_state_name = self._state_name_of(state)
-        if loaded_state_name != state_name:
+        loaded_name = self._state_name_of(state)
+        if loaded_name != state_name:
             raise ValueError(
-                f"Loaded WritableOchestratorState.name mismatch: got {loaded_state_name!r}, "
+                f"Loaded OchestratorState.name mismatch: got {loaded_name!r}, "
                 f"expected {state_name!r}"
             )
 
@@ -223,7 +230,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             )
         except (TypeError, ValueError) as exc:
             raise ValueError(
-                f"Ochestrator state '{state_name}' is not JSON-serializable: {exc}"
+                f"OchestratorState '{state_name}' is not JSON-serializable: {exc}"
             ) from exc
 
         (
@@ -232,9 +239,9 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             .set(payload_json)
         )
 
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Per-state persistence
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     def load_state(
         self,
@@ -246,48 +253,53 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         if not isinstance(state_name, str) or not state_name.strip():
             raise ValueError("state_name must be a non-empty string")
 
-        payload = (
+        raw = (
             self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
             .child("states")
             .child(state_name)
             .get()
         )
 
-        if payload is None:
+        if raw is None:
             return None
 
-        if not isinstance(payload, str):
+        if not isinstance(raw, str):
             raise ValueError(
-                f"Stored state payload for state_name={state_name!r} must be a JSON string blob, "
-                f"got {type(payload).__name__}"
+                f"Stored state payload for state_name={state_name!r} must be "
+                f"a JSON string blob, got {type(raw).__name__}"
             )
 
-        cls = self._state_classes_by_name.get(state_name)
-        if cls is None:
-            raise KeyError(f"No State class registered for state_name={state_name!r}")
-
         try:
-            state_dict = json.loads(payload)
+            state_dict = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError(
-                f"Stored state blob for state_name={state_name!r} is not valid JSON: {exc}"
+                f"Stored state blob for state_name={state_name!r} "
+                f"is not valid JSON: {exc}"
             ) from exc
 
         if not isinstance(state_dict, dict):
             raise ValueError(
-                f"Decoded state payload for state_name={state_name!r} must be a dict, "
-                f"got {type(state_dict).__name__}"
+                f"Decoded state payload for state_name={state_name!r} "
+                f"must be a dict, got {type(state_dict).__name__}"
+            )
+
+        cls = self._state_classes_by_name.get(state_name)
+        if cls is None:
+            raise KeyError(
+                f"No State class registered for state_name={state_name!r}"
             )
 
         try:
             state = cls.from_json_dict(state_dict)
         except Exception as exc:
-            raise ValueError(f"Error deserializing state '{state_name}': {exc}") from exc
-
-        loaded_state_name = self._state_name_of(state)
-        if loaded_state_name != state_name:
             raise ValueError(
-                f"Loaded State.name mismatch: got {loaded_state_name!r}, "
+                f"Error deserializing state '{state_name}': {exc}"
+            ) from exc
+
+        loaded_name = self._state_name_of(state)
+        if loaded_name != state_name:
+            raise ValueError(
+                f"Loaded State.name mismatch: got {loaded_name!r}, "
                 f"expected {state_name!r}"
             )
 
@@ -311,7 +323,9 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
                 separators=(",", ":"),
             )
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"State '{state_name}' is not JSON-serializable: {exc}") from exc
+            raise ValueError(
+                f"State '{state_name}' is not JSON-serializable: {exc}"
+            ) from exc
 
         (
             self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
@@ -337,9 +351,9 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             .delete()
         )
 
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Message history
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     def append_message(
         self,
@@ -408,20 +422,26 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             .delete()
         )
 
-    # ---------------------------------------------------------------------
-    # Internals
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Internal — Firebase references & paths
+    # ------------------------------------------------------------------
 
     def _conversation_index_user_ref(self, *, user_id: UUID) -> Any:
         return self._conversation_index_root_ref.child(str(user_id))
 
-    def _conversation_index_ref(self, *, user_id: UUID, conversation_id: UUID) -> Any:
-        return self._conversation_index_user_ref(user_id=user_id).child(str(conversation_id))
+    def _conversation_index_ref(
+        self, *, user_id: UUID, conversation_id: UUID
+    ) -> Any:
+        return self._conversation_index_user_ref(user_id=user_id).child(
+            str(conversation_id)
+        )
 
     def _user_ref(self, *, user_id: UUID) -> Any:
         return self._workflows_root_ref.child(str(user_id))
 
-    def _conversation_ref(self, *, user_id: UUID, conversation_id: UUID) -> Any:
+    def _conversation_ref(
+        self, *, user_id: UUID, conversation_id: UUID
+    ) -> Any:
         return self._user_ref(user_id=user_id).child(str(conversation_id))
 
     def _conversation_index_path(
@@ -430,7 +450,8 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         user_id: UUID,
         conversation_id: UUID,
     ) -> str:
-        return f"{self._CONVERSATION_INDEX_ROOT.strip('/')}/{user_id}/{conversation_id}"
+        root = self._CONVERSATION_INDEX_ROOT.strip("/")
+        return f"{root}/{user_id}/{conversation_id}"
 
     def _conversation_path(
         self,
@@ -438,7 +459,8 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         user_id: UUID,
         conversation_id: UUID,
     ) -> str:
-        return f"{self._WORKFLOWS_ROOT.strip('/')}/{user_id}/{conversation_id}"
+        root = self._WORKFLOWS_ROOT.strip("/")
+        return f"{root}/{user_id}/{conversation_id}"
 
     def _conversation_meta_path(
         self,
@@ -446,38 +468,37 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         user_id: UUID,
         conversation_id: UUID,
     ) -> str:
-        return f"{self._conversation_path(user_id=user_id, conversation_id=conversation_id)}/_meta"
+        base = self._conversation_path(
+            user_id=user_id, conversation_id=conversation_id
+        )
+        return f"{base}/_meta"
+
+    # ------------------------------------------------------------------
+    # Internal — ChatMessage serialisation
+    # ------------------------------------------------------------------
 
     def _chat_message_to_dict(self, message: ChatMessage) -> dict[str, Any]:
-        base_payload: dict[str, Any] = {
+        payload: dict[str, Any] = {
             "role": message.role,
             "message": message.content,
         }
 
-        raw_payload: dict[str, Any] = {}
-        if is_dataclass(message):
-            raw_payload = asdict(message)
-
         artifact_refs = self._serialize_artifact_refs(
-            raw_payload.get("artifact_refs", getattr(message, "artifact_refs", None))
+            getattr(message, "artifact_refs", None)
         )
-        if artifact_refs is None:
-            artifact_refs = self._serialize_artifact_refs(
-                raw_payload.get("artifacts_ids", getattr(message, "artifacts_ids", None))
-            )
         artifacts = self._serialize_artifacts(
-            raw_payload.get("artifacts", getattr(message, "artifacts", None))
+            getattr(message, "artifacts", None)
         )
-        message_id = raw_payload.get("id", getattr(message, "id", None))
+        message_id = getattr(message, "id", None)
 
         if artifact_refs is not None:
-            base_payload["artifact_refs"] = artifact_refs
+            payload["artifact_refs"] = artifact_refs
         if artifacts is not None:
-            base_payload["artifacts"] = artifacts
+            payload["artifacts"] = artifacts
         if message_id is not None:
-            base_payload["id"] = str(message_id)
+            payload["id"] = str(message_id)
 
-        return base_payload
+        return payload
 
     def _chat_message_from_dict(self, payload: dict[str, Any]) -> ChatMessage:
         role = payload.get("role")
@@ -489,7 +510,9 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         message_id = payload.get("id")
 
         if not isinstance(role, str) or not isinstance(content, str):
-            raise ValueError("Invalid chat message payload: role/message must be strings")
+            raise ValueError(
+                "Invalid chat message payload: role/message must be strings"
+            )
 
         return ChatMessage(
             role=role,  # type: ignore[arg-type]
@@ -499,23 +522,29 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             id=message_id if isinstance(message_id, str) else None,
         )
 
+    # ------------------------------------------------------------------
+    # Internal — artifact helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _serialize_artifact_refs(value: Any) -> list[dict[str, Any]] | None:
-        normalized = FirebaseRealtimeWorkflowStateRepo._normalize_artifact_refs(value)
+        normalized = FirebaseRealtimeWorkflowStateRepo._normalize_artifact_refs(
+            value
+        )
         if normalized is None:
             return None
 
         serialized: list[dict[str, Any]] = []
         for item in normalized:
-            serialized_item: dict[str, Any] = {
+            entry: dict[str, Any] = {
                 "id": str(item["id"]),
                 "kind": item["kind"],
                 "format": item["format"],
             }
-            artifact_meta = item.get("artifact_meta")
-            if artifact_meta is not None:
-                serialized_item["artifact_meta"] = dict(artifact_meta)
-            serialized.append(serialized_item)
+            meta = item.get("artifact_meta")
+            if meta is not None:
+                entry["artifact_meta"] = dict(meta)
+            serialized.append(entry)
 
         return serialized
 
@@ -524,11 +553,16 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         normalized = FirebaseRealtimeWorkflowStateRepo._normalize_artifacts(value)
         if normalized is None:
             return None
-        return [FirebaseRealtimeWorkflowStateRepo._jsonify_nested(item) for item in normalized]
+        return [
+            FirebaseRealtimeWorkflowStateRepo._jsonify_nested(item)
+            for item in normalized
+        ]
 
     @staticmethod
     def _normalize_artifact_refs(value: Any) -> list[dict[str, Any]] | None:
-        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        if not isinstance(value, Sequence) or isinstance(
+            value, (str, bytes, bytearray)
+        ):
             return None
 
         normalized: list[dict[str, Any]] = []
@@ -540,6 +574,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             artifact_kind = item.get("kind")
             artifact_format = item.get("format")
 
+            # Legacy format: {"id": ..., "type": "csv"} → kind="data", format="csv"
             if (
                 artifact_kind is None
                 and artifact_format is None
@@ -554,15 +589,17 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
                 continue
 
             try:
-                parsed_artifact_id = (
-                    artifact_id if isinstance(artifact_id, UUID) else UUID(str(artifact_id).strip())
+                parsed_id = (
+                    artifact_id
+                    if isinstance(artifact_id, UUID)
+                    else UUID(str(artifact_id).strip())
                 )
             except (TypeError, ValueError, AttributeError):
                 continue
 
             normalized.append(
                 {
-                    "id": parsed_artifact_id,
+                    "id": parsed_id,
                     "kind": artifact_kind,
                     "format": artifact_format,
                     "artifact_meta": FirebaseRealtimeWorkflowStateRepo._normalize_artifact_meta(
@@ -575,7 +612,9 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
     @staticmethod
     def _normalize_artifacts(value: Any) -> list[dict[str, Any]] | None:
-        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        if not isinstance(value, Sequence) or isinstance(
+            value, (str, bytes, bytearray)
+        ):
             return None
 
         normalized: list[dict[str, Any]] = []
@@ -583,32 +622,33 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             if not isinstance(item, dict):
                 continue
 
-            normalized_item = dict(item)
-            if "id" in normalized_item:
+            entry = dict(item)
+
+            if "id" in entry:
                 try:
-                    normalized_item["id"] = (
-                        normalized_item["id"]
-                        if isinstance(normalized_item["id"], UUID)
-                        else UUID(str(normalized_item["id"]).strip())
+                    entry["id"] = (
+                        entry["id"]
+                        if isinstance(entry["id"], UUID)
+                        else UUID(str(entry["id"]).strip())
                     )
                 except (TypeError, ValueError, AttributeError):
-                    normalized_item.pop("id", None)
+                    entry.pop("id", None)
 
-            kind = normalized_item.get("kind")
+            kind = entry.get("kind")
             if kind is not None and kind not in {"graph", "data"}:
-                normalized_item.pop("kind", None)
+                entry.pop("kind", None)
 
-            fmt = normalized_item.get("format")
+            fmt = entry.get("format")
             if fmt is not None and fmt not in {"csv", "json"}:
-                normalized_item.pop("format", None)
+                entry.pop("format", None)
 
-            normalized_item["artifact_meta"] = (
+            entry["artifact_meta"] = (
                 FirebaseRealtimeWorkflowStateRepo._normalize_artifact_meta(
-                    normalized_item.get("artifact_meta")
+                    entry.get("artifact_meta")
                 )
             )
 
-            normalized.append(normalized_item)
+            normalized.append(entry)
 
         return normalized or None
 
@@ -617,15 +657,19 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         if not isinstance(value, dict):
             return None
 
-        normalized: dict[str, str] = {}
+        result: dict[str, str] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 continue
             if item is None:
                 continue
-            normalized[key] = str(item)
+            result[key] = str(item)
 
-        return normalized or None
+        return result or None
+
+    # ------------------------------------------------------------------
+    # Internal — misc helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _state_name_of(state: Any) -> str | None:
@@ -640,11 +684,11 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             return str(value)
         if isinstance(value, dict):
             return {
-                str(key): FirebaseRealtimeWorkflowStateRepo._jsonify_nested(item)
-                for key, item in value.items()
+                str(k): FirebaseRealtimeWorkflowStateRepo._jsonify_nested(v)
+                for k, v in value.items()
             }
-        if isinstance(value, list):
-            return [FirebaseRealtimeWorkflowStateRepo._jsonify_nested(item) for item in value]
-        if isinstance(value, tuple):
-            return [FirebaseRealtimeWorkflowStateRepo._jsonify_nested(item) for item in value]
+        if isinstance(value, (list, tuple)):
+            return [
+                FirebaseRealtimeWorkflowStateRepo._jsonify_nested(v) for v in value
+            ]
         return value
