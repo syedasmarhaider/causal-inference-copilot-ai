@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from python.domain.models.errors import StateDependencyError
 from python.domain.workflows.node import NodeRequest
-from python.implementation.workflows.nodes.data_statistics.data_statistics_state import (
-    DataStatisticsState,
-)
 from python.implementation.workflows.tools.common.model.data_summary import (
     DatasetSummaryModel,
 )
@@ -22,37 +17,21 @@ class DataStatisticsDeps:
 
     @classmethod
     def from_request(cls, request: NodeRequest) -> DataStatisticsDeps:
-        raw_context = request.orchestrator_state.get(request.node_state.name())
-        if raw_context is None:
-            raise _missing_dependency_error("working_dataset_id", "latest_dataset_summary")
+        dataset_id_raw: Any = request.orchestrator_state.get("working_dataset_id")
+        dataset_summary_raw: Any = request.orchestrator_state.get("latest_dataset_summary")
 
-        dataset_id_raw: Any
-        dataset_summary_raw: Any
+        if dataset_id_raw is None:
+            raise ValueError("dataset_id is required but was not found in orchestrator state")
+        if dataset_summary_raw is None:
+            raise ValueError("dataset_summary is required but was not found in orchestrator state")
 
-        if isinstance(raw_context, Mapping):
-            dataset_id_raw = raw_context.get("working_dataset_id")
-            dataset_summary_raw = raw_context.get("latest_dataset_summary")
-        else:
-            raise ValueError(
-                "DATA_STATISTICS dependency payload must be a dict with working_dataset_id and "
-                "latest_dataset_summary"
-            )
-
-        if dataset_id_raw is None or dataset_summary_raw is None:
-            raise _missing_dependency_error("working_dataset_id", "latest_dataset_summary")
-        
+        if not isinstance(dataset_id_raw, UUID):
+            raise TypeError("dataset_id must be a UUID")
         if not isinstance(dataset_summary_raw, DatasetSummaryModel):
-            raise TypeError("latest_dataset_summary must be of type DatasetSummaryModel")
-        
-        if not isinstance(dataset_id_raw,  UUID):
-            raise TypeError("working_dataset_id must be a UUID")
+            raise TypeError("dataset_summary must be of type DatasetSummaryModel")
 
-        return cls(dataset_id=dataset_id_raw, dataset_summary=dataset_summary_raw)
+        return cls(
+            dataset_id=dataset_id_raw,
+            dataset_summary=dataset_summary_raw,
+        )
     
-
-def _missing_dependency_error(*missing: str) -> StateDependencyError:
-    return StateDependencyError(
-        DataStatisticsState.NAME,
-        DataStatisticsState.NAME,
-        list(missing),
-    )

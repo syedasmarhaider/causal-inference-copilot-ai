@@ -7,8 +7,6 @@ from python.domain.workflows.node import NodeRequest
 from python.implementation.workflows.tools.common.model.data_summary import (
     DatasetSummaryModel,
 )
-from python.implementation.workflows.utils.utils import uuid_from_any
-
 
 @dataclass(frozen=True)
 class DataCompilationDeps:
@@ -22,34 +20,22 @@ class DataCompilationDeps:
         dataset_summary_raw = request.orchestrator_state.get("latest_dataset_summary")
         protocol_discussion_raw = request.orchestrator_state.get("protocol_discussion")
 
-        dataset_id = uuid_from_any(dataset_id_raw)
-
-        dataset_summary: DatasetSummaryModel | None
+        if dataset_id_raw is None:
+            raise ValueError("DataCompilationDeps: dataset_id is required but was not found in compilation state")
         if dataset_summary_raw is None:
-            dataset_summary = None
-        elif isinstance(dataset_summary_raw, DatasetSummaryModel):
-            dataset_summary = dataset_summary_raw
-        elif isinstance(dataset_summary_raw, str):
-            dataset_summary = DatasetSummaryModel.model_validate_json(dataset_summary_raw)
-        else:
-            dataset_summary = DatasetSummaryModel.model_validate(dataset_summary_raw)
-
+            raise ValueError("DataCompilationDeps: dataset_summary is required but was not found in compilation state")
         if protocol_discussion_raw is None:
-            protocol_discussion = None
-        elif isinstance(protocol_discussion_raw, str):
-            protocol_discussion = protocol_discussion_raw.strip() or None
-        else:
-            raise TypeError("protocol_discussion must be str|null")
-
-        if dataset_id is None:
-            raise ValueError("DataCompilationDeps: dataset_id is required but was not found in orchestrator state")
-        if dataset_summary is None:
-            raise ValueError("DataCompilationDeps: dataset_summary is required but was not found in orchestrator state")
-        if protocol_discussion is None:
-            raise ValueError("DataCompilationDeps: protocol_discussion is required but was not found in orchestrator state")
+            raise ValueError("DataCompilationDeps: protocol_discussion is required but was not found in compilation state")
+        
+        if not isinstance(dataset_id_raw, UUID):
+            raise TypeError("DataCompilationDeps: dataset_id must be a UUID")
+        if not isinstance(dataset_summary_raw, DatasetSummaryModel):
+            raise TypeError("DataCompilationDeps: dataset_summary must be of type DatasetSummaryModel")
+        if not isinstance(protocol_discussion_raw, str):
+            raise TypeError("DataCompilationDeps: protocol_discussion must be a string")
 
         return cls(
-            dataset_id=dataset_id,
-            dataset_summary=dataset_summary,
-            protocol_discussion=protocol_discussion,
+            dataset_id=dataset_id_raw,
+            dataset_summary=dataset_summary_raw,
+            protocol_discussion=protocol_discussion_raw,
         )

@@ -5,29 +5,29 @@ from uuid import UUID
 
 from python.domain.workflows.node import NodeRequest
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
-from python.implementation.workflows.utils.utils import uuid_from_any
 
 
 @dataclass(frozen=True)
 class ProtocolDiscussionDeps:
-    dataset_id: UUID | None
-    dataset_summary: DatasetSummaryModel | None
+    dataset_id: UUID
+    dataset_summary: DatasetSummaryModel
 
     @classmethod
     def from_request(cls, request: NodeRequest) -> ProtocolDiscussionDeps:
         dataset_id_raw = request.orchestrator_state.get("working_dataset_id")
-        summary_raw = request.orchestrator_state.get("latest_dataset_summary")
+        dataset_summary_raw = request.orchestrator_state.get("latest_dataset_summary")
 
-        dataset_id = uuid_from_any(dataset_id_raw)
+        if dataset_id_raw is None:
+            raise ValueError("ProtocolDiscussionDeps: dataset_id is required but was not found in compilation state")
+        if dataset_summary_raw is None:
+            raise ValueError("ProtocolDiscussionDeps: dataset_summary is required but was not found in compilation state")
+        
+        if not isinstance(dataset_id_raw, UUID):
+            raise TypeError("ProtocolDiscussionDeps: dataset_id must be a UUID")
+        if not isinstance(dataset_summary_raw, DatasetSummaryModel):
+            raise TypeError("ProtocolDiscussionDeps: dataset_summary must be of type DatasetSummaryModel")
 
-        dataset_summary: DatasetSummaryModel | None
-        if summary_raw is None:
-            dataset_summary = None
-        elif isinstance(summary_raw, DatasetSummaryModel):
-            dataset_summary = summary_raw
-        elif isinstance(summary_raw, str):
-            dataset_summary = DatasetSummaryModel.model_validate_json(summary_raw)
-        else:
-            dataset_summary = DatasetSummaryModel.model_validate(summary_raw)
-
-        return cls(dataset_id=dataset_id, dataset_summary=dataset_summary)
+        return cls(
+            dataset_id=dataset_id_raw,
+            dataset_summary=dataset_summary_raw,
+        )

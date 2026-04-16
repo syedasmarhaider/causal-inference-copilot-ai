@@ -122,20 +122,9 @@ class DataManupulationNode(Node):
                 f"{type(request.node_state).__name__}"
             )
 
-        try:
-            deps = DataManupulationDeps.from_request(request)
-        except Exception as exc:
-            log.info(
-                "missing data manupulation dependencies",
-                error=safe_err( exc),
-            )
-            return self._needs_data_result(
-                request=request,
-                user_message=(
-                    "I do not have a working dataset available for data manipulation yet. "
-                    "Please upload or select a dataset first."
-                ),
-            )
+        
+        deps = DataManupulationDeps.from_request(request)
+    
 
         try:
             current_df = self._data_repo.get_csv_data(

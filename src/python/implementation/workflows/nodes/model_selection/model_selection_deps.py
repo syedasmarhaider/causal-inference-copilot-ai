@@ -1,18 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, cast
 from uuid import UUID
 
 from python.domain.models.validation import ValidationIssueModel, ValidationStatus
 from python.domain.workflows.node import NodeRequest
-from python.implementation.workflows.nodes.data_compilation.data_compilation_state import (
-    DataCompilationState,
-)
-from python.implementation.workflows.nodes.data_validation.data_validation_state import (
-    DataValidationState,
-)
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import (
@@ -31,73 +23,47 @@ class ModelSelectionDeps:
 
     @classmethod
     def from_request(cls, request: NodeRequest) -> ModelSelectionDeps:
-        compilation_raw = request.orchestrator_state.get(DataCompilationState.NAME)
-        validation_raw = request.orchestrator_state.get(DataValidationState.NAME)
+        transformation_plan_raw = request.orchestrator_state.get("data_transformation_plan")
+        causal_spec_raw = request.orchestrator_state.get("causal_spec")
+        dataset_id_raw = request.orchestrator_state.get("working_dataset_id")
+        dataset_summary_raw = request.orchestrator_state.get("latest_dataset_summary")
+        validation_issues_raw = request.orchestrator_state.get("validation_issues")
 
-        if compilation_raw is not None and not isinstance(compilation_raw, Mapping):
-            raise TypeError(
-                "DATA_COMPILATION payload must be a dict with compiled dataset and setup values"
-            )
-        if validation_raw is not None and not isinstance(validation_raw, Mapping):
-            raise TypeError(
-                "DATA_VALIDATION payload must be a dict with validation results"
-            )
-
-        compilation = cast(Mapping[str, Any] | None, compilation_raw)
-        validation = cast(Mapping[str, Any] | None, validation_raw)
-
-        dataset_id = cast(UUID | None, None if compilation is None else compilation.get("working_dataset_id"))
-
-        dataset_summary_raw = None if compilation is None else compilation.get("latest_dataset_summary")
-        if dataset_summary_raw is None:
-            dataset_summary = None
-        elif isinstance(dataset_summary_raw, DatasetSummaryModel):
-            dataset_summary = dataset_summary_raw
-        elif isinstance(dataset_summary_raw, str):
-            dataset_summary = DatasetSummaryModel.model_validate_json(dataset_summary_raw)
-        else:
-            dataset_summary = DatasetSummaryModel.model_validate(dataset_summary_raw)
-
-        causal_spec_raw = None if compilation is None else compilation.get("causal_spec")
-        if causal_spec_raw is None:
-            causal_spec = None
-        elif isinstance(causal_spec_raw, CausalSpec):
-            causal_spec = causal_spec_raw
-        else:
-            causal_spec = CausalSpec.model_validate(causal_spec_raw)
-
-        transformation_plan_raw = (
-            None
-            if compilation is None
-            else compilation.get(
-                "data_transformation_plan",
-            )
-        )
-        if transformation_plan_raw is None:
-            transformation_plan = None
-        elif isinstance(transformation_plan_raw, TransformPlan):
-            transformation_plan = transformation_plan_raw
-        else:
-            transformation_plan = TransformPlan.model_validate(transformation_plan_raw)
-
-        validation_issues_raw = [] if validation is None else list(validation.get("validation_issues") or [])
-        validation_issues = [
-            issue
-            if isinstance(issue, ValidationIssueModel)
-            else ValidationIssueModel.model_validate(issue)
-            for issue in validation_issues_raw
-        ]
-        if dataset_id is None:
+        if dataset_id_raw is None:
             raise ValueError("ModelSelectionDeps: dataset_id is required but was not found in compilation state")
-        if dataset_summary is None:
+        if dataset_summary_raw is None:
             raise ValueError("ModelSelectionDeps: dataset_summary is required but was not found in compilation state")
-        if causal_spec is None:
+        if causal_spec_raw is None:
             raise ValueError("ModelSelectionDeps: causal_spec is required but was not found in compilation state")
-        if transformation_plan is None:
+        if transformation_plan_raw is None:
             raise ValueError("ModelSelectionDeps: transformation_plan is required but was not found in compilation state")
+        
+        if not isinstance(dataset_id_raw, UUID):
+            raise TypeError("ModelSelectionDeps: dataset_id must be a UUID")
+        if not isinstance(dataset_summary_raw, DatasetSummaryModel):
+            raise TypeError("ModelSelectionDeps: dataset_summary must be of type DatasetSummaryModel")
+        if not isinstance(causal_spec_raw, CausalSpec):
+            raise TypeError("ModelSelectionDeps: causal_spec must be of type CausalSpec")
+        if not isinstance(transformation_plan_raw, TransformPlan):
+            raise TypeError("ModelSelectionDeps: transformation_plan must be of type TransformPlan")
+        if validation_issues_raw is not None and not isinstance(validation_issues_raw, list):
+            raise TypeError("ModelSelectionDeps: validation_issues must be a list of ValidationIssueModel")
+        if validation_issues_raw is None:
+            validation_issues_raw = []
+        else:
+            validated_issues: list[ValidationIssueModel] = []
+            for issue in validation_issues_raw:
+                if isinstance(issue, dict):
+                    validated_issues.append(ValidationIssueModel(**issue))
+                elif isinstance(issue, ValidationIssueModel):
+                    validated_issues.append(issue)
+                else:
+                    raise TypeError("ModelSelectionDeps: each item in validation_issues must be a dict or ValidationIssueModel")
+            validation_issues_raw = validated_issues
+        
 
         validation_status = "PASS"
-        for issue in validation_issues:
+        for issue in validation_issues_raw:
             if issue.severity == "WARN":
                 validation_status = "WARN"
                 break
@@ -105,11 +71,11 @@ class ModelSelectionDeps:
                 raise Exception(f"Validation failed: {issue}")
             
         return cls(
-            dataset_id=dataset_id,
-            dataset_summary=dataset_summary,
-            causal_spec=causal_spec,
-            transformation_plan=transformation_plan,
-            validation_issues=validation_issues,
+            dataset_id=dataset_id_raw,
+            dataset_summary=dataset_summary_raw,
+            causal_spec=causal_spec_raw,
+            transformation_plan=transformation_plan_raw,
+            validation_issues=validation_issues_raw,
             validation_status=validation_status,
         )
 

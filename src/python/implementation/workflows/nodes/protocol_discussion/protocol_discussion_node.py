@@ -219,16 +219,7 @@ class ProtocolDiscussionNode(Node):
             )
 
         deps = ProtocolDiscussionDeps.from_request(request)
-
-        if deps.dataset_id is None or deps.dataset_summary is None:
-            return self._needs_data_result(
-                request=request,
-                user_message=(
-                    "I need an active dataset before I can start the protocol discussion. "
-                    "Please upload or select a dataset first."
-                ),
-            )
-
+        
         questions = get_questions()
         prior_dataset_id = request.node_state.payload.dataset_id
         dataset_changed = prior_dataset_id is not None and prior_dataset_id != deps.dataset_id

@@ -22,18 +22,8 @@ class DataManupulationDeps:
 
     @classmethod
     def from_request(cls, request: NodeRequest) -> DataManupulationDeps:
-        raw_context = request.orchestrator_state.get(request.node_state.name())
-        if raw_context is None:
-            raise _missing_dependency_error("dataset_id")
-
-        if not isinstance(raw_context, Mapping):
-            raise TypeError(
-                "DATA_MANUPULATION dependency payload must be a dict with working_dataset_id and "
-                "dataset_summary"
-            )
-
-        dataset_id_raw: Any = raw_context.get("working_dataset_id")
-        dataset_summary_raw: Any = raw_context.get("latest_dataset_summary")
+        dataset_id_raw: Any = request.orchestrator_state.get("working_dataset_id")
+        dataset_summary_raw: Any = request.orchestrator_state.get("latest_dataset_summary")
 
         if dataset_id_raw is None:
             raise _missing_dependency_error("dataset_id")
