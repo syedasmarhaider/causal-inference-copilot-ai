@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from python.implementation.workflows.ochestrator.ochestrator_global_state import (
+from python.implementation.workflows.ochestrator.writable_ochestrator_state import (
     OchestratorWritableGlobalState,
 )
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel

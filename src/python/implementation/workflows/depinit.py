@@ -8,7 +8,7 @@ from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import LLMService
-from python.domain.workflows.node_state import State
+from python.domain.workflows.node_state import NodeState
 from python.implementation.repo.duckdb_working_analytics_repo import DuckDBAnalyticsRepo
 from python.implementation.repo.firebase_realtime_workflow_state_repo import (
     FirebaseRealtimeWorkflowStateRepo,
@@ -27,7 +27,8 @@ from python.implementation.workflows.ochestrator.ochestraotor import (
     Ochestrator,
     build_state_classes_by_name,
 )
-from python.implementation.workflows.ochestrator.ochestrator_global_state import OchestratorWritableGlobalState
+
+from python.implementation.workflows.ochestrator.writable_ochestrator_state import WritableOchestratorState
 from python.implementation.workflows.workflow_app import WorkflowApp
 
 log = get_logger(__name__, component="workflow_depinit", log_type="dependency_bootstrap")
@@ -86,13 +87,13 @@ def make_dataflow_app(*, use_local_files: bool = False) -> DataflowApp:
 
 def _make_workflow_state_repo(
     *,
-    state_classes_by_name: Mapping[str, type[State]],
+    state_classes_by_name: Mapping[str, type[NodeState]],
 ) -> WorkflowStateRepo:
     app = FirebaseRealtimeWorkflowStateRepo.get_default_firebase_database_app()
     return FirebaseRealtimeWorkflowStateRepo(
         app=app,
         state_classes_by_name=state_classes_by_name,
-        ochestrator_state_classes_by_name={"OCHESTRATOR_STATE": OchestratorWritableGlobalState},
+        ochestrator_state_classes_by_name={"OCHESTRATOR_STATE": WritableOchestratorState},  # TODO: make this dynamic when we have more orch states
         
     )
 

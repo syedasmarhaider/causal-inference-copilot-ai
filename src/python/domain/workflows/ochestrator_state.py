@@ -15,7 +15,7 @@ class OchestratorState(ABC):
      raise NotImplementedError
     
     @abstractmethod
-    def set(self, key: str, value: Any) -> None:
+    def set(self, key: str, value: dict[str, Any]) -> None:
         raise NotImplementedError
     
     @abstractmethod

@@ -5,8 +5,8 @@ from collections.abc import Sequence
 from uuid import UUID
 
 from python.domain.models.models import ChatMessage
-from python.domain.workflows.ochestrator_state import WritableOchestratorState
-from python.domain.workflows.node_state import State
+from python.domain.workflows.ochestrator_state import OchestratorState
+from python.domain.workflows.node_state import NodeState
 
 
 class WorkflowStateRepo(ABC):
@@ -33,12 +33,12 @@ class WorkflowStateRepo(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def load_ochestrator_state(self, *, user_id: UUID, conversation_id: UUID) -> WritableOchestratorState | None:
+    def load_ochestrator_state(self, *, user_id: UUID, conversation_id: UUID) -> OchestratorState | None:
         raise NotImplementedError
 
     @abstractmethod
     def store_ochestrator_state(
-        self, *, user_id: UUID, conversation_id: UUID, state: WritableOchestratorState 
+        self, *, user_id: UUID, conversation_id: UUID, state: OchestratorState 
     ) -> None:
         raise NotImplementedError
 
@@ -47,11 +47,11 @@ class WorkflowStateRepo(ABC):
     # -----------------------
 
     @abstractmethod
-    def load_state(self, *, user_id: UUID, conversation_id: UUID, state_name: str) -> State | None:
+    def load_state(self, *, user_id: UUID, conversation_id: UUID, state_name: str) -> NodeState | None:
         raise NotImplementedError
 
     @abstractmethod
-    def store_state(self, *, user_id: UUID, conversation_id: UUID, state: State) -> None:
+    def store_state(self, *, user_id: UUID, conversation_id: UUID, state: NodeState) -> None:
         raise NotImplementedError
 
     # Optional convenience

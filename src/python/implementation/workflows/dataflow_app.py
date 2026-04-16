@@ -4,7 +4,7 @@ import io
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
 import pandas as pd
@@ -18,8 +18,8 @@ from python.domain.models.models import ArtifactFormat, ArtifactKind, WorkingDat
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.implementation.service.logging.default_logging import get_app_logger
-from python.implementation.workflows.nodes.dataset.dataset_state import DatasetState
-from python.implementation.workflows.ochestrator.ochestrator_global_state import OchestratorWritableGlobalState
+from python.implementation.workflows.nodes.data_manupulation.data_manupulation_node import DataManupulationNode
+from python.implementation.workflows.ochestrator.writable_ochestrator_state import WritableOchestratorState
 
 # TODO: add distributed tnx or locks later
 
@@ -89,13 +89,16 @@ class DataflowApp:
             user_id=user_id,
             conversation_id=conversation_id,
         )
-        dataset_state = self._load_dataset_state(
+        ochestrator_state = self._repo.load_ochestrator_state(
             user_id=user_id,
             conversation_id=conversation_id,
         )
-        if dataset_state is None:
-            return ()
-        return tuple(iteration.dataset_id for iteration in dataset_state.payload.dataset_iterations)
+        if ochestrator_state is None:
+            return []
+        dataset_ids = ochestrator_state.get("working_dataset_ids")
+        if dataset_ids is None:
+            return []
+        return dataset_ids
 
     def get_current_working_dataset_info(
         self,
@@ -107,13 +110,20 @@ class DataflowApp:
             user_id=user_id,
             conversation_id=conversation_id,
         )
-        dataset_state = self._load_dataset_state(
+        ochestrator_state = self._repo.load_ochestrator_state(
             user_id=user_id,
             conversation_id=conversation_id,
         )
-        if dataset_state is None:
+        if ochestrator_state is None:
             return None
-        return dataset_state.get_working_dataset_info()
+        dataset_ids = ochestrator_state.get("working_dataset_ids")
+        if not dataset_ids:
+            return None
+        current_dataset_id = dataset_ids[-1]
+        is_frozen = ochestrator_state.get("working_dataset_frozen")
+        if is_frozen is None:
+            is_frozen = False
+        return WorkingDatasetInfo(dataset_id=current_dataset_id, is_freezed=is_frozen)
 
     def upload_csv_data(
         self,
@@ -144,21 +154,18 @@ class DataflowApp:
             conversation_id=conversation_id,
         )
         if not ochestrator_state:
-            ochestrator_state = OchestratorWritableGlobalState.init_empty()
+            ochestrator_state = WritableOchestratorState.init_empty()
         
-        ochestrator_state = cast(OchestratorWritableGlobalState, ochestrator_state)    
-
-        if ochestrator_state.needs_node_name() != DatasetState.NAME:
-            self._log.info(
-                "csv upload rejected because conversation is not at dataset state",
-                user_id=user_id,
-                conversation_id=conversation_id,
-                active_state_name=ochestrator_state.needs_node_name(),
-                required_state_name=DatasetState.NAME,
-            )
+        if not isinstance(ochestrator_state, WritableOchestratorState):
             raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation_id)
 
-        dataset_id = DatasetState.INIT_DATA_ID
+        if ochestrator_state.get_current_node_name() != DataManupulationNode.NAME:
+            raise ValidationError(
+                field="conversation_id",
+                reason="Cannot upload dataset while in the middle of a manipulation stage. Please finish or cancel the current stage before uploading a new dataset.",
+            )
+
+        dataset_id = WritableOchestratorState.INIT_DATA_ID
         self._data_repo.save_csv_data(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -264,26 +271,3 @@ class DataflowApp:
             mime=mime,
             content=content,
         )
-
-    def _load_dataset_state(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-    ) -> DatasetState | None:
-        state = self._repo.load_state(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            state_name=DatasetState.NAME,
-        )
-        if state is None:
-            return None
-        if not isinstance(state, DatasetState):
-            raise TypeError(f"Expected DatasetState, got {type(state).__name__}")
-        return state
-
-
-__all__ = [
-    "DataflowApp",
-    "DataflowArtifactResponse",
-]

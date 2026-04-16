@@ -12,8 +12,8 @@ from firebase_admin import credentials, db
 
 from python.domain.models.models import ChatMessage
 from python.domain.repo.workflow_state_repo import WorkflowStateRepo
-from python.domain.workflows.ochestrator_state import WritableOchestratorState
-from python.domain.workflows.node_state import State
+from python.domain.workflows.node_state import NodeState
+from python.domain.workflows.ochestrator_state import OchestratorState
 
 
 class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
@@ -64,8 +64,8 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         self,
         *,
         app: Any,
-        state_classes_by_name: Mapping[str, type[State]],
-        ochestrator_state_classes_by_name: Mapping[str, type[WritableOchestratorState]],
+        state_classes_by_name: Mapping[str, type[NodeState]],
+        ochestrator_state_classes_by_name: Mapping[str, type[OchestratorState]],
     ) -> None:
         if app is None:
             raise ValueError("app must not be None")
@@ -136,7 +136,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         *,
         user_id: UUID,
         conversation_id: UUID,
-    ) -> WritableOchestratorState | None:
+    ) -> OchestratorState | None:
         raw_payload = (
             self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
             .child("ochestrator_state")
@@ -204,7 +204,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         *,
         user_id: UUID,
         conversation_id: UUID,
-        state: WritableOchestratorState,
+        state: OchestratorState,
     ) -> None:
         state_name = self._state_name_of(state)
         if not isinstance(state_name, str) or not state_name.strip():
@@ -242,7 +242,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         user_id: UUID,
         conversation_id: UUID,
         state_name: str,
-    ) -> State | None:
+    ) -> NodeState | None:
         if not isinstance(state_name, str) or not state_name.strip():
             raise ValueError("state_name must be a non-empty string")
 
@@ -298,7 +298,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         *,
         user_id: UUID,
         conversation_id: UUID,
-        state: State,
+        state: NodeState,
     ) -> None:
         state_name = self._state_name_of(state)
         if not isinstance(state_name, str) or not state_name.strip():
