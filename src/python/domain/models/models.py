@@ -15,10 +15,13 @@ ArtifactKind = Literal["graph", "data"]
 ArtifactFormat = Literal["json", "csv"]
 
 
-class ArtifactRef(TypedDict, total=False):
+class _ArtifactRefBase(TypedDict):
     id: UUID
     kind: ArtifactKind
     format: ArtifactFormat
+
+
+class ArtifactRef(_ArtifactRefBase, total=False):
     artifact_meta: dict[str, str] | None
 
 

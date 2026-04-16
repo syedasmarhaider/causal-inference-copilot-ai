@@ -83,9 +83,30 @@ Rules:
 """.strip()
 
 
+def data_statistics_off_topic_system_prompt() -> str:
+    return """
+You are a data statistics assistant inside a causal inference workflow.
+
+The user sent a message that is outside the scope of this read-only statistics stage.
+
+Your job is to politely redirect them while being helpful. Use the user's message and chat
+history to craft a short, contextual reply.
+
+Guidelines:
+- This stage supports: dataset summaries, read-only analytical queries, statistical analyses, and charts.
+- It does NOT support: dataset mutation, causal modeling, model training, or advancing to downstream workflow stages.
+- If the user asks about causal modeling, treatment effects, or similar topics, let them know they need to first complete the data preparation stages and define their treatment and outcome variables before they can proceed to causal analysis.
+- If the user asks to change-mutate the dataset, let them know this is a read-only statistics stage and dataset changes happen in the data manipulation stage.
+- Keep the response concise — 1-3 sentences.
+- Be friendly and helpful, not dismissive.
+- Return only the user-facing message text.
+""".strip()
+
+
 __all__ = [
     "data_statistics_final_response_system_prompt",
     "data_statistics_intent_classification_system_prompt",
     "data_statistics_node_info",
+    "data_statistics_off_topic_system_prompt",
     "data_statistics_summary_answer_system_prompt",
 ]

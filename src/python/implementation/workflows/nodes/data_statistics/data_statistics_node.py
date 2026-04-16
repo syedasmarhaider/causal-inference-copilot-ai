@@ -28,6 +28,7 @@ from python.implementation.workflows.nodes.data_statistics.data_statistics_promp
     data_statistics_final_response_system_prompt,
     data_statistics_intent_classification_system_prompt,
     data_statistics_node_info,
+    data_statistics_off_topic_system_prompt,
     data_statistics_summary_answer_system_prompt,
 )
 from python.implementation.workflows.nodes.data_statistics.data_statistics_state import (
@@ -53,14 +54,10 @@ _WORKING_TABLE_HASH_HEX_LEN = 16
 _ARTIFACT_KIND_ANALYTICAL_RESULT = "analytical_result"
 _ARTIFACT_KIND_CHART_SPEC = "chart_spec"
 _INITIAL_SUMMARY_MAX_COLUMNS = 8
-_OFF_TOPIC_MESSAGE = (
+_OFF_TOPIC_FALLBACK_MESSAGE = (
     "This statistics stage is read-only. I can answer dataset-summary questions, run "
     "read-only analytical queries, perform statistical analyses, and generate charts. "
     "I cannot change the dataset or move into downstream causal or model stages from here."
-)
-_OFF_TOPIC_CLARIFICATION_MESSAGE = (
-    "This step only supports read-only summaries, analytical queries, statistics, and charts. "
-    "It cannot change the dataset or run downstream workflow stages."
 )
 
 
@@ -197,16 +194,13 @@ class DataStatisticsNode(Node):
             )
 
         if intent.intent_out_of_scope or not intent.has_any_intent():
-            previous_assistant_message = _latest_assistant_message(
-                request.read_only_messages_history
+            off_topic_reply = self._build_off_topic_response(
+                user_message=latest_user_message,
+                chat_history=history_text,
             )
             return self._needs_input_result(
                 request=request,
-                user_message=(
-                    self._build_off_topic_clarification_message()
-                    if _is_statistics_scope_message(previous_assistant_message)
-                    else self._build_off_topic_message()
-                ),
+                user_message=off_topic_reply,
             )
 
         summary_answer: str | None = None
@@ -574,11 +568,29 @@ class DataStatisticsNode(Node):
             f"{preview}. Ask for read-only summaries, queries, statistical analyses, or charts."
         )
 
-    def _build_off_topic_message(self) -> str:
-        return _OFF_TOPIC_MESSAGE
-
-    def _build_off_topic_clarification_message(self) -> str:
-        return _OFF_TOPIC_CLARIFICATION_MESSAGE
+    def _build_off_topic_response(
+        self,
+        *,
+        user_message: str,
+        chat_history: str | None,
+    ) -> str:
+        payload: JSONDict = {
+            "user_message": user_message,
+            "chat_history": chat_history,
+        }
+        try:
+            response = self._llm.generate(
+                system_prompt=data_statistics_off_topic_system_prompt(),
+                user_prompt=json.dumps(payload, ensure_ascii=False),
+                config=LLMConfig(model="basic", temperature=0.3),
+                history=None,
+            )
+            answer = response.content.strip()
+            if answer:
+                return answer
+        except Exception as exc:
+            log.exception("failed to generate off-topic response", error=safe_err(exc))
+        return _OFF_TOPIC_FALLBACK_MESSAGE
 
     def _build_final_message(
         self,
@@ -710,20 +722,6 @@ def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str 
     return None
 
 
-def _latest_assistant_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
-    if not messages_history:
-        return None
-
-    for message in reversed(messages_history):
-        if message.role != "assistant":
-            continue
-        content = message.content.strip()
-        if content:
-            return content
-
-    return None
-
-
 def _recent_history_text(messages_history: Sequence[ChatMessage] | None) -> str | None:
     if not messages_history or len(messages_history) <= 1:
         return None
@@ -733,17 +731,6 @@ def _recent_history_text(messages_history: Sequence[ChatMessage] | None) -> str 
         return None
 
     return get_chat_messages_role_and_message_json(recent_messages)
-
-
-def _normalize_message_text(value: str) -> str:
-    return " ".join(value.strip().casefold().split()).strip("?.! ")
-
-
-def _is_statistics_scope_message(value: str | None) -> bool:
-    if not value:
-        return False
-    normalized = _normalize_message_text(value)
-    return "read-only" in normalized and "statistics" in normalized
 
 
 def _dataframe_preview(dataframe: pd.DataFrame, *, row_limit: int = 10) -> JSONDict:

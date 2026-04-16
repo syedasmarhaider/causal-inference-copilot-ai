@@ -58,41 +58,7 @@ def _safe_dict(d: dict[str, Any]) -> dict[str, Any]:
 
 # ---------------------------------------------------------------------------
 # Individual analysis runners — thin wrappers around library APIs
-# ---------------------------------------------------------------------------
-
-
-def _run_descriptive(df: pd.DataFrame, plan: AnalyticsPlanModel) -> AnalyticsResultModel:
-    cols = [c for c in plan.columns if c in df.columns]
-    if not cols:
-        raise ValueError("No valid numeric columns found in dataframe")
-    subset = df[cols]
-    if plan.group_by and plan.group_by in df.columns:
-        desc = subset.groupby(df[plan.group_by]).describe()
-        table = {str(k): _safe_dict(v) for k, v in desc.to_dict().items()}
-    else:
-        desc = subset.describe()
-        table = {str(k): _safe_dict(v) for k, v in desc.to_dict().items()}
-
-    return AnalyticsResultModel(
-        analysis_type="descriptive",
-        summary=f"Descriptive statistics for {len(cols)} column(s): {', '.join(cols)}.",
-        tables={"describe": table},
-    )
-
-
-def _run_correlation(df: pd.DataFrame, plan: AnalyticsPlanModel) -> AnalyticsResultModel:
-    cols = [c for c in plan.columns if c in df.columns]
-    if len(cols) < 2:
-        raise ValueError("Need at least 2 valid numeric columns for correlation")
-    corr = df[cols].corr(method="pearson")
-    table = {str(k): _safe_dict(v) for k, v in corr.to_dict().items()}
-    return AnalyticsResultModel(
-        analysis_type="correlation",
-        summary=f"Pearson correlation matrix for: {', '.join(cols)}.",
-        tables={"correlation_matrix": table},
-    )
-
-
+# ---------------------------------------------------------------------------    
 def _run_linear_regression(df: pd.DataFrame, plan: AnalyticsPlanModel) -> AnalyticsResultModel:
     import statsmodels.api as sm
 
@@ -267,8 +233,6 @@ def _run_ttest(df: pd.DataFrame, plan: AnalyticsPlanModel) -> AnalyticsResultMod
 
 
 _RUNNERS = {
-    "descriptive": _run_descriptive,
-    "correlation": _run_correlation,
     "linear_regression": _run_linear_regression,
     "logistic_regression": _run_logistic_regression,
     "propensity_score": _run_propensity_score,
@@ -294,9 +258,8 @@ class AdvancedAnalyticsTool(Tool):
 
     def get_tool_info(self) -> str:
         return (
-            "Advanced analytics tool for tabular data. Supports descriptive statistics, "
-            "correlation matrices, OLS / logistic regression, propensity score estimation, "
-            "chi-squared tests, and independent t-tests. Uses an LLM to plan the analysis "
+            "Advanced analytics tool for tabular data. Supports OLS / logistic regression, "
+            "propensity score estimation, chi-squared tests, and independent t-tests. Uses an LLM to plan the analysis "
             "from a natural-language request, then executes it with statsmodels / scipy / sklearn."
         )
 

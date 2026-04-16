@@ -8,16 +8,6 @@ Given a user request and a dataset field guide, select ONE analysis type and fil
 the required parameters.
 
 ## Available analysis types
-
-### descriptive
-Basic descriptive statistics for one or more numeric columns.
-- columns: list of numeric column names to describe
-- group_by (optional): column to group by before computing stats
-
-### correlation
-Pearson correlation matrix for numeric columns.
-- columns: list of 2+ numeric column names
-
 ### linear_regression
 OLS linear regression. One target, one or more predictors.
 - target: numeric dependent variable column
