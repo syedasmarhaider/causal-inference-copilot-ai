@@ -8,7 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
-from python.domain.workflows.node import Node
+from python.domain.workflows.node import Node, NodeExecutionResult, NodeRequest
 from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_deps import (
     ProtocolDiscussionDeps,
@@ -122,10 +122,7 @@ class ProtocolDiscussionNode(Node):
         questions: Sequence[str],
         reset_discussion: bool,
     ) -> ProtocolDiscussionPayloadModel:
-        updates: dict[str, Any] = {
-            "dataset_id": deps.dataset_id,
-            "dataset_summary": deps.dataset_summary,
-        }
+        updates: dict[str, Any] = {"dataset_id": deps.dataset_id}
         if reset_discussion:
             updates.update(
                 {
@@ -136,7 +133,6 @@ class ProtocolDiscussionNode(Node):
                     "system_message": None,
                 }
             )
-            
         return payload.model_copy(update=updates)
 
     def _call_update(
@@ -215,37 +211,41 @@ class ProtocolDiscussionNode(Node):
     def run(
         self,
         *,
-        user_id: UUID,
-        conversation_id: UUID,
-        readonly_orchestrator_state: ReadOnlyOchestratorState,
-        messages_history: Sequence[ChatMessage] | None,
-        state: State,
-    ) -> State:
-        _ = user_id
-        _ = conversation_id
-
-        if not isinstance(state, ProtocolDiscussionState):
+        request: NodeRequest,
+    ) -> NodeExecutionResult:
+        if not isinstance(request.node_state, ProtocolDiscussionState):
             raise TypeError(
-                f"{self.name}: expected ProtocolDiscussionState, got {type(state).__name__}"
+                f"{self.name}: expected ProtocolDiscussionState, got {type(request.node_state).__name__}"
             )
 
-        deps = ProtocolDiscussionDeps.from_loaded(readonly_orchestrator_state)
+        deps = ProtocolDiscussionDeps.from_request(request)
+
+        if deps.dataset_id is None or deps.dataset_summary is None:
+            return self._needs_data_result(
+                request=request,
+                user_message=(
+                    "I need an active dataset before I can start the protocol discussion. "
+                    "Please upload or select a dataset first."
+                ),
+            )
+
         questions = get_questions()
-        prior_dataset_id = state.payload.dataset_id
+        prior_dataset_id = request.node_state.payload.dataset_id
         dataset_changed = prior_dataset_id is not None and prior_dataset_id != deps.dataset_id
-        needs_initialization = not state.payload.discussion.strip()
+        needs_initialization = not request.node_state.payload.discussion.strip()
 
         payload = self._bind_payload_to_dataset(
-            payload=state.payload.model_copy(deep=True),
+            payload=request.node_state.payload.model_copy(deep=True),
             deps=deps,
             questions=questions,
             reset_discussion=(dataset_changed or needs_initialization),
         )
 
-        latest_user_message = _latest_user_message(messages_history)
+        latest_user_message = _latest_user_message(request.read_only_messages_history)
         if not latest_user_message:
-            return ProtocolDiscussionState(
-                payload.model_copy(
+            return self._needs_input_result(
+                request=request,
+                payload=payload.model_copy(
                     update={
                         "assistant_message": self._prefix_dataset_reset_message(
                             assistant_message=payload.assistant_message or initial_user_message(),
@@ -255,12 +255,16 @@ class ProtocolDiscussionNode(Node):
                         "system_message": None,
                         "phase": "DISCUSSING",
                     }
-                )
+                ),
             )
 
         summary_string = deps.dataset_summary.model_dump_json()
         base_payload = self._base_payload(questions=questions, summary_string=summary_string)
-        last_4_messages = list(messages_history[-4:]) if messages_history else None
+        last_4_messages = (
+            list(request.read_only_messages_history[-4:])
+            if request.read_only_messages_history
+            else None
+        )
 
         if payload.phase == "REVIEW_READY":
             try:
@@ -271,8 +275,9 @@ class ProtocolDiscussionNode(Node):
                 )
             except Exception as e:
                 log.exception("PROTOCOL_DISCUSSION review decision failure: %s", safe_err(e))
-                return ProtocolDiscussionState(
-                    payload.model_copy(
+                return self._needs_input_result(
+                    request=request,
+                    payload=payload.model_copy(
                         update={
                             "phase": "REVIEW_READY",
                             "assistant_message": (
@@ -281,31 +286,40 @@ class ProtocolDiscussionNode(Node):
                             ),
                             "system_message": None,
                         }
-                    )
+                    ),
                 )
 
             if review_decision.action == "confirm":
-                return ProtocolDiscussionState(
-                    payload.model_copy(
-                        update={
-                            "phase": "CONFIRMED",
-                            "assistant_message": review_decision.assistant_message,
-                            "system_message": self._build_confirmed_cleaning_system_message(
-                                cast(str, payload.pending_dataset_change_request)
-                            ),
-                        }
-                    )
+                confirmed_payload = payload.model_copy(
+                    update={
+                        "phase": "CONFIRMED",
+                        "assistant_message": review_decision.assistant_message,
+                        "system_message": self._build_confirmed_cleaning_system_message(
+                            cast(str, payload.pending_dataset_change_request)
+                        ),
+                    }
+                )
+                request.orchestrator_state.set(
+                    request.node_state.name(),
+                    {"protocol_discussion": confirmed_payload.discussion},
+                )
+                return self._done_result(
+                    request=request,
+                    payload=confirmed_payload,
+                    user_message=review_decision.assistant_message,
+                    system_message=confirmed_payload.system_message,
                 )
 
             if review_decision.action == "clarify":
-                return ProtocolDiscussionState(
-                    payload.model_copy(
+                return self._needs_input_result(
+                    request=request,
+                    payload=payload.model_copy(
                         update={
                             "phase": "REVIEW_READY",
                             "assistant_message": review_decision.assistant_message,
                             "system_message": None,
                         }
-                    )
+                    ),
                 )
 
             payload = payload.model_copy(
@@ -325,14 +339,15 @@ class ProtocolDiscussionNode(Node):
             )
         except Exception as e:
             log.exception("PROTOCOL_DISCUSSION update failure: %s", safe_err(e))
-            return ProtocolDiscussionState(
-                payload.model_copy(
+            return self._needs_input_result(
+                request=request,
+                payload=payload.model_copy(
                     update={
                         "phase": "DISCUSSING",
                         "assistant_message": "Protocol discussion update failed. Please try again.",
                         "system_message": None,
                     }
-                )
+                ),
             )
 
         assistant_message = self._prefix_dataset_reset_message(
@@ -351,8 +366,9 @@ class ProtocolDiscussionNode(Node):
             except Exception as e:
                 log.exception("PROTOCOL_DISCUSSION review summary failure: %s", safe_err(e))
                 review_message = self._fallback_review_summary(decision.discussion)
-            return ProtocolDiscussionState(
-                payload.model_copy(
+            return self._needs_input_result(
+                request=request,
+                payload=payload.model_copy(
                     update={
                         "discussion": decision.discussion,
                         "phase": "REVIEW_READY",
@@ -366,11 +382,12 @@ class ProtocolDiscussionNode(Node):
                         ),
                         "system_message": None,
                     }
-                )
+                ),
             )
 
-        return ProtocolDiscussionState(
-            payload.model_copy(
+        return self._needs_input_result(
+            request=request,
+            payload=payload.model_copy(
                 update={
                     "discussion": decision.discussion,
                     "phase": "DISCUSSING",
@@ -378,7 +395,62 @@ class ProtocolDiscussionNode(Node):
                     "assistant_message": assistant_message,
                     "system_message": None,
                 }
-            )
+            ),
+        )
+
+    def _needs_input_result(
+        self,
+        *,
+        request: NodeRequest,
+        payload: ProtocolDiscussionPayloadModel,
+    ) -> NodeExecutionResult:
+        messages: list[ChatMessage] = []
+        if payload.system_message:
+            messages.append(ChatMessage(role="system", content=payload.system_message))
+        if payload.assistant_message:
+            messages.append(ChatMessage(role="assistant", content=payload.assistant_message))
+        if not messages:
+            messages.append(ChatMessage(role="assistant", content=initial_user_message()))
+        return NodeExecutionResult(
+            new_node_state=ProtocolDiscussionState(payload),
+            new_orchestrator_state=request.orchestrator_state,
+            status="PENDING",
+            action="NEEDS_INPUT",
+            response_messages=messages,
+        )
+
+    def _needs_data_result(
+        self,
+        *,
+        request: NodeRequest,
+        user_message: str,
+    ) -> NodeExecutionResult:
+        return NodeExecutionResult(
+            new_node_state=ProtocolDiscussionState.init_empty(),
+            new_orchestrator_state=request.orchestrator_state,
+            status="PENDING",
+            action="NEEDS_DATA",
+            response_messages=[ChatMessage(role="assistant", content=user_message)],
+        )
+
+    def _done_result(
+        self,
+        *,
+        request: NodeRequest,
+        payload: ProtocolDiscussionPayloadModel,
+        user_message: str,
+        system_message: str | None,
+    ) -> NodeExecutionResult:
+        messages: list[ChatMessage] = []
+        if system_message:
+            messages.append(ChatMessage(role="system", content=system_message))
+        messages.append(ChatMessage(role="assistant", content=user_message))
+        return NodeExecutionResult(
+            new_node_state=ProtocolDiscussionState(payload),
+            new_orchestrator_state=request.orchestrator_state,
+            status="DONE",
+            action="NONE",
+            response_messages=messages,
         )
 
 
@@ -392,3 +464,4 @@ def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str 
         if content:
             return content
     return None
+
