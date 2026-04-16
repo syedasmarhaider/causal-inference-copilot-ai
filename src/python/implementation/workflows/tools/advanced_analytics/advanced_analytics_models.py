@@ -6,8 +6,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 AnalysisKind = Literal[
-    "descriptive",
-    "correlation",
     "linear_regression",
     "logistic_regression",
     "propensity_score",
@@ -36,10 +34,6 @@ class AnalyticsPlanModel(BaseModel):
     @model_validator(mode="after")
     def _check(self) -> AnalyticsPlanModel:
         k = self.analysis_type
-        if k == "descriptive" and not self.columns:
-            raise ValueError("descriptive requires 'columns'")
-        if k == "correlation" and len(self.columns) < 2:
-            raise ValueError("correlation requires >= 2 columns")
         if k in ("linear_regression", "logistic_regression"):
             if not self.target or not self.predictors:
                 raise ValueError(f"{k} requires 'target' and 'predictors'")

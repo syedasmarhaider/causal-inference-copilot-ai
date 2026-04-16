@@ -29,7 +29,6 @@ from python.implementation.workflows.nodes.data_statistics.data_statistics_promp
     data_statistics_intent_classification_system_prompt,
     data_statistics_node_info,
     data_statistics_off_topic_system_prompt,
-    data_statistics_summary_answer_system_prompt,
 )
 from python.implementation.workflows.nodes.data_statistics.data_statistics_state import (
     DataStatisticsState,
@@ -55,8 +54,8 @@ _ARTIFACT_KIND_ANALYTICAL_RESULT = "analytical_result"
 _ARTIFACT_KIND_CHART_SPEC = "chart_spec"
 _INITIAL_SUMMARY_MAX_COLUMNS = 8
 _OFF_TOPIC_FALLBACK_MESSAGE = (
-    "This statistics stage is read-only. I can answer dataset-summary questions, run "
-    "read-only analytical queries, perform statistical analyses, and generate charts. "
+    "This is a data statistics stage. I can run analytical queries, "
+    "formal statistical tests, and generate charts. "
     "I cannot change the dataset or move into downstream causal or model stages from here."
 )
 
@@ -64,21 +63,18 @@ _OFF_TOPIC_FALLBACK_MESSAGE = (
 class DataStatisticsIntentModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    intent_summary_question: bool = False
-    intent_summary_question_brief: str = ""
-    intent_readonly_query: bool = False
-    intent_readonly_query_brief: str = ""
-    intent_statistical_analysis: bool = False
-    intent_statistical_analysis_brief: str = ""
+    intent_analytics: bool = False
+    intent_analytics_brief: str = ""
     intent_chart: bool = False
     intent_chart_brief: str = ""
+    intent_advanced_analytics: bool = False
+    intent_advanced_analytics_brief: str = ""
     intent_out_of_scope: bool = False
 
     @field_validator(
-        "intent_summary_question_brief",
-        "intent_readonly_query_brief",
-        "intent_statistical_analysis_brief",
+        "intent_analytics_brief",
         "intent_chart_brief",
+        "intent_advanced_analytics_brief",
         mode="before",
     )
     @classmethod
@@ -89,27 +85,27 @@ class DataStatisticsIntentModel(BaseModel):
 
     @model_validator(mode="after")
     def _validate(self) -> DataStatisticsIntentModel:
-        in_scope_count = int(self.intent_summary_question) + int(self.intent_readonly_query)
-        in_scope_count += int(self.intent_statistical_analysis) + int(self.intent_chart)
+        in_scope_count = (
+            int(self.intent_analytics)
+            + int(self.intent_chart)
+            + int(self.intent_advanced_analytics)
+        )
 
         if self.intent_out_of_scope and in_scope_count > 0:
             raise ValueError("intent_out_of_scope cannot be combined with in-scope intents")
-        if self.intent_summary_question and not self.intent_summary_question_brief:
-            raise ValueError("intent_summary_question_brief is required")
-        if self.intent_readonly_query and not self.intent_readonly_query_brief:
-            raise ValueError("intent_readonly_query_brief is required")
-        if self.intent_statistical_analysis and not self.intent_statistical_analysis_brief:
-            raise ValueError("intent_statistical_analysis_brief is required")
+        if self.intent_analytics and not self.intent_analytics_brief:
+            raise ValueError("intent_analytics_brief is required")
         if self.intent_chart and not self.intent_chart_brief:
             raise ValueError("intent_chart_brief is required")
+        if self.intent_advanced_analytics and not self.intent_advanced_analytics_brief:
+            raise ValueError("intent_advanced_analytics_brief is required")
         return self
 
     def has_any_intent(self) -> bool:
         return (
-            self.intent_summary_question
-            or self.intent_readonly_query
-            or self.intent_statistical_analysis
+            self.intent_analytics
             or self.intent_chart
+            or self.intent_advanced_analytics
         )
 
 
@@ -224,9 +220,8 @@ class DataStatisticsNode(Node):
                 user_message=off_topic_reply,
             )
 
-        summary_answer: str | None = None
-        query_result: JSONDict | None = None
-        statistics_result: JSONDict | None = None
+        analytics_result: JSONDict | None = None
+        advanced_analytics_result: JSONDict | None = None
         chart_result: JSONDict | None = None
         analytical_artifact_refs: list[ArtifactRef] = []
         chart_artifact_refs: list[ArtifactRef] = []
@@ -234,82 +229,48 @@ class DataStatisticsNode(Node):
         working_df = current_df
         working_summary = current_summary
         working_summary_json = current_summary_json
-        query_followup_requested = (
-            intent.intent_statistical_analysis or intent.intent_chart
-        )
-        query_failed = False
+        analytics_failed = False
 
-        if intent.intent_summary_question:
-            try:
-                summary_answer = self._answer_summary_question(
-                    intent_brief=intent.intent_summary_question_brief or latest_user_message,
-                    dataset_summary=current_summary_json,
-                    chat_history=history_text,
-                )
-            except Exception as exc:
-                log.exception("failed to answer data statistics summary question", error=safe_err(exc))
-                summary_answer = (
-                    "I could not answer that precisely from the current dataset summary alone."
-                )
-
-        if intent.intent_readonly_query:
+        # ── intent_analytics → DataManipulationTool (DuckDB) ──
+        if intent.intent_analytics:
             try:
                 (
-                    query_result,
+                    analytics_result,
                     analytical_artifact_refs,
                     working_df,
                     working_summary,
                     working_summary_json,
-                ) = self._run_readonly_query(
+                ) = self._run_analytics_query(
                     user_id=request.user_id,
                     conversation_id=request.conversation_id,
                     dataframe=working_df,
                     summary_model=working_summary,
                     summary_json=working_summary_json,
-                    instructions=intent.intent_readonly_query_brief or latest_user_message,
-                    prepare_followup_data=query_followup_requested,
+                    instructions=intent.intent_analytics_brief or latest_user_message,
+                    prepare_followup_data=(
+                        intent.intent_chart or intent.intent_advanced_analytics
+                    ),
                 )
             except Exception as exc:
-                log.exception("failed to run data statistics readonly query", error=safe_err(exc))
-                query_failed = True
-                query_result = {
+                log.exception("analytics query failed", error=safe_err(exc))
+                analytics_failed = True
+                analytics_result = {
                     "status": "error",
-                    "instruction": intent.intent_readonly_query_brief or latest_user_message,
-                    "detail": "I could not complete the requested read-only query.",
-                }
-
-        if intent.intent_statistical_analysis:
-            if query_failed and intent.intent_readonly_query:
-                statistics_result = {
-                    "status": "skipped",
+                    "instruction": intent.intent_analytics_brief or latest_user_message,
                     "detail": (
-                        "Statistical analysis was not run because the requested read-only "
-                        "query could not be completed."
+                        "I encountered an error while attempting to run the analytical "
+                        "query. Please try rephrasing your request."
                     ),
                 }
-            else:
-                try:
-                    statistics_result = self._run_statistical_analysis(
-                        dataframe=working_df,
-                        summary_model=working_summary,
-                        user_request=(
-                            intent.intent_statistical_analysis_brief or latest_user_message
-                        ),
-                    )
-                except Exception as exc:
-                    log.exception("failed to run data statistics analysis", error=safe_err(exc))
-                    statistics_result = {
-                        "status": "error",
-                        "detail": "I could not complete the requested statistical analysis.",
-                    }
 
+        # ── intent_chart → DataManipulationTool (DuckDB) + PlotTool ──
         if intent.intent_chart:
-            if query_failed and intent.intent_readonly_query:
+            if analytics_failed and intent.intent_analytics:
                 chart_result = {
                     "status": "skipped",
                     "detail": (
-                        "Chart generation was not run because the requested read-only query "
-                        "could not be completed."
+                        "Chart generation was skipped because the preceding analytical "
+                        "query could not be completed."
                     ),
                 }
             else:
@@ -322,43 +283,54 @@ class DataStatisticsNode(Node):
                         instructions=intent.intent_chart_brief or latest_user_message,
                     )
                 except Exception as exc:
-                    log.exception("failed to generate data statistics charts", error=safe_err(exc))
+                    log.exception("chart generation failed", error=safe_err(exc))
                     chart_result = {
                         "status": "error",
-                        "detail": "I could not generate the requested chart output.",
+                        "detail": "I could not generate the requested charts.",
                     }
+
+        # ── intent_advanced_analytics → AdvancedAnalyticsTool + PlotTool ──
+        if intent.intent_advanced_analytics:
+            try:
+                adv_result, adv_chart_refs = self._run_advanced_analytics_intent(
+                    user_id=request.user_id,
+                    conversation_id=request.conversation_id,
+                    dataframe=working_df,
+                    summary_model=working_summary,
+                    instructions=intent.intent_advanced_analytics_brief or latest_user_message,
+                )
+                advanced_analytics_result = adv_result
+                chart_artifact_refs.extend(adv_chart_refs)
+            except Exception as exc:
+                log.exception("advanced analytics failed", error=safe_err(exc))
+                advanced_analytics_result = {
+                    "status": "error",
+                    "detail": "I could not complete the requested statistical analysis.",
+                }
 
         try:
             final_message = self._build_final_message(
-                summary_answer=summary_answer,
-                query_result=query_result,
-                statistics_result=statistics_result,
+                analytics_result=analytics_result,
+                advanced_analytics_result=advanced_analytics_result,
                 chart_result=chart_result,
                 dataset_context={
                     "original_user_message": latest_user_message,
                     "handled_intents": {
-                        "summary_question": intent.intent_summary_question,
-                        "readonly_query": intent.intent_readonly_query,
-                        "statistical_analysis": intent.intent_statistical_analysis,
+                        "analytics": intent.intent_analytics,
                         "chart": intent.intent_chart,
+                        "advanced_analytics": intent.intent_advanced_analytics,
                     },
                     "analysis_dataset_rows": int(len(working_df)),
                     "analysis_dataset_columns": [
                         str(column) for column in working_df.columns
                     ],
-                    "used_query_result_for_followups": bool(
-                        intent.intent_readonly_query
-                        and not query_failed
-                        and query_followup_requested
-                    ),
                 },
             )
         except Exception as exc:
             log.exception("failed to build final data statistics response", error=safe_err(exc))
             final_message = self._build_final_message_fallback(
-                summary_answer=summary_answer,
-                query_result=query_result,
-                statistics_result=statistics_result,
+                analytics_result=analytics_result,
+                advanced_analytics_result=advanced_analytics_result,
                 chart_result=chart_result,
             )
 
@@ -389,30 +361,9 @@ class DataStatisticsNode(Node):
             max_attempts=2,
         )
 
-    def _answer_summary_question(
-        self,
-        *,
-        intent_brief: str,
-        dataset_summary: str,
-        chat_history: str | None,
-    ) -> str:
-        payload: JSONDict = {
-            "user_intent_brief": intent_brief,
-            "dataset_summary": dataset_summary,
-            "chat_history": chat_history,
-        }
-        response = self._llm.generate(
-            system_prompt=data_statistics_summary_answer_system_prompt(),
-            user_prompt=json.dumps(payload, ensure_ascii=False),
-            config=LLMConfig(model="basic", temperature=0.2),
-            history=None,
-        )
-        answer = response.content.strip()
-        if not answer:
-            return "I could not determine a precise answer from the summary alone."
-        return answer
+    # ── intent_analytics → DataManipulationTool (DuckDB) ──
 
-    def _run_readonly_query(
+    def _run_analytics_query(
         self,
         *,
         user_id: UUID,
@@ -466,7 +417,7 @@ class DataStatisticsNode(Node):
 
         return (
             {
-                "status": "analytical_query",
+                "status": "analytics_complete",
                 "instruction": instructions,
                 "analytical_result_id": str(analytical_result_id),
                 "result": _dataframe_preview(result_df),
@@ -507,25 +458,7 @@ class DataStatisticsNode(Node):
 
         return manipulate(**kwargs)
 
-    def _run_statistical_analysis(
-        self,
-        *,
-        dataframe: pd.DataFrame,
-        summary_model: Any,
-        user_request: str,
-    ) -> JSONDict:
-        result = self._advanced_analytics_tool.analyze(
-            dataframe=dataframe,
-            data_summary=summary_model,
-            user_request=user_request,
-        )
-        return {
-            "status": "statistics_complete",
-            "analysis_type": result.analysis_type,
-            "summary": result.summary,
-            "tables": result.tables,
-            "metrics": result.metrics,
-        }
+    # ── intent_chart → DataManipulationTool (DuckDB) + PlotTool ──
 
     def _run_chart_intent(
         self,
@@ -574,6 +507,72 @@ class DataStatisticsNode(Node):
             saved_refs,
         )
 
+    # ── intent_advanced_analytics → AdvancedAnalyticsTool + PlotTool ──
+
+    def _run_advanced_analytics_intent(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataframe: pd.DataFrame,
+        summary_model: Any,
+        instructions: str,
+    ) -> tuple[JSONDict, list[ArtifactRef]]:
+        result = self._advanced_analytics_tool.analyze(
+            dataframe=dataframe,
+            data_summary=summary_model,
+            user_request=instructions,
+        )
+
+        adv_result: JSONDict = {
+            "status": "advanced_analytics_complete",
+            "analysis_type": result.analysis_type,
+            "summary": result.summary,
+            "tables": result.tables,
+            "metrics": result.metrics,
+        }
+
+        # Generate charts from the advanced analytics results
+        chart_refs: list[ArtifactRef] = []
+        try:
+            chart_instructions = (
+                f"Generate charts to visualize the results of the following "
+                f"{result.analysis_type} analysis: {instructions}"
+            )
+            specs = self._plot_tool.generate_specs(
+                dataframe=dataframe,
+                data_summary=summary_model,
+                user_intent=chart_instructions,
+            )
+            for spec in specs:
+                saved_id = uuid.uuid4()
+                self._data_repo.save_json_data(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    dataset_id=saved_id,
+                    json_data=json.dumps(spec, ensure_ascii=False),
+                    overwrite=True,
+                )
+                chart_refs.append(
+                    _build_artifact_ref(
+                        artifact_id=saved_id,
+                        artifact_type="graph",
+                        artifact_format="json",
+                        artifact_kind=_ARTIFACT_KIND_CHART_SPEC,
+                    )
+                )
+            adv_result["charts_generated"] = len(chart_refs)
+        except Exception as exc:
+            log.warning(
+                "chart generation for advanced analytics skipped",
+                error=safe_err(exc),
+            )
+            adv_result["charts_generated"] = 0
+
+        return adv_result, chart_refs
+
+    # ── Response builders ──
+
     def _build_ready_message(self, *, summary: Any) -> str:
         profiles = list(summary.profiles)
         shown_profiles = profiles[:_INITIAL_SUMMARY_MAX_COLUMNS]
@@ -586,7 +585,7 @@ class DataStatisticsNode(Node):
             preview += f", +{extra_columns} more"
         return (
             f"Data statistics is ready — {summary.n_rows} rows, {len(profiles)} columns: "
-            f"{preview}. Ask for read-only summaries, queries, statistical analyses, or charts."
+            f"{preview}. Ask for analytical queries, statistical tests, or charts."
         )
 
     def _build_off_topic_response(
@@ -616,16 +615,14 @@ class DataStatisticsNode(Node):
     def _build_final_message(
         self,
         *,
-        summary_answer: str | None,
-        query_result: JSONDict | None,
-        statistics_result: JSONDict | None,
+        analytics_result: JSONDict | None,
+        advanced_analytics_result: JSONDict | None,
         chart_result: JSONDict | None,
         dataset_context: JSONDict,
     ) -> str:
         payload: JSONDict = {
-            "summary_answer": summary_answer,
-            "query_result": query_result,
-            "statistics_result": statistics_result,
+            "analytics_result": analytics_result,
+            "advanced_analytics_result": advanced_analytics_result,
             "chart_result": chart_result,
             "dataset_context": dataset_context,
         }
@@ -643,38 +640,34 @@ class DataStatisticsNode(Node):
     def _build_final_message_fallback(
         self,
         *,
-        summary_answer: str | None,
-        query_result: JSONDict | None,
-        statistics_result: JSONDict | None,
+        analytics_result: JSONDict | None,
+        advanced_analytics_result: JSONDict | None,
         chart_result: JSONDict | None,
     ) -> str:
         parts: list[str] = []
 
-        if summary_answer:
-            parts.append(summary_answer.strip())
-
-        if query_result is not None:
-            status = str(query_result.get("status", "")).strip()
-            if status == "analytical_query":
-                parts.append("Ran the requested read-only analytical query.")
+        if analytics_result is not None:
+            status = str(analytics_result.get("status", "")).strip()
+            if status == "analytics_complete":
+                parts.append("Ran the requested analytical query.")
             elif status == "error":
                 parts.append(
                     str(
-                        query_result.get(
-                            "detail", "The requested read-only analytical query failed."
+                        analytics_result.get(
+                            "detail", "The analytical query failed."
                         )
                     )
                 )
 
-        if statistics_result is not None:
-            status = str(statistics_result.get("status", "")).strip()
-            if status == "statistics_complete":
-                parts.append(str(statistics_result.get("summary", "")).strip())
+        if advanced_analytics_result is not None:
+            status = str(advanced_analytics_result.get("status", "")).strip()
+            if status == "advanced_analytics_complete":
+                parts.append(str(advanced_analytics_result.get("summary", "")).strip())
             elif status in {"error", "skipped"}:
                 parts.append(
                     str(
-                        statistics_result.get(
-                            "detail", "The requested statistical analysis could not be completed."
+                        advanced_analytics_result.get(
+                            "detail", "The statistical analysis could not be completed."
                         )
                     )
                 )
@@ -689,7 +682,7 @@ class DataStatisticsNode(Node):
                 parts.append(
                     str(
                         chart_result.get(
-                            "detail", "The requested chart output could not be completed."
+                            "detail", "The requested charts could not be generated."
                         )
                     )
                 )

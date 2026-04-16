@@ -35,7 +35,8 @@ Independent two-sample t-test comparing a numeric column across two groups.
 
 ## Rules
 - Map columns EXACTLY as they appear in the field guide (case-sensitive).
-- If ambiguous, choose "descriptive" as fallback.
+- Only the analysis types listed above are available. Do NOT output "descriptive" or "correlation" — those are handled by a separate DuckDB SQL tool.
+- If the request does not clearly match one of the listed tests, raise an error rather than guessing.
 - Output strict JSON matching the required schema. No extra keys.
 """.strip()
 
