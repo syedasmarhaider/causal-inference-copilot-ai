@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import ClassVar
-from uuid import UUID
 
-from python.domain.service.llm_service import ChatMessage
-from python.domain.workflows.node import Node
-from python.domain.workflows.ochestrator_state import ReadOnlyOchestratorState
-from python.domain.workflows.node_state import State
+from python.domain.models.models import ChatMessage
+from python.domain.workflows.node import Node, NodeExecutionResult, NodeRequest
 from python.implementation.workflows.nodes.noop_done.noop_done_state import NoopDoneState
 
 
@@ -25,14 +21,14 @@ class NoopDoneNode(Node):
     def run(
         self,
         *,
-        user_id: UUID,
-        conversation_id: UUID,
-        state: State,
-        readonly_orchestrator_state: ReadOnlyOchestratorState,
-        messages_history: Sequence[ChatMessage] | None,
-    ) -> State:
-        _ = user_id
-        _ = conversation_id
-        _ = state
-        _ = messages_history
-        return NoopDoneState()
+        request: NodeRequest,
+    ) -> NodeExecutionResult:
+        return NodeExecutionResult(
+            new_node_state=NoopDoneState.init_empty(),
+            new_orchestrator_state=request.orchestrator_state,
+            status="DONE",
+            action="NONE",
+            response_messages=[
+                ChatMessage(role="assistant", content="Workflow is complete.")
+            ],
+        )

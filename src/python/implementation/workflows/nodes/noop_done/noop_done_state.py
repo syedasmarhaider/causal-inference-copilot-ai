@@ -1,36 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Any, ClassVar
 
-from python.domain.models.errors import NodeExecutionError
-from python.domain.models.models import ChatMessage
-from python.domain.workflows.node_state import Action, State, Status
+from python.domain.workflows.node_state import NodeState
 
 
-class NoopDoneState(State):
+class NoopDoneState(NodeState):
     NAME: ClassVar[str] = "NOOP_DONE"
 
     def name(self) -> str:
         return self.NAME
 
-    def status(self) -> Status:
-        return "DONE"
-    
-    def action(self) -> Action:
-        return "NONE"
-    
-    def set_status_pending(self) -> None:
+    def clear_state(self) -> None:
         return None
-
-    def messages(self) -> Sequence[ChatMessage]:
-        return [ChatMessage(role="assistant", content="Workflow is complete.")]
-
-    def error(self) -> NodeExecutionError | None:
-        return None
-
-    def pre_required_states_names(self) -> Sequence[str]:
-        return ()
 
     def to_json_dict(self) -> dict[str, Any]:
         return {}
@@ -43,3 +25,6 @@ class NoopDoneState(State):
     @classmethod
     def init_empty(cls) -> NoopDoneState:
         return cls()
+
+
+__all__ = ["NoopDoneState"]
