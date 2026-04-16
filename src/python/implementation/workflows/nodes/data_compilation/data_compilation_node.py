@@ -116,26 +116,6 @@ class DataCompilationNode(Node):
 
         payload = request.node_state.payload.model_copy(deep=True)
         deps = DataCompilationDeps.from_request(request)
-
-        if deps.dataset_id is None:
-            return self._needs_data_result(
-                request=request,
-                user_message=(
-                    "I need a working dataset before I can compile the protocol-scope "
-                    "dataset and transformation plan."
-                ),
-            )
-
-        if deps.protocol_discussion is None:
-            return self._needs_input_result(
-                request=request,
-                payload=DataCompilationPayloadModel(),
-                user_message=(
-                    "I need a confirmed protocol discussion before I can compile the "
-                    "dataset and transformation plan."
-                ),
-            )
-
         try:
             source_df = self._data_repo.get_csv_data(
                 user_id=request.user_id,
@@ -158,9 +138,6 @@ class DataCompilationNode(Node):
             )
 
         source_summary = deps.dataset_summary
-        if source_summary is None:
-            source_summary = self._profile_dataset(source_df)
-
         payload, source_changed = self._bind_payload_to_source(
             payload=payload,
             dataset_id=deps.dataset_id,

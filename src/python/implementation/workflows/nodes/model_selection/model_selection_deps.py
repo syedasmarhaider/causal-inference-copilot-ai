@@ -22,12 +22,12 @@ from python.implementation.workflows.tools.common.model.data_summary import (
 
 @dataclass(frozen=True)
 class ModelSelectionDeps:
-    dataset_id: UUID | None
-    dataset_summary: DatasetSummaryModel | None
-    causal_spec: CausalSpec | None
-    transformation_plan: TransformPlan | None
+    dataset_id: UUID
+    dataset_summary: DatasetSummaryModel
+    causal_spec: CausalSpec
+    transformation_plan: TransformPlan
     validation_issues: list[ValidationIssueModel]
-    validation_status: ValidationStatus | None
+    validation_status: ValidationStatus
 
     @classmethod
     def from_request(cls, request: NodeRequest) -> ModelSelectionDeps:
@@ -87,14 +87,23 @@ class ModelSelectionDeps:
             else ValidationIssueModel.model_validate(issue)
             for issue in validation_issues_raw
         ]
-        validation_status = None
-        for issue in validation_issues:
-            if issue.status == ValidationStatus.WARN:
-                validation_status = ValidationStatus.WARN
-            elif issue.status == ValidationStatus.FAIL:
-                raise Exception(f"Validation failed: {issue}")
+        if dataset_id is None:
+            raise ValueError("ModelSelectionDeps: dataset_id is required but was not found in compilation state")
+        if dataset_summary is None:
+            raise ValueError("ModelSelectionDeps: dataset_summary is required but was not found in compilation state")
+        if causal_spec is None:
+            raise ValueError("ModelSelectionDeps: causal_spec is required but was not found in compilation state")
+        if transformation_plan is None:
+            raise ValueError("ModelSelectionDeps: transformation_plan is required but was not found in compilation state")
 
-        
+        validation_status = "PASS"
+        for issue in validation_issues:
+            if issue.severity == "WARN":
+                validation_status = "WARN"
+                break
+            elif issue.severity == "FAIL":
+                raise Exception(f"Validation failed: {issue}")
+            
         return cls(
             dataset_id=dataset_id,
             dataset_summary=dataset_summary,

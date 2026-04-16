@@ -25,12 +25,12 @@ from python.implementation.workflows.utils.utils import uuid_from_any
 
 @dataclass(frozen=True)
 class CausalInferenceDeps:
-    dataset_id: UUID | None
-    dataset_summary: DatasetSummaryModel | None
-    causal_spec: CausalSpec | None
-    transformation_plan: TransformPlan | None
-    selected_model: str | None
-    trained_model_id: UUID | None
+    dataset_id: UUID
+    dataset_summary: DatasetSummaryModel
+    causal_spec: CausalSpec
+    transformation_plan: TransformPlan
+    selected_model: str
+    trained_model_id: UUID
 
     @classmethod
     def from_request(cls, request: NodeRequest) -> CausalInferenceDeps:
@@ -105,6 +105,19 @@ class CausalInferenceDeps:
         trained_model_id = uuid_from_any(
             None if training is None else training.get("trained_model_id")
         )
+
+        if dataset_id is None:
+            raise ValueError("CausalInferenceDeps: dataset_id is required but was not found in compilation state")
+        if dataset_summary is None:
+            raise ValueError("CausalInferenceDeps: dataset_summary is required but was not found in compilation state")
+        if causal_spec is None:
+            raise ValueError("CausalInferenceDeps: causal_spec is required but was not found in compilation state")
+        if transformation_plan is None:
+            raise ValueError("CausalInferenceDeps: transformation_plan is required but was not found in compilation state")
+        if selected_model is None:
+            raise ValueError("CausalInferenceDeps: selected_model is required but was not found in selection state")
+        if trained_model_id is None:
+            raise ValueError("CausalInferenceDeps: trained_model_id is required but was not found in training state")
 
         return cls(
             dataset_id=dataset_id,

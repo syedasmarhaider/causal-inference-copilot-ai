@@ -12,9 +12,9 @@ from python.implementation.workflows.utils.utils import uuid_from_any
 
 @dataclass(frozen=True)
 class DataCompilationDeps:
-    dataset_id: UUID | None
-    dataset_summary: DatasetSummaryModel | None
-    protocol_discussion: str | None
+    dataset_id: UUID
+    dataset_summary: DatasetSummaryModel
+    protocol_discussion: str
 
     @classmethod
     def from_request(cls, request: NodeRequest) -> DataCompilationDeps:
@@ -40,6 +40,13 @@ class DataCompilationDeps:
             protocol_discussion = protocol_discussion_raw.strip() or None
         else:
             raise TypeError("protocol_discussion must be str|null")
+
+        if dataset_id is None:
+            raise ValueError("DataCompilationDeps: dataset_id is required but was not found in orchestrator state")
+        if dataset_summary is None:
+            raise ValueError("DataCompilationDeps: dataset_summary is required but was not found in orchestrator state")
+        if protocol_discussion is None:
+            raise ValueError("DataCompilationDeps: protocol_discussion is required but was not found in orchestrator state")
 
         return cls(
             dataset_id=dataset_id,

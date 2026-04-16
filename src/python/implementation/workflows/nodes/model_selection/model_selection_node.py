@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, cast
-from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from python.domain.models.validation import ValidationIssueModel, ValidationStatus
+from python.domain.models.validation import ValidationIssueModel
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node, NodeExecutionResult, NodeRequest
 from python.domain.workflows.tool_factory import ToolFactory
@@ -96,25 +95,6 @@ class ModelSelectionNode(Node):
 
         payload = request.node_state.payload.model_copy(deep=True)
         deps = ModelSelectionDeps.from_request(request)
-
-        if deps.causal_spec is None or deps.transformation_plan is None:
-            return self._needs_input_result(
-                request=request,
-                payload=ModelSelectionPayload(),
-                user_message=(
-                    "I need a confirmed compiled causal specification and transformation "
-                    "plan before I can recommend models."
-                ),
-            )
-
-        if deps.validation_status is None:
-            return self._needs_input_result(
-                request=request,
-                payload=ModelSelectionPayload(),
-                user_message=(
-                    "I need a confirmed validation result before I can recommend models."
-                ),
-            )
 
         payload, sources_changed = self._bind_payload_to_sources(
             payload=payload,
@@ -382,7 +362,6 @@ class ModelSelectionNode(Node):
             request.node_state.name(),
             {
                 "selected_model": confirmed_selection.selected_model,
-                "selected_model_display_label": confirmed_selection.selected_model_display_label,
                 "selection_reasoning": confirmed_selection.reasoning,
             },
         )
@@ -491,11 +470,7 @@ def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str 
 
 def _build_selection_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
     return {
-        "compiled_dataset_summary": (
-            None
-            if deps.dataset_summary is None
-            else deps.dataset_summary.model_dump(mode="json", exclude_none=True)
-        ),
+        "compiled_dataset_summary": deps.dataset_summary.model_dump(mode="json", exclude_none=True),
         "causal_spec": deps.causal_spec.model_dump(mode="json", exclude_none=True),
         "transformation_plan": deps.transformation_plan.model_dump(
             mode="json",

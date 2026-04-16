@@ -159,29 +159,6 @@ class CausalInferenceNode(Node):
         payload = request.node_state.payload.model_copy(deep=True)
         deps = CausalInferenceDeps.from_request(request)
 
-        if deps.dataset_id is None:
-            return self._needs_data_result(
-                request=request,
-                user_message=(
-                    "I need the compiled dataset before I can run causal inference."
-                ),
-            )
-
-        if (
-            deps.causal_spec is None
-            or deps.transformation_plan is None
-            or deps.selected_model is None
-            or deps.trained_model_id is None
-        ):
-            return self._needs_input_result(
-                request=request,
-                payload=CausalInferencePayloadModel(),
-                user_message=(
-                    "I need the compiled causal setup, the confirmed selected model, and "
-                    "the trained model artifact before I can run causal inference."
-                ),
-            )
-
         try:
             dataframe = self._data_repo.get_csv_data(
                 user_id=request.user_id,
@@ -210,15 +187,6 @@ class CausalInferenceNode(Node):
             )
 
         dataset_summary = deps.dataset_summary
-        if dataset_summary is None:
-            dataset_summary = self._profiling_tool.extract_dataset_summary(
-                dataframe,
-                max_categories=200,
-                sample_distinct=200,
-                compute_quantiles=False,
-                strict=True,
-            )
-
         try:
             inference_ready_spec = InferenceReadyCausalSpec(
                 causal_spec=deps.causal_spec,

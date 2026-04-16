@@ -21,11 +21,11 @@ from python.implementation.workflows.tools.common.model.data_summary import (
 
 @dataclass(frozen=True)
 class ModelTrainDeps:
-    dataset_id: UUID | None
-    dataset_summary: DatasetSummaryModel | None
-    causal_spec: CausalSpec | None
-    transformation_plan: TransformPlan | None
-    selected_model: str | None
+    dataset_id: UUID
+    dataset_summary: DatasetSummaryModel
+    causal_spec: CausalSpec
+    transformation_plan: TransformPlan
+    selected_model: str
 
     @classmethod
     def from_request(cls, request: NodeRequest) -> ModelTrainDeps:
@@ -44,7 +44,7 @@ class ModelTrainDeps:
         compilation = cast(Mapping[str, Any] | None, compilation_raw)
         selection = cast(Mapping[str, Any] | None, selection_raw)
 
-        dataset_id_raw = None if compilation is None else compilation.get("new_dataset_id")
+        dataset_id_raw = None if compilation is None else compilation.get("working_dataset_id")
         if dataset_id_raw is None:
             dataset_id = None
         elif isinstance(dataset_id_raw, UUID):
@@ -53,7 +53,7 @@ class ModelTrainDeps:
             raise TypeError("new_dataset_id must be a UUID")
 
         dataset_summary_raw = (
-            None if compilation is None else compilation.get("new_dataset_summary")
+            None if compilation is None else compilation.get("latest_dataset_summary")
         )
         if dataset_summary_raw is None:
             dataset_summary = None
@@ -94,6 +94,17 @@ class ModelTrainDeps:
             selected_model = selected_model_raw.strip() or None
         else:
             raise TypeError("selected_model must be a non-empty string or null")
+
+        if dataset_id is None:
+            raise ValueError("ModelTrainDeps: dataset_id is required but was not found in compilation state")
+        if dataset_summary is None:
+            raise ValueError("ModelTrainDeps: dataset_summary is required but was not found in compilation state")
+        if causal_spec is None:
+            raise ValueError("ModelTrainDeps: causal_spec is required but was not found in compilation state")
+        if transformation_plan is None:
+            raise ValueError("ModelTrainDeps: transformation_plan is required but was not found in compilation state")
+        if selected_model is None:
+            raise ValueError("ModelTrainDeps: selected_model is required but was not found in selection state")
 
         return cls(
             dataset_id=dataset_id,

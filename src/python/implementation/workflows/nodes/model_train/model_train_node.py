@@ -83,27 +83,6 @@ class ModelTrainNode(Node):
         payload = request.node_state.payload.model_copy(deep=True)
         deps = ModelTrainDeps.from_request(request)
 
-        if deps.dataset_id is None:
-            return self._needs_data_result(
-                request=request,
-                user_message=(
-                    "I need the compiled working dataset before I can train the selected model."
-                ),
-            )
-
-        if (
-            deps.causal_spec is None
-            or deps.transformation_plan is None
-            or deps.selected_model is None
-        ):
-            return self._needs_input_result(
-                request=request,
-                payload=ModelTrainPayloadModel(),
-                user_message=(
-                    "I need the confirmed compiled setup and a confirmed selected model "
-                    "before I can start training."
-                ),
-            )
 
         training_signature = _training_signature(deps=deps)
         if payload.training_signature != training_signature:
@@ -153,15 +132,6 @@ class ModelTrainNode(Node):
             )
 
         dataset_summary = deps.dataset_summary
-        if dataset_summary is None:
-            dataset_summary = self._profiling_tool.extract_dataset_summary(
-                df,
-                max_categories=200,
-                sample_distinct=200,
-                compute_quantiles=False,
-                strict=True,
-            )
-
         try:
             inference_ready_spec = InferenceReadyCausalSpec(
                 causal_spec=deps.causal_spec,
@@ -414,21 +384,9 @@ class ModelTrainNode(Node):
 def _training_signature(*, deps: ModelTrainDeps) -> str:
     signature_payload = {
         "dataset_id": str(deps.dataset_id),
-        "dataset_summary": (
-            None
-            if deps.dataset_summary is None
-            else deps.dataset_summary.model_dump(mode="json", exclude_none=True)
-        ),
-        "causal_spec": (
-            None
-            if deps.causal_spec is None
-            else deps.causal_spec.model_dump(mode="json", exclude_none=True)
-        ),
-        "transformation_plan": (
-            None
-            if deps.transformation_plan is None
-            else deps.transformation_plan.model_dump(mode="json", exclude_none=True)
-        ),
+        "dataset_summary": deps.dataset_summary.model_dump(mode="json", exclude_none=True),
+        "causal_spec": deps.causal_spec.model_dump(mode="json", exclude_none=True),
+        "transformation_plan": deps.transformation_plan.model_dump(mode="json", exclude_none=True),
         "selected_model": deps.selected_model,
     }
     signature_json = json.dumps(
