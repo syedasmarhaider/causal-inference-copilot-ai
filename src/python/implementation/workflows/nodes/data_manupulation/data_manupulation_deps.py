@@ -28,12 +28,12 @@ class DataManupulationDeps:
 
         if not isinstance(raw_context, Mapping):
             raise TypeError(
-                "DATA_MANUPULATION dependency payload must be a dict with dataset_id and "
+                "DATA_MANUPULATION dependency payload must be a dict with working_dataset_id and "
                 "dataset_summary"
             )
 
-        dataset_id_raw: Any = raw_context.get("dataset_id")
-        dataset_summary_raw: Any = raw_context.get("dataset_summary")
+        dataset_id_raw: Any = raw_context.get("working_dataset_id")
+        dataset_summary_raw: Any = raw_context.get("latest_dataset_summary")
 
         if dataset_id_raw is None:
             raise _missing_dependency_error("dataset_id")

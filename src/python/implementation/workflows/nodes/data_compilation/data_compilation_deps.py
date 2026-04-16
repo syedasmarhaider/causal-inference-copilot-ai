@@ -19,7 +19,7 @@ class DataCompilationDeps:
     @classmethod
     def from_request(cls, request: NodeRequest) -> DataCompilationDeps:
         dataset_id_raw = request.orchestrator_state.get("working_dataset_id")
-        dataset_summary_raw = request.orchestrator_state.get("working_dataset_summary")
+        dataset_summary_raw = request.orchestrator_state.get("latest_dataset_summary")
         protocol_discussion_raw = request.orchestrator_state.get("protocol_discussion")
 
         dataset_id = uuid_from_any(dataset_id_raw)
@@ -46,6 +46,3 @@ class DataCompilationDeps:
             dataset_summary=dataset_summary,
             protocol_discussion=protocol_discussion,
         )
-
-
-__all__ = ["DataCompilationDeps"]

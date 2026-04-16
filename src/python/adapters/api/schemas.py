@@ -1,12 +1,29 @@
 from __future__ import annotations
 
+"""Pydantic request/response schemas for the Causal Inference Copilot API.
+
+All models use ``extra="forbid"`` to reject unknown fields at the boundary,
+keeping the public contract explicit and preventing silent data leakage.
+
+Schema design notes
+-------------------
+* ``InvokeResponse`` and the lateststate endpoint share the same schema.
+  ``latest_working_dataset`` is now derived entirely from ``WorkflowResponse``
+  (fields ``current_data_id`` / ``is_dataset_frozen``) — the adapter no longer
+  issues a separate DataflowApp query.
+* ``ArtifactRefResponse`` mirrors the domain ``ArtifactRef`` TypedDict but as a
+  validated Pydantic model safe for JSON serialisation.
+* ``ChatMessageResponse`` carries optional ``artifact_refs`` so the frontend
+  can link inline artifact downloads to the specific message that produced them.
+"""
+
 from collections.abc import Sequence
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.models.models import ArtifactFormat, ArtifactKind, MessageRole
-from python.domain.workflows.node_state import Action, Status
+from python.domain.workflows.node import Action, Status
 
 
 class ArtifactRefResponse(BaseModel):
@@ -157,5 +174,9 @@ class InvokeResponse(BaseModel):
     current_stage_status: Status = Field(description="Current workflow stage status.")
     latest_working_dataset: WorkingDatasetInfoResponse | None = Field(
         default=None,
-        description="Latest working dataset info from DataflowApp, if a dataset exists for this conversation.",
+        description=(
+            "Current working dataset info derived from the workflow response. "
+            "Present when ``current_data_id`` is set in the workflow state; "
+            "``null`` when no dataset has been uploaded yet."
+        ),
     )

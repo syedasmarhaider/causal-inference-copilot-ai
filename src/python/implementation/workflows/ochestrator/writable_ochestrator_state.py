@@ -152,8 +152,10 @@ class WritableOchestratorState(OchestratorState):
     def get(self, key: str) -> Any:
         if key not in GlobalStateModel.model_fields:
             raise KeyError(f"Unknown global state key: {key!r}")
-        if key == "working_dataset_ids" and len(self._model.working_dataset_ids) == 0:
+        if key == "working_dataset_id" and len(self._model.working_dataset_ids) == 0:
             return [self.INIT_DATA_ID]
+        if key == "working_dataset_id":
+            return self._model.working_dataset_ids[-1]
         
         return deepcopy(getattr(self._model, key))
 
@@ -163,18 +165,18 @@ class WritableOchestratorState(OchestratorState):
         appropriate private stage setter so cascading invalidation fires."""
         match key:
             case _ if key == DataManupulationState.NAME:
-                if not "working_dataset_ids" in value or  not "latest_dataset_summary" in value:
-                    raise KeyError("DATA_MANUPULATION updates must include working_dataset_ids and latest_dataset_summary")
+                if not "working_dataset_id" in value or  not "latest_dataset_summary" in value:
+                    raise KeyError("DATA_MANUPULATION updates must include working_dataset_id and latest_dataset_summary")
             
                 protocol_discusson = self._model.protocol_discussion if self._model.protocol_discussion else None
+                existing_ids = self._model.working_dataset_ids or []
+                new_id_raw = value["working_dataset_id"]
+                new_dataset_id = (new_id_raw if isinstance(new_id_raw, UUID) else UUID(str(new_id_raw)))
                 self._set_stage1(
-                        working_dataset_ids=self._parse_dataset_ids(
-                            value.get("working_dataset_ids", self._model.working_dataset_ids)
-                        ),
-                        latest_dataset_summary=self._parse_dataset_summary(
-                            value.get("latest_dataset_summary", self._model.latest_dataset_summary)
-                        ),
-                )
+                    working_dataset_ids=[*existing_ids, new_dataset_id],
+                    latest_dataset_summary=value["latest_dataset_summary"],
+                    preserve_protocol_discussion=True,
+                ) 
                 if protocol_discusson is not None:
                             self._set_stage2(protocol_discussion=protocol_discusson)    
                 if "data_cleaned" in value:

@@ -531,10 +531,10 @@ class DataCompilationNode(Node):
             request.orchestrator_state.set(
                 request.node_state.name(),
                 {
-                    "new_dataset_id": payload.compiled_dataset_id,
-                    "new_dataset_summary": payload.compiled_dataset_summary,
+                    "working_dataset_id": payload.compiled_dataset_id,
+                    "latest_dataset_summary": payload.compiled_dataset_summary,
                     "causal_spec": payload.compiled_causal_spec,
-                    "transformation_plan": payload.transformation_plan,
+                    "data_transformation_plan": payload.transformation_plan,
                 },
             )
             confirmed_payload = payload.model_copy(

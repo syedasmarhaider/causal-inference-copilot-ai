@@ -127,7 +127,7 @@ class DataManupulationNode(Node):
         except Exception as exc:
             log.info(
                 "missing data manupulation dependencies",
-                error=safe_err(cast(Exception, exc)),
+                error=safe_err( exc),
             )
             return self._needs_data_result(
                 request=request,
@@ -241,7 +241,7 @@ class DataManupulationNode(Node):
         return self._needs_input_result(
             request=request,
             user_message=final_message,
-            action=self._success_action(request),
+            action= "NONE" if self._is_protocol_discussion_complete_and_data_cleaning_pending(request) else "NEEDS_INPUT",
         )
 
     def _classify_intent(
@@ -297,12 +297,14 @@ class DataManupulationNode(Node):
             compute_quantiles=False,
             strict=True,
         )
-
+        
+        needs_cleaned_flag = self._is_protocol_discussion_complete_and_data_cleaning_pending(request)
         request.orchestrator_state.set(
             request.node_state.name(),
             {
-                "new_dataset_id": new_dataset_id,
-                "new_dataset_summary": new_dataset_summary,
+                "working_dataset_id": new_dataset_id,
+                "latest_dataset_summary": new_dataset_summary,
+                "data_cleaned": True if not needs_cleaned_flag else None,
             },
         )
 
@@ -399,13 +401,13 @@ class DataManupulationNode(Node):
             f"The updated dataset has {row_count} rows and {column_count} columns."
         )
 
-    def _success_action(self, request: NodeRequest) -> Action:
+    def _is_protocol_discussion_complete_and_data_cleaning_pending(self, request: NodeRequest) -> bool:
         protocol_discussion = request.orchestrator_state.get("protocol_discussion")
         data_cleaned = request.orchestrator_state.get("data_cleaned")
-        if isinstance(protocol_discussion, str) and protocol_discussion.strip():
-            if data_cleaned is not True:
-                return "NONE"
-        return "NEEDS_INPUT"
+        if protocol_discussion is None or data_cleaned is None or data_cleaned is not True:
+                return True
+        return False
+                
 
     def _needs_input_result(
         self,
@@ -503,6 +505,3 @@ def _dataframe_preview(dataframe: pd.DataFrame, *, row_limit: int = 10) -> JSOND
 def _conversation_id_to_table_name(conversation_id: UUID) -> str:
     digest = hashlib.sha256(str(conversation_id).encode("ascii")).hexdigest()
     return f"{_WORKING_TABLE_PREFIX}{digest[:_WORKING_TABLE_HASH_HEX_LEN]}"
-
-
-__all__ = ["DataManupulationIntentModel", "DataManupulationNode"]
