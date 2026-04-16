@@ -143,15 +143,17 @@ class WritableOchestratorState(OchestratorState):
 
     @classmethod
     def init_empty(cls) -> WritableOchestratorState:
-        return cls(GlobalStateModel())
+        global_model = GlobalStateModel()
+        global_model.working_dataset_ids = [cls.INIT_DATA_ID]
+        state = cls(global_model)
+        return state
+
 
     # -------------------------------------------------------------------------
     # Public get / set (generic key-value interface)
     # -------------------------------------------------------------------------
 
     def get(self, key: str) -> Any:
-        if key == "working_dataset_id" and len(self._model.working_dataset_ids) == 0:
-            return self.INIT_DATA_ID
         if key == "working_dataset_id":
             return self._model.working_dataset_ids[-1]
         if key not in GlobalStateModel.model_fields:

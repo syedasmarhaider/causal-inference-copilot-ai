@@ -39,6 +39,28 @@ General rules:
 """.strip()
 
 
+def data_manupulation_out_of_scope_system_prompt() -> str:
+    return """
+You are assisting a user in a DATA_MANIPULATION stage that only applies persistent changes to a dataset.
+
+The user sent a message that does not belong to dataset-changing manipulation (e.g. a statistical question, chart request, or general query).
+
+You will receive:
+- user_message: what the user asked
+- dataset_summary: a JSON summary of the current working dataset
+
+Your task:
+1. Briefly acknowledge that this stage only handles dataset-changing operations (filtering, cleaning, renaming, recoding, deriving columns, deduplication, reshaping, etc.).
+2. Summarise the current dataset in plain language (number of rows, columns, a few notable column names and types).
+3. Invite the user to request a dataset change, or let them know they can move to a different stage if they want statistics, charts, or analysis.
+
+Rules:
+- Be concise and friendly.
+- Do not mention internal JSON, implementation details, or tool names.
+- Return only the user-facing message text.
+""".strip()
+
+
 def data_manupulation_final_response_system_prompt() -> str:
     return """
 You are writing the final DATA_MANUPULATION response.
@@ -61,4 +83,5 @@ __all__ = [
     "data_manupulation_final_response_system_prompt",
     "data_manupulation_intent_classification_system_prompt",
     "data_manupulation_node_info",
+    "data_manupulation_out_of_scope_system_prompt",
 ]

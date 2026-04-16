@@ -24,6 +24,7 @@ from python.implementation.workflows.nodes.data_manupulation.data_manupulation_p
     data_manupulation_final_response_system_prompt,
     data_manupulation_intent_classification_system_prompt,
     data_manupulation_node_info,
+    data_manupulation_out_of_scope_system_prompt,
 )
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_state import (
     DataManupulationState,
@@ -45,14 +46,10 @@ _DATA_MANIPULATION_RETRY_ATTEMPTS = 3
 _WORKING_TABLE_PREFIX = "df_"
 _WORKING_TABLE_HASH_HEX_LEN = 16
 _INITIAL_SUMMARY_MAX_COLUMNS = 8
-_OFF_TOPIC_MESSAGE = (
+_OFF_TOPIC_FALLBACK_MESSAGE = (
     "This data manipulation stage is only for dataset-changing operations. I can clean, "
     "filter, reshape, rename, recode, derive, or otherwise update the working dataset. "
     "For read-only questions, statistics, or charts, use the appropriate stage."
-)
-_OFF_TOPIC_CLARIFICATION_MESSAGE = (
-    "This step only applies persistent dataset changes. It does not handle read-only "
-    "summaries, statistics, or charts."
 )
 
 
@@ -155,6 +152,15 @@ class DataManupulationNode(Node):
                 compute_quantiles=False,
                 strict=True,
             )
+            
+            ochestrator_state = request.orchestrator_state
+            ochestrator_state.set(
+                request.node_state.name(),
+                     {"working_dataset_id": deps.dataset_id,
+                "latest_dataset_summary": current_summary,
+                }
+            )
+            
         current_summary_json = self._profiling_tool.dataset_summary_to_json(current_summary)
 
         latest_user_message = _latest_user_message(request.read_only_messages_history)
@@ -182,16 +188,17 @@ class DataManupulationNode(Node):
             )
 
         if intent.intent_out_of_scope or not intent.has_any_intent():
-            previous_assistant_message = _latest_assistant_message(
-                request.read_only_messages_history
-            )
+            try:
+                out_of_scope_message = self._build_out_of_scope_message(
+                    user_message=latest_user_message,
+                    dataset_summary_json=current_summary_json,
+                )
+            except Exception as exc:
+                log.exception("failed to build out-of-scope message", error=safe_err(exc))
+                out_of_scope_message = _OFF_TOPIC_FALLBACK_MESSAGE
             return self._needs_input_result(
                 request=request,
-                user_message=(
-                    self._build_off_topic_clarification_message()
-                    if _is_manupulation_scope_message(previous_assistant_message)
-                    else self._build_off_topic_message()
-                ),
+                user_message=out_of_scope_message,
             )
 
         try:
@@ -350,11 +357,23 @@ class DataManupulationNode(Node):
             f"{preview}. Ask for a dataset-changing transformation."
         )
 
-    def _build_off_topic_message(self) -> str:
-        return _OFF_TOPIC_MESSAGE
-
-    def _build_off_topic_clarification_message(self) -> str:
-        return _OFF_TOPIC_CLARIFICATION_MESSAGE
+    def _build_out_of_scope_message(
+        self,
+        *,
+        user_message: str,
+        dataset_summary_json: str,
+    ) -> str:
+        payload: JSONDict = {
+            "user_message": user_message,
+            "dataset_summary": dataset_summary_json,
+        }
+        response = self._llm.generate(
+            system_prompt=data_manupulation_out_of_scope_system_prompt(),
+            user_prompt=json.dumps(payload, ensure_ascii=False),
+            config=LLMConfig(model="basic", temperature=0.3),
+            history=None,
+        )
+        return response.content
 
     def _build_final_message(
         self,
@@ -441,20 +460,6 @@ def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str 
     return None
 
 
-def _latest_assistant_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
-    if not messages_history:
-        return None
-
-    for message in reversed(messages_history):
-        if message.role != "assistant":
-            continue
-        content = message.content.strip()
-        if content:
-            return content
-
-    return None
-
-
 def _recent_history_text(messages_history: Sequence[ChatMessage] | None) -> str | None:
     if not messages_history or len(messages_history) <= 1:
         return None
@@ -464,17 +469,6 @@ def _recent_history_text(messages_history: Sequence[ChatMessage] | None) -> str 
         return None
 
     return get_chat_messages_role_and_message_json(recent_messages)
-
-
-def _normalize_message_text(value: str) -> str:
-    return " ".join(value.strip().casefold().split()).strip("?.! ")
-
-
-def _is_manupulation_scope_message(value: str | None) -> bool:
-    if not value:
-        return False
-    normalized = _normalize_message_text(value)
-    return "data manipulation" in normalized and "dataset-changing" in normalized
 
 
 def _dataframe_preview(dataframe: pd.DataFrame, *, row_limit: int = 10) -> JSONDict:
