@@ -54,6 +54,25 @@ class GeneralQueriesNode(Node):
                     user_question = msg.content.strip()
                     break
 
+        if not self._has_loaded_dataset(orchestrator_state):
+            assistant_message = (
+                "Please upload or select a dataset first to start the workflow. "
+                "Once the dataset is loaded, I can help define the causal question "
+                "and move through the next stages."
+            )
+            new_state = GeneralQueriesState(
+                GeneralQueriesPayloadModel(assistant_message=assistant_message)
+            )
+            return NodeExecutionResult(
+                new_node_state=new_state,
+                new_orchestrator_state=orchestrator_state,
+                status="DONE",
+                action="NEEDS_INPUT",
+                response_messages=[
+                    ChatMessage(role="assistant", content=assistant_message)
+                ],
+            )
+
         # Build a workflow state summary from orchestration state
         workflow_summary = self._build_workflow_summary(orchestrator_state)
 
@@ -87,13 +106,18 @@ class GeneralQueriesNode(Node):
     # Workflow state summary builder
     # -------------------------------------------------------------------------
 
+    def _has_loaded_dataset(self, orchestrator_state: Any) -> bool:
+        dataset_ids: list[Any] = list(orchestrator_state.get("working_dataset_ids") or [])
+        summary = orchestrator_state.get("latest_dataset_summary")
+        return bool(dataset_ids) and summary is not None
+
     def _build_workflow_summary(self, orchestrator_state: Any) -> str:
         sections: list[str] = []
 
         # Stage 1 — dataset
         dataset_ids: list[Any] = list(orchestrator_state.get("working_dataset_ids") or [])
         summary = orchestrator_state.get("latest_dataset_summary")
-        if dataset_ids and summary is not None:
+        if self._has_loaded_dataset(orchestrator_state):
             summary_json = summary.model_dump(mode="json") if hasattr(summary, "model_dump") else summary
             sections.append(
                 f"[DONE] Stage 1 — Dataset loaded.\n"

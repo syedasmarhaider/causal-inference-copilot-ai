@@ -10,6 +10,7 @@ from python.domain.models.validation import ValidationIssueModel
 from python.domain.workflows.ochestrator_state import OchestratorState
 from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.nodes.causal_inference.causal_inference_node import CausalInferenceNode
+from python.implementation.workflows.nodes.causal_inference.causal_inference_state import CausalInferenceState
 from python.implementation.workflows.nodes.data_compilation.data_compilation_node import DataCompilationNode
 from python.implementation.workflows.nodes.data_compilation.data_compilation_state import DataCompilationState
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_node import DataManupulationNode
@@ -415,22 +416,22 @@ class WritableOchestratorState(OchestratorState):
                 self._reset_from("working_dataset_ids", reason=f"rollback from {current_failed_node}")
             
             case _ if current_failed_node == ProtocolDiscussionNode.NAME:
-                self._reset_from("working_dataset_ids", reason=f"rollback from {current_failed_node}")
+                self._reset_from("protocol_discussion", reason=f"rollback from {current_failed_node}")
             
             case _ if current_failed_node == DataCompilationNode.NAME:
-                self._reset_from("working_dataset_ids", reason=f"rollback from {current_failed_node}")
+                self._reset_from("causal_spec", reason=f"rollback from {current_failed_node}")
             
             case _ if current_failed_node == DataValidationNode.NAME:
-                self._reset_from("working_dataset_ids", reason=f"rollback from {current_failed_node}") 
+                self._reset_from("validation_issues", reason=f"rollback from {current_failed_node}") 
             
             case _ if current_failed_node == ModelSelectionNode.NAME:
-                self._reset_from("working_dataset_ids", reason=f"rollback from {current_failed_node}")
+                self._reset_from("selected_model", reason=f"rollback from {current_failed_node}")
             
             case _ if current_failed_node == ModelTrainNode.NAME:
-                self._reset_from("working_dataset_ids", reason=f"rollback from {current_failed_node}") 
+                self._reset_from("trained_model_id", reason=f"rollback from {current_failed_node}") 
             
             case _ if current_failed_node == CausalInferenceNode.NAME:
-                self._reset_from("working_dataset_ids", reason=f"rollback from {current_failed_node}")                
+                pass                
             
             case _:
                 raise ValueError(f"Unknown node name for rollback: {current_failed_node!r}")
@@ -463,17 +464,17 @@ class WritableOchestratorState(OchestratorState):
                 self._reset_from("protocol_discussion", reason=f"rollback to {state_name}")
             
             case _ if state_name == DataCompilationState.NAME:
-                self._reset_from("causal_spec", reason=f"rollback to {state_name}")
-                self._reset_from("data_transformation_plan", reason=f"rollback to {state_name}")
+                self._reset_from("protocol_discussion", reason=f"rollback to {state_name}")
+                self._reset_from("protocol_discussion", reason=f"rollback to {state_name}")
             case _ if state_name == DataValidationState.NAME:
-                self._reset_from("validation_issues", reason=f"rollback to {state_name}")
+                self._reset_from("protocol_discussion", reason=f"rollback to {state_name}")
             case _ if state_name == ModelSelectionState.NAME:
-                self._reset_from("selected_model", reason=f"rollback to {state_name}")
-                self._reset_from("selection_reasoning", reason=f"rollback to {state_name}")
+                self._reset_from("protocol_discussion", reason=f"rollback to {state_name}")
+                self._reset_from("protocol_discussion", reason=f"rollback to {state_name}")
             case _ if state_name == ModelTrainState.NAME:
-                self._reset_from("trained_model_id", reason=f"rollback to {state_name}")
-                self._reset_from("training_warnings", reason=f"rollback to {state_name}")
-            case _ if state_name == CausalInferenceNode.NAME:
+                self._reset_from("protocol_discussion", reason=f"rollback to {state_name}")
+                self._reset_from("protocol_discussion", reason=f"rollback to {state_name}")
+            case _ if state_name == CausalInferenceState.NAME:
                 pass  # no state to roll back for the final node
             case _:
                 raise ValueError(f"Unknown state name for rollback: {state_name!r}")       

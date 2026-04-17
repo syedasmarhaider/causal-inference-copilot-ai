@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import inspect
 import json
 import uuid
 from collections.abc import Sequence
@@ -21,7 +19,6 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_dep
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
     data_compilation_causal_spec_prompt,
-    data_compilation_cleaning_instructions_prompt,
     data_compilation_node_info,
     data_compilation_review_decision_prompt,
     data_compilation_review_summary_prompt,
@@ -42,19 +39,12 @@ from python.implementation.workflows.tools.causal.specs.causal_specs_tool import
 from python.implementation.workflows.tools.common.model.data_summary import (
     DatasetSummaryModel,
 )
-from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import (
-    DataManipulationTool,
-)
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
 )
-from python.implementation.workflows.utils.utils import JSONDict, safe_err
+from python.implementation.workflows.utils.utils import safe_err
 
 log = get_app_logger(__name__, component="data_compilation_node", log_type="node")
-
-_DATA_MANIPULATION_RETRY_ATTEMPTS = 3
-_WORKING_TABLE_PREFIX = "df_"
-_WORKING_TABLE_HASH_HEX_LEN = 16
 
 
 class _ReviewSummary(BaseModel):
@@ -82,9 +72,6 @@ class DataCompilationNode(Node):
     ) -> None:
         self._data_repo = data_repo
         self._llm = llm
-        self._data_manipulation_tool = cast(
-            DataManipulationTool, tools_factory.get_tool(DataManipulationTool.NAME)
-        )
         self._profiling_tool = cast(
             DatasetProfilingTool, tools_factory.get_tool(DatasetProfilingTool.NAME)
         )
@@ -243,7 +230,6 @@ class DataCompilationNode(Node):
         protocol_discussion: str,
         source_changed: bool,
     ) -> NodeExecutionResult:
-        source_summary_json = self._profiling_tool.dataset_summary_to_json(source_summary)
         history = (
             list(request.read_only_messages_history[-4:])
             if request.read_only_messages_history
@@ -269,16 +255,9 @@ class DataCompilationNode(Node):
             )
 
         try:
-            cleaning_instructions = self._build_cleaning_instructions(
-                protocol_discussion=protocol_discussion,
-                causal_spec=causal_spec,
-                source_summary_json=source_summary_json,
-            )
-            compiled_df = self._run_data_manipulation_tool(
+            compiled_df = self._build_protocol_scope_dataframe(
                 dataframe=source_df,
-                conversation_id=request.conversation_id,
-                summary_json=source_summary_json,
-                instructions=cleaning_instructions,
+                causal_spec=causal_spec,
             )
             compiled_dataset_id = uuid.uuid4()
             self._data_repo.save_csv_data(
@@ -390,37 +369,22 @@ class DataCompilationNode(Node):
             data_summary=source_summary,
         )
 
-    def _build_cleaning_instructions(
+    def _build_protocol_scope_dataframe(
         self,
         *,
-        protocol_discussion: str,
+        dataframe: pd.DataFrame,
         causal_spec: CausalSpec,
-        source_summary_json: str,
-    ) -> str:
-        response = self._llm.generate(
-            system_prompt=data_compilation_cleaning_instructions_prompt(),
-            user_prompt=json.dumps(
-                {
-                    "protocol_discussion": protocol_discussion,
-                    "compiled_causal_spec": causal_spec.model_dump(mode="json"),
-                    "dataset_summary": json.loads(source_summary_json),
-                },
-                ensure_ascii=False,
-            ),
-            config=LLMConfig(model="basic", temperature=0.0, top_p=1.0),
-            history=None,
-        )
-        instructions = response.content.strip()
-        if not instructions:
-            raise ValueError("compiled dataset instructions cannot be empty")
-
-        final_columns_line = (
-            "Final protocol-scope columns to keep exactly: "
-            + ", ".join(_protocol_scope_columns(causal_spec))
-        )
-        if final_columns_line not in instructions:
-            instructions = f"{instructions}\n{final_columns_line}"
-        return instructions
+    ) -> pd.DataFrame:
+        protocol_scope_columns = _protocol_scope_columns(causal_spec)
+        missing_columns = [
+            column for column in protocol_scope_columns if column not in dataframe.columns
+        ]
+        if missing_columns:
+            raise ValueError(
+                "compiled causal spec references columns missing from the working dataset: "
+                f"{missing_columns}"
+            )
+        return dataframe.loc[:, protocol_scope_columns].copy()
 
     def _compile_transformation_plan(
         self,
@@ -595,36 +559,6 @@ class DataCompilationNode(Node):
             strict=True,
         )
 
-    def _run_data_manipulation_tool(
-        self,
-        *,
-        dataframe: pd.DataFrame,
-        conversation_id: UUID,
-        summary_json: str,
-        instructions: str,
-    ) -> pd.DataFrame:
-        manipulate = self._data_manipulation_tool.manipulate
-        params = inspect.signature(manipulate).parameters
-
-        kwargs: dict[str, Any] = {
-            "dataframe": dataframe,
-            "data_summary": summary_json,
-            "instructions": instructions,
-        }
-        if "table_name" in params:
-            kwargs["table_name"] = _conversation_id_to_table_name(conversation_id)
-        elif "conversation_id" in params:
-            kwargs["conversation_id"] = str(conversation_id)
-        else:
-            raise TypeError(
-                "data manipulation tool must accept either 'table_name' or "
-                "'conversation_id'"
-            )
-        if "retry_attempts" in params:
-            kwargs["retry_attempts"] = _DATA_MANIPULATION_RETRY_ATTEMPTS
-
-        return manipulate(**kwargs)
-
     def _needs_input_result(
         self,
         *,
@@ -717,11 +651,6 @@ def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str 
         if content:
             return content
     return None
-
-
-def _conversation_id_to_table_name(conversation_id: UUID) -> str:
-    digest = hashlib.sha256(str(conversation_id).encode("ascii")).hexdigest()
-    return f"{_WORKING_TABLE_PREFIX}{digest[:_WORKING_TABLE_HASH_HEX_LEN]}"
 
 
 def _protocol_scope_columns(causal_spec: CausalSpec) -> list[str]:

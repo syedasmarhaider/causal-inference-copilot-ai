@@ -56,6 +56,9 @@ _OFF_TOPIC_FALLBACK_MESSAGE = (
     "filter, reshape, rename, recode, derive, or otherwise update the working dataset. "
     "For read-only questions, statistics, or charts, use the appropriate stage."
 )
+_MODELING_PREPARATION_MESSAGE = (
+    "Please wait a bit more while I make this data ready for modeling."
+)
 
 
 class DataManupulationIntentModel(BaseModel):
@@ -250,6 +253,8 @@ class DataManupulationNode(Node):
             final_message = self._build_final_message_fallback(
                 manipulation_result=manipulation_result
             )
+        if should_complete_cleaning:
+            final_message = self._append_modeling_preparation_message(final_message)
 
         return self._needs_input_result(
             request=request,
@@ -511,6 +516,12 @@ class DataManupulationNode(Node):
             "Updated the working dataset and saved a new dataset version. "
             f"The updated dataset has {row_count} rows and {column_count} columns."
         )
+
+    def _append_modeling_preparation_message(self, user_message: str) -> str:
+        cleaned_message = user_message.strip()
+        if not cleaned_message:
+            return _MODELING_PREPARATION_MESSAGE
+        return f"{cleaned_message}\n\n{_MODELING_PREPARATION_MESSAGE}"
 
     def _is_protocol_discussion_complete_and_data_cleaning_pending(self, request: NodeRequest) -> bool:
         protocol_discussion = request.orchestrator_state.get("protocol_discussion")
