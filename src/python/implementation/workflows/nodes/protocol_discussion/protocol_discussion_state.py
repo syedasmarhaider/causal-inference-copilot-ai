@@ -19,7 +19,6 @@ class ProtocolDiscussionPayloadModel(BaseModel):
     phase: ProtocolDiscussionPhase = "DISCUSSING"
     pending_dataset_change_request: str | None = None
     assistant_message: str | None = None
-    system_message: str | None = None
 
     @field_validator("dataset_id", mode="before")
     @classmethod
@@ -30,7 +29,6 @@ class ProtocolDiscussionPayloadModel(BaseModel):
         "discussion",
         "pending_dataset_change_request",
         "assistant_message",
-        "system_message",
         mode="before",
     )
     @classmethod

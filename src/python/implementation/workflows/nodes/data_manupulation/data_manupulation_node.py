@@ -25,6 +25,7 @@ from python.implementation.workflows.nodes.data_manupulation.data_manupulation_p
     data_manupulation_intent_classification_system_prompt,
     data_manupulation_node_info,
     data_manupulation_out_of_scope_system_prompt,
+    data_manupulation_protocol_driven_cleaning_appendix,
 )
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_state import (
     DataManupulationState,
@@ -180,53 +181,73 @@ class DataManupulationNode(Node):
             )
 
         current_summary_json = self._profiling_tool.dataset_summary_to_json(current_summary)
+        should_complete_cleaning = (
+            self._is_protocol_discussion_complete_and_data_cleaning_pending(request)
+        )
 
-        if not latest_user_message:
+        intent: DataManupulationIntentModel | None = None
+        if latest_user_message:
+            history_text = _recent_history_text(request.read_only_messages_history)
+            try:
+                intent = self._classify_intent(
+                    latest_user_message=latest_user_message,
+                    chat_history=history_text,
+                    dataset_summary=current_summary_json,
+                )
+            except Exception as exc:
+                log.exception(
+                    "failed to classify data manupulation intent",
+                    error=safe_err(exc),
+                )
+                if protocol_cleaning_instructions is None:
+                    return self._needs_input_result(
+                        request=request,
+                        user_message=(
+                            "I could not classify that manipulation request. Please ask "
+                            "again more directly."
+                        ),
+                    )
+
+        if not latest_user_message and not should_complete_cleaning:
             return self._needs_input_result(
                 request=request,
                 user_message=self._build_ready_message(summary=current_summary),
             )
 
-        history_text = _recent_history_text(request.read_only_messages_history)
-        try:
-            intent = self._classify_intent(
-                latest_user_message=latest_user_message,
-                chat_history=history_text,
-                dataset_summary=current_summary_json,
-            )
-        except Exception as exc:
-            log.exception("failed to classify data manupulation intent", error=safe_err(exc))
-            return self._needs_input_result(
+        if should_complete_cleaning:
+            instructions = self._build_protocol_cleaning_instructions(
                 request=request,
-                user_message=(
-                    "I could not classify that manipulation request. Please ask again more "
-                    "directly."
+                user_instructions=(
+                    intent.intent_dataset_mutation_brief or latest_user_message
+                    if intent is not None and intent.has_any_intent()
+                    else None
                 ),
             )
-
-        if intent.intent_out_of_scope or not intent.has_any_intent():
-            try:
-                out_of_scope_message = self._build_out_of_scope_message(
-                    user_message=latest_user_message,
-                    dataset_summary_json=current_summary_json,
+        else:
+            if intent is None or intent.intent_out_of_scope or not intent.has_any_intent():
+                try:
+                    out_of_scope_message = self._build_out_of_scope_message(
+                        user_message=latest_user_message or "",
+                        dataset_summary_json=current_summary_json,
+                    )
+                except Exception as exc:
+                    log.exception(
+                        "failed to build out-of-scope message",
+                        error=safe_err(exc),
+                    )
+                    out_of_scope_message = _OFF_TOPIC_FALLBACK_MESSAGE
+                return self._needs_input_result(
+                    request=request,
+                    user_message=out_of_scope_message,
                 )
-            except Exception as exc:
-                log.exception("failed to build out-of-scope message", error=safe_err(exc))
-                out_of_scope_message = _OFF_TOPIC_FALLBACK_MESSAGE
-            return self._needs_input_result(
-                request=request,
-                user_message=out_of_scope_message,
-            )
+            instructions = intent.intent_dataset_mutation_brief or latest_user_message or ""
 
-        should_complete_cleaning = (
-            self._is_protocol_discussion_complete_and_data_cleaning_pending(request)
-        )
         try:
             manipulation_result = self._run_manupulation(
                 request=request,
                 dataframe=current_df,
                 current_summary_json=current_summary_json,
-                instructions=intent.intent_dataset_mutation_brief or latest_user_message,
+                instructions=instructions,
                 should_complete_cleaning=should_complete_cleaning,
             )
         except Exception as exc:
@@ -523,6 +544,35 @@ class DataManupulationNode(Node):
             return _MODELING_PREPARATION_MESSAGE
         return f"{cleaned_message}\n\n{_MODELING_PREPARATION_MESSAGE}"
 
+    def _build_protocol_cleaning_instructions(
+        self,
+        *,
+        request: NodeRequest,
+        user_instructions: str | None,
+    ) -> str:
+        protocol_discussion_raw = request.orchestrator_state.get("protocol_discussion")
+        if protocol_discussion_raw is None:
+            raise ValueError("protocol_discussion is required for protocol-driven cleaning")
+
+        protocol_discussion = str(protocol_discussion_raw).strip()
+        if not protocol_discussion:
+            raise ValueError("protocol_discussion must be non-empty for protocol-driven cleaning")
+
+        protocol_cleaning_instructions_raw = request.orchestrator_state.get(
+            "protocol_cleaning_instructions"
+        )
+        protocol_cleaning_instructions = (
+            str(protocol_cleaning_instructions_raw).strip()
+            if protocol_cleaning_instructions_raw is not None
+            else None
+        )
+
+        return build_data_manupulation_protocol_cleaning_instructions(
+            protocol_discussion=protocol_discussion,
+            protocol_cleaning_instructions=protocol_cleaning_instructions,
+            user_instructions=user_instructions,
+        )
+
     def _is_protocol_discussion_complete_and_data_cleaning_pending(self, request: NodeRequest) -> bool:
         protocol_discussion = request.orchestrator_state.get("protocol_discussion")
         data_cleaned = request.orchestrator_state.get("data_cleaned")
@@ -602,3 +652,51 @@ def _dataframe_preview(dataframe: pd.DataFrame, *, row_limit: int = 10) -> JSOND
 def _conversation_id_to_table_name(conversation_id: UUID) -> str:
     digest = hashlib.sha256(str(conversation_id).encode("ascii")).hexdigest()
     return f"{_WORKING_TABLE_PREFIX}{digest[:_WORKING_TABLE_HASH_HEX_LEN]}"
+
+
+def build_data_manupulation_protocol_cleaning_instructions(
+    *,
+    protocol_discussion: str,
+    protocol_cleaning_instructions: str | None = None,
+    user_instructions: str | None = None,
+) -> str:
+    normalized_protocol_discussion = protocol_discussion.strip()
+    normalized_protocol_cleaning_instructions = (
+        protocol_cleaning_instructions.strip()
+        if protocol_cleaning_instructions is not None
+        else ""
+    )
+    normalized_user_instructions = (
+        user_instructions.strip() if user_instructions is not None else ""
+    )
+
+    parts: list[str] = [
+        "This is a data-changing request for the protocol-driven cleaning stage.",
+        "Clean the active dataset so it matches the confirmed protocol discussion.",
+        "",
+        "Confirmed protocol discussion:",
+        normalized_protocol_discussion,
+    ]
+    if normalized_protocol_cleaning_instructions:
+        parts.extend(
+            [
+                "",
+                "Confirmed cleaning instructions:",
+                normalized_protocol_cleaning_instructions,
+            ]
+        )
+    parts.extend(
+        [
+            "",
+            data_manupulation_protocol_driven_cleaning_appendix(),
+        ]
+    )
+    if normalized_user_instructions:
+        parts.extend(
+            [
+                "",
+                "Also apply this additional user-requested dataset change if it does not conflict with the confirmed protocol cleaning rules above:",
+                normalized_user_instructions,
+            ]
+        )
+    return "\n".join(parts).strip()

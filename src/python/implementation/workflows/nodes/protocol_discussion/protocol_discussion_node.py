@@ -14,7 +14,6 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     ProtocolDiscussionDeps,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
-    confirmed_cleaning_system_message_preamble,
     get_protocol_discussion_get_node_info,
     get_protocol_discussion_review_decision_prompt,
     get_protocol_discussion_review_summary_prompt,
@@ -107,13 +106,6 @@ class ProtocolDiscussionNode(Node):
             )
         return assistant_message
 
-    @staticmethod
-    def _build_confirmed_cleaning_system_message(dataset_change_request: str) -> str:
-        return (
-            f"{confirmed_cleaning_system_message_preamble()}\n\n"
-            f"{dataset_change_request.strip()}"
-        )
-
     def _bind_payload_to_dataset(
         self,
         *,
@@ -130,7 +122,6 @@ class ProtocolDiscussionNode(Node):
                     "phase": "DISCUSSING",
                     "pending_dataset_change_request": None,
                     "assistant_message": None,
-                    "system_message": None,
                 }
             )
         return payload.model_copy(update=updates)
@@ -275,7 +266,6 @@ class ProtocolDiscussionNode(Node):
                                 "I could not interpret your reply to the protocol review. "
                                 "Please confirm the protocol explicitly or say what should change."
                             ),
-                            "system_message": None,
                         }
                     ),
                 )
@@ -285,20 +275,22 @@ class ProtocolDiscussionNode(Node):
                     update={
                         "phase": "CONFIRMED",
                         "assistant_message": review_decision.assistant_message,
-                        "system_message": self._build_confirmed_cleaning_system_message(
-                            cast(str, payload.pending_dataset_change_request)
-                        ),
                     }
                 )
                 request.orchestrator_state.set(
                     request.node_state.name(),
-                    {"protocol_discussion": confirmed_payload.discussion},
+                    {
+                        "protocol_discussion": confirmed_payload.discussion,
+                        "protocol_cleaning_instructions": cast(
+                            str,
+                            confirmed_payload.pending_dataset_change_request,
+                        ),
+                    },
                 )
                 return self._done_result(
                     request=request,
                     payload=confirmed_payload,
                     user_message=review_decision.assistant_message,
-                    system_message=confirmed_payload.system_message,
                 )
 
             if review_decision.action == "clarify":
@@ -308,7 +300,6 @@ class ProtocolDiscussionNode(Node):
                         update={
                             "phase": "REVIEW_READY",
                             "assistant_message": review_decision.assistant_message,
-                            "system_message": None,
                         }
                     ),
                 )
@@ -318,7 +309,6 @@ class ProtocolDiscussionNode(Node):
                     "phase": "DISCUSSING",
                     "pending_dataset_change_request": None,
                     "assistant_message": None,
-                    "system_message": None,
                 }
             )
 
@@ -336,7 +326,6 @@ class ProtocolDiscussionNode(Node):
                     update={
                         "phase": "DISCUSSING",
                         "assistant_message": "Protocol discussion update failed. Please try again.",
-                        "system_message": None,
                     }
                 ),
             )
@@ -371,7 +360,6 @@ class ProtocolDiscussionNode(Node):
                             dataset_changed=dataset_changed,
                             prior_dataset_id=prior_dataset_id,
                         ),
-                        "system_message": None,
                     }
                 ),
             )
@@ -384,7 +372,6 @@ class ProtocolDiscussionNode(Node):
                     "phase": "DISCUSSING",
                     "pending_dataset_change_request": None,
                     "assistant_message": assistant_message,
-                    "system_message": None,
                 }
             ),
         )
@@ -396,8 +383,6 @@ class ProtocolDiscussionNode(Node):
         payload: ProtocolDiscussionPayloadModel,
     ) -> NodeExecutionResult:
         messages: list[ChatMessage] = []
-        if payload.system_message:
-            messages.append(ChatMessage(role="system", content=payload.system_message))
         if payload.assistant_message:
             messages.append(ChatMessage(role="assistant", content=payload.assistant_message))
         if not messages:
@@ -430,18 +415,13 @@ class ProtocolDiscussionNode(Node):
         request: NodeRequest,
         payload: ProtocolDiscussionPayloadModel,
         user_message: str,
-        system_message: str | None,
     ) -> NodeExecutionResult:
-        messages: list[ChatMessage] = []
-        if system_message:
-            messages.append(ChatMessage(role="system", content=system_message))
-        messages.append(ChatMessage(role="assistant", content=user_message))
         return NodeExecutionResult(
             new_node_state=ProtocolDiscussionState(payload),
             new_orchestrator_state=request.orchestrator_state,
             status="DONE",
             action="NONE",
-            response_messages=messages,
+            response_messages=[ChatMessage(role="assistant", content=user_message)],
         )
 
 
@@ -455,4 +435,3 @@ def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str 
         if content:
             return content
     return None
-

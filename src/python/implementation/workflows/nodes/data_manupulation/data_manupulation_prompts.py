@@ -79,9 +79,22 @@ Rules:
 """.strip()
 
 
+def data_manupulation_protocol_driven_cleaning_appendix() -> str:
+    return """
+Additional protocol-driven cleaning rules:
+- Fix protocol-scope column data types whenever the stored type does not match the grounded semantic meaning of the variable. This applies to all relevant conversions, not just one pattern. For example, categorical codes stored as numbers should be treated as categories, numeric values stored as strings should be cast to numeric, boolean-like values should be normalized to a stable boolean/binary representation, and date/time values stored as strings should be parsed into an appropriate temporal representation when the protocol depends on time.
+- If a protocol-scope column behaves like a discrete category but is stored with another type (for example numeric or free-text codes), normalize it to a stable categorical representation instead of treating it like a continuous measurement.
+- For the confirmed binary treatment column, keep only the two grounded treatment values from the confirmed protocol. If the raw data contains extra treatment values and the protocol does not explicitly instruct a grounded merge or remapping, remove those rows instead of guessing.
+- For a confirmed binary outcome column, keep only the two grounded outcome values from the confirmed protocol. If the raw data contains extra outcome values and the protocol does not explicitly instruct a grounded merge or remapping, remove those rows instead of guessing.
+- Do not invent category merges such as collapsing values 2 and 3 together unless the confirmed protocol or an explicit user request clearly says to do that.
+- Keep all normalization grounded in the confirmed protocol discussion and the observed data.
+""".strip()
+
+
 __all__ = [
     "data_manupulation_final_response_system_prompt",
     "data_manupulation_intent_classification_system_prompt",
     "data_manupulation_node_info",
     "data_manupulation_out_of_scope_system_prompt",
+    "data_manupulation_protocol_driven_cleaning_appendix",
 ]

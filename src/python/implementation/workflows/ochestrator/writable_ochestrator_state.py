@@ -46,6 +46,7 @@ class GlobalStateModel(BaseModel):
 
     # stage 2 — protocol discussion
     protocol_discussion: str | None = None
+    protocol_cleaning_instructions: str | None = None
 
     # stage 3 — data cleaning
     data_cleaned: bool = False
@@ -95,6 +96,7 @@ class WritableOchestratorState(OchestratorState):
         "working_dataset_ids",
         "latest_dataset_summary",
         "protocol_discussion",
+        "protocol_cleaning_instructions",
         "data_cleaned",
         "causal_spec",
         "data_transformation_plan",
@@ -212,7 +214,10 @@ class WritableOchestratorState(OchestratorState):
                     latest_dataset_summary=value["latest_dataset_summary"],
                 )  
                 if protocol_discusson is not None and "data_cleaned" in value and isinstance(value["data_cleaned"], bool):
-                    self._set_stage2(protocol_discussion=protocol_discusson)
+                    self._set_stage2(
+                        protocol_discussion=protocol_discusson,
+                        protocol_cleaning_instructions=self._model.protocol_cleaning_instructions,
+                    )
                     self._set_stage3(data_cleaned=bool(value["data_cleaned"]))
 
             case _ if key == ProtocolDiscussionState.NAME:
@@ -220,7 +225,12 @@ class WritableOchestratorState(OchestratorState):
                     raise KeyError("PROTOCOL_DISCUSSION updates must include protocol_discussion")
                 raw_text = value.get("protocol_discussion")
                 self._set_stage2(
-                    protocol_discussion=str(raw_text).strip() if raw_text is not None else None
+                    protocol_discussion=str(raw_text).strip() if raw_text is not None else None,
+                    protocol_cleaning_instructions=(
+                        str(value["protocol_cleaning_instructions"]).strip()
+                        if value.get("protocol_cleaning_instructions") is not None
+                        else None
+                    ),
                 )
 
             case _ if key == DataCompilationState.NAME:
@@ -311,12 +321,24 @@ class WritableOchestratorState(OchestratorState):
                 reason="stage-1 dataset updated",
             )
 
-    def _set_stage2(self, *, protocol_discussion: str | None) -> None:
+    def _set_stage2(
+        self,
+        *,
+        protocol_discussion: str | None,
+        protocol_cleaning_instructions: str | None,
+    ) -> None:
         self._require_stage1()
-        if self._model.protocol_discussion == protocol_discussion:
+        if (
+            self._model.protocol_discussion == protocol_discussion
+            and self._model.protocol_cleaning_instructions == protocol_cleaning_instructions
+        ):
             return
         self._model.protocol_discussion = protocol_discussion
-        self._invalidate_downstream_of("protocol_discussion", reason="stage-2 protocol discussion updated")
+        self._model.protocol_cleaning_instructions = protocol_cleaning_instructions
+        self._invalidate_downstream_of(
+            "protocol_cleaning_instructions",
+            reason="stage-2 protocol discussion updated",
+        )
 
     def _set_stage3(self, *, data_cleaned: bool) -> None:
         self._require_stage2()

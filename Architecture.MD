@@ -1,3 +1,7 @@
+# PROMPT FILE RULE:
+ONLY STRINGS IN PROMPT FILES NOT OTHER VARIABLES PASSING
+
+
 Request will come to the adapter
 
 adpater will call Workflow 
