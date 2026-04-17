@@ -419,16 +419,16 @@ class WritableOchestratorState(OchestratorState):
                 self._reset_from("protocol_discussion", reason=f"rollback from {current_failed_node}")
             
             case _ if current_failed_node == DataCompilationNode.NAME:
-                self._reset_from("causal_spec", reason=f"rollback from {current_failed_node}")
+                self._reset_from("protocol_discussion", reason=f"rollback from {current_failed_node}")
             
             case _ if current_failed_node == DataValidationNode.NAME:
-                self._reset_from("validation_issues", reason=f"rollback from {current_failed_node}") 
+                self._reset_from("protocol_discussion", reason=f"rollback from {current_failed_node}") 
             
             case _ if current_failed_node == ModelSelectionNode.NAME:
-                self._reset_from("selected_model", reason=f"rollback from {current_failed_node}")
+                self._reset_from("protocol_discussion", reason=f"rollback from {current_failed_node}")
             
             case _ if current_failed_node == ModelTrainNode.NAME:
-                self._reset_from("trained_model_id", reason=f"rollback from {current_failed_node}") 
+                self._reset_from("protocol_discussion", reason=f"rollback from {current_failed_node}") 
             
             case _ if current_failed_node == CausalInferenceNode.NAME:
                 pass                

@@ -195,6 +195,7 @@ class TransformPlan(BaseModel):
 
     SUMMARY_FIELD_NAMES: ClassVar[tuple[str, ...] | None] = None
     SUMMARY_FIELD_KINDS: ClassVar[dict[str, str] | None] = None
+    SUMMARY_FIELD_DISTINCT_COUNTS: ClassVar[dict[str, int | None] | None] = None
     SUMMARY_KNOWN_VALUES: ClassVar[dict[str, set[str] | None] | None] = None
     ELIGIBLE_COLUMNS: ClassVar[tuple[str, ...] | None] = None
     EXPECTED_ROLE_BY_COLUMN: ClassVar[dict[str, EncodingRole] | None] = None
@@ -221,6 +222,7 @@ class TransformPlan(BaseModel):
                 plan=self,
                 summary_field_names=summary_field_names,
                 summary_field_kinds=type(self).SUMMARY_FIELD_KINDS or {},
+                summary_field_distinct_counts=type(self).SUMMARY_FIELD_DISTINCT_COUNTS or {},
                 summary_known_values=type(self).SUMMARY_KNOWN_VALUES or {},
                 eligible_columns=type(self).ELIGIBLE_COLUMNS,
                 expected_role_by_column=type(self).EXPECTED_ROLE_BY_COLUMN,
@@ -278,6 +280,9 @@ class TransformPlan(BaseModel):
         )
         dynamic_plan_model.SUMMARY_FIELD_NAMES = field_names
         dynamic_plan_model.SUMMARY_FIELD_KINDS = _extract_summary_field_kinds(dataset_summary)
+        dynamic_plan_model.SUMMARY_FIELD_DISTINCT_COUNTS = _extract_summary_field_distinct_counts(
+            dataset_summary
+        )
         dynamic_plan_model.SUMMARY_KNOWN_VALUES = _extract_summary_known_values(dataset_summary)
         dynamic_plan_model.ELIGIBLE_COLUMNS = tuple(expected_role_by_column.keys())
         dynamic_plan_model.EXPECTED_ROLE_BY_COLUMN = expected_role_by_column
@@ -327,6 +332,7 @@ def _validate_transform_plan_against_constraints(
     plan: TransformPlan,
     summary_field_names: tuple[str, ...],
     summary_field_kinds: dict[str, str],
+    summary_field_distinct_counts: dict[str, int | None],
     summary_known_values: dict[str, set[str] | None],
     eligible_columns: tuple[str, ...] | None,
     expected_role_by_column: dict[str, EncodingRole] | None,
@@ -374,17 +380,20 @@ def _validate_transform_plan_against_constraints(
     for column_plan in plan.columns:
         column = str(column_plan.column).strip()
         inferred_kind = summary_field_kinds.get(column)
+        distinct_count = summary_field_distinct_counts.get(column)
         preset = str(column_plan.encoding.preset)
         if inferred_kind is None:
             continue
         if not _is_encoding_preset_compatible_with_kind(
             inferred_kind=inferred_kind,
             preset=preset,
+            distinct_count=distinct_count,
         ):
             incompatible_presets.append(
                 {
                     "column": column,
                     "inferred_kind": inferred_kind,
+                    "distinct_count": str(distinct_count),
                     "preset": preset,
                 }
             )
@@ -437,11 +446,16 @@ def _is_encoding_preset_compatible_with_kind(
     *,
     inferred_kind: str,
     preset: str,
+    distinct_count: int | None = None,
 ) -> bool:
     if preset in {"drop", "passthrough"}:
         return True
     if inferred_kind == "NUMERIC":
-        return preset in {"num_standard", "num_minmax", "num_log1p"}
+        if preset in {"num_standard", "num_minmax", "num_log1p"}:
+            return True
+        if distinct_count is not None and 0 < distinct_count <= 20:
+            return preset in {"cat_onehot", "map_binary", "map_ordinal"}
+        return False
     if inferred_kind == "CATEGORICAL":
         return preset in {"cat_onehot", "map_binary", "map_ordinal"}
     if inferred_kind == "BOOLEAN":
@@ -562,6 +576,16 @@ def _extract_summary_field_names(dataset_summary: DatasetSummaryModel) -> tuple[
 def _extract_summary_field_kinds(dataset_summary: DatasetSummaryModel) -> dict[str, str]:
     return {
         str(profile.name).strip(): str(profile.inferred_kind)
+        for profile in dataset_summary.profiles
+        if str(profile.name).strip()
+    }
+
+
+def _extract_summary_field_distinct_counts(
+    dataset_summary: DatasetSummaryModel,
+) -> dict[str, int | None]:
+    return {
+        str(profile.name).strip(): profile.distinct_count
         for profile in dataset_summary.profiles
         if str(profile.name).strip()
     }

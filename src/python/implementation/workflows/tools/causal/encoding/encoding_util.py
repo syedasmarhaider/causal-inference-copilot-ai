@@ -102,6 +102,32 @@ class RaiseIfMissing(BaseEstimator, TransformerMixin):
         return np.asarray(input_features, dtype=object)
 
 
+class CastToCategoricalString(BaseEstimator, TransformerMixin):
+    """
+    Normalize a single feature into a stable categorical/string representation.
+
+    This is used before categorical imputers/encoders so numeric-coded discrete
+    columns can safely receive string missing tokens such as "__MISSING__".
+    """
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X) -> np.ndarray:
+        arr = np.asarray(X, dtype=object)
+        if arr.ndim != 2 or arr.shape[1] != 1:
+            raise ValueError(f"categorical cast: expected shape (n,1), got {arr.shape}.")
+
+        s = pd.Series(arr[:, 0], dtype=object)
+        out = s.map(lambda value: np.nan if pd.isna(value) else str(value))
+        return out.to_numpy(dtype=object).reshape(-1, 1)
+
+    def get_feature_names_out(self, input_features=None):
+        if input_features is None or len(input_features) == 0:
+            return np.asarray(["categorical"], dtype=object)
+        return np.asarray(input_features, dtype=object)
+
+
 class Log1pSafeTransformer(BaseEstimator, TransformerMixin):
     def __init__(self, *, allow_negative: bool):
         self.allow_negative = bool(allow_negative)
@@ -497,7 +523,7 @@ def compile_plan_to_transformers(
             return "passthrough"
 
         if preset == "cat_onehot":
-            steps: list[tuple[str, BaseEstimator]] = []
+            steps: list[tuple[str, BaseEstimator]] = [("cast_categorical", CastToCategoricalString())]
             if enc.missing == "error":
                 steps.append(("check_missing", RaiseIfMissing()))
                 steps.append(

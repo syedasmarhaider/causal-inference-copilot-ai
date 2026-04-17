@@ -93,10 +93,12 @@ Inputs:
 - required_plan_column_count
 
 Task:
-- Produce one TransformPlan JSON object that matches the provided schema exactly.
+- Produce one compact transformation-plan draft JSON object that matches the provided schema exactly.
+- The runtime will expand the draft into the final TransformPlan using safe defaults.
 
 Defaults:
 - NUMERIC baseline features usually default to `num_standard`.
+- NUMERIC columns with very small distinct_count can be numeric-coded binary, categorical, or ordinal fields; choose a discrete encoding when the profile supports that interpretation.
 - Binary categorical or boolean baseline features usually default to `map_binary` when the mapping is grounded.
 - Multi-category baseline features usually default to `cat_onehot`.
 - DATETIME baseline features may use `datetime_epoch_seconds` when the timestamp itself is intended as a baseline feature; otherwise prefer `drop`.
@@ -110,8 +112,38 @@ Role rules:
 - Do not include any column outside `eligible_columns`.
 - The number of entries in `columns` must equal `required_plan_column_count`.
 - For each entry, `role` must exactly match `expected_role_by_column[column]`.
+- Use `map_binary` only when you can provide a grounded `mapping`.
+- Use `map_ordinal` only when you can provide a grounded `order`.
 
 {_PLAN_GUARDRAILS}
+
+Output policy:
+- Output JSON only.
+- No markdown.
+- No explanatory prose outside the JSON object.
+""".strip()
+
+
+def data_compilation_single_column_transformation_plan_prompt() -> str:
+    return """
+You are selecting a baseline transformation for one compiled protocol-scope column.
+
+Inputs:
+- column_name
+- expected_role
+- column_profile
+
+Task:
+- Produce one compact transformation-plan draft column JSON object that matches the provided schema exactly.
+
+Rules:
+- The schema already fixes the allowed `column` and `role`; do not invent or change them.
+- Use the provided column_profile as the source of truth for kind, dtype, missingness, distinct_count, range, and known/sample values.
+- NUMERIC columns with very small distinct_count can represent binary, categorical, or ordinal coded fields; choose a discrete encoding when grounded by the profile.
+- Use `map_binary` only when you can provide a grounded `mapping`.
+- Use `map_ordinal` only when you can provide a grounded `order`.
+- Prefer conservative, broadly safe encodings.
+- Avoid `drop` unless there is a grounded reason to exclude the feature.
 
 Output policy:
 - Output JSON only.
@@ -135,9 +167,11 @@ Task:
 - This is a review step before confirmation, not the final confirmation itself.
 
 Content rules:
+- Focus first on the data preparation changes made for causal modeling.
+- Explain which protocol-scope columns were retained and how the dataset was narrowed for modeling.
+- Summarize the planned baseline transformations in readable language with more detail than the treatment/outcome recap.
 - Summarize the treatment, outcome, covariates, and effect modifiers clearly.
 - Summarize the compiled dataset shape in readable language.
-- Summarize the planned baseline transformations in readable language.
 - Ask the user to confirm the compiled dataset and transformation plan or say exactly what should change.
 - Do not mention internal JSON, validators, or workflow implementation details.
 
@@ -179,5 +213,6 @@ __all__ = [
     "data_compilation_node_info",
     "data_compilation_review_decision_prompt",
     "data_compilation_review_summary_prompt",
+    "data_compilation_single_column_transformation_plan_prompt",
     "data_compilation_transformation_plan_prompt",
 ]
