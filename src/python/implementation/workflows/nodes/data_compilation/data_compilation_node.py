@@ -777,10 +777,6 @@ class DataCompilationNode(Node):
         transform_plan: TransformPlan | None,
         transform_issues: Sequence[ValidationIssueModel],
     ) -> tuple[list[ValidationIssueModel], ValidationStatus]:
-        scope_issues = _validate_dataset_protocol_scope_columns(
-            dataframe=dataframe,
-            causal_spec=causal_spec,
-        )
         validation_report = self._validation_tool.validate(
             causal_spec=causal_spec,
             dataframe=dataframe,
@@ -795,7 +791,7 @@ class DataCompilationNode(Node):
                 != "Transform plan is required when covariates or effect modifiers are present."
             ]
 
-        issues = [*scope_issues, *transform_issues, *validation_issues]
+        issues = [ *transform_issues, *validation_issues]
         return issues, _validation_status(issues)
 
     def _finalize_compilation_attempt(
