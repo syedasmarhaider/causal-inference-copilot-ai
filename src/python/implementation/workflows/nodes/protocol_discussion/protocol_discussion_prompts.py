@@ -63,7 +63,7 @@ Tasks:
 1) Update PROTOCOL_DISCUSSION using grounded user evidence.
 2) Decide the single best next_action.
 3) Produce the assistant_message for this turn.
-4) If next_action is confirm, produce dataset_change_request for the downstream data-cleaning stage.
+4) If next_action is confirm, produce dataset_change_request for the downstream compilation stage.
 
 {_SHARED_GUARDRAILS}
 
@@ -76,11 +76,11 @@ Tasks:
 Assistant message policy:
 - Do not be terse. The user prefers comprehensive, specific responses.
 - For next_action="continue", answer the latest user point first and then ask the most important missing follow-up question if one is still needed.
-- For next_action="confirm", acknowledge that the protocol discussion is now confirmed and explain that data cleaning/normalization will proceed next.
+- For next_action="confirm", acknowledge that the protocol discussion is now confirmed and explain that the compilation stage will clean, compile, transform, and validate next.
 - If the protocol cannot proceed under the current assumptions or data, keep next_action="continue" and explain clearly what is not possible, apologize briefly, and state what would need to change.
 
 dataset_change_request policy when next_action="confirm":
-- The request is for a downstream data-changing stage.
+- The request is for the downstream compilation stage that still performs data-changing preparation.
 - Make it self-contained, operational, and grounded.
 - State explicitly that this is a data-changing request.
 - Specify the confirmed treatment, outcome, covariates, effect modifiers, and any time-zero relevant columns that must be preserved.
@@ -98,7 +98,7 @@ Return ONLY JSON with exactly:
   "discussion": "<updated protocol discussion text>",
   "next_action": "continue" | "confirm",
   "assistant_message": "<user-facing assistant message>",
-  "dataset_change_request": "<downstream data-cleaning instruction or null>"
+  "dataset_change_request": "<downstream compilation instruction or null>"
 }}
 """.strip()
 

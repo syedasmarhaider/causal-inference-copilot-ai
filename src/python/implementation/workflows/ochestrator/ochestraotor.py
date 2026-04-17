@@ -24,8 +24,6 @@ from python.implementation.workflows.nodes.data_manupulation.data_manupulation_n
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_state import DataManupulationState
 from python.implementation.workflows.nodes.data_statistics.data_statistics_node import DataStatisticsNode
 from python.implementation.workflows.nodes.data_statistics.data_statistics_state import DataStatisticsState
-from python.implementation.workflows.nodes.data_validation.data_validation_node import DataValidationNode
-from python.implementation.workflows.nodes.data_validation.data_validation_state import DataValidationState
 from python.implementation.workflows.nodes.general_queries.general_queries_node import GeneralQueriesNode
 from python.implementation.workflows.nodes.general_queries.general_queries_state import GeneralQueriesState
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import ModelSelectionState
@@ -45,7 +43,6 @@ _WORKFLOW_STATE_ORDER: tuple[str, ...] = (
     DataManupulationState.NAME,
     ProtocolDiscussionState.NAME,
     DataCompilationState.NAME,
-    DataValidationState.NAME,
     ModelSelectionState.NAME,
     ModelTrainState.NAME,
     CausalInferenceState.NAME,
@@ -300,7 +297,6 @@ def build_state_classes_by_name() -> Mapping[str, type[NodeState]]:
         ProtocolDiscussionState.NAME: ProtocolDiscussionState,
         DataCompilationState.NAME: DataCompilationState,
         DataStatisticsState.NAME: DataStatisticsState,
-        DataValidationState.NAME: DataValidationState,
         ModelSelectionState.NAME: ModelSelectionState,
         ModelTrainState.NAME: ModelTrainState,
         CausalInferenceState.NAME: CausalInferenceState,
@@ -315,7 +311,6 @@ def build_state_name_by_node_name() -> Mapping[str, str]:
         ProtocolDiscussionNode.NAME: ProtocolDiscussionState.NAME,
         DataCompilationNode.NAME: DataCompilationState.NAME,
         DataStatisticsNode.NAME: DataStatisticsState.NAME,
-        DataValidationNode.NAME: DataValidationState.NAME,
         ModelSelectionNode.NAME: ModelSelectionState.NAME,
         ModelTrainNode.NAME: ModelTrainState.NAME,
         CausalInferenceNode.NAME: CausalInferenceState.NAME,
@@ -329,7 +324,6 @@ def build_node_name_by_node_name() -> Mapping[str, type[Node]]:
         ProtocolDiscussionNode.NAME: ProtocolDiscussionNode,
         DataCompilationNode.NAME: DataCompilationNode,
         DataStatisticsNode.NAME: DataStatisticsNode,
-        DataValidationNode.NAME: DataValidationNode,
         ModelSelectionNode.NAME: ModelSelectionNode,
         ModelTrainNode.NAME: ModelTrainNode,
         CausalInferenceNode.NAME: CausalInferenceNode,
@@ -367,11 +361,6 @@ def init_all_nodes_with_name_as_key(
         llm=llm,
         tools_factory=tool_factory,
     )
-    data_validation_node = DataValidationNode(
-        data_repo=data_repo,
-        llm=llm,
-        tools_factory=tool_factory,
-    )
     model_selection_node = ModelSelectionNode(
         llm=llm,
         tools_factory=tool_factory,
@@ -394,7 +383,6 @@ def init_all_nodes_with_name_as_key(
         protocol_discussion_node.name: protocol_discussion_node,
         data_compilation_node.name: data_compilation_node,
         data_statistics_node.name: data_statistics_node,
-        data_validation_node.name: data_validation_node,
         model_selection_node.name: model_selection_node,
         model_train_node.name: model_train_node,
         causal_inference_node.name: causal_inference_node,

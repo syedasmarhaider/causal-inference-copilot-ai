@@ -127,12 +127,22 @@ class GeneralQueriesNode(Node):
         else:
             sections.append("[PENDING] Stage 2 — Protocol discussion not started. Define the causal question with the agent.")
 
-        # Stage 3 — compilation
+        # Stage 3 — compilation + validation
         causal_spec = orchestrator_state.get("causal_spec")
         transform_plan = orchestrator_state.get("data_transformation_plan")
         frozen: bool = bool(orchestrator_state.get("working_dataset_frozen") or False)
+        is_validated: bool = bool(orchestrator_state.get("is_validated") or False)
+        validation_issues: list[Any] = list(orchestrator_state.get("validation_issues") or [])
         if causal_spec and transform_plan and frozen:
-            sections.append("[DONE] Stage 3 — Causal specification compiled and dataset frozen.")
+            if is_validated:
+                sections.append(
+                    f"[DONE] Stage 3 — Compilation and validation complete. "
+                    f"{len(validation_issues)} validation issue(s) recorded."
+                )
+            else:
+                sections.append(
+                    "[PENDING] Stage 3 — Compilation is present but validation has not been confirmed yet."
+                )
         else:
             missing: list[str] = []
             if not causal_spec:
@@ -141,40 +151,29 @@ class GeneralQueriesNode(Node):
                 missing.append("transformation plan")
             if not frozen:
                 missing.append("dataset freeze")
-            sections.append(f"[PENDING] Stage 3 — Data compilation incomplete. Missing: {', '.join(missing)}.")
+            sections.append(
+                f"[PENDING] Stage 3 — Compilation and validation incomplete. Missing: {', '.join(missing)}."
+            )
 
-        # Stage 4 — validation
-        is_validated: bool = bool(orchestrator_state.get("is_validated") or False)
-        validation_issues: list[Any] = list(orchestrator_state.get("validation_issues") or [])
-        if causal_spec and transform_plan and frozen:
-            if is_validated:
-                sections.append(
-                    f"[DONE] Stage 4 — Validation confirmed. {len(validation_issues)} issue(s) recorded."
-                )
-            else:
-                sections.append("[PENDING] Stage 4 — Validation not yet run.")
-        else:
-            sections.append("[BLOCKED] Stage 4 — Validation blocked until Stage 3 is complete.")
-
-        # Stage 5 — model selection
+        # Stage 4 — model selection
         selected_model = orchestrator_state.get("selected_model")
         reasoning = orchestrator_state.get("selection_reasoning")
         if selected_model:
             sections.append(
-                f"[DONE] Stage 5 — Model selected: {selected_model}.\n"
+                f"[DONE] Stage 4 — Model selected: {selected_model}.\n"
                 f"  Reasoning: {reasoning or 'N/A'}"
             )
         else:
-            sections.append("[PENDING] Stage 5 — Model not yet selected.")
+            sections.append("[PENDING] Stage 4 — Model not yet selected.")
 
-        # Stage 6 — training
+        # Stage 5 — training
         trained_model_id = orchestrator_state.get("trained_model_id")
         training_warnings: list[Any] = list(orchestrator_state.get("training_warnings") or [])
         if trained_model_id:
             warn_txt = f" ({len(training_warnings)} warning(s))" if training_warnings else ""
-            sections.append(f"[DONE] Stage 6 — Model trained{warn_txt}. Model ID: {trained_model_id}")
+            sections.append(f"[DONE] Stage 5 — Model trained{warn_txt}. Model ID: {trained_model_id}")
         else:
-            sections.append("[PENDING] Stage 6 — Model training not started.")
+            sections.append("[PENDING] Stage 5 — Model training not started.")
 
         return "\n\n".join(sections)
 

@@ -5,6 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from python.domain.models.validation import ValidationIssueModel, ValidationStatus
 from python.domain.workflows.node_state import NodeState
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
@@ -13,7 +14,13 @@ from python.implementation.workflows.tools.common.model.data_summary import (
 )
 from python.implementation.workflows.utils.utils import uuid_from_any
 
-DataCompilationPhase = Literal["INIT", "REVIEW_READY", "CONFIRMED", "FAILED"]
+DataCompilationPhase = Literal[
+    "INIT",
+    "ACTION_REQUIRED",
+    "REVIEW_READY",
+    "CONFIRMED",
+    "FAILED",
+]
 
 
 class DataCompilationPayloadModel(BaseModel):
@@ -28,6 +35,8 @@ class DataCompilationPayloadModel(BaseModel):
     transformation_plan: TransformPlan | None = None
     compilation_actions: list[str] = Field(default_factory=list)
     compilation_warnings: list[str] = Field(default_factory=list)
+    validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
+    validation_status: ValidationStatus | None = None
     phase: DataCompilationPhase = "INIT"
     assistant_message: str | None = None
     system_message: str | None = None
@@ -88,6 +97,8 @@ class DataCompilationPayloadModel(BaseModel):
                 "transformation_plan": None,
                 "compilation_actions": [],
                 "compilation_warnings": [],
+                "validation_issues": [],
+                "validation_status": None,
                 "phase": "INIT",
                 "assistant_message": None,
                 "system_message": None,

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 def data_compilation_node_info() -> str:
     return (
-        "Compile-only data preparation stage. It turns a confirmed protocol discussion into "
-        "a compiled causal spec, a protocol-scope cleaned dataset, and a baseline "
-        "transformation plan, then asks the user to confirm before publishing those outputs "
-        "to orchestrator state."
+        "Merged compilation and validation stage. It turns a confirmed protocol discussion "
+        "into a compiled causal spec, a protocol-scope cleaned dataset, a baseline "
+        "transformation plan, and a validation result, then asks the user either to resolve "
+        "blocking issues or to confirm the accepted compiled setup before publishing it to "
+        "orchestrator state."
     )
 
 
@@ -72,19 +73,21 @@ Rules:
 
 def data_compilation_discrepancy_repair_prompt() -> str:
     return """
-You are preparing one corrective SQL-oriented cleaning pass after protocol compilation found grounded data discrepancies.
+You are preparing one corrective SQL-oriented cleaning pass after protocol compilation and validation found grounded data discrepancies.
 
 Inputs:
 - confirmed protocol discussion
 - confirmed protocol cleaning instructions
 - compiled causal specification
 - compiled dataset summary
-- transformation validation issues
+- validation issues
+- user-requested repair direction
 
 Rules:
 - Return only user-intent text for a SQL data manipulation tool.
 - Keep the dataset inside the compiled protocol scope.
-- Only fix discrepancies that are explicitly grounded by the compiled causal specification, compiled dataset summary, and listed validation issues.
+- Keep the locked treatment, outcome, covariate, and effect-modifier columns unchanged.
+- Only fix discrepancies that are explicitly grounded by the compiled causal specification, compiled dataset summary, listed validation issues, and user-requested repair direction.
 - Prefer safe type corrections, grounded recoding, and removal of invalid treatment or outcome rows over speculative remapping.
 - Never add treatment or outcome transformations to the transform plan; fix the data instead when needed.
 - Do not invent new cohort rules, new columns, or unsupported category merges.
@@ -114,6 +117,8 @@ Inputs:
 - eligible_columns
 - expected_role_by_column
 - required_plan_column_count
+- optional repair_request
+- optional validation_issues
 
 Task:
 - Produce one compact transformation-plan draft JSON object that matches the provided schema exactly.
@@ -137,6 +142,8 @@ Role rules:
 - For each entry, `role` must exactly match `expected_role_by_column[column]`.
 - Use `map_binary` only when you can provide a grounded `mapping`.
 - Use `map_ordinal` only when you can provide a grounded `order`.
+- Use the confirmed protocol discussion and compiled causal specification to resolve semantic ambiguity, especially for low-cardinality numeric codes, ordinal categories, baseline datetime fields, and columns that could be either dropped or retained.
+- If repair_request or validation_issues are provided, revise the plan to address them while keeping the same eligible columns and roles.
 
 {_PLAN_GUARDRAILS}
 
@@ -152,21 +159,27 @@ def data_compilation_single_column_transformation_plan_prompt() -> str:
 You are selecting a baseline transformation for one compiled protocol-scope column.
 
 Inputs:
+- confirmed protocol discussion
+- compiled causal specification
 - column_name
 - expected_role
 - column_profile
+- optional repair_request
+- optional validation_issues
 
 Task:
 - Produce one compact transformation-plan draft column JSON object that matches the provided schema exactly.
 
 Rules:
 - The schema already fixes the allowed `column` and `role`; do not invent or change them.
+- Use the confirmed protocol discussion and compiled causal specification to understand the semantic role of the column within the study design.
 - Use the provided column_profile as the source of truth for kind, dtype, missingness, distinct_count, range, and known/sample values.
 - NUMERIC columns with very small distinct_count can represent binary, categorical, or ordinal coded fields; choose a discrete encoding when grounded by the profile.
 - Use `map_binary` only when you can provide a grounded `mapping`.
 - Use `map_ordinal` only when you can provide a grounded `order`.
 - Prefer conservative, broadly safe encodings.
 - Avoid `drop` unless there is a grounded reason to exclude the feature.
+- If repair_request or validation_issues are provided, revise the encoding choice to address them while keeping the same locked column and role.
 
 Output policy:
 - Output JSON only.
@@ -186,6 +199,8 @@ Inputs:
 - compiled transformation plan
 - compilation_actions
 - compilation_warnings
+- validation_status
+- validation_issues
 
 Task:
 - Write a specific review message for the user.
@@ -197,9 +212,10 @@ Content rules:
 - Explicitly mention grounded row removals, dropped invalid treatment/outcome values, and any corrective cleaning that was applied.
 - Surface non-blocking warnings clearly as warnings.
 - Summarize the planned baseline transformations in readable language with more detail than the treatment/outcome recap.
+- Summarize the validation result clearly, including any remaining warnings that do not block confirmation.
 - Summarize the treatment, outcome, covariates, and effect modifiers clearly.
 - Summarize the compiled dataset shape in readable language.
-- Ask the user to confirm the compiled dataset and transformation plan or say exactly what should change.
+- Ask the user to confirm the compiled dataset, transformation plan, and validation result or say exactly what should change.
 - Do not mention internal JSON, validators, or workflow implementation details.
 
 Output JSON exactly:
@@ -214,11 +230,11 @@ def data_compilation_review_decision_prompt() -> str:
 You are reviewing a compiled dataset and transformation plan with the user.
 
 Task:
-- Interpret the latest user reply to decide whether the compiled setup is accepted, rejected for revision, or still unclear.
+- Interpret the latest user reply to decide whether the compiled and validated setup is accepted, rejected for revision, or still unclear.
 
 Decision rules:
-- Choose `confirm` only when the user is clearly accepting the compiled dataset and transformation plan as-is.
-- Choose `revise` when the user is asking to change the compiled dataset scope, treatment, outcome, covariates, effect modifiers, protocol filters, normalization, or planned encodings.
+- Choose `confirm` only when the user is clearly accepting the compiled dataset, transformation plan, and validation result as-is.
+- Choose `revise` when the user is asking to change the compiled dataset scope, treatment, outcome, covariates, effect modifiers, protocol filters, normalization, planned encodings, or validation outcome.
 - Choose `clarify` when the reply is ambiguous, incomplete, or not enough to confirm or reject safely.
 
 Style rules:
@@ -234,10 +250,74 @@ Output JSON exactly:
 """.strip()
 
 
+def data_compilation_action_decision_prompt() -> str:
+    return """
+You are handling a blocked compilation step after hard validation errors.
+
+Task:
+- Interpret the user's latest reply and choose the next allowed action.
+
+Allowed actions:
+- `retry_transform`: revise only the covariate/effect-modifier transformation plan.
+- `retry_cleaning`: rerun same-column cleaning or value normalization while keeping the locked treatment, outcome, covariate, and effect-modifier columns unchanged.
+- `revise_spec_details`: revise only same-column causal-spec details, such as treated/control literals or binary outcome event/non-event literals, while keeping the locked columns and roles unchanged.
+- `revise_protocol`: the requested change would alter treatment, outcome, covariate, or effect-modifier column identity or role, or otherwise requires upstream protocol revision.
+- `clarify`: the user's request is ambiguous or incomplete.
+
+Rules:
+- Locked columns and roles must not change inside this step.
+- Treatment and outcome must never enter the transformation plan.
+- Use `revise_protocol` when the user wants different treatment/outcome columns, different covariate/effect-modifier columns, or different feature roles.
+- Use `revise_spec_details` when the user wants to keep the same locked columns but change same-column treatment/outcome details or other same-column causal-spec literals.
+- Use `retry_cleaning` when the user wants value normalization, recoding, row filtering, or dtype cleanup while keeping the same locked columns.
+- Use `retry_transform` when the user wants different encoding choices for covariates or effect modifiers only.
+
+Output JSON exactly:
+{
+  "action": "retry_transform" | "retry_cleaning" | "revise_spec_details" | "revise_protocol" | "clarify",
+  "assistant_message": "<short user-facing message>",
+  "repair_request": "<brief grounded instruction summary or null>"
+}
+""".strip()
+
+
+def data_compilation_locked_spec_revision_prompt() -> str:
+    return """
+You are revising a locked causal specification after validation found same-column issues.
+
+Inputs:
+- confirmed protocol discussion
+- locked compiled causal specification
+- compiled dataset summary
+- validation issues
+- user-requested repair direction
+
+Task:
+- Produce one revised causal specification JSON object that matches the provided schema exactly.
+
+Lock rules:
+- Keep the treatment column exactly unchanged.
+- Keep the outcome column exactly unchanged.
+- Keep the covariate columns exactly unchanged.
+- Keep the effect-modifier columns exactly unchanged.
+- Keep treatment/outcome/covariate/effect-modifier roles exactly unchanged.
+- Do not add, remove, rename, or re-role locked columns.
+- Only revise same-column causal-spec details that are grounded by the inputs, such as treated/control literals, binary outcome event/non-event literals, or continuous-outcome clipping details.
+- Do not invent new columns, values, cohort rules, or unsupported remappings.
+
+Output policy:
+- Output JSON only.
+- No markdown.
+- No explanatory prose outside the JSON object.
+""".strip()
+
+
 __all__ = [
     "data_compilation_causal_spec_prompt",
     "data_compilation_cleaning_instructions_prompt",
     "data_compilation_discrepancy_repair_prompt",
+    "data_compilation_action_decision_prompt",
+    "data_compilation_locked_spec_revision_prompt",
     "data_compilation_node_info",
     "data_compilation_review_decision_prompt",
     "data_compilation_review_summary_prompt",

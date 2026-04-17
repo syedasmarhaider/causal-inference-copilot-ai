@@ -16,8 +16,6 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_sta
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_node import DataManupulationNode
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_state import DataManupulationState
 from python.implementation.workflows.nodes.data_statistics.data_statistics_node import DataStatisticsNode
-from python.implementation.workflows.nodes.data_validation.data_validation_node import DataValidationNode
-from python.implementation.workflows.nodes.data_validation.data_validation_state import DataValidationState
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import ModelSelectionState
 from python.implementation.workflows.nodes.model_selection.model_selection_node import ModelSelectionNode
 from python.implementation.workflows.nodes.model_train.model_train_node import ModelTrainNode
@@ -219,10 +217,57 @@ class WritableOchestratorState(OchestratorState):
                 )
 
             case _ if key == DataCompilationState.NAME:
-                if "causal_spec" not in value or "data_transformation_plan" not in value or "working_dataset_id" not in value or "latest_dataset_summary" not in value:
-                    raise KeyError("DATA_COMPILATION updates must include causal_spec, data_transformation_plan, working_dataset_id and latest_dataset_summary")
+                publish_dataset_only = value.get("publish_dataset_only") is True
+                if publish_dataset_only:
+                    if "working_dataset_id" not in value or "latest_dataset_summary" not in value:
+                        raise KeyError(
+                            "DATA_COMPILATION dataset-only publish must include "
+                            "working_dataset_id and latest_dataset_summary"
+                        )
+                    raw_dataset_id = value["working_dataset_id"]
+                    dataset_id = (
+                        raw_dataset_id
+                        if isinstance(raw_dataset_id, UUID)
+                        else UUID(str(raw_dataset_id))
+                    )
+                    raw_summary = value["latest_dataset_summary"]
+                    summary = (
+                        raw_summary
+                        if isinstance(raw_summary, DatasetSummaryModel)
+                        else DatasetSummaryModel.model_validate(raw_summary)
+                    )
+                    self._publish_stage2_dataset_from_compilation(
+                        working_dataset_id=dataset_id,
+                        latest_dataset_summary=summary,
+                    )
+                    return
+
+                required_fields = {
+                    "causal_spec",
+                    "data_transformation_plan",
+                    "working_dataset_id",
+                    "latest_dataset_summary",
+                    "validation_issues",
+                    "is_validated",
+                }
+                missing_fields = sorted(field for field in required_fields if field not in value)
+                if missing_fields:
+                    raise KeyError(
+                        "DATA_COMPILATION updates must include "
+                        + ", ".join(missing_fields)
+                    )
                 raw_spec = value.get("causal_spec", self._model.causal_spec)
                 raw_plan = value.get("data_transformation_plan", self._model.data_transformation_plan)
+                raw_issues = cast(list[Any], value["validation_issues"])
+                if not isinstance(raw_issues, list):
+                    raise TypeError("DATA_COMPILATION validation_issues must be a list")
+                issues = [
+                    v if isinstance(v, ValidationIssueModel) else ValidationIssueModel.model_validate(v)
+                    for v in raw_issues
+                ]
+                raw_validated = value["is_validated"]
+                if not isinstance(raw_validated, bool):
+                    raise TypeError("DATA_COMPILATION is_validated must be a bool")
                 self._set_stage4(
                     working_dataset_id=value["working_dataset_id"],
                     latest_dataset_summary=value["latest_dataset_summary"],
@@ -236,25 +281,6 @@ class WritableOchestratorState(OchestratorState):
                     ),
                     working_dataset_frozen=True,
                 )
-
-            case _ if key == DataValidationState.NAME:
-                if "validation_issues" not in value or "is_validated" not in value:
-                    raise KeyError(
-                        "DATA_VALIDATION updates must include validation_issues and is_validated"
-                    )
-                raw_validated = value["is_validated"]
-                if not isinstance(raw_validated, bool):
-                    raise TypeError("DATA_VALIDATION is_validated must be a bool")
-
-                raw_issues = cast(list[Any], value["validation_issues"])
-                if not isinstance(raw_issues, list):
-                    raise TypeError(
-                        "DATA_VALIDATION validation_issues must be a list"
-                    )
-                issues = [
-                    v if isinstance(v, ValidationIssueModel) else ValidationIssueModel.model_validate(v)
-                    for v in raw_issues
-                ]
                 self._set_stage5(
                     validation_issues=issues,
                     is_validated=raw_validated,
@@ -325,6 +351,34 @@ class WritableOchestratorState(OchestratorState):
             reason="stage-2 protocol discussion updated",
         )
 
+    def _publish_stage2_dataset_from_compilation(
+        self,
+        *,
+        working_dataset_id: UUID,
+        latest_dataset_summary: DatasetSummaryModel,
+    ) -> None:
+        self._require_stage2()
+        current_ids = list(self._model.working_dataset_ids or [])
+        changed = (
+            not current_ids
+            or current_ids[-1] != working_dataset_id
+            or self._model.latest_dataset_summary != latest_dataset_summary
+        )
+        if not changed:
+            return
+
+        if current_ids and current_ids[-1] == working_dataset_id:
+            next_ids = current_ids
+        else:
+            next_ids = [*current_ids, working_dataset_id]
+
+        self._model.working_dataset_ids = next_ids
+        self._model.latest_dataset_summary = latest_dataset_summary
+        self._invalidate_downstream_of(
+            "protocol_cleaning_instructions",
+            reason="data-compilation published updated dataset",
+        )
+
     def _set_stage4(
         self,
         *,
@@ -367,7 +421,7 @@ class WritableOchestratorState(OchestratorState):
         selected_model: str | None,
         selection_reasoning: str | None,
     ) -> None:
-        self._require_stage4()
+        self._require_stage5()
         if (
             self._model.selected_model == selected_model
             and self._model.selection_reasoning == selection_reasoning
@@ -403,7 +457,7 @@ class WritableOchestratorState(OchestratorState):
             return DataCompilationNode.NAME
         
         if self._model.is_validated is not True:
-            return DataValidationNode.NAME
+            return DataCompilationNode.NAME
 
         if self._model.selected_model is None:
             return ModelSelectionNode.NAME
@@ -429,9 +483,6 @@ class WritableOchestratorState(OchestratorState):
             
             case _ if node_name == DataCompilationNode.NAME:
                 return [DataManupulationNode.NAME, DataStatisticsNode.NAME] 
-             
-            case _ if node_name == DataValidationNode.NAME:
-                return  [DataStatisticsNode.NAME]
             
             case _ if node_name == ModelSelectionNode.NAME:
                 return [DataStatisticsNode.NAME]
@@ -461,9 +512,6 @@ class WritableOchestratorState(OchestratorState):
             case _ if current_failed_node == DataCompilationNode.NAME:
                 self._reset_from("protocol_discussion", reason=f"rollback from {current_failed_node}")
             
-            case _ if current_failed_node == DataValidationNode.NAME:
-                self._reset_from("protocol_discussion", reason=f"rollback from {current_failed_node}") 
-            
             case _ if current_failed_node == ModelSelectionNode.NAME:
                 self._reset_from("protocol_discussion", reason=f"rollback from {current_failed_node}")
             
@@ -479,12 +527,10 @@ class WritableOchestratorState(OchestratorState):
     def get_forward_states_after_node(self, node_name: str) -> list[str]:
         match node_name:
             case _ if node_name == DataManupulationNode.NAME:
-                return [DataCompilationNode.NAME, DataValidationNode.NAME, ModelSelectionNode.NAME, ModelTrainNode.NAME, CausalInferenceNode.NAME]
+                return [DataCompilationNode.NAME, ModelSelectionNode.NAME, ModelTrainNode.NAME, CausalInferenceNode.NAME]
             case _ if node_name == ProtocolDiscussionNode.NAME:
-                return [DataCompilationNode.NAME, DataValidationNode.NAME, ModelSelectionNode.NAME, ModelTrainNode.NAME, CausalInferenceNode.NAME]
+                return [DataCompilationNode.NAME, ModelSelectionNode.NAME, ModelTrainNode.NAME, CausalInferenceNode.NAME]
             case _ if node_name == DataCompilationNode.NAME:
-                return [DataValidationNode.NAME, ModelSelectionNode.NAME, ModelTrainNode.NAME, CausalInferenceNode.NAME]
-            case _ if node_name == DataValidationNode.NAME:
                 return [ModelSelectionNode.NAME, ModelTrainNode.NAME, CausalInferenceNode.NAME]
             case _ if node_name == ModelSelectionNode.NAME:
                 return [ModelTrainNode.NAME, CausalInferenceNode.NAME]
@@ -505,8 +551,6 @@ class WritableOchestratorState(OchestratorState):
             
             case _ if state_name == DataCompilationState.NAME:
                 self._reset_from("protocol_discussion", reason=f"rollback to {state_name}")
-                self._reset_from("protocol_discussion", reason=f"rollback to {state_name}")
-            case _ if state_name == DataValidationState.NAME:
                 self._reset_from("protocol_discussion", reason=f"rollback to {state_name}")
             case _ if state_name == ModelSelectionState.NAME:
                 self._reset_from("protocol_discussion", reason=f"rollback to {state_name}")
