@@ -55,12 +55,15 @@ class GlobalStateModel(BaseModel):
     data_transformation_plan: TransformPlan | None = None
     working_dataset_frozen: bool = False
 
-    # stage 5 — validation + model selection
+    # stage 5
     validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
+    is_validated : bool = False
+    
+    # stage 6
     selected_model: str | None = None
     selection_reasoning: str | None = None
 
-    # stage 6 — model training
+    # stage 7 — model training
     trained_model_id: UUID | None = None
     training_warnings: list[str] = Field(default_factory=list)
 
@@ -362,6 +365,9 @@ class WritableOchestratorState(OchestratorState):
             or not self._model.working_dataset_frozen
         ):
             return DataCompilationNode.NAME
+        
+        if self._model.is_validated is not True:
+            return DataValidationNode.NAME
 
         if self._model.selected_model is None:
             return ModelSelectionNode.NAME
