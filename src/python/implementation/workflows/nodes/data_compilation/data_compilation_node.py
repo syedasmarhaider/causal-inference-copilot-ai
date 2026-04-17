@@ -511,10 +511,10 @@ class DataCompilationNode(Node):
             config=LLMConfig(
                 model="basic",
                 temperature=1.0,
-                max_tokens=2000,
+                max_tokens=10000,
             ),
             history=None,
-            max_attempts=1,
+            max_attempts=3,
         )
 
     def _generate_columnwise_transform_plan_draft(

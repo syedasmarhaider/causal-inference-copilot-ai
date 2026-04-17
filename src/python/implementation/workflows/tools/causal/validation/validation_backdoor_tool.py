@@ -658,9 +658,15 @@ def _validate_transform_plan(
         issues.append(
             _issue(
                 severity="FAIL",
-                message="Transform plan must not include treatment or outcome columns.",
+                message=(
+                    f"Transform plan must not include treatment or outcome columns, "
+                    f"but found: {', '.join(illegal_columns)}."
+                ),
                 evidence={"illegal_columns": illegal_columns},
-                fix_hint="Keep only covariates and effect modifiers in the transform plan.",
+                fix_hint=(
+                    f"Remove {', '.join(illegal_columns)} from the transform plan. "
+                    f"Keep only covariates and effect modifiers."
+                ),
             )
         )
 
@@ -669,9 +675,15 @@ def _validate_transform_plan(
         issues.append(
             _issue(
                 severity="FAIL",
-                message="Transform plan is missing eligible columns.",
+                message=(
+                    f"Transform plan is missing eligible columns: "
+                    f"{', '.join(missing_columns)}."
+                ),
                 evidence={"missing_columns": missing_columns},
-                fix_hint="Include every covariate and effect modifier in the transform plan.",
+                fix_hint=(
+                    f"Add the following columns to the transform plan: "
+                    f"{', '.join(missing_columns)}."
+                ),
             )
         )
 
@@ -680,9 +692,15 @@ def _validate_transform_plan(
         issues.append(
             _issue(
                 severity="FAIL",
-                message="Transform plan contains non-eligible columns.",
+                message=(
+                    f"Transform plan contains columns not declared in the causal spec: "
+                    f"{', '.join(extra_columns)}."
+                ),
                 evidence={"extra_columns": extra_columns},
-                fix_hint="Remove columns that are not declared as covariates or effect modifiers.",
+                fix_hint=(
+                    f"Remove {', '.join(extra_columns)} from the transform plan, or add "
+                    f"them to the causal specification as covariates or effect modifiers."
+                ),
             )
         )
 
@@ -696,13 +714,19 @@ def _validate_transform_plan(
             issues.append(
                 _issue(
                     severity="FAIL",
-                    message="Transform plan assigns the wrong role to a column.",
+                    message=(
+                        f"Column '{column_plan.column}' has role '{column_plan.role}' in the "
+                        f"transform plan, but the causal spec expects '{expected_role}'."
+                    ),
                     evidence={
                         "column": column_plan.column,
                         "expected_role": expected_role,
                         "actual_role": column_plan.role,
                     },
-                    fix_hint="Match transform-plan roles to the causal spec exactly.",
+                    fix_hint=(
+                        f"Change the role of '{column_plan.column}' from "
+                        f"'{column_plan.role}' to '{expected_role}' in the transform plan."
+                    ),
                 )
             )
 
@@ -715,13 +739,20 @@ def _validate_transform_plan(
             issues.append(
                 _issue(
                     severity="FAIL",
-                    message="Transform plan preset is incompatible with the observed dataframe column type.",
+                    message=(
+                        f"Column '{column_plan.column}' has preset '{preset}', but the "
+                        f"observed data type is {inferred_kind}. These are incompatible."
+                    ),
                     evidence={
                         "column": column_plan.column,
                         "inferred_kind": inferred_kind,
                         "preset": preset,
                     },
-                    fix_hint="Choose a preset compatible with the observed column type.",
+                    fix_hint=(
+                        f"Change the encoding preset for '{column_plan.column}' to one "
+                        f"compatible with {inferred_kind} data, or verify the column "
+                        f"values are correct."
+                    ),
                 )
             )
             continue
@@ -752,9 +783,9 @@ def _validate_transform_plan(
         issues.append(
             _issue(
                 severity="FAIL",
-                message="Transform plan failed transformer compilation.",
+                message=f"Transform plan failed transformer compilation: {exc}",
                 evidence={"error": repr(exc)},
-                fix_hint="Adjust the transform plan so it compiles into sklearn transformers cleanly.",
+                fix_hint="Review and adjust the transform plan so it compiles into sklearn transformers cleanly.",
             )
         )
 
