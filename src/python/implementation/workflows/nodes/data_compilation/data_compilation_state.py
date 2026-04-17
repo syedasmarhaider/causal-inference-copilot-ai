@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, ClassVar, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.workflows.node_state import NodeState
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
@@ -21,10 +21,13 @@ class DataCompilationPayloadModel(BaseModel):
 
     source_dataset_id: UUID | None = None
     source_protocol_discussion: str | None = None
+    source_protocol_cleaning_instructions: str | None = None
     compiled_dataset_id: UUID | None = None
     compiled_dataset_summary: DatasetSummaryModel | None = None
     compiled_causal_spec: CausalSpec | None = None
     transformation_plan: TransformPlan | None = None
+    compilation_actions: list[str] = Field(default_factory=list)
+    compilation_warnings: list[str] = Field(default_factory=list)
     phase: DataCompilationPhase = "INIT"
     assistant_message: str | None = None
     system_message: str | None = None
@@ -37,6 +40,7 @@ class DataCompilationPayloadModel(BaseModel):
 
     @field_validator(
         "source_protocol_discussion",
+        "source_protocol_cleaning_instructions",
         "assistant_message",
         "system_message",
         "error_message",
@@ -56,11 +60,13 @@ class DataCompilationPayloadModel(BaseModel):
         *,
         dataset_id: UUID,
         protocol_discussion: str,
+        protocol_cleaning_instructions: str | None,
     ) -> DataCompilationPayloadModel:
         return self.model_copy(
             update={
                 "source_dataset_id": dataset_id,
                 "source_protocol_discussion": protocol_discussion,
+                "source_protocol_cleaning_instructions": protocol_cleaning_instructions,
             }
         )
 
@@ -69,15 +75,19 @@ class DataCompilationPayloadModel(BaseModel):
         *,
         dataset_id: UUID,
         protocol_discussion: str,
+        protocol_cleaning_instructions: str | None,
     ) -> DataCompilationPayloadModel:
         return self.model_copy(
             update={
                 "source_dataset_id": dataset_id,
                 "source_protocol_discussion": protocol_discussion,
+                "source_protocol_cleaning_instructions": protocol_cleaning_instructions,
                 "compiled_dataset_id": None,
                 "compiled_dataset_summary": None,
                 "compiled_causal_spec": None,
                 "transformation_plan": None,
+                "compilation_actions": [],
+                "compilation_warnings": [],
                 "phase": "INIT",
                 "assistant_message": None,
                 "system_message": None,

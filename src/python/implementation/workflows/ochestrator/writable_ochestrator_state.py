@@ -48,9 +48,6 @@ class GlobalStateModel(BaseModel):
     protocol_discussion: str | None = None
     protocol_cleaning_instructions: str | None = None
 
-    # stage 3 — data cleaning
-    data_cleaned: bool = False
-
     # stage 4 — causal spec + dataset freeze
     causal_spec: CausalSpec | None = None
     data_transformation_plan: TransformPlan | None = None
@@ -97,7 +94,6 @@ class WritableOchestratorState(OchestratorState):
         "latest_dataset_summary",
         "protocol_discussion",
         "protocol_cleaning_instructions",
-        "data_cleaned",
         "causal_spec",
         "data_transformation_plan",
         "working_dataset_frozen",
@@ -109,9 +105,7 @@ class WritableOchestratorState(OchestratorState):
         "training_warnings",
     ]
 
-    _BOOL_FIELDS: ClassVar[frozenset[str]] = frozenset(
-        {"data_cleaned", "working_dataset_frozen", "is_validated"}
-    )
+    _BOOL_FIELDS: ClassVar[frozenset[str]] = frozenset({"working_dataset_frozen", "is_validated"})
     _LIST_FIELDS: ClassVar[frozenset[str]] = frozenset(
         {"working_dataset_ids", "validation_issues", "training_warnings"}
     )
@@ -142,10 +136,8 @@ class WritableOchestratorState(OchestratorState):
         # migrate legacy training_id field
         if "model_training_id" in normalized and "trained_model_id" not in normalized:
             normalized["trained_model_id"] = normalized.pop("model_training_id")
-        # migrate legacy data_cleaning_pending flag
-        legacy_pending = normalized.pop("dataset_cleaning_pending", None)
-        if "data_cleaned" not in normalized and legacy_pending is not None:
-            normalized["data_cleaned"] = not bool(legacy_pending)
+        normalized.pop("data_cleaned", None)
+        normalized.pop("dataset_cleaning_pending", None)
         if "is_validated" not in normalized:
             normalized["is_validated"] = (
                 bool(normalized.get("validation_issues"))
@@ -205,20 +197,13 @@ class WritableOchestratorState(OchestratorState):
                     self._model.working_dataset_ids.pop()
                     self._model.working_dataset_ids.pop()
             
-                protocol_discusson = self._model.protocol_discussion if self._model.protocol_discussion else None
                 existing_ids = self._model.working_dataset_ids or []
                 new_id_raw = value["working_dataset_id"]
                 new_dataset_id = (new_id_raw if isinstance(new_id_raw, UUID) else UUID(str(new_id_raw)))
                 self._set_stage1(
                     working_dataset_ids=[*existing_ids, new_dataset_id],
                     latest_dataset_summary=value["latest_dataset_summary"],
-                )  
-                if protocol_discusson is not None and "data_cleaned" in value and isinstance(value["data_cleaned"], bool):
-                    self._set_stage2(
-                        protocol_discussion=protocol_discusson,
-                        protocol_cleaning_instructions=self._model.protocol_cleaning_instructions,
-                    )
-                    self._set_stage3(data_cleaned=bool(value["data_cleaned"]))
+                )
 
             case _ if key == ProtocolDiscussionState.NAME:
                 if "protocol_discussion" not in value:
@@ -340,13 +325,6 @@ class WritableOchestratorState(OchestratorState):
             reason="stage-2 protocol discussion updated",
         )
 
-    def _set_stage3(self, *, data_cleaned: bool) -> None:
-        self._require_stage2()
-        if self._model.data_cleaned == data_cleaned:
-            return
-        self._model.data_cleaned = data_cleaned
-        self._invalidate_downstream_of("data_cleaned", reason="stage-3 data cleaning updated")
-
     def _set_stage4(
         self,
         *,
@@ -356,7 +334,7 @@ class WritableOchestratorState(OchestratorState):
         data_transformation_plan: TransformPlan,
         working_dataset_frozen: bool,
     ) -> None:
-        self._require_stage3()
+        self._require_stage2()
         self._model.working_dataset_ids = self._model.working_dataset_ids + [working_dataset_id]
         self._model.latest_dataset_summary = latest_dataset_summary
         self._model.causal_spec = causal_spec
@@ -417,9 +395,6 @@ class WritableOchestratorState(OchestratorState):
         if not self._model.protocol_discussion:
             return ProtocolDiscussionNode.NAME
 
-        if not self._model.data_cleaned:
-            return DataManupulationNode.NAME
-
         if (
             self._model.causal_spec is None
             or self._model.data_transformation_plan is None
@@ -446,8 +421,6 @@ class WritableOchestratorState(OchestratorState):
         match node_name:
             case _ if node_name == DataManupulationNode.NAME:
                 if not self._model.working_dataset_ids or self._model.latest_dataset_summary is None:
-                    return []
-                if self._model.protocol_discussion is not None and self._model.data_cleaned is False:
                     return []
                 return [ProtocolDiscussionNode.NAME, DataStatisticsNode.NAME]
             
@@ -563,13 +536,8 @@ class WritableOchestratorState(OchestratorState):
         if not self._model.protocol_discussion:
             raise ValueError("Stage 2 incomplete: protocol discussion not set")
 
-    def _require_stage3(self) -> None:
-        self._require_stage2()
-        if not self._model.data_cleaned:
-            raise ValueError("Stage 3 incomplete: data not cleaned")
-
     def _require_stage4(self) -> None:
-        self._require_stage3()
+        self._require_stage2()
         if self._model.causal_spec is None:
             raise ValueError("Stage 4 incomplete: causal_spec not set")
         if self._model.data_transformation_plan is None:

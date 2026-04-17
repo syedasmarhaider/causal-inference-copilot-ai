@@ -50,21 +50,44 @@ Output policy:
 
 def data_compilation_cleaning_instructions_prompt() -> str:
     return """
-You translate a confirmed protocol discussion and compiled causal specification into SQL-oriented data compilation instructions.
+You are preparing first-pass SQL-oriented cleaning instructions before protocol compilation.
 
 Inputs:
 - confirmed protocol discussion
-- compiled causal specification
+- confirmed protocol cleaning instructions
 - authoritative source dataset summary
 
 Rules:
 - Return only user-intent text for a SQL data manipulation tool.
 - Keep it executable and concrete.
-- Include only grounded row filters, normalization steps, and column handling derived from the confirmed protocol.
-- The final compiled dataset must retain only protocol-scope columns: treatment, outcome, covariates, effect modifiers.
+- Include only grounded row filters, normalization steps, type fixes, and column handling derived from the confirmed protocol and confirmed protocol cleaning instructions.
+- Do not compile the causal spec yourself; only prepare the dataset so later compilation can use it.
+- Preserve any columns that may still be needed for later protocol compilation unless the confirmed cleaning instructions explicitly narrow them already.
 - If treatment is binary, normalize its labels only when grounded by the confirmed protocol.
 - If outcome is binary, normalize its labels only when grounded by the confirmed protocol.
 - Do not invent filters, columns, or value mappings.
+- Do not include validation, modeling, plotting, or non-SQL tasks.
+""".strip()
+
+
+def data_compilation_discrepancy_repair_prompt() -> str:
+    return """
+You are preparing one corrective SQL-oriented cleaning pass after protocol compilation found grounded data discrepancies.
+
+Inputs:
+- confirmed protocol discussion
+- confirmed protocol cleaning instructions
+- compiled causal specification
+- compiled dataset summary
+- transformation validation issues
+
+Rules:
+- Return only user-intent text for a SQL data manipulation tool.
+- Keep the dataset inside the compiled protocol scope.
+- Only fix discrepancies that are explicitly grounded by the compiled causal specification, compiled dataset summary, and listed validation issues.
+- Prefer safe type corrections, grounded recoding, and removal of invalid treatment or outcome rows over speculative remapping.
+- Never add treatment or outcome transformations to the transform plan; fix the data instead when needed.
+- Do not invent new cohort rules, new columns, or unsupported category merges.
 - Do not include validation, modeling, plotting, or non-SQL tasks.
 """.strip()
 
@@ -161,6 +184,8 @@ Inputs:
 - compiled causal specification
 - compiled dataset summary
 - compiled transformation plan
+- compilation_actions
+- compilation_warnings
 
 Task:
 - Write a specific review message for the user.
@@ -169,6 +194,8 @@ Task:
 Content rules:
 - Focus first on the data preparation changes made for causal modeling.
 - Explain which protocol-scope columns were retained and how the dataset was narrowed for modeling.
+- Explicitly mention grounded row removals, dropped invalid treatment/outcome values, and any corrective cleaning that was applied.
+- Surface non-blocking warnings clearly as warnings.
 - Summarize the planned baseline transformations in readable language with more detail than the treatment/outcome recap.
 - Summarize the treatment, outcome, covariates, and effect modifiers clearly.
 - Summarize the compiled dataset shape in readable language.
@@ -210,6 +237,7 @@ Output JSON exactly:
 __all__ = [
     "data_compilation_causal_spec_prompt",
     "data_compilation_cleaning_instructions_prompt",
+    "data_compilation_discrepancy_repair_prompt",
     "data_compilation_node_info",
     "data_compilation_review_decision_prompt",
     "data_compilation_review_summary_prompt",

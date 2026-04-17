@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import numbers
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, cast
 from uuid import UUID
 
@@ -19,6 +22,8 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_dep
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
     data_compilation_causal_spec_prompt,
+    data_compilation_cleaning_instructions_prompt,
+    data_compilation_discrepancy_repair_prompt,
     data_compilation_node_info,
     data_compilation_review_decision_prompt,
     data_compilation_review_summary_prompt,
@@ -33,7 +38,10 @@ from python.implementation.workflows.tools.causal.encoding.encoding_plan import 
 from python.implementation.workflows.tools.causal.encoding.encoding_plan_tool import (
     EncodingPlanTool,
 )
-from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec import (
+    BinaryOutcomeSpecModel,
+    CausalSpec,
+)
 from python.implementation.workflows.tools.causal.specs.causal_specs_tool import (
     CausalSpecsTool,
 )
@@ -47,6 +55,9 @@ from python.implementation.workflows.tools.common.model.data_summary import (
 )
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
+)
+from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import (
+    DataManipulationTool,
 )
 from python.implementation.workflows.utils.utils import safe_err
 
@@ -98,6 +109,29 @@ class _TransformPlanDraftColumn(BaseModel):
         return self
 
 
+@dataclass(frozen=True)
+class _PreparedSourceArtifacts:
+    dataframe: pd.DataFrame
+    summary: DatasetSummaryModel
+    actions: list[str]
+    warnings: list[str]
+
+
+@dataclass(frozen=True)
+class _CompiledDatasetArtifacts:
+    dataframe: pd.DataFrame
+    summary: DatasetSummaryModel
+    actions: list[str]
+    warnings: list[str]
+
+
+@dataclass(frozen=True)
+class _ValidatedTransformPlanArtifacts:
+    plan: TransformPlan | None
+    warnings: list[str]
+    repair_issues: list[dict[str, Any]]
+
+
 class DataCompilationNode(Node):
     NAME: ClassVar[str] = DataCompilationState.NAME
 
@@ -118,6 +152,9 @@ class DataCompilationNode(Node):
         )
         self._encoding_plan_tool = cast(
             EncodingPlanTool, tools_factory.get_tool(EncodingPlanTool.NAME)
+        )
+        self._data_manipulation_tool = cast(
+            DataManipulationTool, tools_factory.get_tool(DataManipulationTool.NAME)
         )
 
     @property
@@ -177,6 +214,7 @@ class DataCompilationNode(Node):
             payload=payload,
             dataset_id=deps.dataset_id,
             protocol_discussion=deps.protocol_discussion,
+            protocol_cleaning_instructions=deps.protocol_cleaning_instructions,
         )
 
         latest_user_message = _latest_user_message(request.read_only_messages_history)
@@ -191,14 +229,16 @@ class DataCompilationNode(Node):
                 payload = payload.reset_for_recompile(
                     dataset_id=deps.dataset_id,
                     protocol_discussion=deps.protocol_discussion,
+                    protocol_cleaning_instructions=deps.protocol_cleaning_instructions,
                 )
-                return self._compile(
+                return self._compile_pipeline(
                     request=request,
                     payload=payload,
                     source_df=source_df,
                     source_dataset_id=deps.dataset_id,
                     source_summary=source_summary,
                     protocol_discussion=deps.protocol_discussion,
+                    protocol_cleaning_instructions=deps.protocol_cleaning_instructions,
                     source_changed=False,
                 )
             if latest_user_message is None:
@@ -229,13 +269,14 @@ class DataCompilationNode(Node):
                 or "The compilation step is blocked and needs upstream revision.",
             )
 
-        return self._compile(
+        return self._compile_pipeline(
             request=request,
             payload=payload,
             source_df=source_df,
             source_dataset_id=deps.dataset_id,
             source_summary=source_summary,
             protocol_discussion=deps.protocol_discussion,
+            protocol_cleaning_instructions=deps.protocol_cleaning_instructions,
             source_changed=source_changed,
         )
 
@@ -245,29 +286,34 @@ class DataCompilationNode(Node):
         payload: DataCompilationPayloadModel,
         dataset_id: UUID,
         protocol_discussion: str,
+        protocol_cleaning_instructions: str | None,
     ) -> tuple[DataCompilationPayloadModel, bool]:
         if (
             payload.source_dataset_id == dataset_id
             and payload.source_protocol_discussion == protocol_discussion
+            and payload.source_protocol_cleaning_instructions == protocol_cleaning_instructions
         ):
             return payload, False
 
         if (
             payload.source_dataset_id is None
             and payload.source_protocol_discussion is None
+            and payload.source_protocol_cleaning_instructions is None
             and payload.phase == "INIT"
         ):
             return payload.bind_source(
                 dataset_id=dataset_id,
                 protocol_discussion=protocol_discussion,
+                protocol_cleaning_instructions=protocol_cleaning_instructions,
             ), False
 
         return payload.reset_for_recompile(
             dataset_id=dataset_id,
             protocol_discussion=protocol_discussion,
+            protocol_cleaning_instructions=protocol_cleaning_instructions,
         ), True
 
-    def _compile(
+    def _compile_pipeline(
         self,
         *,
         request: NodeRequest,
@@ -276,12 +322,33 @@ class DataCompilationNode(Node):
         source_dataset_id: UUID,
         source_summary: DatasetSummaryModel,
         protocol_discussion: str,
+        protocol_cleaning_instructions: str | None,
         source_changed: bool,
     ) -> NodeExecutionResult:
         try:
+            prepared_source = self._prepare_cleaned_source(
+                request=request,
+                source_df=source_df,
+                source_summary=source_summary,
+                protocol_discussion=protocol_discussion,
+                protocol_cleaning_instructions=protocol_cleaning_instructions,
+            )
+        except Exception as exc:
+            log.exception("data compilation first-pass cleaning failed", error=safe_err(exc))
+            return self._failed_result(
+                request=request,
+                payload=payload,
+                user_message=(
+                    "I could not prepare the working dataset from the confirmed protocol "
+                    "instructions. Please revise the protocol cleaning assumptions and try again."
+                ),
+                error_message=f"first-pass cleaning failed: {safe_err(exc)}",
+            )
+
+        try:
             causal_spec = self._compile_causal_spec(
                 protocol_discussion=protocol_discussion,
-                source_summary=source_summary,
+                source_summary=prepared_source.summary,
             )
         except Exception as exc:
             log.exception("data compilation causal spec failed", error=safe_err(exc))
@@ -296,20 +363,10 @@ class DataCompilationNode(Node):
             )
 
         try:
-            compiled_df = self._build_protocol_scope_dataframe(
-                dataframe=source_df,
+            compiled_dataset = self._build_compiled_dataset(
+                dataframe=prepared_source.dataframe,
                 causal_spec=causal_spec,
             )
-            compiled_dataset_id = uuid.uuid4()
-            self._data_repo.save_csv_data(
-                user_id=request.user_id,
-                conversation_id=request.conversation_id,
-                dataset_id=compiled_dataset_id,
-                df=compiled_df,
-                overwrite=True,
-                include_index=False,
-            )
-            compiled_dataset_summary = self._profile_dataset(compiled_df)
         except Exception as exc:
             log.exception("data compilation dataset build failed", error=safe_err(exc))
             return self._failed_result(
@@ -323,9 +380,10 @@ class DataCompilationNode(Node):
             )
 
         try:
-            transformation_plan = self._compile_transformation_plan(
+            transform_artifacts = self._build_validated_transform_plan(
                 causal_spec=causal_spec,
-                compiled_dataset_summary=compiled_dataset_summary,
+                compiled_dataset_summary=compiled_dataset.summary,
+                allow_repair=True,
             )
         except Exception as exc:
             log.exception("data compilation transformation plan failed", error=safe_err(exc))
@@ -339,20 +397,95 @@ class DataCompilationNode(Node):
                 error_message=f"transformation plan compilation failed: {safe_err(exc)}",
             )
 
+        compilation_actions = [
+            *prepared_source.actions,
+            *compiled_dataset.actions,
+        ]
+        compilation_warnings = [
+            *prepared_source.warnings,
+            *compiled_dataset.warnings,
+            *transform_artifacts.warnings,
+        ]
+
+        if transform_artifacts.plan is None:
+            try:
+                repaired_source = self._repair_compilation_discrepancies(
+                    request=request,
+                    compiled_df=compiled_dataset.dataframe,
+                    compiled_dataset_summary=compiled_dataset.summary,
+                    protocol_discussion=protocol_discussion,
+                    protocol_cleaning_instructions=protocol_cleaning_instructions,
+                    causal_spec=causal_spec,
+                    repair_issues=transform_artifacts.repair_issues,
+                )
+                compiled_dataset = self._build_compiled_dataset(
+                    dataframe=repaired_source.dataframe,
+                    causal_spec=causal_spec,
+                )
+                transform_artifacts = self._build_validated_transform_plan(
+                    causal_spec=causal_spec,
+                    compiled_dataset_summary=compiled_dataset.summary,
+                    allow_repair=False,
+                )
+            except Exception as exc:
+                log.exception("data compilation corrective cleaning failed", error=safe_err(exc))
+                return self._failed_result(
+                    request=request,
+                    payload=payload,
+                    user_message=(
+                        "I found transform-plan discrepancies after compilation and could "
+                        "not repair them safely. Please revise the protocol cleaning or "
+                        "feature encoding assumptions and try again."
+                    ),
+                    error_message=f"corrective cleaning failed: {safe_err(exc)}",
+                )
+
+            compilation_actions.extend(repaired_source.actions)
+            compilation_actions.extend(compiled_dataset.actions)
+            compilation_warnings.extend(repaired_source.warnings)
+            compilation_warnings.extend(compiled_dataset.warnings)
+            compilation_warnings.extend(transform_artifacts.warnings)
+
+        if transform_artifacts.plan is None:
+            return self._failed_result(
+                request=request,
+                payload=payload,
+                user_message=(
+                    "I compiled the dataset, but the baseline transformation plan still "
+                    "does not match the cleaned protocol-scope data. Please revise the "
+                    "protocol or encoding assumptions and try again."
+                ),
+                error_message="transformation plan unresolved after corrective cleaning",
+            )
+
+        final_compiled_dataset_id = uuid.uuid4()
+        self._data_repo.save_csv_data(
+            user_id=request.user_id,
+            conversation_id=request.conversation_id,
+            dataset_id=final_compiled_dataset_id,
+            df=compiled_dataset.dataframe,
+            overwrite=True,
+            include_index=False,
+        )
+
         try:
             review_message = self._build_review_summary_message(
                 protocol_discussion=protocol_discussion,
                 compiled_causal_spec=causal_spec,
-                compiled_dataset_summary=compiled_dataset_summary,
-                transformation_plan=transformation_plan,
+                compiled_dataset_summary=compiled_dataset.summary,
+                transformation_plan=transform_artifacts.plan,
+                compilation_actions=compilation_actions,
+                compilation_warnings=compilation_warnings,
                 messages_history=request.read_only_messages_history,
             )
         except Exception as exc:
             log.exception("data compilation review summary failed", error=safe_err(exc))
             review_message = _build_review_summary_fallback(
-                compiled_dataset_summary=compiled_dataset_summary,
+                compiled_dataset_summary=compiled_dataset.summary,
                 compiled_causal_spec=causal_spec,
-                transformation_plan=transformation_plan,
+                transformation_plan=transform_artifacts.plan,
+                compilation_actions=compilation_actions,
+                compilation_warnings=compilation_warnings,
             )
 
         if source_changed:
@@ -365,10 +498,13 @@ class DataCompilationNode(Node):
             update={
                 "source_dataset_id": source_dataset_id,
                 "source_protocol_discussion": protocol_discussion,
-                "compiled_dataset_id": compiled_dataset_id,
-                "compiled_dataset_summary": compiled_dataset_summary,
+                "source_protocol_cleaning_instructions": protocol_cleaning_instructions,
+                "compiled_dataset_id": final_compiled_dataset_id,
+                "compiled_dataset_summary": compiled_dataset.summary,
                 "compiled_causal_spec": causal_spec,
-                "transformation_plan": transformation_plan,
+                "transformation_plan": transform_artifacts.plan,
+                "compilation_actions": compilation_actions,
+                "compilation_warnings": compilation_warnings,
                 "phase": "REVIEW_READY",
                 "assistant_message": review_message,
                 "system_message": None,
@@ -379,6 +515,38 @@ class DataCompilationNode(Node):
             request=request,
             payload=review_payload,
             user_message=review_message,
+        )
+
+    def _prepare_cleaned_source(
+        self,
+        *,
+        request: NodeRequest,
+        source_df: pd.DataFrame,
+        source_summary: DatasetSummaryModel,
+        protocol_discussion: str,
+        protocol_cleaning_instructions: str | None,
+    ) -> _PreparedSourceArtifacts:
+        cleaning_instructions = self._build_first_pass_cleaning_instructions(
+            protocol_discussion=protocol_discussion,
+            protocol_cleaning_instructions=protocol_cleaning_instructions,
+        )
+        cleaned_df = self._run_data_manipulation_tool(
+            dataframe=source_df,
+            conversation_id=request.conversation_id,
+            data_summary=source_summary,
+            instructions=cleaning_instructions,
+        )
+        cleaned_summary = self._profile_dataset(cleaned_df)
+        actions = _summarize_summary_delta_actions(
+            before_summary=source_summary,
+            after_summary=cleaned_summary,
+            context="Applied first-pass protocol-driven cleaning before compilation.",
+        )
+        return _PreparedSourceArtifacts(
+            dataframe=cleaned_df,
+            summary=cleaned_summary,
+            actions=actions,
+            warnings=[],
         )
 
     def _compile_causal_spec(
@@ -407,12 +575,12 @@ class DataCompilationNode(Node):
             data_summary=source_summary,
         )
 
-    def _build_protocol_scope_dataframe(
+    def _build_compiled_dataset(
         self,
         *,
         dataframe: pd.DataFrame,
         causal_spec: CausalSpec,
-    ) -> pd.DataFrame:
+    ) -> _CompiledDatasetArtifacts:
         protocol_scope_columns = _protocol_scope_columns(causal_spec)
         missing_columns = [
             column for column in protocol_scope_columns if column not in dataframe.columns
@@ -422,14 +590,58 @@ class DataCompilationNode(Node):
                 "compiled causal spec references columns missing from the working dataset: "
                 f"{missing_columns}"
             )
-        return dataframe.loc[:, protocol_scope_columns].copy()
 
-    def _compile_transformation_plan(
+        scoped_df = dataframe.loc[:, protocol_scope_columns].copy()
+        actions = [
+            "Retained only protocol-scope columns for compilation: "
+            + ", ".join(protocol_scope_columns)
+        ]
+        warnings: list[str] = []
+
+        scoped_df, treatment_actions = _drop_rows_outside_binary_spec(
+            dataframe=scoped_df,
+            column=str(causal_spec.treatment_spec.column),
+            allowed_values={
+                str(causal_spec.treatment_spec.treated),
+                str(causal_spec.treatment_spec.control),
+            },
+            label="treatment",
+        )
+        actions.extend(treatment_actions)
+
+        if isinstance(causal_spec.outcome_spec, BinaryOutcomeSpecModel):
+            scoped_df, outcome_actions = _drop_rows_outside_binary_spec(
+                dataframe=scoped_df,
+                column=str(causal_spec.outcome_spec.column),
+                allowed_values={
+                    str(causal_spec.outcome_spec.event),
+                    str(causal_spec.outcome_spec.non_event),
+                },
+                label="outcome",
+            )
+            actions.extend(outcome_actions)
+
+        if scoped_df.empty:
+            raise ValueError("compiled dataset is empty after protocol-scope filtering")
+
+        _ensure_binary_treatment_arms_present(scoped_df, causal_spec=causal_spec)
+        _ensure_binary_outcome_classes_present(scoped_df, causal_spec=causal_spec)
+
+        compiled_summary = self._profile_dataset(scoped_df)
+        return _CompiledDatasetArtifacts(
+            dataframe=scoped_df,
+            summary=compiled_summary,
+            actions=actions,
+            warnings=warnings,
+        )
+
+    def _build_validated_transform_plan(
         self,
         *,
         causal_spec: CausalSpec,
         compiled_dataset_summary: DatasetSummaryModel,
-    ) -> TransformPlan:
+        allow_repair: bool,
+    ) -> _ValidatedTransformPlanArtifacts:
         expected_role_by_column = _protocol_scope_role_by_column(causal_spec)
         eligible_columns = list(expected_role_by_column.keys())
         context_payload = {
@@ -480,23 +692,82 @@ class DataCompilationNode(Node):
             )
             raise
 
-        try:
-            return self._encoding_plan_tool.validate_encoding_payload(
-                payload=transform_plan_payload,
-                data_summary=validation_summary,
-                covariate_columns=causal_spec.covariates,
-                effect_modifier_columns=causal_spec.effect_modifiers,
+        model_dict, issues = self._encoding_plan_tool.validate_encoding_payload_structured(
+            payload=transform_plan_payload,
+            data_summary=validation_summary,
+            covariate_columns=causal_spec.covariates,
+            effect_modifier_columns=causal_spec.effect_modifiers,
+        )
+        if issues:
+            repair_issues, blocking_issues = _split_transform_validation_issues(issues)
+            if blocking_issues or not allow_repair:
+                raise ValueError(_format_transform_validation_issues(blocking_issues or issues))
+            return _ValidatedTransformPlanArtifacts(
+                plan=None,
+                warnings=[
+                    "Found transform-plan discrepancies that triggered one corrective cleaning pass."
+                ],
+                repair_issues=repair_issues,
             )
-        except Exception as exc:
-            log.exception(
-                "data compilation transformation plan validation failed",
-                error=_exception_chain_text(exc),
-                eligible_columns=eligible_columns,
-                expected_role_by_column=expected_role_by_column,
-                generated_draft=transform_plan_draft.model_dump(mode="json"),
-                generated_plan=transform_plan_payload,
-            )
-            raise
+
+        if model_dict is None:
+            raise ValueError("encoding validation returned no plan and no issues")
+
+        validated_plan = self._encoding_plan_tool.validate_encoding_payload(
+            payload=transform_plan_payload,
+            data_summary=validation_summary,
+            covariate_columns=causal_spec.covariates,
+            effect_modifier_columns=causal_spec.effect_modifiers,
+        )
+        warnings = _summarize_transform_plan_warnings(
+            plan=validated_plan,
+            compiled_dataset_summary=compiled_dataset_summary,
+        )
+        return _ValidatedTransformPlanArtifacts(
+            plan=validated_plan,
+            warnings=warnings,
+            repair_issues=[],
+        )
+
+    def _repair_compilation_discrepancies(
+        self,
+        *,
+        request: NodeRequest,
+        compiled_df: pd.DataFrame,
+        compiled_dataset_summary: DatasetSummaryModel,
+        protocol_discussion: str,
+        protocol_cleaning_instructions: str | None,
+        causal_spec: CausalSpec,
+        repair_issues: list[dict[str, Any]],
+    ) -> _PreparedSourceArtifacts:
+        repair_instructions = self._build_repair_cleaning_instructions(
+            protocol_discussion=protocol_discussion,
+            protocol_cleaning_instructions=protocol_cleaning_instructions,
+            causal_spec=causal_spec,
+            compiled_dataset_summary=compiled_dataset_summary,
+            repair_issues=repair_issues,
+        )
+        repaired_df = self._run_data_manipulation_tool(
+            dataframe=compiled_df,
+            conversation_id=request.conversation_id,
+            data_summary=compiled_dataset_summary,
+            instructions=repair_instructions,
+        )
+        repaired_summary = self._profile_dataset(repaired_df)
+        actions = _summarize_summary_delta_actions(
+            before_summary=compiled_dataset_summary,
+            after_summary=repaired_summary,
+            context="Applied one corrective cleaning pass to repair transformation-plan discrepancies.",
+        )
+        warnings = [
+            "Corrective cleaning was needed because the initial transform plan did not match the compiled dataset types."
+        ]
+        return _PreparedSourceArtifacts(
+            dataframe=repaired_df,
+            summary=repaired_summary,
+            actions=actions,
+            warnings=warnings,
+        )
 
     def _generate_batch_transform_plan_draft(
         self,
@@ -685,6 +956,8 @@ class DataCompilationNode(Node):
         compiled_causal_spec: CausalSpec,
         compiled_dataset_summary: DatasetSummaryModel,
         transformation_plan: TransformPlan,
+        compilation_actions: Sequence[str],
+        compilation_warnings: Sequence[str],
         messages_history: Sequence[ChatMessage] | None,
     ) -> str:
         history = list(messages_history[-4:]) if messages_history else None
@@ -699,6 +972,8 @@ class DataCompilationNode(Node):
                         compiled_dataset_summary
                     ),
                     "transformation_plan": transformation_plan.model_dump(mode="json"),
+                    "compilation_actions": list(compilation_actions),
+                    "compilation_warnings": list(compilation_warnings),
                 },
                 ensure_ascii=False,
             ),
@@ -707,6 +982,85 @@ class DataCompilationNode(Node):
             max_attempts=2,
         )
         return review_summary.assistant_message
+
+    def _build_first_pass_cleaning_instructions(
+        self,
+        *,
+        protocol_discussion: str,
+        protocol_cleaning_instructions: str | None,
+    ) -> str:
+        parts = [
+            data_compilation_cleaning_instructions_prompt(),
+            "",
+            "Confirmed protocol discussion:",
+            protocol_discussion.strip(),
+        ]
+        if protocol_cleaning_instructions:
+            parts.extend(
+                [
+                    "",
+                    "Confirmed protocol cleaning instructions:",
+                    protocol_cleaning_instructions.strip(),
+                ]
+            )
+        return "\n".join(parts).strip()
+
+    def _build_repair_cleaning_instructions(
+        self,
+        *,
+        protocol_discussion: str,
+        protocol_cleaning_instructions: str | None,
+        causal_spec: CausalSpec,
+        compiled_dataset_summary: DatasetSummaryModel,
+        repair_issues: Sequence[dict[str, Any]],
+    ) -> str:
+        parts = [
+            data_compilation_discrepancy_repair_prompt(),
+            "",
+            "Confirmed protocol discussion:",
+            protocol_discussion.strip(),
+        ]
+        if protocol_cleaning_instructions:
+            parts.extend(
+                [
+                    "",
+                    "Confirmed protocol cleaning instructions:",
+                    protocol_cleaning_instructions.strip(),
+                ]
+            )
+        parts.extend(
+            [
+                "",
+                "Compiled causal specification:",
+                json.dumps(causal_spec.model_dump(mode="json"), ensure_ascii=False),
+                "",
+                "Compiled dataset summary:",
+                json.dumps(
+                    _dataset_summary_prompt_payload(compiled_dataset_summary),
+                    ensure_ascii=False,
+                ),
+                "",
+                "Transformation validation issues:",
+                json.dumps(list(repair_issues), ensure_ascii=False),
+            ]
+        )
+        return "\n".join(parts).strip()
+
+    def _run_data_manipulation_tool(
+        self,
+        *,
+        dataframe: pd.DataFrame,
+        conversation_id: UUID,
+        data_summary: DatasetSummaryModel,
+        instructions: str,
+    ) -> pd.DataFrame:
+        return self._data_manipulation_tool.manipulate(
+            dataframe=dataframe,
+            table_name=_conversation_id_to_table_name(conversation_id),
+            data_summary=self._profiling_tool.dataset_summary_to_json(data_summary),
+            instructions=instructions,
+            retry_attempts=3,
+        )
 
     def _profile_dataset(self, dataframe: pd.DataFrame) -> DatasetSummaryModel:
         return self._profiling_tool.extract_dataset_summary(
@@ -1116,11 +1470,15 @@ def _build_review_summary_fallback(
     compiled_dataset_summary: DatasetSummaryModel,
     compiled_causal_spec: CausalSpec,
     transformation_plan: TransformPlan,
+    compilation_actions: Sequence[str],
+    compilation_warnings: Sequence[str],
 ) -> str:
     transform_lines = [
         f"{column.column}: {column.encoding.preset}" for column in transformation_plan.columns
     ]
     retained_columns = [str(profile.name).strip() for profile in compiled_dataset_summary.profiles]
+    actions_text = "; ".join(compilation_actions) if compilation_actions else "None"
+    warnings_text = "; ".join(compilation_warnings) if compilation_warnings else "None"
     return (
         "I prepared the data for causal modeling by narrowing the dataset to the "
         "protocol-scope columns and compiling the baseline transformation plan. "
@@ -1131,9 +1489,197 @@ def _build_review_summary_fallback(
         f"Outcome: {compiled_causal_spec.outcome_spec.column}. "
         f"Covariates: {', '.join(compiled_causal_spec.covariates) if compiled_causal_spec.covariates else 'None'}. "
         f"Effect modifiers: {', '.join(compiled_causal_spec.effect_modifiers) if compiled_causal_spec.effect_modifiers else 'None'}. "
+        f"Compilation actions: {actions_text}. "
+        f"Warnings: {warnings_text}. "
         f"Planned baseline transformations: {'; '.join(transform_lines)}. "
         "Please confirm this compiled dataset and transformation plan, or tell me exactly what should change."
     )
+
+
+def _drop_rows_outside_binary_spec(
+    *,
+    dataframe: pd.DataFrame,
+    column: str,
+    allowed_values: set[str],
+    label: str,
+) -> tuple[pd.DataFrame, list[str]]:
+    allowed_keys = {_normalize_discrete_value(value) for value in allowed_values}
+    series = dataframe[column]
+    normalized_series = series.map(_normalize_discrete_value)
+    invalid_mask = ~normalized_series.isin(list(allowed_keys))
+    if not bool(invalid_mask.any()):
+        return dataframe, []
+
+    invalid_counts: dict[str, int] = {}
+    for raw_value in series[invalid_mask].tolist():
+        key = _normalize_discrete_value(raw_value)
+        key_text = _discrete_key_text(key)
+        invalid_counts[key_text] = invalid_counts.get(key_text, 0) + 1
+
+    filtered_df = dataframe.loc[~invalid_mask].copy()
+    actions = [
+        f"Dropped {int(invalid_mask.sum())} row(s) with {label} values outside the compiled specification for '{column}'.",
+        f"Removed invalid {label} values: {', '.join(f'{value} ({count})' for value, count in sorted(invalid_counts.items()))}.",
+    ]
+    return filtered_df, actions
+
+
+def _ensure_binary_treatment_arms_present(
+    dataframe: pd.DataFrame,
+    *,
+    causal_spec: CausalSpec,
+) -> None:
+    treatment_col = str(causal_spec.treatment_spec.column)
+    allowed_keys = {
+        _normalize_discrete_value(causal_spec.treatment_spec.treated),
+        _normalize_discrete_value(causal_spec.treatment_spec.control),
+    }
+    observed = {
+        _normalize_discrete_value(value)
+        for value in dataframe[treatment_col].dropna().tolist()
+        if _normalize_discrete_value(value) in allowed_keys
+    }
+    if observed != allowed_keys:
+        raise ValueError("compiled dataset must retain both treatment arms after filtering")
+
+
+def _ensure_binary_outcome_classes_present(
+    dataframe: pd.DataFrame,
+    *,
+    causal_spec: CausalSpec,
+) -> None:
+    if not isinstance(causal_spec.outcome_spec, BinaryOutcomeSpecModel):
+        return
+    outcome_col = str(causal_spec.outcome_spec.column)
+    allowed_keys = {
+        _normalize_discrete_value(causal_spec.outcome_spec.event),
+        _normalize_discrete_value(causal_spec.outcome_spec.non_event),
+    }
+    observed = {
+        _normalize_discrete_value(value)
+        for value in dataframe[outcome_col].dropna().tolist()
+        if _normalize_discrete_value(value) in allowed_keys
+    }
+    if observed != allowed_keys:
+        raise ValueError("compiled dataset must retain both binary outcome classes after filtering")
+
+
+def _summarize_summary_delta_actions(
+    *,
+    before_summary: DatasetSummaryModel,
+    after_summary: DatasetSummaryModel,
+    context: str,
+) -> list[str]:
+    actions = [context]
+    if before_summary.n_rows != after_summary.n_rows:
+        actions.append(
+            f"Row count changed from {before_summary.n_rows} to {after_summary.n_rows}."
+        )
+
+    before_columns = _summary_column_names(before_summary)
+    after_columns = _summary_column_names(after_summary)
+    removed_columns = [column for column in before_columns if column not in after_columns]
+    added_columns = [column for column in after_columns if column not in before_columns]
+    if removed_columns:
+        actions.append(f"Removed columns: {', '.join(removed_columns)}.")
+    if added_columns:
+        actions.append(f"Added columns: {', '.join(added_columns)}.")
+    return actions
+
+
+def _summary_column_names(summary: DatasetSummaryModel) -> list[str]:
+    return [str(profile.name).strip() for profile in summary.profiles if str(profile.name).strip()]
+
+
+def _split_transform_validation_issues(
+    issues: Sequence[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    repairable_issues: list[dict[str, Any]] = []
+    blocking_issues: list[dict[str, Any]] = []
+    for issue in issues:
+        message = str(issue.get("message", "")).lower()
+        if (
+            "column type and preset incompatibilities" in message
+            or "mapping contains values not supported" in message
+            or "order contains values not supported" in message
+        ):
+            repairable_issues.append(issue)
+            continue
+        blocking_issues.append(issue)
+    return repairable_issues, blocking_issues
+
+
+def _format_transform_validation_issues(issues: Sequence[dict[str, Any]]) -> str:
+    return "; ".join(
+        f"{issue.get('path', 'root')}: {issue.get('message', 'Invalid value')}"
+        for issue in issues
+    )
+
+
+def _summarize_transform_plan_warnings(
+    *,
+    plan: TransformPlan,
+    compiled_dataset_summary: DatasetSummaryModel,
+) -> list[str]:
+    profiles_by_name = {
+        str(profile.name).strip(): profile for profile in compiled_dataset_summary.profiles
+    }
+    warnings: list[str] = []
+    for column_plan in plan.columns:
+        column = str(column_plan.column).strip()
+        preset = str(column_plan.encoding.preset)
+        profile = profiles_by_name.get(column)
+        if profile is None:
+            continue
+        if preset == "drop":
+            warnings.append(
+                f"Baseline feature '{column}' is dropped from the transformation plan."
+            )
+            continue
+        if (
+            str(profile.inferred_kind) == "NUMERIC"
+            and profile.distinct_count is not None
+            and profile.distinct_count <= 20
+            and preset in {"num_standard", "num_minmax", "num_log1p"}
+        ):
+            warnings.append(
+                f"Numeric column '{column}' has low cardinality but remains numeric with preset '{preset}'. Review whether it should stay numeric."
+            )
+    return warnings
+
+
+def _normalize_discrete_value(value: Any) -> tuple[str, Any]:
+    try:
+        if pd.isna(value):
+            return ("na", None)
+    except Exception:
+        pass
+
+    if isinstance(value, bool):
+        return ("bool", bool(value))
+    if isinstance(value, numbers.Real):
+        return ("num", float(value))
+    if isinstance(value, str):
+        stripped = value.strip()
+        lowered = stripped.lower()
+        if lowered == "true":
+            return ("bool", True)
+        if lowered == "false":
+            return ("bool", False)
+        try:
+            return ("num", float(lowered))
+        except ValueError:
+            return ("str", lowered)
+    return ("str", str(value).strip().lower())
+
+
+def _discrete_key_text(key: tuple[str, Any]) -> str:
+    return f"{key[0]}:{key[1]!r}"
+
+
+def _conversation_id_to_table_name(conversation_id: UUID) -> str:
+    digest = hashlib.sha256(str(conversation_id).encode("ascii")).hexdigest()
+    return f"df_{digest[:16]}"
 
 
 __all__ = ["DataCompilationNode"]
