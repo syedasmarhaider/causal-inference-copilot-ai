@@ -397,31 +397,60 @@ class DataCompilationNode(Node):
         causal_spec: CausalSpec,
         compiled_dataset_summary: DatasetSummaryModel,
     ) -> TransformPlan:
+        expected_role_by_column = _protocol_scope_role_by_column(causal_spec)
         context_payload = {
             "compiled_causal_spec": causal_spec.model_dump(mode="json"),
             "compiled_dataset_summary": _dataset_summary_prompt_payload(
                 compiled_dataset_summary
             ),
+            "eligible_columns": list(expected_role_by_column.keys()),
+            "expected_role_by_column": expected_role_by_column,
+            "required_plan_column_count": len(expected_role_by_column),
         }
         plan_schema = self._encoding_plan_tool.build_encoding_schema(
             data_summary=compiled_dataset_summary,
             covariate_columns=causal_spec.covariates,
             effect_modifier_columns=causal_spec.effect_modifiers,
         )
-        transform_plan = self._llm.generate_json(
-            schema=plan_schema,
-            system_prompt=data_compilation_transformation_plan_prompt(),
-            user_prompt=json.dumps(context_payload, ensure_ascii=False),
-            config=LLMConfig(model="pro", temperature=0.1),
-            history=None,
-            max_attempts=3,
-        )
-        return self._encoding_plan_tool.post_validate_encoding_plan(
-            plan=transform_plan,
-            data_summary=compiled_dataset_summary,
-            covariate_columns=causal_spec.covariates,
-            effect_modifier_columns=causal_spec.effect_modifiers,
-        )
+        try:
+            transform_plan = self._llm.generate_json(
+                schema=plan_schema,
+                system_prompt=data_compilation_transformation_plan_prompt(),
+                user_prompt=json.dumps(context_payload, ensure_ascii=False),
+                config=LLMConfig(
+                    model="basic",
+                    temperature=0.0,
+                    top_p=1.0,
+                    max_tokens=10000,
+                ),
+                history=None,
+                max_attempts=3,
+            )
+        except Exception as exc:
+            log.exception(
+                "data compilation transformation plan generation failed",
+                error=_exception_chain_text(exc),
+                eligible_columns=list(expected_role_by_column.keys()),
+                expected_role_by_column=expected_role_by_column,
+            )
+            raise
+
+        try:
+            return self._encoding_plan_tool.post_validate_encoding_plan(
+                plan=transform_plan,
+                data_summary=compiled_dataset_summary,
+                covariate_columns=causal_spec.covariates,
+                effect_modifier_columns=causal_spec.effect_modifiers,
+            )
+        except Exception as exc:
+            log.exception(
+                "data compilation transformation plan validation failed",
+                error=_exception_chain_text(exc),
+                eligible_columns=list(expected_role_by_column.keys()),
+                expected_role_by_column=expected_role_by_column,
+                generated_plan=transform_plan.model_dump(mode="json"),
+            )
+            raise
 
     def _review_payload_complete(self, payload: DataCompilationPayloadModel) -> bool:
         return (
@@ -672,6 +701,19 @@ def _protocol_scope_columns(causal_spec: CausalSpec) -> list[str]:
     return deduped
 
 
+def _protocol_scope_role_by_column(causal_spec: CausalSpec) -> dict[str, str]:
+    role_by_column: dict[str, str] = {}
+    for column in causal_spec.covariates:
+        normalized = str(column).strip()
+        if normalized:
+            role_by_column[normalized] = "covariate"
+    for column in causal_spec.effect_modifiers:
+        normalized = str(column).strip()
+        if normalized:
+            role_by_column[normalized] = "effect_modifier"
+    return role_by_column
+
+
 def _dataset_summary_prompt_payload(summary: DatasetSummaryModel) -> dict[str, Any]:
     return {
         "n_rows": summary.n_rows,
@@ -725,6 +767,17 @@ def _column_prompt_payload(
         return payload
 
     return payload
+
+
+def _exception_chain_text(exc: Exception) -> str:
+    chain: list[str] = []
+    current: BaseException | None = exc
+    while current is not None:
+        message = str(current).strip() or current.__class__.__name__
+        if message not in chain:
+            chain.append(message)
+        current = current.__cause__ or current.__context__
+    return " | ".join(chain[:5])
 
 
 def _build_review_summary_fallback(

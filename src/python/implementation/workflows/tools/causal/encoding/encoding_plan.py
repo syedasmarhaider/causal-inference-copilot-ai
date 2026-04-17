@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model, model_validator
 
 from python.domain.models.validation import NonEmptyStr
 from python.implementation.workflows.tools.common.model.data_summary import (
@@ -240,9 +240,13 @@ class TransformPlan(BaseModel):
         if not field_names:
             raise ValueError("dataset_summary must contain at least one non-empty column name")
 
+        normalized_covariate_columns = _normalize_column_sequence(covariate_columns) or ()
+        normalized_effect_modifier_columns = (
+            _normalize_column_sequence(effect_modifier_columns) or ()
+        )
         expected_role_by_column = _build_expected_role_by_column(
-            covariate_columns=covariate_columns,
-            effect_modifier_columns=effect_modifier_columns,
+            covariate_columns=normalized_covariate_columns,
+            effect_modifier_columns=normalized_effect_modifier_columns,
         )
         if expected_role_by_column is None:
             raise ValueError("At least one covariate or effect_modifier column is required")
@@ -254,18 +258,30 @@ class TransformPlan(BaseModel):
                 f"{unknown_constraint_columns}"
             )
 
-        return type(
-            f"{cls.__name__}ForFields_{len(field_names)}",
-            (cls,),
-            {
-                "__module__": cls.__module__,
-                "SUMMARY_FIELD_NAMES": field_names,
-                "SUMMARY_FIELD_KINDS": _extract_summary_field_kinds(dataset_summary),
-                "SUMMARY_KNOWN_VALUES": _extract_summary_known_values(dataset_summary),
-                "ELIGIBLE_COLUMNS": tuple(expected_role_by_column.keys()),
-                "EXPECTED_ROLE_BY_COLUMN": expected_role_by_column,
-            },
+        constrained_column_plan = _build_constrained_column_plan_type(
+            covariate_columns=normalized_covariate_columns,
+            effect_modifier_columns=normalized_effect_modifier_columns,
         )
+        required_columns_count = len(expected_role_by_column)
+        dynamic_plan_model = create_model(
+            f"{cls.__name__}ForFields_{len(field_names)}",
+            __base__=cls,
+            __module__=cls.__module__,
+            columns=(
+                list[constrained_column_plan],
+                Field(
+                    ...,
+                    min_length=required_columns_count,
+                    max_length=required_columns_count,
+                ),
+            ),
+        )
+        dynamic_plan_model.SUMMARY_FIELD_NAMES = field_names
+        dynamic_plan_model.SUMMARY_FIELD_KINDS = _extract_summary_field_kinds(dataset_summary)
+        dynamic_plan_model.SUMMARY_KNOWN_VALUES = _extract_summary_known_values(dataset_summary)
+        dynamic_plan_model.ELIGIBLE_COLUMNS = tuple(expected_role_by_column.keys())
+        dynamic_plan_model.EXPECTED_ROLE_BY_COLUMN = expected_role_by_column
+        return dynamic_plan_model
 
 
 def validate_transform_payload_structured(
@@ -466,6 +482,51 @@ def _normalize_column_sequence(columns: Sequence[str] | None) -> tuple[str, ...]
     if columns is None:
         return None
     return tuple(dict.fromkeys(str(column).strip() for column in columns if str(column).strip()))
+
+
+def _build_constrained_column_plan_type(
+    *,
+    covariate_columns: Sequence[str],
+    effect_modifier_columns: Sequence[str],
+) -> Any:
+    variants: list[Any] = []
+    if covariate_columns:
+        variants.append(
+            _build_role_specific_column_plan_type(
+                columns=covariate_columns,
+                role="covariate",
+            )
+        )
+    if effect_modifier_columns:
+        variants.append(
+            _build_role_specific_column_plan_type(
+                columns=effect_modifier_columns,
+                role="effect_modifier",
+            )
+        )
+    if not variants:
+        raise ValueError("At least one constrained column-plan variant is required")
+    if len(variants) == 1:
+        return variants[0]
+
+    union_type = variants[0]
+    for variant in variants[1:]:
+        union_type = union_type | variant
+    return Annotated[union_type, Field(discriminator="role")]
+
+
+def _build_role_specific_column_plan_type(
+    *,
+    columns: Sequence[str],
+    role: EncodingRole,
+) -> type[ColumnEncodingPlan]:
+    return create_model(
+        f"{ColumnEncodingPlan.__name__}_{role}_{len(columns)}",
+        __base__=ColumnEncodingPlan,
+        __module__=ColumnEncodingPlan.__module__,
+        column=(Literal.__getitem__(tuple(columns)), ...),
+        role=(Literal.__getitem__((role,)), ...),
+    )
 
 
 def _build_expected_role_by_column(

@@ -88,6 +88,9 @@ Inputs:
 - confirmed protocol discussion
 - compiled causal specification
 - compiled dataset summary
+- eligible_columns
+- expected_role_by_column
+- required_plan_column_count
 
 Task:
 - Produce one TransformPlan JSON object that matches the provided schema exactly.
@@ -103,6 +106,10 @@ Role rules:
 - Use `role="covariate"` exactly for compiled causal-spec covariates.
 - Use `role="effect_modifier"` exactly for compiled causal-spec effect modifiers.
 - Do not infer new roles.
+- Include every eligible column exactly once.
+- Do not include any column outside `eligible_columns`.
+- The number of entries in `columns` must equal `required_plan_column_count`.
+- For each entry, `role` must exactly match `expected_role_by_column[column]`.
 
 {_PLAN_GUARDRAILS}
 
