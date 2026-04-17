@@ -146,7 +146,7 @@ class DataManupulationNode(Node):
             return self._needs_data_result(
                 request=request,
                 user_message=(
-                    "Upload dataset csv"
+                    "Please upload dataset. Make sure it is valid csv"
                 ),
             )
 

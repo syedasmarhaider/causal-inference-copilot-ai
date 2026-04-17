@@ -84,6 +84,7 @@ class Ochestrator:
             models_repo=models_repo,
             analytics_repo=analytics_repo,
         )
+        self._node_classes_by_name = build_node_name_by_node_name()
         self._state_classes_by_name = build_state_classes_by_name()
         self._state_name_by_node_name = build_state_name_by_node_name()
         self._log = get_app_logger(
@@ -223,14 +224,15 @@ class Ochestrator:
         companions: list[str],
         history: Sequence[ChatMessage],
     ) -> str:
-        companions_text = ", ".join(companions)
+        current_node_text = self._build_route_node_text(current_node)
+        other_nodes_text = self._build_route_nodes_text(companions)
         try:
             decision = self._llm.generate_json(
                 schema=_RouteDecision,
                 system_prompt=ROUTE_SYSTEM_PROMPT,
                 user_prompt=(
-                    f"Current node: [{current_node}]\n"
-                    f"Other nodes: [{companions_text}]\n"
+                    f"Current node:\n{current_node_text}\n"
+                    f"Other nodes:\n{other_nodes_text}\n"
                     "Pick the best node for the user's message."
                 ),
                 config=LLMConfig(model="mini", temperature=0.4),
@@ -242,6 +244,22 @@ class Ochestrator:
         except Exception:
             self._log.warning("LLM route pick failed, falling back to GENERAL_QUERIES")
         return GeneralQueriesNode.NAME
+
+    def _build_route_node_text(self, node_name: str) -> str:
+        node_cls = self._node_classes_by_name.get(node_name)
+        node_info = node_cls.get_info().strip() if node_cls is not None else ""
+        node_info = " ".join(node_info.split()) if node_info else "No description available."
+        return f"- {node_name}: {node_info}"
+
+    def _build_route_nodes_text(self, node_names: Sequence[str]) -> str:
+        seen: set[str] = set()
+        lines: list[str] = []
+        for node_name in node_names:
+            if node_name in seen:
+                continue
+            seen.add(node_name)
+            lines.append(self._build_route_node_text(node_name))
+        return "\n".join(lines)
 
     def _load_node_state_or_init(
         self,
