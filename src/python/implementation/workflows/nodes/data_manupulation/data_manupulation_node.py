@@ -128,7 +128,14 @@ class DataManupulationNode(Node):
         if self._is_revert_request(latest_user_message):
             return self._handle_revert_request(request=request)
 
-        deps = DataManupulationDeps.from_request(request)
+        try:
+            deps = DataManupulationDeps.from_request(request)
+        except Exception as exc:
+            log.info("missing data manipulation dependencies", error=safe_err(exc))
+            return self._needs_data_result(
+                request=request,
+                user_message="Upload dataset csv",
+            )
 
         try:
             current_df = self._data_repo.get_csv_data(
@@ -208,12 +215,16 @@ class DataManupulationNode(Node):
                 user_message=out_of_scope_message,
             )
 
+        should_complete_cleaning = (
+            self._is_protocol_discussion_complete_and_data_cleaning_pending(request)
+        )
         try:
             manipulation_result = self._run_manupulation(
                 request=request,
                 dataframe=current_df,
                 current_summary_json=current_summary_json,
                 instructions=intent.intent_dataset_mutation_brief or latest_user_message,
+                should_complete_cleaning=should_complete_cleaning,
             )
         except Exception as exc:
             log.exception("failed to run data manupulation", error=safe_err(exc))
@@ -245,7 +256,7 @@ class DataManupulationNode(Node):
             user_message=final_message,
             action=(
                 "NONE"
-                if self._is_protocol_discussion_complete_and_data_cleaning_pending(request)
+                if should_complete_cleaning
                 else "NEEDS_INPUT"
             ),
         )
@@ -360,6 +371,7 @@ class DataManupulationNode(Node):
         dataframe: pd.DataFrame,
         current_summary_json: str,
         instructions: str,
+        should_complete_cleaning: bool,
     ) -> JSONDict:
         result_df = self._run_data_manipulation_tool(
             dataframe=dataframe,
@@ -385,14 +397,13 @@ class DataManupulationNode(Node):
             compute_quantiles=False,
             strict=True,
         )
-        
-        needs_cleaned_flag = self._is_protocol_discussion_complete_and_data_cleaning_pending(request)
+
         request.orchestrator_state.set(
             request.node_state.name(),
             {
                 "working_dataset_id": new_dataset_id,
                 "latest_dataset_summary": new_dataset_summary,
-                "data_cleaned": True if not needs_cleaned_flag else None,
+                "data_cleaned": True if should_complete_cleaning else None,
             },
         )
 

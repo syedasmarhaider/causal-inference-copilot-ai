@@ -19,6 +19,8 @@ class DataManupulationDeps:
     def from_request(cls, request: NodeRequest) -> DataManupulationDeps:
         dataset_id_raw: Any = request.orchestrator_state.get("working_dataset_id")
         dataset_summary_raw: Any = request.orchestrator_state.get("latest_dataset_summary")
+        if dataset_id_raw is None:
+            raise ValueError("dataset_id is required but was not found in orchestrator state")
         if not isinstance(dataset_id_raw, UUID):
             raise TypeError("dataset_id must be a UUID")
         if dataset_summary_raw is not None and not isinstance(
