@@ -60,7 +60,6 @@ class LiteLLMService(LLMService):
     def close(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
-    @observe()
     def generate(
         self,
         *,
@@ -76,7 +75,6 @@ class LiteLLMService(LLMService):
         )
         return self._run_with_retries(messages=messages, config=config)
 
-    @observe()
     def generate_json(
         self,
         *,

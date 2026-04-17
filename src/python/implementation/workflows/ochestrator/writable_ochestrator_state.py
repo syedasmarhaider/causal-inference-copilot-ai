@@ -169,6 +169,26 @@ class WritableOchestratorState(OchestratorState):
             case _ if key == DataManupulationState.NAME:
                 if not "working_dataset_id" in value or  not "latest_dataset_summary" in value:
                     raise KeyError("DATA_MANUPULATION updates must include working_dataset_id and latest_dataset_summary")
+
+                revert_requested = (
+                    value.get("revert_request") is True
+                    or value.get("_revert_request") is True
+                )
+                if revert_requested:
+                    if not self._model.working_dataset_ids:
+                        raise ValueError("No working dataset to revert from")
+                    if len(self._model.working_dataset_ids) == 1:
+                        raise ValueError("Cannot revert from initial dataset")
+                    # Verify the second-to-last dataset ID matches the one provided
+                    if "working_dataset_id" not in value:
+                        raise ValueError("working_dataset_id required for revert request")
+                    revert_to_id_raw = value["working_dataset_id"]
+                    revert_to_id = revert_to_id_raw if isinstance(revert_to_id_raw, UUID) else UUID(str(revert_to_id_raw))
+                    if self._model.working_dataset_ids[-2] != revert_to_id:
+                        raise ValueError(f"Dataset ID mismatch: expected {self._model.working_dataset_ids[-2]}, got {revert_to_id}")
+                    # pop the last dataset id to revert to previous one
+                    self._model.working_dataset_ids.pop()
+                    self._model.working_dataset_ids.pop()
             
                 protocol_discusson = self._model.protocol_discussion if self._model.protocol_discussion else None
                 existing_ids = self._model.working_dataset_ids or []
@@ -177,10 +197,9 @@ class WritableOchestratorState(OchestratorState):
                 self._set_stage1(
                     working_dataset_ids=[*existing_ids, new_dataset_id],
                     latest_dataset_summary=value["latest_dataset_summary"],
-                ) 
-                if protocol_discusson is not None:
-                    self._set_stage2(protocol_discussion=protocol_discusson)    
-                if "data_cleaned" in value and isinstance(value["data_cleaned"], bool):
+                )  
+                if protocol_discusson is not None and "data_cleaned" in value and isinstance(value["data_cleaned"], bool):
+                    self._set_stage2(protocol_discussion=protocol_discusson)
                     self._set_stage3(data_cleaned=bool(value["data_cleaned"]))
 
             case _ if key == ProtocolDiscussionState.NAME:

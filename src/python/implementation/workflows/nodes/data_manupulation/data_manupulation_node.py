@@ -46,6 +46,11 @@ _DATA_MANIPULATION_RETRY_ATTEMPTS = 3
 _WORKING_TABLE_PREFIX = "df_"
 _WORKING_TABLE_HASH_HEX_LEN = 16
 _INITIAL_SUMMARY_MAX_COLUMNS = 8
+_REVERT_DATA_CHANGES_MESSAGE = "revert_data_changes"
+_FROZEN_DATASET_REVERT_MESSAGE = (
+    "The dataset is frozen, so a revert request is not possible here. "
+    "Revert to a previous workflow state first to do that."
+)
 _OFF_TOPIC_FALLBACK_MESSAGE = (
     "This data manipulation stage is only for dataset-changing operations. I can clean, "
     "filter, reshape, rename, recode, derive, or otherwise update the working dataset. "
@@ -119,9 +124,11 @@ class DataManupulationNode(Node):
                 f"{type(request.node_state).__name__}"
             )
 
-        
+        latest_user_message = _latest_user_message(request.read_only_messages_history)
+        if self._is_revert_request(latest_user_message):
+            return self._handle_revert_request(request=request)
+
         deps = DataManupulationDeps.from_request(request)
-    
 
         try:
             current_df = self._data_repo.get_csv_data(
@@ -156,14 +163,14 @@ class DataManupulationNode(Node):
             ochestrator_state = request.orchestrator_state
             ochestrator_state.set(
                 request.node_state.name(),
-                     {"working_dataset_id": deps.dataset_id,
-                "latest_dataset_summary": current_summary,
-                }
+                {
+                    "working_dataset_id": deps.dataset_id,
+                    "latest_dataset_summary": current_summary,
+                },
             )
-            
+
         current_summary_json = self._profiling_tool.dataset_summary_to_json(current_summary)
 
-        latest_user_message = _latest_user_message(request.read_only_messages_history)
         if not latest_user_message:
             return self._needs_input_result(
                 request=request,
@@ -236,7 +243,94 @@ class DataManupulationNode(Node):
         return self._needs_input_result(
             request=request,
             user_message=final_message,
-            action= "NONE" if self._is_protocol_discussion_complete_and_data_cleaning_pending(request) else "NEEDS_INPUT",
+            action=(
+                "NONE"
+                if self._is_protocol_discussion_complete_and_data_cleaning_pending(request)
+                else "NEEDS_INPUT"
+            ),
+        )
+
+    def _is_revert_request(self, latest_user_message: str | None) -> bool:
+        if latest_user_message is None:
+            return False
+        return latest_user_message.strip() == _REVERT_DATA_CHANGES_MESSAGE
+
+    def _handle_revert_request(
+        self,
+        *,
+        request: NodeRequest,
+    ) -> NodeExecutionResult:
+        if request.orchestrator_state.get("working_dataset_frozen") is True:
+            return self._needs_input_result(
+                request=request,
+                user_message=_FROZEN_DATASET_REVERT_MESSAGE,
+            )
+
+        working_dataset_ids_raw: Any = (
+            request.orchestrator_state.get("working_dataset_ids") or []
+        )
+        working_dataset_ids = [
+            dataset_id if isinstance(dataset_id, UUID) else UUID(str(dataset_id))
+            for dataset_id in cast(list[Any], working_dataset_ids_raw)
+        ]
+        if len(working_dataset_ids) < 2:
+            return self._needs_input_result(
+                request=request,
+                user_message="There is no previous dataset version to revert to.",
+            )
+
+        revert_to_dataset_id = working_dataset_ids[-2]
+        try:
+            reverted_df = self._data_repo.get_csv_data(
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                dataset_id=revert_to_dataset_id,
+                limit=1_000_000,
+            )
+        except Exception as exc:
+            log.exception(
+                "failed to load previous data manipulation dataset",
+                dataset_id=str(revert_to_dataset_id),
+                error=safe_err(exc),
+            )
+            return self._needs_data_result(
+                request=request,
+                user_message=(
+                    "I could not load the previous working dataset version. "
+                    "Please try again or restore the dataset manually."
+                ),
+            )
+
+        reverted_summary = self._profiling_tool.extract_dataset_summary(
+            reverted_df,
+            max_categories=200,
+            sample_distinct=200,
+            compute_quantiles=False,
+            strict=True,
+        )
+        request.orchestrator_state.set(
+            request.node_state.name(),
+            {
+                "working_dataset_id": revert_to_dataset_id,
+                "latest_dataset_summary": reverted_summary,
+                "revert_request": True,
+            },
+        )
+
+        reverted_profiles = list(reverted_summary.profiles)
+        reverted_message = (
+            "Reverted the working dataset to the previous version. "
+            f"The restored dataset has {reverted_summary.n_rows} rows and "
+            f"{len(reverted_profiles)} columns."
+        )
+        return self._needs_input_result(
+            request=request,
+            user_message=reverted_message,
+            action=(
+                "NONE"
+                if self._is_protocol_discussion_complete_and_data_cleaning_pending(request)
+                else "NEEDS_INPUT"
+            ),
         )
 
     def _classify_intent(
@@ -412,9 +506,9 @@ class DataManupulationNode(Node):
         protocol_discussion = request.orchestrator_state.get("protocol_discussion")
         data_cleaned = request.orchestrator_state.get("data_cleaned")
         if protocol_discussion is None or data_cleaned is None or data_cleaned is not True:
-                return True
+            return True
         return False
-                
+
 
     def _needs_input_result(
         self,

@@ -134,8 +134,8 @@ class Ochestrator:
             node_name = needed_node
         else:
             companions = orch_state.get_current_node_companion_names(needed_node)
-            candidates = list(dict.fromkeys([needed_node, *companions, GeneralQueriesNode.NAME]))
-            node_name = self._llm_pick_node(candidates=candidates, history=history)
+            companions.append(GeneralQueriesNode.NAME)
+            node_name = self._llm_pick_node(current_node=needed_node, companions=companions, history=history)
 
         # 4. Load node state + run
         node_state = self._load_node_state_or_init(
@@ -219,23 +219,25 @@ class Ochestrator:
     def _llm_pick_node(
         self,
         *,
-        candidates: list[str],
+        current_node: str,
+        companions: list[str],
         history: Sequence[ChatMessage],
     ) -> str:
-        candidates_text = ", ".join(candidates)
+        companions_text = ", ".join(companions)
         try:
             decision = self._llm.generate_json(
                 schema=_RouteDecision,
                 system_prompt=ROUTE_SYSTEM_PROMPT,
                 user_prompt=(
-                    f"Available nodes: [{candidates_text}]\n"
+                    f"Current node: [{current_node}]\n"
+                    f"Other nodes: [{companions_text}]\n"
                     "Pick the best node for the user's message."
                 ),
-                config=LLMConfig(model="mini", temperature=0.1),
+                config=LLMConfig(model="mini", temperature=0.4),
                 history=list(history[-3:]) if history else None,
                 max_attempts=2,
             )
-            if decision.node_name in candidates:
+            if decision.node_name in companions or decision.node_name == current_node:
                 return decision.node_name
         except Exception:
             self._log.warning("LLM route pick failed, falling back to GENERAL_QUERIES")
