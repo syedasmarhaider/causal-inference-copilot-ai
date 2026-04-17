@@ -232,7 +232,7 @@ class Ochestrator:
                     f"Other nodes:\n{other_nodes_text}\n"
                     "Pick the best node for the user's message."
                 ),
-                config=LLMConfig(model="mini", temperature=0.4),
+                config=LLMConfig(model="basic", temperature=0.5),
                 history=list(history[-3:]) if history else None,
                 max_attempts=2,
             )
