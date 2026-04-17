@@ -37,7 +37,12 @@ from python.implementation.workflows.tools.causal.specs.causal_specs_tool import
     CausalSpecsTool,
 )
 from python.implementation.workflows.tools.common.model.data_summary import (
+    BooleanColumnProfileModel,
+    CategoricalColumnProfileModel,
     DatasetSummaryModel,
+    DatetimeColumnProfileModel,
+    NumericColumnProfileModel,
+    OtherColumnProfileModel,
 )
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
@@ -102,7 +107,17 @@ class DataCompilationNode(Node):
             )
 
         payload = request.node_state.payload.model_copy(deep=True)
-        deps = DataCompilationDeps.from_request(request)
+        try:
+            deps = DataCompilationDeps.from_request(request)
+        except Exception as exc:
+            log.exception("data compilation dependencies missing", error=safe_err(exc))
+            return self._needs_data_result(
+                request=request,
+                user_message=(
+                    "The compilation stage is missing the active dataset or the confirmed "
+                    "protocol. Please complete dataset cleaning and protocol confirmation first."
+                ),
+            )
         try:
             source_df = self._data_repo.get_csv_data(
                 user_id=request.user_id,
@@ -230,17 +245,10 @@ class DataCompilationNode(Node):
         protocol_discussion: str,
         source_changed: bool,
     ) -> NodeExecutionResult:
-        history = (
-            list(request.read_only_messages_history[-4:])
-            if request.read_only_messages_history
-            else None
-        )
-
         try:
             causal_spec = self._compile_causal_spec(
                 protocol_discussion=protocol_discussion,
                 source_summary=source_summary,
-                history=history,
             )
         except Exception as exc:
             log.exception("data compilation causal spec failed", error=safe_err(exc))
@@ -283,10 +291,8 @@ class DataCompilationNode(Node):
 
         try:
             transformation_plan = self._compile_transformation_plan(
-                protocol_discussion=protocol_discussion,
                 causal_spec=causal_spec,
                 compiled_dataset_summary=compiled_dataset_summary,
-                history=history,
             )
         except Exception as exc:
             log.exception("data compilation transformation plan failed", error=safe_err(exc))
@@ -347,11 +353,10 @@ class DataCompilationNode(Node):
         *,
         protocol_discussion: str,
         source_summary: DatasetSummaryModel,
-        history: Sequence[ChatMessage] | None,
     ) -> CausalSpec:
         context_payload = {
             "protocol_discussion": protocol_discussion,
-            "dataset_summary": source_summary.model_dump(mode="json"),
+            "dataset_summary": _dataset_summary_prompt_payload(source_summary),
         }
         causal_schema = self._causal_specs_tool.build_backdoor_schema(
             data_summary=source_summary,
@@ -361,7 +366,7 @@ class DataCompilationNode(Node):
             system_prompt=data_compilation_causal_spec_prompt(),
             user_prompt=json.dumps(context_payload, ensure_ascii=False),
             config=LLMConfig(model="pro", temperature=0.1),
-            history=history,
+            history=None,
             max_attempts=3,
         )
         return self._causal_specs_tool.post_validate_backdoor_spec(
@@ -389,15 +394,14 @@ class DataCompilationNode(Node):
     def _compile_transformation_plan(
         self,
         *,
-        protocol_discussion: str,
         causal_spec: CausalSpec,
         compiled_dataset_summary: DatasetSummaryModel,
-        history: Sequence[ChatMessage] | None,
     ) -> TransformPlan:
         context_payload = {
-            "protocol_discussion": protocol_discussion,
             "compiled_causal_spec": causal_spec.model_dump(mode="json"),
-            "compiled_dataset_summary": compiled_dataset_summary.model_dump(mode="json"),
+            "compiled_dataset_summary": _dataset_summary_prompt_payload(
+                compiled_dataset_summary
+            ),
         }
         plan_schema = self._encoding_plan_tool.build_encoding_schema(
             data_summary=compiled_dataset_summary,
@@ -409,7 +413,7 @@ class DataCompilationNode(Node):
             system_prompt=data_compilation_transformation_plan_prompt(),
             user_prompt=json.dumps(context_payload, ensure_ascii=False),
             config=LLMConfig(model="pro", temperature=0.1),
-            history=history,
+            history=None,
             max_attempts=3,
         )
         return self._encoding_plan_tool.post_validate_encoding_plan(
@@ -537,14 +541,14 @@ class DataCompilationNode(Node):
                 {
                     "protocol_discussion": protocol_discussion,
                     "compiled_causal_spec": compiled_causal_spec.model_dump(mode="json"),
-                    "compiled_dataset_summary": compiled_dataset_summary.model_dump(
-                        mode="json"
+                    "compiled_dataset_summary": _dataset_summary_prompt_payload(
+                        compiled_dataset_summary
                     ),
                     "transformation_plan": transformation_plan.model_dump(mode="json"),
                 },
                 ensure_ascii=False,
             ),
-            config=LLMConfig(model="basic", temperature=0.2),
+            config=LLMConfig(model="mini", temperature=0.2),
             history=history,
             max_attempts=2,
         )
@@ -666,6 +670,61 @@ def _protocol_scope_columns(causal_spec: CausalSpec) -> list[str]:
         if normalized and normalized not in deduped:
             deduped.append(normalized)
     return deduped
+
+
+def _dataset_summary_prompt_payload(summary: DatasetSummaryModel) -> dict[str, Any]:
+    return {
+        "n_rows": summary.n_rows,
+        "columns": [_column_prompt_payload(profile) for profile in summary.profiles],
+    }
+
+
+def _column_prompt_payload(
+    profile: (
+        NumericColumnProfileModel
+        | DatetimeColumnProfileModel
+        | BooleanColumnProfileModel
+        | CategoricalColumnProfileModel
+        | OtherColumnProfileModel
+    ),
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "name": str(profile.name).strip(),
+        "kind": str(profile.inferred_kind),
+        "dtype": profile.dtype,
+        "missing_rate": profile.missing_rate,
+        "distinct_count": profile.distinct_count,
+    }
+
+    if isinstance(profile, NumericColumnProfileModel):
+        payload["range"] = {
+            "min": profile.summary.min,
+            "max": profile.summary.max,
+        }
+        return payload
+
+    if isinstance(profile, DatetimeColumnProfileModel):
+        payload["range"] = {
+            "min": profile.summary.min,
+            "max": profile.summary.max,
+        }
+        return payload
+
+    if isinstance(profile, BooleanColumnProfileModel):
+        payload["known_values"] = list(profile.summary.counts.keys())
+        return payload
+
+    if isinstance(profile, CategoricalColumnProfileModel):
+        payload["top_values"] = [
+            item.value for item in profile.summary.top_categories
+        ]
+        return payload
+
+    if isinstance(profile, OtherColumnProfileModel):
+        payload["sample_values"] = list(profile.summary.distinct_values_sample)
+        return payload
+
+    return payload
 
 
 def _build_review_summary_fallback(
