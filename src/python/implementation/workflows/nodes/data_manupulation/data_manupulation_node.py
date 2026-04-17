@@ -260,6 +260,7 @@ class DataManupulationNode(Node):
         *,
         request: NodeRequest,
     ) -> NodeExecutionResult:
+        should_action_be_none = self._is_protocol_discussion_complete_and_data_cleaning_pending(request)
         if request.orchestrator_state.get("working_dataset_frozen") is True:
             return self._needs_input_result(
                 request=request,
@@ -327,9 +328,7 @@ class DataManupulationNode(Node):
             request=request,
             user_message=reverted_message,
             action=(
-                "NONE"
-                if self._is_protocol_discussion_complete_and_data_cleaning_pending(request)
-                else "NEEDS_INPUT"
+                "NONE" if should_action_be_none else "NEEDS_INPUT"
             ),
         )
 
