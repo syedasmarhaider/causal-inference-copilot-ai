@@ -55,10 +55,10 @@ class GlobalStateModel(BaseModel):
     data_transformation_plan: TransformPlan | None = None
     working_dataset_frozen: bool = False
 
-    # stage 5
+    # stage 5 — validation
     validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
-    is_validated : bool = False
-    
+    is_validated: bool = False
+
     # stage 6
     selected_model: str | None = None
     selection_reasoning: str | None = None
@@ -100,6 +100,7 @@ class WritableOchestratorState(OchestratorState):
         "data_transformation_plan",
         "working_dataset_frozen",
         "validation_issues",
+        "is_validated",
         "selected_model",
         "selection_reasoning",
         "trained_model_id",
@@ -107,7 +108,7 @@ class WritableOchestratorState(OchestratorState):
     ]
 
     _BOOL_FIELDS: ClassVar[frozenset[str]] = frozenset(
-        {"data_cleaned", "working_dataset_frozen"}
+        {"data_cleaned", "working_dataset_frozen", "is_validated"}
     )
     _LIST_FIELDS: ClassVar[frozenset[str]] = frozenset(
         {"working_dataset_ids", "validation_issues", "training_warnings"}
@@ -143,6 +144,14 @@ class WritableOchestratorState(OchestratorState):
         legacy_pending = normalized.pop("dataset_cleaning_pending", None)
         if "data_cleaned" not in normalized and legacy_pending is not None:
             normalized["data_cleaned"] = not bool(legacy_pending)
+        if "is_validated" not in normalized:
+            normalized["is_validated"] = (
+                bool(normalized.get("validation_issues"))
+                or bool(normalized.get("selected_model"))
+                or bool(normalized.get("selection_reasoning"))
+                or normalized.get("trained_model_id") is not None
+                or bool(normalized.get("training_warnings"))
+            )
         return cls(GlobalStateModel.model_validate(normalized))
 
     @classmethod
@@ -234,12 +243,27 @@ class WritableOchestratorState(OchestratorState):
                 )
 
             case _ if key == DataValidationState.NAME:
-                raw_issues = cast(list[Any], value.get("validation_issues", self._model.validation_issues))
+                if "validation_issues" not in value or "is_validated" not in value:
+                    raise KeyError(
+                        "DATA_VALIDATION updates must include validation_issues and is_validated"
+                    )
+                raw_validated = value["is_validated"]
+                if not isinstance(raw_validated, bool):
+                    raise TypeError("DATA_VALIDATION is_validated must be a bool")
+
+                raw_issues = cast(list[Any], value["validation_issues"])
+                if not isinstance(raw_issues, list):
+                    raise TypeError(
+                        "DATA_VALIDATION validation_issues must be a list"
+                    )
                 issues = [
                     v if isinstance(v, ValidationIssueModel) else ValidationIssueModel.model_validate(v)
                     for v in raw_issues
                 ]
-                self._set_stage5(validation_issues=issues)
+                self._set_stage5(
+                    validation_issues=issues,
+                    is_validated=raw_validated,
+                )
 
             case _ if key == ModelSelectionState.NAME:
                 if "selected_model" not in value or "selection_reasoning" not in value:
@@ -282,7 +306,10 @@ class WritableOchestratorState(OchestratorState):
         self._model.working_dataset_ids = working_dataset_ids
         self._model.latest_dataset_summary = latest_dataset_summary
         if changed:
-              self._invalidate_downstream_of("latest_dataset_summary", reason="stage-1 dataset updated")
+            self._invalidate_downstream_of(
+                "latest_dataset_summary",
+                reason="stage-1 dataset updated",
+            )
 
     def _set_stage2(self, *, protocol_discussion: str | None) -> None:
         self._require_stage1()
@@ -315,12 +342,24 @@ class WritableOchestratorState(OchestratorState):
         self._model.working_dataset_frozen = working_dataset_frozen
         self._invalidate_downstream_of("working_dataset_frozen", reason="stage-4 causal config updated")
 
-    def _set_stage5(self, *, validation_issues: list[ValidationIssueModel]) -> None:
+    def _set_stage5(
+        self,
+        *,
+        validation_issues: list[ValidationIssueModel],
+        is_validated: bool,
+    ) -> None:
         self._require_stage4()
-        if self._model.validation_issues == validation_issues:
+        if (
+            self._model.validation_issues == validation_issues
+            and self._model.is_validated == is_validated
+        ):
             return
         self._model.validation_issues = validation_issues
-        self._invalidate_downstream_of("validation_issues", reason="stage-5 validation issues updated")
+        self._model.is_validated = is_validated
+        self._invalidate_downstream_of(
+            "is_validated",
+            reason="stage-5 validation updated",
+        )
 
     def _set_stage6(
         self,
@@ -518,8 +557,8 @@ class WritableOchestratorState(OchestratorState):
 
     def _require_stage5(self) -> None:
         self._require_stage4()
-        if not self._model.validation_issues and self._model.selected_model is None:
-            raise ValueError("Stage 5 incomplete: validation not run")
+        if not self._model.is_validated:
+            raise ValueError("Stage 5 incomplete: validation not confirmed")
 
     def _require_stage6(self) -> None:
         self._require_stage5()
@@ -573,10 +612,10 @@ class WritableOchestratorState(OchestratorState):
         setattr(self._model, field_name, default)
         return True
 
-    @staticmethod
-    def _default(field_name: str) -> Any:
-        if field_name in {"data_cleaned", "working_dataset_frozen"}:
+    @classmethod
+    def _default(cls, field_name: str) -> Any:
+        if field_name in cls._BOOL_FIELDS:
             return False
-        if field_name in {"working_dataset_ids", "validation_issues", "training_warnings"}:
+        if field_name in cls._LIST_FIELDS:
             return []
         return None

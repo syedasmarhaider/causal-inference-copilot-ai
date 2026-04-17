@@ -151,11 +151,12 @@ class GeneralQueriesNode(Node):
             sections.append(f"[PENDING] Stage 4 — Data compilation incomplete. Missing: {', '.join(missing)}.")
 
         # Stage 5 — validation
+        is_validated: bool = bool(orchestrator_state.get("is_validated") or False)
         validation_issues: list[Any] = list(orchestrator_state.get("validation_issues") or [])
         if causal_spec and transform_plan and frozen:
-            if validation_issues:
+            if is_validated:
                 sections.append(
-                    f"[DONE] Stage 5 — Validation ran. {len(validation_issues)} issue(s) found."
+                    f"[DONE] Stage 5 — Validation confirmed. {len(validation_issues)} issue(s) recorded."
                 )
             else:
                 sections.append("[PENDING] Stage 5 — Validation not yet run.")

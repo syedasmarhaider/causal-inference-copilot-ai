@@ -414,6 +414,7 @@ class DataValidationNode(Node):
                 request.node_state.name(),
                 {
                     "validation_issues": payload.validation_issues,
+                    "is_validated": True,
                 },
             )
             confirmed_payload = payload.model_copy(
