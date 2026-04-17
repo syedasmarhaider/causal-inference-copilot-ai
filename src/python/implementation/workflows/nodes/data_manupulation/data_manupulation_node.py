@@ -505,7 +505,7 @@ class DataManupulationNode(Node):
     def _is_protocol_discussion_complete_and_data_cleaning_pending(self, request: NodeRequest) -> bool:
         protocol_discussion = request.orchestrator_state.get("protocol_discussion")
         data_cleaned = request.orchestrator_state.get("data_cleaned")
-        if protocol_discussion is None or data_cleaned is None or data_cleaned is not True:
+        if protocol_discussion is not None and (data_cleaned is None or data_cleaned is not True):
             return True
         return False
 

@@ -305,6 +305,20 @@ def build_state_name_by_node_name() -> Mapping[str, str]:
         GeneralQueriesNode.NAME: GeneralQueriesState.NAME,
     }
 
+def build_node_name_by_node_name() -> Mapping[str, type[Node]]:
+    return {
+        DataManupulationNode.NAME: DataManupulationNode,
+        ProtocolDiscussionNode.NAME: ProtocolDiscussionNode,
+        DataCompilationNode.NAME: DataCompilationNode,
+        DataStatisticsNode.NAME: DataStatisticsNode,
+        DataValidationNode.NAME: DataValidationNode,
+        ModelSelectionNode.NAME: ModelSelectionNode,
+        ModelTrainNode.NAME: ModelTrainNode,
+        CausalInferenceNode.NAME: CausalInferenceNode,
+        NoopDoneNode.NAME: NoopDoneNode,
+        GeneralQueriesNode.NAME: GeneralQueriesNode,
+    }    
+
 
 def init_all_nodes_with_name_as_key(
     llm: LLMService,
