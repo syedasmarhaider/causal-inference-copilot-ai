@@ -639,6 +639,15 @@ class DataCompilationNode(Node):
                 f"setup before this review. {review_message}"
             )
 
+        request.orchestrator_state.set(
+            request.node_state.name(),
+            {
+                "working_dataset_id": payload.compiled_dataset_id,
+                "latest_dataset_summary": payload.compiled_dataset_summary,
+                "causal_spec_draft": payload.source_causal_spec_draft,
+            },
+        )
+
         review_payload = payload.model_copy(
             update={
                 "compiled_causal_spec": compiled_artifacts.causal_spec,
@@ -713,6 +722,7 @@ class DataCompilationNode(Node):
                     "causal_spec_draft": payload.source_causal_spec_draft,
                     "causal_spec": payload.compiled_causal_spec,
                     "data_transformation_plan": payload.transformation_plan,
+                    "working_dataset_frozen": True,
                     "validation_issues": payload.validation_issues,
                     "is_validated": True,
                 },
