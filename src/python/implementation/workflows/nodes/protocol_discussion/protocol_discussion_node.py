@@ -15,19 +15,20 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     ProtocolDiscussionDeps,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
+    get_llm_blocker_message_prompt,
     get_protocol_discussion_get_node_info,
     get_protocol_discussion_review_decision_prompt,
     get_protocol_discussion_review_summary_prompt,
     get_protocol_discussion_update_prompt,
     get_questions,
     initial_user_message,
-    summarize_upstream_data_prep_decisions,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_summary_blockers import (
-    build_summary_blocker_follow_up_message,
-    scan_protocol_summary_blockers,
-    unresolved_summary_blockers,
+scan_protocol_summary_blockers,
+unresolved_summary_blockers
 )
+
+    
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionPayloadModel,
     ProtocolDiscussionState,
@@ -36,6 +37,7 @@ from python.implementation.workflows.tools.causal.specs.causal_spec_draft import
     CausalSpecDraft,
     compile_causal_spec_draft_from_discussion,
 )
+from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.utils.utils import safe_err
 
 log = get_logger(__name__)
@@ -74,7 +76,56 @@ class _ReviewDecisionModel(BaseModel):
     assistant_message: str = Field(..., min_length=1)
 
 
+
 class ProtocolDiscussionNode(Node):
+    def _llm_blocker_message(
+        self,
+        blockers: Sequence[Any],
+        protocol_discussion: str,
+        dataset_summary: DatasetSummaryModel,
+    ) -> str:
+        """Use LLM to generate user-facing message for blockers."""
+        prompt = get_llm_blocker_message_prompt()
+        user_payload = {
+            "blockers": [
+                {
+                    "column": b.column,
+                    "role": b.role,
+                    "issue": b.issue,
+                    "user_question": b.user_question,
+                } for b in blockers
+            ],
+            "protocol_discussion": protocol_discussion,
+            "dataset_summary": dataset_summary.model_dump_json() if hasattr(dataset_summary, 'model_dump_json') else str(dataset_summary),
+        }
+        return self._generate_string(
+            system_prompt=prompt,
+            user_prompt=json.dumps(user_payload, ensure_ascii=False),
+            config=LLMConfig(model="pro", temperature=0.4),
+            history=None,
+            max_attempts=2,
+        )
+
+    def _generate_string(
+        self,
+        system_prompt: str | None,
+        user_prompt: str,
+        config: LLMConfig,
+        history: Sequence[ChatMessage] | None = None,
+        max_attempts: int = 2,
+    ) -> str:
+        """Call LLMService.generate and return the string content."""
+        for _ in range(max_attempts):
+            response = self._llm.generate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                config=config,
+                history=history,
+            )
+            if response and response.content:
+                return response.content.strip()
+        raise RuntimeError("LLM did not return a valid string response after retries.")
+
     NAME: ClassVar[str] = "PROTOCOL_DISCUSSION"
 
     def __init__(self, *, llm: LLMService, data_repo: DataRepo | None = None) -> None:
@@ -234,6 +285,7 @@ class ProtocolDiscussionNode(Node):
             limit=1,
         )
 
+        # Always use LLM to surface validation issues, no heuristics
         retry_feedback: str | None = None
         previous_draft: CausalSpecDraft | None = None
         last_issue_message: str | None = None
@@ -247,6 +299,20 @@ class ProtocolDiscussionNode(Node):
             )
             validation_issue = draft.validate_against_dataframe(df=validation_df)
             if validation_issue is None:
+                blockers = scan_protocol_summary_blockers(
+                    dataset_summary=deps.dataset_summary,
+                    treatment_column=str(draft.treatment_column),
+                    outcome_column=str(draft.outcome_column),
+                    covariates=[str(c) for c in draft.covariates],
+                    effect_modifiers=[str(c) for c in draft.effect_modifiers],
+                )
+                pending_blockers = unresolved_summary_blockers(
+                    protocol_discussion=protocol_discussion,
+                    blockers=blockers,
+                )
+                if pending_blockers:
+                    blocker_message = self._llm_blocker_message(pending_blockers, protocol_discussion, deps.dataset_summary)
+                    raise ValueError(blocker_message)
                 return draft
 
             previous_draft = draft
@@ -256,23 +322,40 @@ class ProtocolDiscussionNode(Node):
                 f"Fix this exactly: {last_issue_message}"
             )
 
+        # If still failing, always surface the last issue to the user for explicit clarification
         raise ValueError(
-            "Could not compile a grounded causal draft from the confirmed protocol. "
-            f"Last validation issue: {last_issue_message or 'unknown validation failure'}"
+            f"Causal draft validation failed: {last_issue_message or 'unknown validation failure'}\n"
+            "Please clarify or correct the protocol discussion to resolve this issue."
         )
 
     def _compile_preview_causal_spec_draft(
         self,
         *,
         protocol_discussion: str,
-        dataset_summary,
+        dataset_summary: DatasetSummaryModel,
     ) -> CausalSpecDraft | None:
         try:
-            return compile_causal_spec_draft_from_discussion(
+            draft = compile_causal_spec_draft_from_discussion(
                 llm=self._llm,
                 protocol_discussion=protocol_discussion,
                 dataset_summary=dataset_summary,
             )
+            blockers = scan_protocol_summary_blockers(
+                dataset_summary=dataset_summary,
+                treatment_column=str(draft.treatment_column),
+                outcome_column=str(draft.outcome_column),
+                covariates=[str(c) for c in draft.covariates],
+                effect_modifiers=[str(c) for c in draft.effect_modifiers],
+            )
+            pending_blockers = unresolved_summary_blockers(
+                protocol_discussion=protocol_discussion,
+                blockers=blockers,
+            )
+            if pending_blockers:
+                # Use LLM to generate the user-facing message for blockers
+                _ = self._llm_blocker_message(pending_blockers, protocol_discussion, dataset_summary)
+                return None
+            return draft
         except Exception as e:
             log.warning(
                 "PROTOCOL_DISCUSSION preview causal draft compile failed before review: %s",
@@ -283,10 +366,10 @@ class ProtocolDiscussionNode(Node):
     @staticmethod
     def _causal_draft_compile_failure_message(error_message: str) -> str:
         return (
-            "I could not finalize the confirmed protocol into a grounded causal draft after "
-            f"two validation attempts against the active dataset. {error_message} "
-            "Please revise the treatment, outcome, covariates, or effect modifiers so they "
-            "match exact dataset columns."
+            "Causal draft validation failed: "
+            f"{error_message}\n"
+            "Please clarify or correct the protocol discussion to resolve this issue. "
+            "Explicitly state how to handle any missing columns, type mismatches, or ambiguous values."
         )
 
     def run(
@@ -468,7 +551,7 @@ class ProtocolDiscussionNode(Node):
                     blockers=blockers,
                 )
                 if pending_blockers:
-                    blocker_message = build_summary_blocker_follow_up_message(pending_blockers)
+                    blocker_message = self._llm_blocker_message(pending_blockers, decision.discussion, deps.dataset_summary)
                     return self._needs_input_result(
                         request=request,
                         payload=payload.model_copy(
@@ -581,4 +664,29 @@ def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str 
         content = message.content.strip()
         if content:
             return content
+    return None
+
+
+
+def summarize_upstream_data_prep_decisions(protocol_discussion: str) -> str | None:
+    items: list[str] = []
+    for prefix in ("14)", "15)"):
+        line = _find_protocol_line(protocol_discussion, prefix)
+        if line is None:
+            continue
+        normalized = line.strip()
+        lowered = normalized.lower()
+        if "unclear" in lowered:
+            continue
+        items.append(normalized)
+    if not items:
+        return None
+    return " ".join(items)
+
+
+def _find_protocol_line(protocol_discussion: str, prefix: str) -> str | None:
+    for line in protocol_discussion.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            return stripped
     return None

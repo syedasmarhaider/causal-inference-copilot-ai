@@ -208,26 +208,25 @@ def initial_user_message() -> str:
         "want for treatment, outcome, or baseline features."
     )
 
+def get_llm_blocker_message_prompt() -> str:
+    return '''
+You are a Causal ML Copilot. Your job is to explain to the user, in a clear and actionable way, any blockers or issues that prevent compiling the protocol draft into a valid causal specification.
 
-def summarize_upstream_data_prep_decisions(protocol_discussion: str) -> str | None:
-    items: list[str] = []
-    for prefix in ("14)", "15)"):
-        line = _find_protocol_line(protocol_discussion, prefix)
-        if line is None:
-            continue
-        normalized = line.strip()
-        lowered = normalized.lower()
-        if "unclear" in lowered:
-            continue
-        items.append(normalized)
-    if not items:
-        return None
-    return " ".join(items)
+Inputs:
+- blockers: a list of blocker objects, each with a column, role, issue, and user_question
+- protocol_discussion: the current protocol discussion text
+- dataset_summary: the authoritative dataset metadata summary
 
+Task:
+- Write a comprehensive, specific, and user-friendly message that:
+  - Explains each blocker in context
+  - Asks the user to explicitly clarify or confirm how to resolve each issue
+  - Avoids technical jargon, but is precise about what is needed
+  - Groups similar issues for clarity if possible
+- Do not invent or guess solutions—require explicit user input for each blocker.
+- If there are multiple blockers, prioritize the most critical and ask about those first (max 2 per message).
+- If there are no blockers, say so clearly.
 
-def _find_protocol_line(protocol_discussion: str, prefix: str) -> str | None:
-    for line in protocol_discussion.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(prefix):
-            return stripped
-    return None
+Output:
+Return only a string with the user-facing message.
+'''

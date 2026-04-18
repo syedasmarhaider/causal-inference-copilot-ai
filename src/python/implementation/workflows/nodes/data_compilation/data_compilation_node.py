@@ -33,7 +33,6 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_sta
     DataCompilationState,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_transformation import (
-    DatasetRepairAction,
     DatasetRepairPlan,
     transform,
 )
@@ -661,15 +660,6 @@ class DataCompilationNode(Node):
                 "The active dataset or confirmed protocol changed, so I recompiled the "
                 f"setup before this review. {review_message}"
             )
-
-        request.orchestrator_state.set(
-            request.node_state.name(),
-            {
-                "working_dataset_id": payload.compiled_dataset_id,
-                "latest_dataset_summary": payload.compiled_dataset_summary,
-                "causal_spec_draft": payload.source_causal_spec_draft,
-            },
-        )
 
         review_payload = payload.model_copy(
             update={

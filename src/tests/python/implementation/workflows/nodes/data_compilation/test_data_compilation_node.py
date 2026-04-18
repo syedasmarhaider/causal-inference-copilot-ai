@@ -192,6 +192,7 @@ class _FakeLLM:
 @dataclass
 class _InMemoryDataRepo(DataRepo):
     dataframes: dict[UUID, pd.DataFrame]
+    get_csv_data_calls: list[UUID] = field(default_factory=list)
 
     def get_csv_data(
         self,
@@ -202,6 +203,7 @@ class _InMemoryDataRepo(DataRepo):
     ) -> pd.DataFrame:
         _ = user_id
         _ = conversation_id
+        self.get_csv_data_calls.append(dataset_id)
         dataframe = self.dataframes[dataset_id]
         if limit is None:
             return dataframe.copy()
@@ -409,8 +411,8 @@ def test_data_compilation_node_auto_retries_full_compile_when_transform_requires
     assert payload.transformation_retry_count == 1
     assert payload.compiled_dataset_id is not None
     assert payload.compiled_dataset_id in data_repo.dataframes
-    assert orchestrator_state.get("working_dataset_id") == payload.compiled_dataset_id
-    assert orchestrator_state.get("latest_dataset_summary") == payload.compiled_dataset_summary
+    assert orchestrator_state.get("working_dataset_id") == dataset_id
+    assert orchestrator_state.get("latest_dataset_summary") == dataset_summary
     assert (
         orchestrator_state.get("causal_spec_draft").model_dump(mode="json")
         == _causal_draft().model_dump(mode="json")
@@ -560,8 +562,8 @@ def test_data_compilation_node_auto_retries_validation_on_cleaned_dataset() -> N
     assert result.action == "NEEDS_INPUT"
     assert payload.phase == "REVIEW_READY"
     assert payload.validation_retry_count == 1
-    assert orchestrator_state.get("working_dataset_id") == payload.compiled_dataset_id
-    assert orchestrator_state.get("latest_dataset_summary") == payload.compiled_dataset_summary
+    assert orchestrator_state.get("working_dataset_id") == dataset_id
+    assert orchestrator_state.get("latest_dataset_summary") == dataset_summary
     assert orchestrator_state.get("causal_spec") is None
     assert orchestrator_state.get("data_transformation_plan") is None
     assert orchestrator_state.get("working_dataset_frozen") is False
@@ -678,6 +680,16 @@ def test_data_compilation_node_review_confirm_publishes_outputs() -> None:
         )
 
         first_payload = first_result.new_node_state.payload
+        assert first_result.status == "PENDING"
+        assert first_result.action == "NEEDS_INPUT"
+        assert first_payload.phase == "REVIEW_READY"
+        assert orchestrator_state.get("working_dataset_id") == dataset_id
+        assert orchestrator_state.get("latest_dataset_summary") == dataset_summary
+        assert orchestrator_state.get("causal_spec") is None
+        assert orchestrator_state.get("data_transformation_plan") is None
+        assert orchestrator_state.get("working_dataset_frozen") is False
+        assert orchestrator_state.get("is_validated") is False
+
         second_result = node.run(
             request=NodeRequest(
                 user_id=uuid4(),
@@ -691,15 +703,6 @@ def test_data_compilation_node_review_confirm_publishes_outputs() -> None:
             )
         )
 
-    assert first_result.status == "PENDING"
-    assert first_result.action == "NEEDS_INPUT"
-    assert first_payload.phase == "REVIEW_READY"
-    assert orchestrator_state.get("working_dataset_id") == first_payload.compiled_dataset_id
-    assert orchestrator_state.get("latest_dataset_summary") == first_payload.compiled_dataset_summary
-    assert orchestrator_state.get("causal_spec") is None
-    assert orchestrator_state.get("data_transformation_plan") is None
-    assert orchestrator_state.get("working_dataset_frozen") is False
-    assert orchestrator_state.get("is_validated") is False
     assert second_result.status == "DONE"
     assert second_result.action == "NONE"
     assert second_result.new_node_state.payload.phase == "CONFIRMED"
@@ -776,9 +779,169 @@ def test_data_compilation_node_review_revise_keeps_only_preaccept_dataset_refres
     assert second_result.status == "ABORTED"
     assert second_result.new_node_state.payload.phase == "FAILED"
     assert second_result.new_node_state.payload.hard_failure is False
-    assert orchestrator_state.get("working_dataset_id") == first_payload.compiled_dataset_id
-    assert orchestrator_state.get("latest_dataset_summary") == first_payload.compiled_dataset_summary
+    assert orchestrator_state.get("working_dataset_id") == dataset_id
+    assert orchestrator_state.get("latest_dataset_summary") == dataset_summary
     assert orchestrator_state.get("causal_spec") is None
     assert orchestrator_state.get("data_transformation_plan") is None
     assert orchestrator_state.get("working_dataset_frozen") is False
     assert orchestrator_state.get("is_validated") is False
+
+
+def test_data_compilation_node_review_question_reuses_cached_payload_without_recompile() -> None:
+    dataframe = _build_dataframe()
+    dataset_summary = _build_summary(dataframe)
+    dataset_id = uuid4()
+    llm = _FakeLLM(
+        json_outputs=[
+            {"assistant_message": "Detailed clinician review."},
+            {
+                "action": "clarify",
+                "assistant_message": "The cleaned dataset is cached; no recompilation is needed.",
+            },
+        ]
+    )
+    data_repo = _InMemoryDataRepo(dataframes={dataset_id: dataframe.copy()})
+    node = DataCompilationNode(data_repo=data_repo, llm=llm, tools_factory=_tool_factory())
+    orchestrator_state = _build_orchestrator_state(
+        dataset_id=dataset_id,
+        dataset_summary=dataset_summary,
+    )
+
+    with (
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.cleaning",
+            return_value=_cleaning_result(dataframe),
+        ) as cleaning_mock,
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
+            return_value=TransformationResult(
+                transformation_plan=_transform_plan(),
+                required_dataset_changes=None,
+            ),
+        ) as transform_mock,
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
+            return_value=DataCompilationValidationResult(
+                validation_errors=[],
+                user_suggestion_message=None,
+            ),
+        ) as validate_mock,
+    ):
+        first_result = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=DataCompilationState.init_empty(),
+                orchestrator_state=orchestrator_state,
+                read_only_messages_history=[ChatMessage(role="user", content="compile it")],
+            )
+        )
+        first_payload = first_result.new_node_state.payload
+
+        second_result = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=first_result.new_node_state,
+                orchestrator_state=orchestrator_state,
+                read_only_messages_history=[
+                    ChatMessage(role="assistant", content=first_payload.assistant_message or ""),
+                    ChatMessage(role="user", content="What changed in the compiled data?"),
+                ],
+            )
+        )
+
+    assert first_result.status == "PENDING"
+    assert first_payload.phase == "REVIEW_READY"
+    assert second_result.status == "PENDING"
+    assert second_result.action == "NEEDS_INPUT"
+    assert second_result.new_node_state.payload.phase == "REVIEW_READY"
+    assert (
+        second_result.new_node_state.payload.assistant_message
+        == "The cleaned dataset is cached; no recompilation is needed."
+    )
+    assert cleaning_mock.call_count == 1
+    assert transform_mock.call_count == 1
+    assert validate_mock.call_count == 1
+    assert data_repo.get_csv_data_calls == [dataset_id]
+    assert orchestrator_state.get("working_dataset_id") == dataset_id
+    assert orchestrator_state.get("latest_dataset_summary") == dataset_summary
+
+
+def test_data_compilation_node_recompiles_when_upstream_protocol_changes() -> None:
+    dataframe = _build_dataframe()
+    dataset_summary = _build_summary(dataframe)
+    dataset_id = uuid4()
+    llm = _FakeLLM(
+        json_outputs=[
+            {"assistant_message": "Detailed clinician review."},
+            {"assistant_message": "Recompiled clinician review."},
+        ]
+    )
+    data_repo = _InMemoryDataRepo(dataframes={dataset_id: dataframe.copy()})
+    node = DataCompilationNode(data_repo=data_repo, llm=llm, tools_factory=_tool_factory())
+    orchestrator_state = _build_orchestrator_state(
+        dataset_id=dataset_id,
+        dataset_summary=dataset_summary,
+    )
+
+    with (
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.cleaning",
+            return_value=_cleaning_result(dataframe),
+        ) as cleaning_mock,
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
+            return_value=TransformationResult(
+                transformation_plan=_transform_plan(),
+                required_dataset_changes=None,
+            ),
+        ) as transform_mock,
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
+            return_value=DataCompilationValidationResult(
+                validation_errors=[],
+                user_suggestion_message=None,
+            ),
+        ) as validate_mock,
+    ):
+        first_result = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=DataCompilationState.init_empty(),
+                orchestrator_state=orchestrator_state,
+                read_only_messages_history=[ChatMessage(role="user", content="compile it")],
+            )
+        )
+
+        orchestrator_state.set(
+            ProtocolDiscussionState.NAME,
+            {
+                "protocol_discussion": "Updated confirmed protocol discussion.",
+                "protocol_cleaning_instructions": "Normalize only grounded values.",
+                "causal_spec_draft": _causal_draft(),
+            },
+        )
+
+        second_result = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=first_result.new_node_state,
+                orchestrator_state=orchestrator_state,
+                read_only_messages_history=[ChatMessage(role="user", content="compile it again")],
+            )
+        )
+
+    assert first_result.new_node_state.payload.phase == "REVIEW_READY"
+    assert second_result.status == "PENDING"
+    assert second_result.action == "NEEDS_INPUT"
+    assert second_result.new_node_state.payload.phase == "REVIEW_READY"
+    assert "The active dataset or confirmed protocol changed" in (
+        second_result.new_node_state.payload.assistant_message or ""
+    )
+    assert cleaning_mock.call_count == 2
+    assert transform_mock.call_count == 2
+    assert validate_mock.call_count == 2
+    assert data_repo.get_csv_data_calls == [dataset_id, dataset_id]
