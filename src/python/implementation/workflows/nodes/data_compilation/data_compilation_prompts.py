@@ -312,15 +312,77 @@ Output policy:
 """.strip()
 
 
-__all__ = [
-    "data_compilation_causal_spec_prompt",
-    "data_compilation_cleaning_instructions_prompt",
-    "data_compilation_discrepancy_repair_prompt",
-    "data_compilation_action_decision_prompt",
-    "data_compilation_locked_spec_revision_prompt",
-    "data_compilation_node_info",
-    "data_compilation_review_decision_prompt",
-    "data_compilation_review_summary_prompt",
-    "data_compilation_single_column_transformation_plan_prompt",
-    "data_compilation_transformation_plan_prompt",
-]
+def batch_transform_prompt() -> str:
+    return """
+You are compiling a minimal transformation draft for covariates and effect modifiers only.
+
+Inputs:
+- transformation_instructions
+- compiled_causal_specification
+- scoped_dataset_summary
+- eligible_columns
+- expected_role_by_column
+- required_plan_column_count
+- optional repair_request
+
+Task:
+- Produce one JSON object with a `columns` array.
+- Include every eligible column exactly once.
+- Never include treatment or outcome.
+- Use `decision="plan"` when the current summarized data can be transformed safely as-is.
+- Use `decision="dataset_change"` when the source dataset must be changed before a safe grounded encoding can be chosen.
+
+Planning rules:
+- Prefer `passthrough` when the column is already analysis-ready.
+- Only choose a real preset when the summary or transformation_instructions make it necessary.
+- Use the scoped dataset summary as the source of truth for data kind, missingness, distinct_count, and grounded known values.
+- Never guess label mappings or ordinal order for numeric-coded categories.
+- If categorical or ordinal semantics are required but not grounded by the summary, emit `decision="dataset_change"` instead of inventing mappings.
+- Only use `map_binary` when you can provide a grounded `mapping`.
+- Only use `map_ordinal` when you can provide a grounded `order`.
+
+Dataset-change rules:
+- `strict_requirement` must clearly say that the source dataset must change first.
+- `required_dataset_change` must say exactly what needs to be changed in the dataset.
+- `addtional_suggestions_to_user` should give a friendly next step for the user.
+
+Output policy:
+- Output JSON only.
+- No markdown.
+- No explanatory prose outside the JSON object.
+""".strip()
+
+
+def single_column_transform_prompt() -> str:
+    return """
+You are selecting a minimal transformation for one covariate or effect modifier.
+
+Inputs:
+- transformation_instructions
+- compiled_causal_specification
+- column_name
+- expected_role
+- column_profile
+
+Task:
+- Produce one JSON object with a single `column` entry.
+- Keep the provided column name and role unchanged.
+- Never refer to treatment or outcome.
+
+Rules:
+- Prefer `decision="plan"` with `preset="passthrough"` when the column is already analysis-ready.
+- Choose a real preset only when the column actually needs transformation.
+- Use the column profile as the source of truth for dtype, inferred kind, missingness, distinct_count, and grounded known values.
+- Never guess label mappings or ordinal order for numeric-coded categories.
+- If safe categorical or ordinal semantics cannot be grounded from the profile and instructions, emit `decision="dataset_change"`.
+
+Dataset-change rules:
+- `strict_requirement` must clearly say that the source dataset must change first.
+- `required_dataset_change` must say exactly what needs to be changed in the dataset.
+- `addtional_suggestions_to_user` should give a friendly next step for the user.
+
+Output policy:
+- Output JSON only.
+- No markdown.
+- No explanatory prose outside the JSON object.
+""".strip()
