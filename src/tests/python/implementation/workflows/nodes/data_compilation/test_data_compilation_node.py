@@ -22,6 +22,8 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_sta
     DataCompilationState,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_transformation import (
+    DatasetRepairAction,
+    DatasetRepairPlan,
     TransformationResult,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_valiation import (
@@ -122,6 +124,33 @@ def _transform_plan() -> TransformPlan:
                 },
             ]
         }
+    )
+
+
+def _dataset_repair_plan(
+    *,
+    column: str,
+    role: str,
+    problem: str,
+    action: str,
+    reason: str,
+    repair_instruction: str,
+    user_explanation: str | None = None,
+) -> DatasetRepairPlan:
+    return DatasetRepairPlan(
+        actions=[
+            DatasetRepairAction.model_validate(
+                {
+                    "column": column,
+                    "role": role,
+                    "problem": problem,
+                    "action": action,
+                    "reason": reason,
+                    "repair_instruction": repair_instruction,
+                    "user_explanation": user_explanation,
+                }
+            )
+        ]
     )
 
 
@@ -328,9 +357,25 @@ def test_data_compilation_node_auto_retries_full_compile_when_transform_requires
             side_effect=[
                 TransformationResult(
                     transformation_plan=None,
-                    required_dataset_changes=(
-                        "Column 'isex' must be recoded into a grounded categorical "
-                        "representation before transformation."
+                    required_dataset_changes=_dataset_repair_plan(
+                        column="isex",
+                        role="effect_modifier",
+                        problem="numeric_coded_category",
+                        action="normalize_categorical_representation",
+                        reason=(
+                            "This effect modifier appears to need categorical handling, "
+                            "but the current numeric coding does not ground a safe "
+                            "categorical encoding plan."
+                        ),
+                        repair_instruction=(
+                            "Replace numeric codes 1 and 2 with explicit category labels "
+                            "such as male and female in the source dataset before "
+                            "recompilation."
+                        ),
+                        user_explanation=(
+                            "Update the stored values first, then rerun compilation so "
+                            "categorical encoding can be grounded safely."
+                        ),
                     ),
                 ),
                 TransformationResult(
@@ -393,11 +438,14 @@ def test_data_compilation_node_transformation_retry_exhausted_message_is_clinici
         dataset_id=dataset_id,
         dataset_summary=dataset_summary,
     )
-    required_dataset_changes = (
-        "Source dataset changes are required before a safe transformation plan can be produced.\n"
-        "Column 'iage' (effect_modifier): Effect modifiers must not contain missing values for the current estimation configuration.\n"
-        "Required dataset change: Remove rows where 'iage' is missing or impute the missing values in the source dataset.\n"
-        "Suggested next step: There is a very small amount of missingness in 'iage' (approximately 1 row). Filtering this row from the dataset is the most straightforward fix."
+    required_dataset_changes = _dataset_repair_plan(
+        column="iage",
+        role="effect_modifier",
+        problem="missing_values",
+        action="impute_missing",
+        reason="Effect modifiers must not contain missing values for the current estimation configuration.",
+        repair_instruction="Impute the missing values in 'iage' before recompilation.",
+        user_explanation="There is very little missingness in 'iage' (approximately 1 row), so a simple grounded imputation strategy should be sufficient.",
     )
 
     with (
@@ -434,10 +482,11 @@ def test_data_compilation_node_transformation_retry_exhausted_message_is_clinici
     assert result.action == "NONE"
     assert "one remaining data issue still blocks a safe baseline transformation plan" in message
     assert "The column 'iage' used as an effect modifier still needs to be fixed" in message
-    assert "Most direct fix: Remove rows where 'iage' is missing or impute the missing values in the source dataset." in message
-    assert "Practical option: There is a very small amount of missingness in 'iage' (approximately 1 row)." in message
+    assert "Most direct fix: Impute the missing values in 'iage' before recompilation." in message
+    assert "Practical option: There is very little missingness in 'iage' (approximately 1 row)" in message
     assert "If you want to keep the current causal draft, update the dataset and rerun compilation." in message
     assert "Source dataset changes are required before a safe transformation plan can be produced." not in message
+    assert "drop" not in message.lower()
 
 
 def test_data_compilation_node_auto_retries_validation_on_cleaned_dataset() -> None:

@@ -23,7 +23,6 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_dep
     DataCompilationDeps,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
-    data_compilation_compile_retry_guidance_prompt,
     data_compilation_node_info,
     data_compilation_review_decision_prompt,
     data_compilation_review_summary_prompt,
@@ -34,6 +33,8 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_sta
     DataCompilationState,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_transformation import (
+    DatasetRepairAction,
+    DatasetRepairPlan,
     transform,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_valiation import (
@@ -80,15 +81,6 @@ class _CompiledArtifacts:
     causal_spec: CausalSpec
     actions: list[str]
     warnings: list[str]
-
-
-@dataclass(frozen=True)
-class _DatasetChangeGuidance:
-    column: str
-    role: str | None
-    problem: str
-    required_change: str | None
-    suggested_next_step: str | None
 
 
 @dataclass(frozen=True)
@@ -211,7 +203,6 @@ class DataCompilationNode(Node):
             deps=deps,
             source_df=source_df,
             source_changed=source_changed,
-            retry_feedback=payload.retry_feedback,
         )
 
     def _bind_payload_to_source(
@@ -258,23 +249,24 @@ class DataCompilationNode(Node):
         deps: DataCompilationDeps,
         source_df: pd.DataFrame,
         source_changed: bool,
-        retry_feedback: str | None,
+        cleaning_retry_plan: DatasetRepairPlan | None = None,
     ) -> NodeExecutionResult:
         try:
             compiled_artifacts = self._compile_from_source(
                 request=request,
                 deps=deps,
                 source_df=source_df,
-                retry_feedback=retry_feedback,
+                cleaning_retry_plan=cleaning_retry_plan,
             )
         except Exception as exc:
             log.exception("data compilation full compile failed", error=safe_err(exc))
-            if retry_feedback and payload.compile_retry_count < 1:
+            if cleaning_retry_plan is not None and payload.compile_retry_count < 1:
                 retry_payload = payload.model_copy(
                     update={
                         "compile_retry_count": payload.compile_retry_count + 1,
-                        "retry_feedback": retry_feedback,
-                        "repair_context": retry_feedback,
+                        "repair_context": _summarize_dataset_repair_plan(
+                            cleaning_retry_plan
+                        ),
                     }
                 )
                 return self._run_pipeline_from_source(
@@ -283,13 +275,17 @@ class DataCompilationNode(Node):
                     deps=deps,
                     source_df=source_df,
                     source_changed=source_changed,
-                    retry_feedback=retry_feedback,
+                    cleaning_retry_plan=cleaning_retry_plan,
                 )
             return self._failed_result(
                 request=request,
                 payload=payload,
                 user_message=_build_compile_failure_message(
-                    retry_feedback=retry_feedback,
+                    retry_context=(
+                        _summarize_dataset_repair_plan(cleaning_retry_plan)
+                        if cleaning_retry_plan is not None
+                        else None
+                    ),
                     error=safe_err(exc),
                 ),
                 error_message=f"full compile failed: {safe_err(exc)}",
@@ -313,8 +309,12 @@ class DataCompilationNode(Node):
                 "assistant_message": None,
                 "system_message": None,
                 "error_message": None,
-                "retry_feedback": retry_feedback,
-                "repair_context": retry_feedback,
+                "retry_feedback": None,
+                "repair_context": (
+                    _summarize_dataset_repair_plan(cleaning_retry_plan)
+                    if cleaning_retry_plan is not None
+                    else None
+                ),
             }
         )
 
@@ -333,13 +333,13 @@ class DataCompilationNode(Node):
         request: NodeRequest,
         deps: DataCompilationDeps,
         source_df: pd.DataFrame,
-        retry_feedback: str | None,
+        cleaning_retry_plan: DatasetRepairPlan | None,
     ) -> _CompiledArtifacts:
         cleaning_result = cleaning(
             protocol_discussion=deps.protocol_discussion,
             cleaning_instructions=self._build_cleaning_instructions(
                 protocol_cleaning_instructions=deps.protocol_cleaning_instructions,
-                retry_feedback=retry_feedback,
+                cleaning_retry_plan=cleaning_retry_plan,
             ),
             draft_causal_spec=deps.causal_spec_draft,
             data_summary=deps.dataset_summary,
@@ -369,7 +369,9 @@ class DataCompilationNode(Node):
                 cleaned_summary=cleaning_result.cleaned_data_summary,
                 causal_spec=cleaning_result.causal,
             ),
-            warnings=_summarize_compile_warnings(retry_feedback=retry_feedback),
+            warnings=_summarize_compile_warnings(
+                repair_plan=cleaning_retry_plan,
+            ),
         )
 
     def _run_pipeline_from_compiled_dataset(
@@ -469,7 +471,7 @@ class DataCompilationNode(Node):
         deps: DataCompilationDeps,
         source_df: pd.DataFrame,
         source_changed: bool,
-        required_dataset_changes: str,
+        required_dataset_changes: DatasetRepairPlan,
     ) -> NodeExecutionResult:
         if payload.transformation_retry_count >= 1:
             return self._failed_result(
@@ -481,12 +483,13 @@ class DataCompilationNode(Node):
                 error_message="transformation required dataset changes after retry budget was exhausted",
             )
 
-        retry_feedback = _build_compile_retry_feedback(required_dataset_changes)
         retry_payload = payload.model_copy(
             update={
                 "transformation_retry_count": payload.transformation_retry_count + 1,
-                "retry_feedback": retry_feedback,
-                "repair_context": retry_feedback,
+                "retry_feedback": None,
+                "repair_context": _summarize_dataset_repair_plan(
+                    required_dataset_changes
+                ),
             }
         )
         return self._run_pipeline_from_source(
@@ -495,7 +498,7 @@ class DataCompilationNode(Node):
             deps=deps,
             source_df=source_df,
             source_changed=source_changed,
-            retry_feedback=retry_feedback,
+            cleaning_retry_plan=required_dataset_changes,
         )
 
     def _handle_validation_failure(
@@ -843,17 +846,16 @@ class DataCompilationNode(Node):
         self,
         *,
         protocol_cleaning_instructions: str | None,
-        retry_feedback: str | None,
+        cleaning_retry_plan: DatasetRepairPlan | None,
     ) -> str:
         parts: list[str] = []
         normalized_protocol_instructions = _normalize_text(protocol_cleaning_instructions)
-        normalized_retry_feedback = _normalize_text(retry_feedback)
 
         if normalized_protocol_instructions:
             parts.append(normalized_protocol_instructions)
-        if normalized_retry_feedback:
+        if cleaning_retry_plan is not None:
             retry_cleaning_instructions = _build_cleaning_retry_instructions(
-                normalized_retry_feedback
+                cleaning_retry_plan
             )
             if parts:
                 parts.append("")
@@ -1043,23 +1045,13 @@ def _summarize_compile_actions(
     return actions
 
 
-def _summarize_compile_warnings(*, retry_feedback: str | None) -> list[str]:
-    normalized_retry_feedback = _normalize_text(retry_feedback)
-    if not normalized_retry_feedback:
+def _summarize_compile_warnings(*, repair_plan: DatasetRepairPlan | None) -> list[str]:
+    if repair_plan is None:
         return []
     return [
         "One automatic repair retry was applied before final review.",
-        normalized_retry_feedback,
+        _summarize_dataset_repair_plan(repair_plan),
     ]
-
-
-def _build_compile_retry_feedback(required_dataset_changes: str) -> str:
-    return "\n\n".join(
-        [
-            data_compilation_compile_retry_guidance_prompt(),
-            required_dataset_changes.strip(),
-        ]
-    ).strip()
 
 
 def _build_validation_retry_feedback(validation_message: str) -> str:
@@ -1088,37 +1080,34 @@ def _format_issue_lines(issues: Sequence[ValidationIssueModel]) -> list[str]:
     return lines
 
 
-def _build_cleaning_retry_instructions(retry_feedback: str) -> str:
-    guidance = _parse_required_dataset_changes(retry_feedback)
-    if not guidance:
-        return "\n".join(
-            [
-                data_compilation_compile_retry_guidance_prompt(),
-                retry_feedback.strip(),
-            ]
-        ).strip()
-
+def _build_cleaning_retry_instructions(repair_plan: DatasetRepairPlan) -> str:
     lines = [
         "Automatic retry fix request from downstream transformation planning:",
         "Apply the following grounded dataset fixes before recompiling the causal specification.",
         "Keep treatment, outcome, covariates, and effect modifiers locked to the confirmed draft columns.",
+        "Never remove locked draft columns.",
+        "If a locked baseline covariate or effect modifier has blocking missingness, repair it through imputation-oriented cleaning rather than automatic row dropping.",
     ]
-    for item in guidance:
-        role_text = f" ({item.role.replace('_', ' ')})" if item.role else ""
-        lines.append(f"- {item.column}{role_text}: {item.problem}")
-        if item.required_change:
-            lines.append(f"  Required dataset fix: {item.required_change}")
-        if item.suggested_next_step:
-            lines.append(f"  Practical option: {item.suggested_next_step}")
+    for action in repair_plan.actions:
+        role_text = f" ({action.role.replace('_', ' ')})"
+        lines.append(f"- {action.column}{role_text}: {action.problem.replace('_', ' ')}")
+        lines.append(f"  Why this matters: {action.reason}")
+        lines.append(f"  Required dataset fix: {action.repair_instruction}")
+        if action.action == "impute_missing":
+            lines.append(
+                "  Missingness rule: impute the missing values in this locked baseline column; do not use row dropping as the automatic retry strategy."
+            )
+        if action.user_explanation:
+            lines.append(f"  Practical option: {action.user_explanation}")
     return "\n".join(lines).strip()
 
 
 def _build_compile_failure_message(
     *,
-    retry_feedback: str | None,
+    retry_context: str | None,
     error: str,
 ) -> str:
-    if retry_feedback:
+    if retry_context:
         return (
             "I tried to recompile the source dataset after grounded repair feedback, but "
             f"the compile step still failed. Error: {error}"
@@ -1131,33 +1120,20 @@ def _build_compile_failure_message(
 
 def _build_transformation_retry_exhausted_message(
     *,
-    required_dataset_changes: str,
+    required_dataset_changes: DatasetRepairPlan,
 ) -> str:
-    guidance = _parse_required_dataset_changes(required_dataset_changes)
-    if not guidance:
-        return "\n".join(
-            [
-                "I retried compilation once, but I still could not produce a safe baseline transformation plan.",
-                "",
-                "A remaining data-preparation issue still needs to be fixed in the dataset before this step can continue.",
-                "",
-                "If you want to keep the current causal draft, update the dataset and rerun compilation. You only need to revise the protocol if you want different variables or roles.",
-            ]
-        ).strip()
-
-    if len(guidance) == 1:
-        item = guidance[0]
-        role_text = f" used as an {item.role.replace('_', ' ')}" if item.role else ""
+    if len(required_dataset_changes.actions) == 1:
+        item = required_dataset_changes.actions[0]
+        role_text = f" used as an {item.role.replace('_', ' ')}"
         lines = [
             "I retried compilation once, but one remaining data issue still blocks a safe baseline transformation plan.",
             "",
             f"The column '{item.column}'{role_text} still needs to be fixed before estimation can continue.",
-            item.problem,
+            item.reason,
         ]
-        if item.required_change:
-            lines.extend(["", f"Most direct fix: {item.required_change}"])
-        if item.suggested_next_step:
-            lines.extend(["", f"Practical option: {item.suggested_next_step}"])
+        lines.extend(["", f"Most direct fix: {item.repair_instruction}"])
+        if item.user_explanation:
+            lines.extend(["", f"Practical option: {item.user_explanation}"])
         lines.extend(
             [
                 "",
@@ -1171,13 +1147,12 @@ def _build_transformation_retry_exhausted_message(
         "",
         "Remaining issues:",
     ]
-    for item in guidance:
-        role_text = f" ({item.role.replace('_', ' ')})" if item.role else ""
-        lines.append(f"- {item.column}{role_text}: {item.problem}")
-        if item.required_change:
-            lines.append(f"  Most direct fix: {item.required_change}")
-        if item.suggested_next_step:
-            lines.append(f"  Practical option: {item.suggested_next_step}")
+    for item in required_dataset_changes.actions:
+        role_text = f" ({item.role.replace('_', ' ')})"
+        lines.append(f"- {item.column}{role_text}: {item.reason}")
+        lines.append(f"  Most direct fix: {item.repair_instruction}")
+        if item.user_explanation:
+            lines.append(f"  Practical option: {item.user_explanation}")
     lines.extend(
         [
             "",
@@ -1307,74 +1282,16 @@ def _build_review_summary_fallback(
     )
 
 
-def _parse_required_dataset_changes(
-    required_dataset_changes: str,
-) -> list[_DatasetChangeGuidance]:
-    guidance: list[_DatasetChangeGuidance] = []
-    current: dict[str, str | None] | None = None
-
-    for raw_line in required_dataset_changes.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        if line.startswith("Column '"):
-            if current is not None:
-                guidance.append(
-                    _DatasetChangeGuidance(
-                        column=current["column"] or "unknown",
-                        role=current["role"],
-                        problem=current["problem"] or "Dataset change required.",
-                        required_change=current["required_change"],
-                        suggested_next_step=current["suggested_next_step"],
-                    )
-                )
-
-            current = {
-                "column": None,
-                "role": None,
-                "problem": None,
-                "required_change": None,
-                "suggested_next_step": None,
-            }
-
-            remainder = line[len("Column '") :]
-            column, _, after_column = remainder.partition("'")
-            current["column"] = column.strip() or None
-            if after_column.startswith(" ("):
-                role_text, _, problem = after_column[2:].partition("):")
-                current["role"] = role_text.strip() or None
-                current["problem"] = problem.strip() or None
-            elif after_column.startswith(":"):
-                current["problem"] = after_column[1:].strip() or None
-            continue
-
-        if current is None:
-            continue
-
-        if line.startswith("Required dataset change:"):
-            current["required_change"] = (
-                line.removeprefix("Required dataset change:").strip() or None
-            )
-            continue
-
-        if line.startswith("Suggested next step:"):
-            current["suggested_next_step"] = (
-                line.removeprefix("Suggested next step:").strip() or None
-            )
-
-    if current is not None:
-        guidance.append(
-            _DatasetChangeGuidance(
-                column=current["column"] or "unknown",
-                role=current["role"],
-                problem=current["problem"] or "Dataset change required.",
-                required_change=current["required_change"],
-                suggested_next_step=current["suggested_next_step"],
-            )
+def _summarize_dataset_repair_plan(repair_plan: DatasetRepairPlan) -> str:
+    parts: list[str] = []
+    for action in repair_plan.actions:
+        role_text = action.role.replace("_", " ")
+        summary = (
+            f"{action.column} ({role_text}): {action.action.replace('_', ' ')}. "
+            f"{action.reason}"
         )
-
-    return guidance
+        parts.append(summary)
+    return "; ".join(parts)
 
 
 def _parse_validation_retry_guidance(

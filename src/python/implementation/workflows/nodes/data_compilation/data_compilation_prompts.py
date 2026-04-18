@@ -49,6 +49,40 @@ Output policy:
 """.strip()
 
 
+def data_compilation_causal_semantics_prompt() -> str:
+    return """
+You are resolving only the remaining treatment/outcome semantics for a locked causal draft.
+
+Inputs:
+- confirmed protocol discussion
+- locked causal draft
+- treatment column profile
+- outcome column profile
+- optional compile_feedback
+
+Task:
+- Return only the unresolved semantic details needed to build the final causal specification.
+
+Rules:
+- Do not change any locked column identities from the draft.
+- Treatment is always binary.
+- Resolve only:
+  - treatment treated/control labels
+  - outcome kind (`binary` or `continuous`)
+  - binary outcome event/non_event labels or continuous outcome metadata
+  - experiment_type
+- Use exact grounded values from the protocol discussion and the provided treatment/outcome profiles.
+- Do not invent new columns, covariates, effect modifiers, timing rules, or post-treatment assumptions.
+- If compile_feedback is present, fix that specific semantic problem directly.
+- If the outcome is continuous, only choose `continuous` when the outcome profile is numeric and the protocol supports it.
+
+Output policy:
+- Output JSON only.
+- No markdown.
+- No explanatory prose outside the JSON object.
+""".strip()
+
+
 def data_compilation_cleaning_instructions_prompt() -> str:
     return """
 You are preparing first-pass SQL-oriented cleaning instructions before protocol compilation.
@@ -92,16 +126,6 @@ Rules:
 - Never add treatment or outcome transformations to the transform plan; fix the data instead when needed.
 - Do not invent new cohort rules, new columns, or unsupported category merges.
 - Do not include validation, modeling, plotting, or non-SQL tasks.
-""".strip()
-
-
-def data_compilation_compile_retry_guidance_prompt() -> str:
-    return """
-Additional grounded repair guidance for the next full compilation attempt:
-- Treat the following feedback as required source-dataset fixes before a safe transformation plan can be produced.
-- Apply only changes that are explicitly grounded by the confirmed protocol, the causal draft, and the provided repair text.
-- Keep the dataset within the confirmed protocol scope and preserve all draft columns.
-- Prefer concrete dtype cleanup, value normalization, recoding, and missingness handling over speculative changes.
 """.strip()
 
 
@@ -362,9 +386,13 @@ Planning rules:
 - Only use `map_ordinal` when you can provide a grounded `order`.
 
 Dataset-change rules:
-- `strict_requirement` must clearly say that the source dataset must change first.
-- `required_dataset_change` must say exactly what needs to be changed in the dataset.
-- `addtional_suggestions_to_user` should give a friendly next step for the user.
+- Emit `problem`, `action`, `reason`, and `repair_instruction` for every dataset-change blocker.
+- `reason` must clearly explain why the current summarized data cannot be transformed safely.
+- `repair_instruction` must say exactly what should be changed in the dataset before recompilation.
+- `user_explanation` should give a short clinician-facing next step when helpful.
+- If `problem="missing_values"` for a locked covariate or effect modifier, you must use `action="impute_missing"`.
+- Never propose row dropping as the automatic retry strategy for baseline missingness.
+- If a locked baseline column looks categorical but is stored numerically, request normalization or recoding only when that need is grounded by the summary and instructions.
 
 Output policy:
 - Output JSON only.
@@ -397,9 +425,10 @@ Rules:
 - If safe categorical or ordinal semantics cannot be grounded from the profile and instructions, emit `decision="dataset_change"`.
 
 Dataset-change rules:
-- `strict_requirement` must clearly say that the source dataset must change first.
-- `required_dataset_change` must say exactly what needs to be changed in the dataset.
-- `addtional_suggestions_to_user` should give a friendly next step for the user.
+- Emit `problem`, `action`, `reason`, and `repair_instruction` for the blocker.
+- `user_explanation` should give a short clinician-facing next step when helpful.
+- If `problem="missing_values"` for a locked covariate or effect modifier, you must use `action="impute_missing"`.
+- Never propose row dropping as the automatic retry strategy for baseline missingness.
 
 Output policy:
 - Output JSON only.

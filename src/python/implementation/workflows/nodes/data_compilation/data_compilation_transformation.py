@@ -28,7 +28,49 @@ from python.implementation.workflows.tools.common.model.data_summary import (
 @dataclass(frozen=True)
 class TransformationResult:
     transformation_plan: TransformPlan | None
-    required_dataset_changes: str | None
+    required_dataset_changes: DatasetRepairPlan | None
+
+
+class DatasetRepairAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    column: str = Field(..., min_length=1)
+    role: Literal["covariate", "effect_modifier"]
+    problem: Literal[
+        "missing_values",
+        "numeric_coded_category",
+        "unsupported_dtype",
+        "ungrounded_mapping",
+        "ungrounded_order",
+        "other",
+    ]
+    action: Literal[
+        "impute_missing",
+        "normalize_dtype",
+        "normalize_categorical_representation",
+        "recode_values",
+    ]
+    reason: str = Field(..., min_length=1)
+    repair_instruction: str = Field(..., min_length=1)
+    user_explanation: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_action_problem_pair(self) -> "DatasetRepairAction":
+        if self.problem == "missing_values" and self.action != "impute_missing":
+            raise ValueError(
+                "missing_values blockers must use action='impute_missing'"
+            )
+        if self.action == "impute_missing" and self.problem != "missing_values":
+            raise ValueError(
+                "action='impute_missing' is only allowed for problem='missing_values'"
+            )
+        return self
+
+
+class DatasetRepairPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    actions: list[DatasetRepairAction] = Field(..., min_length=1)
 
 
 class _DraftColumnBase(BaseModel):
@@ -69,9 +111,35 @@ class _PlanDraftColumn(_DraftColumnBase):
 
 class _DatasetChangeDraftColumn(_DraftColumnBase):
     decision: Literal["dataset_change"]
-    strict_requirement: str = Field(..., min_length=1)
-    required_dataset_change: str = Field(..., min_length=1)
-    addtional_suggestions_to_user: str | None = None
+    problem: Literal[
+        "missing_values",
+        "numeric_coded_category",
+        "unsupported_dtype",
+        "ungrounded_mapping",
+        "ungrounded_order",
+        "other",
+    ]
+    action: Literal[
+        "impute_missing",
+        "normalize_dtype",
+        "normalize_categorical_representation",
+        "recode_values",
+    ]
+    reason: str = Field(..., min_length=1)
+    repair_instruction: str = Field(..., min_length=1)
+    user_explanation: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_dataset_change(self) -> "_DatasetChangeDraftColumn":
+        if self.problem == "missing_values" and self.action != "impute_missing":
+            raise ValueError(
+                "missing_values blockers must use action='impute_missing'"
+            )
+        if self.action == "impute_missing" and self.problem != "missing_values":
+            raise ValueError(
+                "action='impute_missing' is only allowed for problem='missing_values'"
+            )
+        return self
 
 
 _DraftColumn = Annotated[
@@ -185,7 +253,7 @@ def _result_from_draft(
     if blockers:
         return TransformationResult(
             transformation_plan=None,
-            required_dataset_changes=_format_required_dataset_changes(blockers),
+            required_dataset_changes=_build_dataset_repair_plan(blockers),
         )
 
     payload = _materialize_transform_plan_payload(
@@ -502,25 +570,27 @@ def _column_prompt_payload(
     return payload
 
 
-def _format_required_dataset_changes(
+def _build_dataset_repair_plan(
     blockers: Sequence[_DatasetChangeDraftColumn],
-) -> str:
-    lines = [
-        "Source dataset changes are required before a safe transformation plan can be produced.",
-    ]
-
-    for blocker in blockers:
-        lines.append(
-            f"Column '{blocker.column}' ({blocker.role}): {blocker.strict_requirement}"
-        )
-        lines.append(f"Required dataset change: {blocker.required_dataset_change}")
-        if blocker.addtional_suggestions_to_user:
-            lines.append(
-                "Suggested next step: "
-                f"{str(blocker.addtional_suggestions_to_user).strip()}"
+) -> DatasetRepairPlan:
+    return DatasetRepairPlan(
+        actions=[
+            DatasetRepairAction(
+                column=str(blocker.column).strip(),
+                role=blocker.role,
+                problem=blocker.problem,
+                action=blocker.action,
+                reason=str(blocker.reason).strip(),
+                repair_instruction=str(blocker.repair_instruction).strip(),
+                user_explanation=(
+                    str(blocker.user_explanation).strip()
+                    if blocker.user_explanation is not None
+                    else None
+                ),
             )
-
-    return "\n".join(lines).strip()
+            for blocker in blockers
+        ]
+    )
 
 
 def _format_structured_issues(issues: Sequence[dict[str, Any]]) -> str:
@@ -548,4 +618,9 @@ def _exception_chain_text(exc: Exception) -> str:
         current = current.__cause__ or current.__context__
     return " | ".join(chain[:5])
 
-__all__ = ["TransformationResult", "transform"]
+__all__ = [
+    "DatasetRepairAction",
+    "DatasetRepairPlan",
+    "TransformationResult",
+    "transform",
+]

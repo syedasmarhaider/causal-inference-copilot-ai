@@ -2,20 +2,33 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Annotated, Any, Literal, Sequence
 
 import pandas as pd
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
-    data_compilation_causal_spec_prompt,
+    data_compilation_causal_semantics_prompt,
 )
-from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec import (
+    BinaryTreatmentSpecModel,
+    CausalSpec,
+    ContinuousOutcomeSpecModel,
+    BinaryOutcomeSpecModel,
+)
 from python.implementation.workflows.tools.causal.specs.causal_spec_draft import CausalSpecDraft
 from python.implementation.workflows.tools.causal.specs.causal_specs_tool import (
     CausalSpecsTool,
 )
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
+from python.implementation.workflows.tools.common.model.data_summary import (
+    BooleanColumnProfileModel,
+    CategoricalColumnProfileModel,
+    DatetimeColumnProfileModel,
+    NumericColumnProfileModel,
+    OtherColumnProfileModel,
+)
 from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import (
     DataManipulationTool,
 )
@@ -27,6 +40,66 @@ class CleaningResult:
     cleaned_data_summary: DatasetSummaryModel
     pd_cleaned: pd.DataFrame
     causal: CausalSpec
+
+
+class _TreatmentSemanticsModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    treated: str = Field(..., min_length=1)
+    control: str = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_distinct_labels(self) -> "_TreatmentSemanticsModel":
+        if self.treated == self.control:
+            raise ValueError("treated and control must be different")
+        return self
+
+
+class _BinaryOutcomeSemanticsModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    kind: Literal["binary"]
+    event: str = Field(..., min_length=1)
+    non_event: str = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_binary_outcome(self) -> "_BinaryOutcomeSemanticsModel":
+        if self.event == self.non_event:
+            raise ValueError("event and non_event must be different")
+        return self
+
+
+class _ContinuousOutcomeSemanticsModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    kind: Literal["continuous"]
+    unit: str | None = None
+    clip_min: float | None = None
+    clip_max: float | None = None
+
+    @model_validator(mode="after")
+    def _validate_continuous_outcome(self) -> "_ContinuousOutcomeSemanticsModel":
+        if (
+            self.clip_min is not None
+            and self.clip_max is not None
+            and self.clip_min > self.clip_max
+        ):
+            raise ValueError("clip_min must be <= clip_max")
+        return self
+
+
+_OutcomeSemanticsModel = Annotated[
+    _BinaryOutcomeSemanticsModel | _ContinuousOutcomeSemanticsModel,
+    Field(discriminator="kind"),
+]
+
+
+class _CausalSemanticsModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    treatment: _TreatmentSemanticsModel
+    outcome: _OutcomeSemanticsModel
+    experiment_type: Literal["RCT", "OBSERVATIONAL"]
 
 
 def cleaning(
@@ -195,32 +268,36 @@ def compile_causal_spec_from_cleaned_summary(
     causal_specs_tool = CausalSpecsTool()
     compile_feedback = _normalize_text(retry_feedback) or None
 
-    for _ in range(2):
-        causal_spec = _compile_causal_spec_once(
+    for attempt in range(2):
+        semantics = _compile_causal_semantics_once(
             llm=llm,
-            causal_specs_tool=causal_specs_tool,
             cleaned_summary=cleaned_summary,
             draft_causal_spec=draft_causal_spec,
             protocol_discussion=protocol_discussion,
             compile_feedback=compile_feedback,
         )
-        mismatch_message = _draft_vs_compiled_spec_mismatch(
+        causal_spec = _assemble_causal_spec(
             draft_causal_spec=draft_causal_spec,
-            causal_spec=causal_spec,
+            semantics=semantics,
         )
-        if mismatch_message is None:
+        try:
             return causal_specs_tool.post_validate_backdoor_spec(
                 causal_spec=causal_spec,
                 data_summary=cleaned_summary,
             )
-
-        compile_feedback = _merge_compile_feedback(
-            compile_feedback=compile_feedback,
-            mismatch_message=mismatch_message,
-        )
+        except Exception as exc:
+            if attempt == 1:
+                raise ValueError(
+                    "compiled causal spec semantics remained invalid after retry: "
+                    f"{compile_feedback or str(exc)}"
+                ) from exc
+            compile_feedback = _merge_compile_feedback(
+                compile_feedback=compile_feedback,
+                compile_issue=str(exc).strip() or exc.__class__.__name__,
+            )
 
     raise ValueError(
-        "compiled causal spec does not match draft causal spec after retry: "
+        "compiled causal spec semantics remained invalid after retry: "
         f"{compile_feedback}"
     )
 
@@ -228,25 +305,31 @@ def compile_causal_spec_from_cleaned_summary(
 def _merge_compile_feedback(
     *,
     compile_feedback: str | None,
-    mismatch_message: str,
+    compile_issue: str,
 ) -> str:
     if not compile_feedback:
-        return mismatch_message
-    return f"{compile_feedback}\n\nAlso fix this mismatch: {mismatch_message}"
+        return compile_issue
+    return f"{compile_feedback}\n\nAlso fix this issue: {compile_issue}"
 
 
-def _compile_causal_spec_once(
+def _compile_causal_semantics_once(
     *,
     llm: LLMService,
-    causal_specs_tool: CausalSpecsTool,
     cleaned_summary: DatasetSummaryModel,
     draft_causal_spec: CausalSpecDraft,
     protocol_discussion: str | None,
     compile_feedback: str | None,
-) -> CausalSpec:
+) -> _CausalSemanticsModel:
     context_payload: dict[str, object] = {
-        "dataset_summary": cleaned_summary.model_dump(mode="json"),
         "draft_causal_spec": draft_causal_spec.model_dump(mode="json"),
+        "treatment_column_profile": _summary_profile_payload(
+            summary=cleaned_summary,
+            column=str(draft_causal_spec.treatment_column).strip(),
+        ),
+        "outcome_column_profile": _summary_profile_payload(
+            summary=cleaned_summary,
+            column=str(draft_causal_spec.outcome_column).strip(),
+        ),
     }
     normalized_protocol_discussion = _normalize_text(protocol_discussion)
     if normalized_protocol_discussion:
@@ -254,10 +337,9 @@ def _compile_causal_spec_once(
     if compile_feedback:
         context_payload["compile_feedback"] = compile_feedback
 
-    causal_schema = causal_specs_tool.build_backdoor_schema(data_summary=cleaned_summary)
     return llm.generate_json(
-        schema=causal_schema,
-        system_prompt=data_compilation_causal_spec_prompt(),
+        schema=_CausalSemanticsModel,
+        system_prompt=data_compilation_causal_semantics_prompt(),
         user_prompt=json.dumps(context_payload, ensure_ascii=False),
         config=LLMConfig(model="pro", temperature=0.1),
         history=None,
@@ -265,49 +347,105 @@ def _compile_causal_spec_once(
     )
 
 
-def _draft_vs_compiled_spec_mismatch(
+def _assemble_causal_spec(
     *,
     draft_causal_spec: CausalSpecDraft,
-    causal_spec: CausalSpec,
-) -> str | None:
-    mismatches: list[str] = []
+    semantics: _CausalSemanticsModel,
+) -> CausalSpec:
+    treatment_column = str(draft_causal_spec.treatment_column).strip()
+    outcome_column = str(draft_causal_spec.outcome_column).strip()
 
-    expected_treatment = str(draft_causal_spec.treatment_column).strip()
-    observed_treatment = str(causal_spec.treatment_spec.column).strip()
-    if observed_treatment != expected_treatment:
-        mismatches.append(
-            "treatment column mismatch: "
-            f"expected '{expected_treatment}' got '{observed_treatment}'"
+    treatment_spec = BinaryTreatmentSpecModel(
+        kind="binary",
+        column=treatment_column,
+        treated=semantics.treatment.treated,
+        control=semantics.treatment.control,
+    )
+
+    if isinstance(semantics.outcome, _BinaryOutcomeSemanticsModel):
+        outcome_spec = BinaryOutcomeSpecModel(
+            kind="binary",
+            column=outcome_column,
+            event=semantics.outcome.event,
+            non_event=semantics.outcome.non_event,
+        )
+    else:
+        outcome_spec = ContinuousOutcomeSpecModel(
+            kind="continuous",
+            column=outcome_column,
+            unit=semantics.outcome.unit,
+            clip_min=semantics.outcome.clip_min,
+            clip_max=semantics.outcome.clip_max,
         )
 
-    expected_outcome = str(draft_causal_spec.outcome_column).strip()
-    observed_outcome = str(causal_spec.outcome_spec.column).strip()
-    if observed_outcome != expected_outcome:
-        mismatches.append(
-            "outcome column mismatch: "
-            f"expected '{expected_outcome}' got '{observed_outcome}'"
-        )
+    return CausalSpec(
+        treatment_spec=treatment_spec,
+        outcome_spec=outcome_spec,
+        covariates=[str(column).strip() for column in draft_causal_spec.covariates],
+        effect_modifiers=[
+            str(column).strip() for column in draft_causal_spec.effect_modifiers
+        ],
+        experiment_type=semantics.experiment_type,
+    )
 
-    expected_covariates = [str(column).strip() for column in draft_causal_spec.covariates]
-    observed_covariates = [str(column).strip() for column in causal_spec.covariates]
-    if observed_covariates != expected_covariates:
-        mismatches.append(
-            "covariates mismatch: "
-            f"expected {expected_covariates} got {observed_covariates}"
-        )
 
-    expected_effect_modifiers = [
-        str(column).strip() for column in draft_causal_spec.effect_modifiers
-    ]
-    observed_effect_modifiers = [
-        str(column).strip() for column in causal_spec.effect_modifiers
-    ]
-    if observed_effect_modifiers != expected_effect_modifiers:
-        mismatches.append(
-            "effect modifiers mismatch: "
-            f"expected {expected_effect_modifiers} got {observed_effect_modifiers}"
-        )
+def _summary_profile_payload(
+    *,
+    summary: DatasetSummaryModel,
+    column: str,
+) -> dict[str, Any]:
+    profiles_by_name = {
+        str(profile.name).strip(): profile
+        for profile in summary.profiles
+        if str(profile.name).strip()
+    }
+    profile = profiles_by_name.get(column)
+    if profile is None:
+        raise ValueError(f"dataset summary is missing required column '{column}'")
+    return _column_prompt_payload(profile)
 
-    if not mismatches:
-        return None
-    return "; ".join(mismatches)
+
+def _column_prompt_payload(
+    profile: (
+        NumericColumnProfileModel
+        | DatetimeColumnProfileModel
+        | BooleanColumnProfileModel
+        | CategoricalColumnProfileModel
+        | OtherColumnProfileModel
+    ),
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "name": str(profile.name).strip(),
+        "kind": str(profile.inferred_kind),
+        "dtype": profile.dtype,
+        "missing_rate": profile.missing_rate,
+        "distinct_count": profile.distinct_count,
+    }
+
+    if isinstance(profile, NumericColumnProfileModel):
+        payload["range"] = {
+            "min": profile.summary.min,
+            "max": profile.summary.max,
+        }
+        return payload
+
+    if isinstance(profile, DatetimeColumnProfileModel):
+        payload["range"] = {
+            "min": profile.summary.min,
+            "max": profile.summary.max,
+        }
+        return payload
+
+    if isinstance(profile, BooleanColumnProfileModel):
+        payload["known_values"] = list(profile.summary.counts.keys())
+        return payload
+
+    if isinstance(profile, CategoricalColumnProfileModel):
+        payload["known_values"] = [item.value for item in profile.summary.top_categories]
+        return payload
+
+    if isinstance(profile, OtherColumnProfileModel):
+        payload["sample_values"] = list(profile.summary.distinct_values_sample)
+        return payload
+
+    return payload

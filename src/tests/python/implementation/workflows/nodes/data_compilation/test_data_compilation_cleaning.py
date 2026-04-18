@@ -61,31 +61,40 @@ def _draft() -> CausalSpecDraft:
     )
 
 
-def _causal_spec_payload(
+def _semantic_payload(
     *,
-    treatment_column: str = "treatment",
-    outcome_column: str = "outcome",
-    covariates: list[str] | None = None,
-    effect_modifiers: list[str] | None = None,
+    treated: str = "drug",
+    control: str = "control",
+    outcome_kind: str = "binary",
+    event: str = "event",
+    non_event: str = "non_event",
+    unit: str | None = None,
+    clip_min: float | None = None,
+    clip_max: float | None = None,
+    experiment_type: str = "OBSERVATIONAL",
 ) -> dict[str, Any]:
+    outcome: dict[str, Any]
+    if outcome_kind == "continuous":
+        outcome = {
+            "kind": "continuous",
+            "unit": unit,
+            "clip_min": clip_min,
+            "clip_max": clip_max,
+        }
+    else:
+        outcome = {
+            "kind": "binary",
+            "event": event,
+            "non_event": non_event,
+        }
+
     return {
-        "treatment_spec": {
-            "kind": "binary",
-            "column": treatment_column,
-            "treated": "drug",
-            "control": "control",
+        "treatment": {
+            "treated": treated,
+            "control": control,
         },
-        "outcome_spec": {
-            "kind": "binary",
-            "column": outcome_column,
-            "event": "event",
-            "non_event": "non_event",
-        },
-        "covariates": covariates if covariates is not None else ["age"],
-        "effect_modifiers": (
-            effect_modifiers if effect_modifiers is not None else ["isex"]
-        ),
-        "experiment_type": "OBSERVATIONAL",
+        "outcome": outcome,
+        "experiment_type": experiment_type,
     }
 
 
@@ -162,7 +171,7 @@ def test_cleaning_narrows_input_dataframe_to_draft_scope_and_preserves_order() -
         to_clean_df=dataframe,
         datasetProfilingTool=DatasetProfilingTool(),
         dataManipulationTool=_FakeDataManipulationTool(),
-        llm=_FakeLLM(json_outputs=[_causal_spec_payload()]),
+        llm=_FakeLLM(json_outputs=[_semantic_payload()]),
     )
 
     assert isinstance(result, CleaningResult)
@@ -182,14 +191,14 @@ def test_cleaning_fails_immediately_when_input_dataframe_missing_draft_column() 
             to_clean_df=dataframe,
             datasetProfilingTool=DatasetProfilingTool(),
             dataManipulationTool=_FakeDataManipulationTool(),
-            llm=_FakeLLM(json_outputs=[_causal_spec_payload()]),
+            llm=_FakeLLM(json_outputs=[_semantic_payload()]),
         )
 
 
 def test_cleaning_runs_manipulation_when_effective_instructions_are_present() -> None:
     dataframe = _build_dataframe()
     data_manipulation_tool = _FakeDataManipulationTool()
-    llm = _FakeLLM(json_outputs=[_causal_spec_payload()])
+    llm = _FakeLLM(json_outputs=[_semantic_payload()])
 
     result = cleaning(
         protocol_discussion="Treatment is binary and age is a baseline covariate.",
@@ -218,7 +227,7 @@ def test_cleaning_runs_manipulation_when_effective_instructions_are_present() ->
 def test_cleaning_skips_manipulation_when_effective_instructions_are_empty() -> None:
     dataframe = _build_dataframe()
     data_manipulation_tool = _FakeDataManipulationTool()
-    llm = _FakeLLM(json_outputs=[_causal_spec_payload()])
+    llm = _FakeLLM(json_outputs=[_semantic_payload()])
 
     result = cleaning(
         protocol_discussion=None,
@@ -251,16 +260,16 @@ def test_cleaning_fails_when_manipulation_drops_required_draft_column() -> None:
             to_clean_df=dataframe,
             datasetProfilingTool=DatasetProfilingTool(),
             dataManipulationTool=data_manipulation_tool,
-            llm=_FakeLLM(json_outputs=[_causal_spec_payload()]),
+            llm=_FakeLLM(json_outputs=[_semantic_payload()]),
         )
 
 
-def test_cleaning_retries_compile_when_first_compiled_spec_mismatches_draft() -> None:
+def test_cleaning_retries_compile_when_first_semantic_compile_is_invalid() -> None:
     dataframe = _build_dataframe()
     llm = _FakeLLM(
         json_outputs=[
-            _causal_spec_payload(covariates=["isex"], effect_modifiers=["age"]),
-            _causal_spec_payload(),
+            _semantic_payload(treated="rx", control="control"),
+            _semantic_payload(),
         ]
     )
 
@@ -279,21 +288,23 @@ def test_cleaning_retries_compile_when_first_compiled_spec_mismatches_draft() ->
     assert len(llm.generate_json_calls) == 2
     second_call_payload = json.loads(str(llm.generate_json_calls[1]["user_prompt"]))
     assert "compile_feedback" in second_call_payload
-    assert result.causal.model_dump(mode="json") == llm.generate_json_calls[1]["schema"].model_validate(
-        _causal_spec_payload()
-    ).model_dump(mode="json")
+    assert result.causal.treatment_spec.column == "treatment"
+    assert result.causal.outcome_spec.column == "outcome"
+    assert result.causal.covariates == ["age"]
+    assert result.causal.effect_modifiers == ["isex"]
+    assert result.causal.experiment_type == "OBSERVATIONAL"
 
 
-def test_cleaning_fails_when_compiled_spec_still_mismatches_after_retry() -> None:
+def test_cleaning_fails_when_semantic_compile_is_still_invalid_after_retry() -> None:
     dataframe = _build_dataframe()
     llm = _FakeLLM(
         json_outputs=[
-            _causal_spec_payload(covariates=["isex"], effect_modifiers=["age"]),
-            _causal_spec_payload(covariates=["isex"], effect_modifiers=["age"]),
+            _semantic_payload(treated="rx", control="control"),
+            _semantic_payload(treated="rx", control="control"),
         ]
     )
 
-    with pytest.raises(ValueError, match="compiled causal spec does not match draft causal spec after retry"):
+    with pytest.raises(ValueError, match="compiled causal spec semantics remained invalid after retry"):
         cleaning(
             protocol_discussion="Confirmed protocol discussion",
             cleaning_instructions="",
@@ -308,7 +319,7 @@ def test_cleaning_fails_when_compiled_spec_still_mismatches_after_retry() -> Non
 
 def test_cleaning_compiles_without_protocol_discussion() -> None:
     dataframe = _build_dataframe()
-    llm = _FakeLLM(json_outputs=[_causal_spec_payload()])
+    llm = _FakeLLM(json_outputs=[_semantic_payload()])
 
     result = cleaning(
         protocol_discussion=None,

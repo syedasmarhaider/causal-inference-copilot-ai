@@ -9,6 +9,7 @@ import pytest
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig
 from python.implementation.workflows.nodes.data_compilation.data_compilation_transformation import (
+    DatasetRepairPlan,
     TransformationResult,
     transform,
 )
@@ -221,9 +222,11 @@ def test_transform_returns_strict_dataset_change_blocker_for_numeric_coded_categ
                         "decision": "dataset_change",
                         "column": "isex",
                         "role": "effect_modifier",
-                        "strict_requirement": "The source dataset must be recoded before this effect modifier can be handled categorically.",
-                        "required_dataset_change": "Replace numeric codes 1 and 2 with explicit category labels such as male and female in the dataset source.",
-                        "addtional_suggestions_to_user": "Update the dataset values first, then rerun compilation so categorical encoding can be grounded safely.",
+                        "problem": "numeric_coded_category",
+                        "action": "normalize_categorical_representation",
+                        "reason": "This effect modifier appears to need categorical handling, but the current numeric coding does not ground a safe categorical encoding plan.",
+                        "repair_instruction": "Replace numeric codes 1 and 2 with explicit category labels such as male and female in the source dataset before recompilation.",
+                        "user_explanation": "Update the dataset values first, then rerun compilation so categorical encoding can be grounded safely.",
                     },
                 ]
             }
@@ -239,10 +242,15 @@ def test_transform_returns_strict_dataset_change_blocker_for_numeric_coded_categ
 
     assert result.transformation_plan is None
     assert result.required_dataset_changes is not None
-    assert "Source dataset changes are required" in result.required_dataset_changes
-    assert "The source dataset must be recoded" in result.required_dataset_changes
-    assert "Replace numeric codes 1 and 2" in result.required_dataset_changes
-    assert "Update the dataset values first" in result.required_dataset_changes
+    assert isinstance(result.required_dataset_changes, DatasetRepairPlan)
+    assert len(result.required_dataset_changes.actions) == 1
+    action = result.required_dataset_changes.actions[0]
+    assert action.column == "isex"
+    assert action.role == "effect_modifier"
+    assert action.problem == "numeric_coded_category"
+    assert action.action == "normalize_categorical_representation"
+    assert "Replace numeric codes 1 and 2" in action.repair_instruction
+    assert action.user_explanation is not None
 
 
 def test_transform_retries_batch_with_repair_request_then_succeeds() -> None:
