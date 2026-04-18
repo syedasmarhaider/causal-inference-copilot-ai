@@ -5,10 +5,9 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from python.domain.service.llm_service import LLMConfig, LLMService
-from python.domain.models.models import ChatMessage
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node, NodeExecutionResult, NodeRequest
-from python.implementation.service.logging.default_logging import get_logger
+from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.general_queries.general_queries_prompts import (
     get_general_queries_node_info,
     get_general_queries_system_prompt,
@@ -19,7 +18,7 @@ from python.implementation.workflows.nodes.general_queries.general_queries_state
     GeneralQueriesState,
 )
 
-log = get_logger(__name__)
+log = get_app_logger(__name__, component="general_queries_node", log_type="node")
 
 
 class _GeneralQueriesResponseModel(BaseModel):
@@ -29,7 +28,7 @@ class _GeneralQueriesResponseModel(BaseModel):
 
 
 class GeneralQueriesNode(Node):
-    NAME: ClassVar[str] = "GENERAL_QUERIES"
+    NAME: ClassVar[str] = GeneralQueriesState.NAME
 
     def __init__(self, *, llm: LLMService) -> None:
         self._llm = llm
@@ -43,37 +42,26 @@ class GeneralQueriesNode(Node):
         return get_general_queries_node_info()
 
     def run(self, *, request: NodeRequest) -> NodeExecutionResult:
-        orchestrator_state = request.orchestrator_state
-        history = request.read_only_messages_history
-
-        # Extract the latest user message as the question
-        user_question = ""
-        if history:
-            for msg in reversed(history):
-                if msg.role == "user":
-                    user_question = msg.content.strip()
-                    break
-
-        # Build a workflow state summary from orchestration state
-        workflow_summary = self._build_workflow_summary(orchestrator_state)
-
-        if not self._has_loaded_dataset(orchestrator_state):
-            workflow_summary = (
-                "⚠️ IMPORTANT: No dataset has been loaded yet. "
-                "The user must upload or select a dataset before any workflow stage can proceed. "
-                "Emphasise this clearly in your response while still answering their question.\n\n"
-                + workflow_summary
+        if not isinstance(request.node_state, GeneralQueriesState):
+            raise TypeError(
+                f"{self.name}: expected GeneralQueriesState, got "
+                f"{type(request.node_state).__name__}"
             )
+
+        orchestrator_state = request.orchestrator_state
+        user_question = _latest_user_message(request.read_only_messages_history)
+        workflow_summary = self._build_workflow_summary(orchestrator_state)
 
         response = self._llm.generate_json(
             schema=_GeneralQueriesResponseModel,
             system_prompt=get_general_queries_system_prompt(),
             user_prompt=get_general_queries_user_prompt(
-                user_question=user_question,
+                user_question=user_question
+                or "The user asked for a workflow-oriented general answer.",
                 workflow_state_summary=workflow_summary,
             ),
-            config=LLMConfig(model="basic", temperature=0.5),
-            history=None,
+            config=LLMConfig(model="basic", temperature=0.3),
+            history=_recent_history(request.read_only_messages_history),
             max_attempts=2,
         )
 
@@ -85,97 +73,216 @@ class GeneralQueriesNode(Node):
             new_node_state=new_state,
             new_orchestrator_state=orchestrator_state,
             status="DONE",
-            action="NEEDS_INPUT",
+            action="NONE",
             response_messages=[
                 ChatMessage(role="assistant", content=response.assistant_message)
             ],
         )
 
-    # -------------------------------------------------------------------------
-    # Workflow state summary builder
-    # -------------------------------------------------------------------------
-
-    def _has_loaded_dataset(self, orchestrator_state: Any) -> bool:
-        dataset_ids: list[Any] = list(orchestrator_state.get("working_dataset_ids") or [])
-        summary = orchestrator_state.get("latest_dataset_summary")
-        return bool(dataset_ids) and summary is not None
-
     def _build_workflow_summary(self, orchestrator_state: Any) -> str:
         sections: list[str] = []
 
-        # Stage 1 — dataset
-        dataset_ids: list[Any] = list(orchestrator_state.get("working_dataset_ids") or [])
+        sections.append(self._build_workflow_position_summary(orchestrator_state))
+        sections.append(self._build_stage1_summary(orchestrator_state))
+        sections.append(self._build_stage2_summary(orchestrator_state))
+        sections.append(self._build_stage3_summary(orchestrator_state))
+        sections.append(self._build_stage4_summary(orchestrator_state))
+        sections.append(self._build_stage5_summary(orchestrator_state))
+
+        return "\n\n".join(section for section in sections if section.strip())
+
+    def _build_workflow_position_summary(self, orchestrator_state: Any) -> str:
+        current_node = _safe_call(orchestrator_state, "get_current_node_name")
+        if not current_node:
+            return "[UNKNOWN] Workflow position could not be derived from orchestrator state."
+
+        companions = _safe_call(
+            orchestrator_state,
+            "get_current_node_companion_names",
+            current_node,
+        )
+        companion_text = (
+            ", ".join(str(name) for name in companions)
+            if isinstance(companions, list) and companions
+            else "none"
+        )
+        return (
+            "[INFO] Current workflow position.\n"
+            f"  Next required node: {current_node}\n"
+            f"  Companion nodes available now: {companion_text}"
+        )
+
+    def _build_stage1_summary(self, orchestrator_state: Any) -> str:
+        dataset_ids = list(orchestrator_state.get("working_dataset_ids") or [])
         summary = orchestrator_state.get("latest_dataset_summary")
-        if self._has_loaded_dataset(orchestrator_state):
-            summary_json = summary.model_dump(mode="json") if hasattr(summary, "model_dump") else summary
-            sections.append(
-                f"[DONE] Stage 1 — Dataset loaded.\n"
-                f"  Active dataset IDs: {[str(d) for d in dataset_ids]}\n"
-                f"  Summary: {json.dumps(summary_json, ensure_ascii=False)}"
-            )
-        else:
-            sections.append("[PENDING] Stage 1 — No dataset loaded yet. Start by uploading or selecting a dataset.")
+        active_dataset_id = orchestrator_state.get("working_dataset_id")
 
-        # Stage 2 — protocol discussion
-        protocol = orchestrator_state.get("protocol_discussion")
-        if protocol:
-            proto_str = str(protocol)
-            sections.append(
-                f"[DONE] Stage 2 — Protocol discussion complete.\n"
-                f"  Protocol excerpt: {proto_str[:300]}{'...' if len(proto_str) > 300 else ''}"
+        if not dataset_ids or summary is None:
+            return (
+                "[PENDING] Stage 1 — Dataset.\n"
+                "  No active dataset has been accepted yet. The user needs to upload, "
+                "select, or prepare a dataset before the workflow can proceed."
             )
-        else:
-            sections.append("[PENDING] Stage 2 — Protocol discussion not started. Define the causal question with the agent.")
 
-        # Stage 3 — compilation + validation
+        n_rows = getattr(summary, "n_rows", None)
+        profiles = getattr(summary, "profiles", None) or []
+        column_names = [
+            str(profile.name).strip()
+            for profile in profiles
+            if str(profile.name).strip()
+        ]
+        preview_columns = ", ".join(column_names[:8]) if column_names else "none"
+        more_suffix = " ..." if len(column_names) > 8 else ""
+        row_text = f"{n_rows} row(s)" if isinstance(n_rows, int) else "unknown row count"
+
+        return (
+            "[DONE] Stage 1 — Dataset accepted.\n"
+            f"  Active dataset ID: {active_dataset_id}\n"
+            f"  Dataset history length: {len(dataset_ids)}\n"
+            f"  Accepted summary: {row_text}, {len(column_names)} column(s)\n"
+            f"  Columns preview: {preview_columns}{more_suffix}"
+        )
+
+    def _build_stage2_summary(self, orchestrator_state: Any) -> str:
+        protocol_discussion = orchestrator_state.get("protocol_discussion")
+        protocol_cleaning_instructions = orchestrator_state.get(
+            "protocol_cleaning_instructions"
+        )
+        causal_spec_draft = orchestrator_state.get("causal_spec_draft")
+
+        if protocol_discussion is None and causal_spec_draft is None:
+            return (
+                "[PENDING] Stage 2 — Protocol discussion and causal draft.\n"
+                "  The causal question has not been confirmed yet."
+            )
+
+        if protocol_discussion is None or causal_spec_draft is None:
+            missing_parts: list[str] = []
+            if protocol_discussion is None:
+                missing_parts.append("confirmed protocol discussion")
+            if causal_spec_draft is None:
+                missing_parts.append("causal draft")
+            return (
+                "[PENDING] Stage 2 — Protocol discussion and causal draft.\n"
+                f"  Partially complete. Missing: {', '.join(missing_parts)}."
+            )
+
+        protocol_excerpt = str(protocol_discussion).strip()
+        protocol_excerpt = protocol_excerpt[:240] + (
+            "..." if len(protocol_excerpt) > 240 else ""
+        )
+        draft_summary = json.dumps(
+            {
+                "treatment_column": causal_spec_draft.treatment_column,
+                "outcome_column": causal_spec_draft.outcome_column,
+                "covariates": list(causal_spec_draft.covariates),
+                "effect_modifiers": list(causal_spec_draft.effect_modifiers),
+                "has_cleaning_instructions": protocol_cleaning_instructions is not None,
+            },
+            ensure_ascii=False,
+        )
+        return (
+            "[DONE] Stage 2 — Protocol discussion and causal draft accepted.\n"
+            f"  Protocol excerpt: {protocol_excerpt}\n"
+            f"  Accepted draft: {draft_summary}"
+        )
+
+    def _build_stage3_summary(self, orchestrator_state: Any) -> str:
         causal_spec = orchestrator_state.get("causal_spec")
         transform_plan = orchestrator_state.get("data_transformation_plan")
-        frozen: bool = bool(orchestrator_state.get("working_dataset_frozen") or False)
-        is_validated: bool = bool(orchestrator_state.get("is_validated") or False)
-        validation_issues: list[Any] = list(orchestrator_state.get("validation_issues") or [])
-        if causal_spec and transform_plan and frozen:
-            if is_validated:
-                sections.append(
-                    f"[DONE] Stage 3 — Compilation and validation complete. "
-                    f"{len(validation_issues)} validation issue(s) recorded."
-                )
-            else:
-                sections.append(
-                    "[PENDING] Stage 3 — Compilation is present but validation has not been confirmed yet."
-                )
-        else:
-            missing: list[str] = []
-            if not causal_spec:
-                missing.append("causal spec")
-            if not transform_plan:
-                missing.append("transformation plan")
-            if not frozen:
-                missing.append("dataset freeze")
-            sections.append(
-                f"[PENDING] Stage 3 — Compilation and validation incomplete. Missing: {', '.join(missing)}."
+        working_dataset_frozen = bool(orchestrator_state.get("working_dataset_frozen") or False)
+        is_validated = bool(orchestrator_state.get("is_validated") or False)
+        validation_issues = list(orchestrator_state.get("validation_issues") or [])
+
+        if (
+            causal_spec is not None
+            and transform_plan is not None
+            and working_dataset_frozen
+            and is_validated
+        ):
+            return (
+                "[DONE] Stage 3 — Compilation, transformation planning, and validation accepted.\n"
+                f"  Frozen dataset: yes\n"
+                f"  Validation issue count: {len(validation_issues)}"
             )
 
-        # Stage 4 — model selection
+        missing_parts: list[str] = []
+        if causal_spec is None:
+            missing_parts.append("compiled causal specification")
+        if transform_plan is None:
+            missing_parts.append("accepted transformation plan")
+        if not working_dataset_frozen:
+            missing_parts.append("dataset freeze")
+        if not is_validated:
+            missing_parts.append("accepted validation state")
+
+        return (
+            "[PENDING] Stage 3 — Compilation, transformation planning, and validation.\n"
+            f"  Not fully accepted yet. Missing: {', '.join(missing_parts)}."
+        )
+
+    def _build_stage4_summary(self, orchestrator_state: Any) -> str:
         selected_model = orchestrator_state.get("selected_model")
-        reasoning = orchestrator_state.get("selection_reasoning")
-        if selected_model:
-            sections.append(
-                f"[DONE] Stage 4 — Model selected: {selected_model}.\n"
-                f"  Reasoning: {reasoning or 'N/A'}"
-            )
-        else:
-            sections.append("[PENDING] Stage 4 — Model not yet selected.")
+        selection_reasoning = orchestrator_state.get("selection_reasoning")
 
-        # Stage 5 — training
+        if selected_model is None or selection_reasoning is None:
+            return "[PENDING] Stage 4 — Model selection has not been accepted yet."
+
+        return (
+            "[DONE] Stage 4 — Model selection accepted.\n"
+            f"  Selected model: {selected_model}\n"
+            f"  Reasoning: {str(selection_reasoning).strip()}"
+        )
+
+    def _build_stage5_summary(self, orchestrator_state: Any) -> str:
         trained_model_id = orchestrator_state.get("trained_model_id")
-        training_warnings: list[Any] = list(orchestrator_state.get("training_warnings") or [])
-        if trained_model_id:
-            warn_txt = f" ({len(training_warnings)} warning(s))" if training_warnings else ""
-            sections.append(f"[DONE] Stage 5 — Model trained{warn_txt}. Model ID: {trained_model_id}")
-        else:
-            sections.append("[PENDING] Stage 5 — Model training not started.")
+        training_warnings = list(orchestrator_state.get("training_warnings") or [])
 
-        return "\n\n".join(sections)
+        if trained_model_id is None:
+            return "[PENDING] Stage 5 — Model training has not been completed yet."
+
+        warning_text = f"{len(training_warnings)} warning(s)" if training_warnings else "no warnings"
+        return (
+            "[DONE] Stage 5 — Model training completed.\n"
+            f"  Trained model ID: {trained_model_id}\n"
+            f"  Training warnings: {warning_text}"
+        )
+
+
+def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
+    if not messages_history:
+        return None
+    for message in reversed(messages_history):
+        if message.role != "user":
+            continue
+        content = message.content.strip()
+        if content:
+            return content
+    return None
+
+
+def _recent_history(
+    messages_history: Sequence[ChatMessage] | None,
+) -> list[ChatMessage] | None:
+    if not messages_history:
+        return None
+    recent = [message for message in messages_history[-6:] if message.content.strip()]
+    return recent or None
+
+
+def _safe_call(target: Any, method_name: str, *args: Any) -> Any:
+    method = getattr(target, method_name, None)
+    if not callable(method):
+        return None
+    try:
+        return method(*args)
+    except Exception as exc:
+        log.warning(
+            "general queries workflow summary call failed",
+            method_name=method_name,
+            error=repr(exc),
+        )
+        return None
 
 
 __all__ = ["GeneralQueriesNode"]
