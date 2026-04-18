@@ -173,7 +173,11 @@ class DataCompilationNode(Node):
                 request=request,
                 payload=payload,
                 user_message=payload.assistant_message
-                or "The compilation step is blocked and needs upstream revision.",
+                or (
+                    "The compilation step hit a hard blocker and needs upstream revision."
+                    if payload.hard_failure
+                    else "The compilation step is blocked and needs upstream revision."
+                ),
             )
 
         try:
@@ -306,6 +310,7 @@ class DataCompilationNode(Node):
                 "validation_issues": [],
                 "validation_status": None,
                 "phase": "INIT",
+                "hard_failure": False,
                 "assistant_message": None,
                 "system_message": None,
                 "error_message": None,
@@ -747,10 +752,11 @@ class DataCompilationNode(Node):
             )
             confirmed_payload = payload.model_copy(
                 update={
-                    "phase": "CONFIRMED",
-                    "assistant_message": decision.assistant_message,
-                    "system_message": None,
-                    "error_message": None,
+                "phase": "CONFIRMED",
+                "hard_failure": False,
+                "assistant_message": decision.assistant_message,
+                "system_message": None,
+                "error_message": None,
                 }
             )
             return self._done_result(
@@ -763,6 +769,7 @@ class DataCompilationNode(Node):
             revised_payload = payload.model_copy(
                 update={
                     "phase": "FAILED",
+                    "hard_failure": False,
                     "assistant_message": decision.assistant_message,
                     "system_message": "DATA_COMPILATION_REVISION_REQUESTED",
                     "error_message": "user requested revision after review",
@@ -777,6 +784,7 @@ class DataCompilationNode(Node):
         clarified_payload = payload.model_copy(
             update={
                 "assistant_message": decision.assistant_message,
+                "hard_failure": False,
                 "system_message": None,
                 "error_message": None,
             }
@@ -963,8 +971,9 @@ class DataCompilationNode(Node):
         failed_payload = payload.model_copy(
             update={
                 "phase": "FAILED",
+                "hard_failure": True,
                 "assistant_message": user_message,
-                "system_message": "DATA_COMPILATION_FAILED",
+                "system_message": "DATA_COMPILATION_HARD_FAILED",
                 "error_message": error_message,
             }
         )

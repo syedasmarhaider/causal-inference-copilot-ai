@@ -47,6 +47,7 @@ class DataCompilationPayloadModel(BaseModel):
     retry_feedback: str | None = None
     repair_context: str | None = None
     phase: DataCompilationPhase = "INIT"
+    hard_failure: bool = False
     assistant_message: str | None = None
     system_message: str | None = None
     error_message: str | None = None
@@ -120,6 +121,7 @@ class DataCompilationPayloadModel(BaseModel):
                 "retry_feedback": None,
                 "repair_context": None,
                 "phase": "INIT",
+                "hard_failure": False,
                 "assistant_message": None,
                 "system_message": None,
                 "error_message": None,

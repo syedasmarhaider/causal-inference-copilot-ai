@@ -481,6 +481,7 @@ def test_data_compilation_node_transformation_retry_exhausted_message_is_clinici
     assert result.status == "ABORTED"
     assert result.action == "NONE"
     assert "one remaining data issue still blocks a safe baseline transformation plan" in message
+    assert result.new_node_state.payload.hard_failure is True
     assert "The column 'iage' used as an effect modifier still needs to be fixed" in message
     assert "Most direct fix: Impute the missing values in 'iage' before recompilation." in message
     assert "Practical option: There is very little missingness in 'iage' (approximately 1 row)" in message
@@ -623,8 +624,10 @@ def test_data_compilation_node_aborts_on_hard_validation_failure() -> None:
     assert result.status == "ABORTED"
     assert result.action == "NONE"
     assert payload.phase == "FAILED"
+    assert payload.hard_failure is True
     assert payload.validation_retry_count == 0
     assert payload.compiled_dataset_id is not None
+    assert payload.system_message == "DATA_COMPILATION_HARD_FAILED"
 
 
 def test_data_compilation_node_review_confirm_publishes_outputs() -> None:
@@ -772,6 +775,7 @@ def test_data_compilation_node_review_revise_keeps_only_preaccept_dataset_refres
     assert first_payload.phase == "REVIEW_READY"
     assert second_result.status == "ABORTED"
     assert second_result.new_node_state.payload.phase == "FAILED"
+    assert second_result.new_node_state.payload.hard_failure is False
     assert orchestrator_state.get("working_dataset_id") == first_payload.compiled_dataset_id
     assert orchestrator_state.get("latest_dataset_summary") == first_payload.compiled_dataset_summary
     assert orchestrator_state.get("causal_spec") is None

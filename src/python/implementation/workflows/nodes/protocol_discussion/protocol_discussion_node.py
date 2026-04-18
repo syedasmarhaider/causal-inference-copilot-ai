@@ -23,6 +23,11 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     initial_user_message,
     summarize_upstream_data_prep_decisions,
 )
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_summary_blockers import (
+    build_summary_blocker_follow_up_message,
+    scan_protocol_summary_blockers,
+    unresolved_summary_blockers,
+)
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionPayloadModel,
     ProtocolDiscussionState,
@@ -256,6 +261,25 @@ class ProtocolDiscussionNode(Node):
             f"Last validation issue: {last_issue_message or 'unknown validation failure'}"
         )
 
+    def _compile_preview_causal_spec_draft(
+        self,
+        *,
+        protocol_discussion: str,
+        dataset_summary,
+    ) -> CausalSpecDraft | None:
+        try:
+            return compile_causal_spec_draft_from_discussion(
+                llm=self._llm,
+                protocol_discussion=protocol_discussion,
+                dataset_summary=dataset_summary,
+            )
+        except Exception as e:
+            log.warning(
+                "PROTOCOL_DISCUSSION preview causal draft compile failed before review: %s",
+                safe_err(e),
+            )
+            return None
+
     @staticmethod
     def _causal_draft_compile_failure_message(error_message: str) -> str:
         return (
@@ -427,6 +451,39 @@ class ProtocolDiscussionNode(Node):
         )
 
         if decision.next_action == "confirm":
+            preview_draft = self._compile_preview_causal_spec_draft(
+                protocol_discussion=decision.discussion,
+                dataset_summary=deps.dataset_summary,
+            )
+            if preview_draft is not None:
+                blockers = scan_protocol_summary_blockers(
+                    dataset_summary=deps.dataset_summary,
+                    treatment_column=str(preview_draft.treatment_column),
+                    outcome_column=str(preview_draft.outcome_column),
+                    covariates=[str(column) for column in preview_draft.covariates],
+                    effect_modifiers=[str(column) for column in preview_draft.effect_modifiers],
+                )
+                pending_blockers = unresolved_summary_blockers(
+                    protocol_discussion=decision.discussion,
+                    blockers=blockers,
+                )
+                if pending_blockers:
+                    blocker_message = build_summary_blocker_follow_up_message(pending_blockers)
+                    return self._needs_input_result(
+                        request=request,
+                        payload=payload.model_copy(
+                            update={
+                                "discussion": decision.discussion,
+                                "phase": "DISCUSSING",
+                                "pending_dataset_change_request": None,
+                                "assistant_message": self._prefix_dataset_reset_message(
+                                    assistant_message=blocker_message,
+                                    dataset_changed=dataset_changed,
+                                    prior_dataset_id=prior_dataset_id,
+                                ),
+                            }
+                        ),
+                    )
             try:
                 review_summary = self._call_review_summary(
                     protocol_discussion=decision.discussion,
