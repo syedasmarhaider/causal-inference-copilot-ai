@@ -245,7 +245,7 @@ def test_transform_returns_strict_dataset_change_blocker_for_numeric_coded_categ
     assert "Update the dataset values first" in result.required_dataset_changes
 
 
-def test_transform_retries_batch_then_falls_back_to_columnwise_generation() -> None:
+def test_transform_retries_batch_with_repair_request_then_succeeds() -> None:
     dataframe = _build_dataframe()
     llm = _FakeLLM(
         json_outputs=[
@@ -266,25 +266,15 @@ def test_transform_retries_batch_then_falls_back_to_columnwise_generation() -> N
                         "column": "age",
                         "role": "covariate",
                         "preset": "passthrough",
+                    },
+                    {
+                        "decision": "plan",
+                        "column": "isex",
+                        "role": "effect_modifier",
+                        "preset": "num_standard",
                     }
                 ]
-            },
-            {
-                "column": {
-                    "decision": "plan",
-                    "column": "age",
-                    "role": "covariate",
-                    "preset": "passthrough",
-                }
-            },
-            {
-                "column": {
-                    "decision": "plan",
-                    "column": "isex",
-                    "role": "effect_modifier",
-                    "preset": "num_standard",
-                }
-            },
+            }
         ]
     )
 
@@ -297,14 +287,13 @@ def test_transform_retries_batch_then_falls_back_to_columnwise_generation() -> N
 
     assert result.transformation_plan is not None
     assert result.required_dataset_changes is None
-    assert len(llm.generate_json_calls) == 4
+    assert len(llm.generate_json_calls) == 2
     second_batch_payload = json.loads(str(llm.generate_json_calls[1]["user_prompt"]))
     assert "repair_request" in second_batch_payload
     assert "columns array" in str(llm.generate_json_calls[0]["system_prompt"])
-    assert "single `column` entry" in str(llm.generate_json_calls[2]["system_prompt"])
 
 
-def test_transform_raises_when_final_columnwise_plan_is_still_incompatible() -> None:
+def test_transform_raises_when_batch_retry_is_still_incompatible() -> None:
     dataframe = _build_dataframe()
     llm = _FakeLLM(
         json_outputs=[
@@ -327,30 +316,15 @@ def test_transform_raises_when_final_columnwise_plan_is_still_incompatible() -> 
                         "preset": "passthrough",
                     }
                 ]
-            },
-            {
-                "column": {
-                    "decision": "plan",
-                    "column": "age",
-                    "role": "covariate",
-                    "preset": "cat_onehot",
-                }
-            },
-            {
-                "column": {
-                    "decision": "plan",
-                    "column": "isex",
-                    "role": "effect_modifier",
-                    "preset": "passthrough",
-                }
-            },
+            }
         ]
     )
 
-    with pytest.raises(ValueError, match="incompatibilities|missing eligible columns"):
+    with pytest.raises(ValueError, match="batch transformation draft failed after retry"):
         transform(
             transformation_instructions="",
             causal_spec=CausalSpec.model_validate(_causal_spec_payload()),
             data_summary=_build_summary(dataframe),
             llm=llm,
         )
+    assert len(llm.generate_json_calls) == 2

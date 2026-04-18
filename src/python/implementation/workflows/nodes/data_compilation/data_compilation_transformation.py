@@ -7,7 +7,9 @@ from typing import Annotated, Any, Literal, Sequence
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from python.domain.service.llm_service import LLMConfig, LLMService
-from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import batch_transform_prompt, single_column_transform_prompt
+from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
+    batch_transform_prompt,
+)
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.encoding.encoding_plan_tool import (
     EncodingPlanTool,
@@ -84,12 +86,6 @@ class _BatchTransformDraft(BaseModel):
     columns: list[_DraftColumn] = Field(..., min_length=1)
 
 
-class _SingleColumnTransformDraft(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    column: _DraftColumn
-
-
 def transform(
     *,
     transformation_instructions: str,
@@ -110,18 +106,7 @@ def transform(
     )
     encoding_plan_tool = EncodingPlanTool()
 
-    batch_result = _generate_batch_result(
-        llm=llm,
-        transformation_instructions=transformation_instructions,
-        causal_spec=causal_spec,
-        scoped_summary=scoped_summary,
-        expected_role_by_column=expected_role_by_column,
-        encoding_plan_tool=encoding_plan_tool,
-    )
-    if batch_result is not None:
-        return batch_result
-
-    return _generate_columnwise_result(
+    return _generate_batch_result(
         llm=llm,
         transformation_instructions=transformation_instructions,
         causal_spec=causal_spec,
@@ -139,7 +124,7 @@ def _generate_batch_result(
     scoped_summary: DatasetSummaryModel,
     expected_role_by_column: dict[str, Literal["covariate", "effect_modifier"]],
     encoding_plan_tool: EncodingPlanTool,
-) -> TransformationResult | None:
+) -> TransformationResult:
     repair_request: str | None = None
 
     for _ in range(2):
@@ -174,60 +159,9 @@ def _generate_batch_result(
         except Exception as exc:
             repair_request = _exception_chain_text(exc)
 
-    return None
-
-
-def _generate_columnwise_result(
-    *,
-    llm: LLMService,
-    transformation_instructions: str,
-    causal_spec: CausalSpec,
-    scoped_summary: DatasetSummaryModel,
-    expected_role_by_column: dict[str, Literal["covariate", "effect_modifier"]],
-    encoding_plan_tool: EncodingPlanTool,
-) -> TransformationResult:
-    profiles_by_name = {
-        str(profile.name).strip(): profile for profile in scoped_summary.profiles
-    }
-    draft_columns: list[_DraftColumn] = []
-
-    for column, role in expected_role_by_column.items():
-        profile = profiles_by_name.get(column)
-        if profile is None:
-            raise ValueError(
-                f"eligible transformation column is missing from dataset summary: {column}"
-            )
-
-        draft = llm.generate_json(
-            schema=_SingleColumnTransformDraft,
-            system_prompt=single_column_transform_prompt(),
-            user_prompt=json.dumps(
-                {
-                    "transformation_instructions": _normalize_text(
-                        transformation_instructions
-                    ),
-                    "compiled_causal_specification": causal_spec.model_dump(mode="json"),
-                    "column_name": column,
-                    "expected_role": role,
-                    "column_profile": _column_prompt_payload(profile),
-                },
-                ensure_ascii=False,
-            ),
-            config=LLMConfig(
-                model="basic",
-                temperature=0.2,
-                max_tokens=1200,
-            ),
-            history=None,
-            max_attempts=2,
-        )
-        draft_columns.append(draft.column)
-
-    return _result_from_draft(
-        draft_columns=draft_columns,
-        scoped_summary=scoped_summary,
-        expected_role_by_column=expected_role_by_column,
-        encoding_plan_tool=encoding_plan_tool,
+    raise ValueError(
+        "batch transformation draft failed after retry: "
+        f"{repair_request or 'unknown batch generation error'}"
     )
 
 
