@@ -21,6 +21,7 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     get_protocol_discussion_update_prompt,
     get_questions,
     initial_user_message,
+    summarize_upstream_data_prep_decisions,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionPayloadModel,
@@ -200,10 +201,14 @@ class ProtocolDiscussionNode(Node):
         preview = " ".join(compact_lines[:6])
         if len(preview) > 900:
             preview = preview[:897].rstrip() + "..."
-        return (
+        prep_decisions = summarize_upstream_data_prep_decisions(protocol_discussion)
+        summary = (
             "I drafted the final protocol summary based on the current discussion. "
-            f"{preview} Please confirm this protocol, or tell me exactly what should change."
+            f"{preview}"
         )
+        if prep_decisions:
+            summary += f" Before modeling, we will also follow these agreed data-preparation decisions: {prep_decisions}"
+        return f"{summary} Please confirm this protocol, or tell me exactly what should change."
 
     def _compile_confirmed_causal_spec_draft(
         self,

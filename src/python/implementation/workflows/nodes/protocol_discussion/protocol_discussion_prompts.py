@@ -5,8 +5,9 @@ def get_protocol_discussion_get_node_info() -> str:
     return (
         "Node for target-trial style protocol discussion grounded in the active dataset. "
         "It updates the protocol discussion, decides whether the discussion should continue, "
-        "or be confirmed, and on confirmation stores grounded protocol-cleaning "
-        "instructions for the downstream compilation stage."
+        "or be confirmed, captures grounded upstream data-preparation decisions, and on "
+        "confirmation stores grounded protocol-cleaning instructions for the downstream "
+        "compilation stage."
     )
 
 
@@ -43,6 +44,15 @@ Feasibility and design checks:
 """.strip()
 
 
+_BLOCKER_RULES = """
+Upstream blocker policy:
+- Surface only blockers that would prevent safe compilation, transformation, or validation for the chosen treatment, outcome, covariates, and effect modifiers.
+- Focus on clinically meaningful blockers such as treatment/outcome mapping ambiguity, treatment or outcome missing/invalid values, baseline covariate/effect-modifier missingness, coded categorical variables with unclear meaning, and suspected post-treatment variable misuse.
+- Ask at most 2 blocker questions in one turn, and prefer the most important unresolved blockers first.
+- Do not enumerate non-blocking profiling trivia or generic dataset observations.
+""".strip()
+
+
 _CONFIRM_RULES = """
 Confirmation rules:
 - next_action="confirm" only if the latest user message clearly confirms the current protocol discussion and the essentials are complete, coherent, and feasible.
@@ -71,11 +81,13 @@ Tasks:
 
 {_FEASIBILITY_RULES}
 
+{_BLOCKER_RULES}
+
 {_CONFIRM_RULES}
 
 Assistant message policy:
 - Do not be terse. The user prefers comprehensive, specific responses.
-- For next_action="continue", answer the latest user point first and then ask the most important missing follow-up question if one is still needed.
+- For next_action="continue", answer the latest user point first and then ask the most important unresolved blocker question if one is still needed.
 - For next_action="confirm", acknowledge that the protocol discussion is now confirmed and explain that the compilation stage will clean, compile, transform, and validate next.
 - If the protocol cannot proceed under the current assumptions or data, keep next_action="continue" and explain clearly what is not possible, apologize briefly, and state what would need to change.
 
@@ -84,13 +96,16 @@ dataset_change_request policy when next_action="confirm":
 - Make it self-contained, operational, and grounded.
 - State explicitly that this is a data-changing request.
 - Specify the confirmed treatment, outcome, covariates, effect modifiers, and any time-zero relevant columns that must be preserved.
+- Carry forward the confirmed upstream data-preparation decisions from the protocol, especially treatment/outcome value handling and baseline covariate/effect-modifier preparation decisions.
 - End the request with one exact line in this format: `Final protocol-scope columns to keep exactly: col_a, col_b, col_c`
 - Specify row filters or cohort eligibility restrictions only when they are grounded in the discussion.
 - Specify columns to remove only when grounded; otherwise explicitly say not to drop columns beyond the confirmed protocol scope.
 - If treatment is binary, instruct normalization to exactly two canonical values and removal or mapping of unexpected values as grounded by the discussion.
 - If outcome is binary, instruct normalization to exactly two canonical values and handling of unexpected labels as grounded by the discussion.
+- If the protocol approved baseline missingness handling, state the approved imputation or unknown-category handling explicitly and preserve the locked baseline columns.
+- If a coded categorical baseline feature needs normalization, state the approved normalization explicitly.
 - If post-treatment variables were identified, instruct that they must not be used as baseline adjustment features.
-- Do not invent filters, drops, or mappings that are not grounded.
+- Do not invent filters, drops, mappings, imputations, or normalization rules that are not grounded.
 
 Output format:
 Return ONLY JSON with exactly:
@@ -120,6 +135,7 @@ Rules:
 - Do not say the protocol is already confirmed.
 - Do not mention internal phases, JSON, or workflow implementation.
 - Summarize the proposed treatment, outcome, study type, target population, time-zero approach, covariates, and effect modifiers when grounded.
+- Summarize the approved upstream data-preparation decisions when grounded, especially treatment/outcome value handling and baseline feature preparation decisions.
 - Mention important outcome-mapping or snapshot assumptions when grounded.
 - End with a direct confirmation question.
 
@@ -176,6 +192,11 @@ def get_questions() -> list[str]:
         "12) Suspected post-treatment variables (optional): variables measured after t0 or after treatment starts.",
         "13) If Q4=No: acknowledge snapshot assumptions (Yes/No): shared baseline, T before Y, positivity, consistency, "
         "no post-treatment adjustment.",
+        "14) Treatment/outcome data-quality decisions: If treatment or outcome has missing, unexpected, or coded values, "
+        "how should they be handled before modeling? State the exact mapping, exclusion rule, or keep-as-is decision.",
+        "15) Baseline feature preparation decisions: For selected covariates/effect modifiers with missingness, unknown "
+        "categories, or coded categorical values, how should they be prepared before modeling? State the approved "
+        "imputation, category handling, or normalization decisions.",
     ]
 
 
@@ -183,5 +204,30 @@ def initial_user_message() -> str:
     return (
         "Let’s define the protocol carefully from the current dataset. "
         "Please state the causal question, treatment, outcome, study type, target population, "
-        "and how you want to define time zero."
+        "how you want to define time zero, and any upstream data-handling decisions you already "
+        "want for treatment, outcome, or baseline features."
     )
+
+
+def summarize_upstream_data_prep_decisions(protocol_discussion: str) -> str | None:
+    items: list[str] = []
+    for prefix in ("14)", "15)"):
+        line = _find_protocol_line(protocol_discussion, prefix)
+        if line is None:
+            continue
+        normalized = line.strip()
+        lowered = normalized.lower()
+        if "unclear" in lowered:
+            continue
+        items.append(normalized)
+    if not items:
+        return None
+    return " ".join(items)
+
+
+def _find_protocol_line(protocol_discussion: str, prefix: str) -> str | None:
+    for line in protocol_discussion.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            return stripped
+    return None
