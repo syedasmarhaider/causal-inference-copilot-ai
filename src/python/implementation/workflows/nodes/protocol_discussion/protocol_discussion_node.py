@@ -7,6 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node, NodeExecutionResult, NodeRequest
 from python.implementation.service.logging.default_logging import get_logger
@@ -24,6 +25,10 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionPayloadModel,
     ProtocolDiscussionState,
+)
+from python.implementation.workflows.tools.causal.specs.causal_spec_draft import (
+    CausalSpecDraft,
+    compile_causal_spec_draft_from_discussion,
 )
 from python.implementation.workflows.utils.utils import safe_err
 
@@ -66,8 +71,9 @@ class _ReviewDecisionModel(BaseModel):
 class ProtocolDiscussionNode(Node):
     NAME: ClassVar[str] = "PROTOCOL_DISCUSSION"
 
-    def __init__(self, *, llm: LLMService) -> None:
+    def __init__(self, *, llm: LLMService, data_repo: DataRepo | None = None) -> None:
         self._llm = llm
+        self._data_repo = data_repo
 
     @property
     def name(self) -> str:
@@ -199,6 +205,61 @@ class ProtocolDiscussionNode(Node):
             f"{preview} Please confirm this protocol, or tell me exactly what should change."
         )
 
+    def _compile_confirmed_causal_spec_draft(
+        self,
+        *,
+        request: NodeRequest,
+        deps: ProtocolDiscussionDeps,
+        protocol_discussion: str,
+    ) -> CausalSpecDraft:
+        if self._data_repo is None:
+            raise RuntimeError(
+                "PROTOCOL_DISCUSSION requires data_repo to validate the compiled causal draft"
+            )
+
+        validation_df = self._data_repo.get_csv_data(
+            user_id=request.user_id,
+            conversation_id=request.conversation_id,
+            dataset_id=deps.dataset_id,
+            limit=1,
+        )
+
+        retry_feedback: str | None = None
+        previous_draft: CausalSpecDraft | None = None
+        last_issue_message: str | None = None
+        for _ in range(2):
+            draft = compile_causal_spec_draft_from_discussion(
+                llm=self._llm,
+                protocol_discussion=protocol_discussion,
+                dataset_summary=deps.dataset_summary,
+                retry_feedback=retry_feedback,
+                previous_draft=previous_draft,
+            )
+            validation_issue = draft.validate_against_dataframe(df=validation_df)
+            if validation_issue is None:
+                return draft
+
+            previous_draft = draft
+            last_issue_message = f"{validation_issue.severity}: {validation_issue.message}"
+            retry_feedback = (
+                "The previous causal draft failed dataset validation. "
+                f"Fix this exactly: {last_issue_message}"
+            )
+
+        raise ValueError(
+            "Could not compile a grounded causal draft from the confirmed protocol. "
+            f"Last validation issue: {last_issue_message or 'unknown validation failure'}"
+        )
+
+    @staticmethod
+    def _causal_draft_compile_failure_message(error_message: str) -> str:
+        return (
+            "I could not finalize the confirmed protocol into a grounded causal draft after "
+            f"two validation attempts against the active dataset. {error_message} "
+            "Please revise the treatment, outcome, covariates, or effect modifiers so they "
+            "match exact dataset columns."
+        )
+
     def run(
         self,
         *,
@@ -271,6 +332,29 @@ class ProtocolDiscussionNode(Node):
                 )
 
             if review_decision.action == "confirm":
+                try:
+                    causal_spec_draft = self._compile_confirmed_causal_spec_draft(
+                        request=request,
+                        deps=deps,
+                        protocol_discussion=payload.discussion,
+                    )
+                except Exception as e:
+                    log.exception(
+                        "PROTOCOL_DISCUSSION causal draft compile failure: %s", safe_err(e)
+                    )
+                    return self._needs_input_result(
+                        request=request,
+                        payload=payload.model_copy(
+                            update={
+                                "phase": "DISCUSSING",
+                                "pending_dataset_change_request": None,
+                                "assistant_message": self._causal_draft_compile_failure_message(
+                                    safe_err(e)
+                                ),
+                            }
+                        ),
+                    )
+
                 confirmed_payload = payload.model_copy(
                     update={
                         "phase": "CONFIRMED",
@@ -285,6 +369,7 @@ class ProtocolDiscussionNode(Node):
                             str,
                             confirmed_payload.pending_dataset_change_request,
                         ),
+                        "causal_spec_draft": causal_spec_draft,
                     },
                 )
                 return self._done_result(

@@ -350,7 +350,7 @@ def init_all_nodes_with_name_as_key(
         llm=llm,
         tools_factory=tool_factory,
     )
-    protocol_discussion_node = ProtocolDiscussionNode(llm=llm)
+    protocol_discussion_node = ProtocolDiscussionNode(llm=llm, data_repo=data_repo)
     data_compilation_node = DataCompilationNode(
         data_repo=data_repo,
         llm=llm,
