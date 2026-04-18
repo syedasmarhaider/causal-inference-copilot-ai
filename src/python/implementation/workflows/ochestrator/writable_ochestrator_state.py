@@ -209,19 +209,28 @@ class WritableOchestratorState(OchestratorState):
         self._clear_stages_from(3, reason="stage-2 causal spec draft updated")
 
     def _set_data_compilation(self, value: dict[str, Any]) -> None:
-        if "working_dataset_id" not in value or "latest_dataset_summary" not in value:
+        if (
+            "working_dataset_id" not in value
+            or "latest_dataset_summary" not in value
+            or "causal_spec_draft" not in value
+        ):
             raise KeyError(
-                "DATA_COMPILATION updates must include working_dataset_id and latest_dataset_summary"
+                "DATA_COMPILATION updates must include working_dataset_id, "
+                "latest_dataset_summary and causal_spec_draft"
             )
 
         self._require_stage2()
 
         dataset_id = self._parse_dataset_id(value["working_dataset_id"], field_name="working_dataset_id")
         latest_dataset_summary = self._parse_dataset_summary(value["latest_dataset_summary"])
+        causal_spec_draft = self._parse_causal_spec_draft(value["causal_spec_draft"])
+        self._require_matching_causal_spec_draft(causal_spec_draft)
+
         self._set_stage1_fields(
             working_dataset_ids=self._append_dataset_id_if_needed(self._model.working_dataset_ids, dataset_id),
             latest_dataset_summary=latest_dataset_summary,
         )
+        self._model.causal_spec_draft = causal_spec_draft
 
         has_stage3_payload = any(field in value for field in self._STAGE_FIELDS[3])
         if not has_stage3_payload:
@@ -478,6 +487,17 @@ class WritableOchestratorState(OchestratorState):
         if raw is None:
             return None
         return raw if isinstance(raw, CausalSpecDraft) else CausalSpecDraft.model_validate(raw)
+
+    def _require_matching_causal_spec_draft(self, draft: CausalSpecDraft | None) -> None:
+        current_draft = self._model.causal_spec_draft
+        if current_draft is None:
+            raise ValueError("Stage 2 incomplete: causal_spec_draft not set")
+        if draft is None:
+            raise ValueError("DATA_COMPILATION causal_spec_draft must not be None")
+        if current_draft.model_dump(mode="json") != draft.model_dump(mode="json"):
+            raise ValueError(
+                "DATA_COMPILATION causal_spec_draft must match the current stored causal_spec_draft"
+            )
 
     @staticmethod
     def _parse_causal_spec(raw: Any) -> CausalSpec | None:
