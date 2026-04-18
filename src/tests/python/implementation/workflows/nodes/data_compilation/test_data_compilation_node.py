@@ -378,6 +378,66 @@ def test_data_compilation_node_auto_retries_full_compile_when_transform_requires
     assert transform_mock.call_count == 2
     second_cleaning_call = cleaning_mock.call_args_list[1]
     assert "isex" in second_cleaning_call.kwargs["cleaning_instructions"]
+    assert "Required dataset fix:" in second_cleaning_call.kwargs["cleaning_instructions"]
+    assert "Automatic retry fix request from downstream transformation planning" in second_cleaning_call.kwargs["cleaning_instructions"]
+
+
+def test_data_compilation_node_transformation_retry_exhausted_message_is_clinician_facing() -> None:
+    dataframe = _build_dataframe()
+    dataset_summary = _build_summary(dataframe)
+    dataset_id = uuid4()
+    llm = _FakeLLM()
+    data_repo = _InMemoryDataRepo(dataframes={dataset_id: dataframe.copy()})
+    node = DataCompilationNode(data_repo=data_repo, llm=llm, tools_factory=_tool_factory())
+    orchestrator_state = _build_orchestrator_state(
+        dataset_id=dataset_id,
+        dataset_summary=dataset_summary,
+    )
+    required_dataset_changes = (
+        "Source dataset changes are required before a safe transformation plan can be produced.\n"
+        "Column 'iage' (effect_modifier): Effect modifiers must not contain missing values for the current estimation configuration.\n"
+        "Required dataset change: Remove rows where 'iage' is missing or impute the missing values in the source dataset.\n"
+        "Suggested next step: There is a very small amount of missingness in 'iage' (approximately 1 row). Filtering this row from the dataset is the most straightforward fix."
+    )
+
+    with (
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.cleaning",
+            side_effect=[_cleaning_result(dataframe), _cleaning_result(dataframe)],
+        ),
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
+            side_effect=[
+                TransformationResult(
+                    transformation_plan=None,
+                    required_dataset_changes=required_dataset_changes,
+                ),
+                TransformationResult(
+                    transformation_plan=None,
+                    required_dataset_changes=required_dataset_changes,
+                ),
+            ],
+        ),
+    ):
+        result = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=DataCompilationState.init_empty(),
+                orchestrator_state=orchestrator_state,
+                read_only_messages_history=[ChatMessage(role="user", content="compile it")],
+            )
+        )
+
+    message = result.response_messages[0].content if result.response_messages else ""
+    assert result.status == "ABORTED"
+    assert result.action == "NONE"
+    assert "one remaining data issue still blocks a safe baseline transformation plan" in message
+    assert "The column 'iage' used as an effect modifier still needs to be fixed" in message
+    assert "Most direct fix: Remove rows where 'iage' is missing or impute the missing values in the source dataset." in message
+    assert "Practical option: There is a very small amount of missingness in 'iage' (approximately 1 row)." in message
+    assert "If you want to keep the current causal draft, update the dataset and rerun compilation." in message
+    assert "Source dataset changes are required before a safe transformation plan can be produced." not in message
 
 
 def test_data_compilation_node_auto_retries_validation_on_cleaned_dataset() -> None:

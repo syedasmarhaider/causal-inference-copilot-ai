@@ -82,6 +82,21 @@ class _CompiledArtifacts:
     warnings: list[str]
 
 
+@dataclass(frozen=True)
+class _DatasetChangeGuidance:
+    column: str
+    role: str | None
+    problem: str
+    required_change: str | None
+    suggested_next_step: str | None
+
+
+@dataclass(frozen=True)
+class _ValidationRepairGuidance:
+    issue: str
+    fix_hint: str | None
+
+
 class DataCompilationNode(Node):
     NAME: ClassVar[str] = DataCompilationState.NAME
 
@@ -837,14 +852,12 @@ class DataCompilationNode(Node):
         if normalized_protocol_instructions:
             parts.append(normalized_protocol_instructions)
         if normalized_retry_feedback:
+            retry_cleaning_instructions = _build_cleaning_retry_instructions(
+                normalized_retry_feedback
+            )
             if parts:
                 parts.append("")
-            parts.extend(
-                [
-                    data_compilation_compile_retry_guidance_prompt(),
-                    normalized_retry_feedback,
-                ]
-            )
+            parts.append(retry_cleaning_instructions)
         return "\n".join(parts).strip()
 
     def _build_transformation_instructions(
@@ -1075,6 +1088,31 @@ def _format_issue_lines(issues: Sequence[ValidationIssueModel]) -> list[str]:
     return lines
 
 
+def _build_cleaning_retry_instructions(retry_feedback: str) -> str:
+    guidance = _parse_required_dataset_changes(retry_feedback)
+    if not guidance:
+        return "\n".join(
+            [
+                data_compilation_compile_retry_guidance_prompt(),
+                retry_feedback.strip(),
+            ]
+        ).strip()
+
+    lines = [
+        "Automatic retry fix request from downstream transformation planning:",
+        "Apply the following grounded dataset fixes before recompiling the causal specification.",
+        "Keep treatment, outcome, covariates, and effect modifiers locked to the confirmed draft columns.",
+    ]
+    for item in guidance:
+        role_text = f" ({item.role.replace('_', ' ')})" if item.role else ""
+        lines.append(f"- {item.column}{role_text}: {item.problem}")
+        if item.required_change:
+            lines.append(f"  Required dataset fix: {item.required_change}")
+        if item.suggested_next_step:
+            lines.append(f"  Practical option: {item.suggested_next_step}")
+    return "\n".join(lines).strip()
+
+
 def _build_compile_failure_message(
     *,
     retry_feedback: str | None,
@@ -1095,30 +1133,107 @@ def _build_transformation_retry_exhausted_message(
     *,
     required_dataset_changes: str,
 ) -> str:
-    return "\n".join(
-        [
-            "I retried compilation once using the grounded source-data fixes suggested during transformation planning, but I still could not produce a safe transformation plan.",
+    guidance = _parse_required_dataset_changes(required_dataset_changes)
+    if not guidance:
+        return "\n".join(
+            [
+                "I retried compilation once, but I still could not produce a safe baseline transformation plan.",
+                "",
+                "A remaining data-preparation issue still needs to be fixed in the dataset before this step can continue.",
+                "",
+                "If you want to keep the current causal draft, update the dataset and rerun compilation. You only need to revise the protocol if you want different variables or roles.",
+            ]
+        ).strip()
+
+    if len(guidance) == 1:
+        item = guidance[0]
+        role_text = f" used as an {item.role.replace('_', ' ')}" if item.role else ""
+        lines = [
+            "I retried compilation once, but one remaining data issue still blocks a safe baseline transformation plan.",
             "",
-            required_dataset_changes.strip(),
-            "",
-            "Please revise the protocol discussion or the underlying dataset representation before trying again.",
+            f"The column '{item.column}'{role_text} still needs to be fixed before estimation can continue.",
+            item.problem,
         ]
-    ).strip()
+        if item.required_change:
+            lines.extend(["", f"Most direct fix: {item.required_change}"])
+        if item.suggested_next_step:
+            lines.extend(["", f"Practical option: {item.suggested_next_step}"])
+        lines.extend(
+            [
+                "",
+                "If you want to keep the current causal draft, update the dataset and rerun compilation. You only need to revise the protocol if you want different variables or roles.",
+            ]
+        )
+        return "\n".join(lines).strip()
+
+    lines = [
+        "I retried compilation once, but a few remaining data issues still block a safe baseline transformation plan.",
+        "",
+        "Remaining issues:",
+    ]
+    for item in guidance:
+        role_text = f" ({item.role.replace('_', ' ')})" if item.role else ""
+        lines.append(f"- {item.column}{role_text}: {item.problem}")
+        if item.required_change:
+            lines.append(f"  Most direct fix: {item.required_change}")
+        if item.suggested_next_step:
+            lines.append(f"  Practical option: {item.suggested_next_step}")
+    lines.extend(
+        [
+            "",
+            "If you want to keep the current causal draft, update the dataset and rerun compilation. You only need to revise the protocol if you want different variables or roles.",
+        ]
+    )
+    return "\n".join(lines).strip()
 
 
 def _build_validation_retry_exhausted_message(
     *,
     validation_message: str,
 ) -> str:
-    return "\n".join(
-        [
-            "I applied one automatic repair retry after validation, but the compiled setup still has repairable transformation or encoding problems.",
+    guidance = _parse_validation_retry_guidance(validation_message)
+    if not guidance:
+        return "\n".join(
+            [
+                "I applied one automatic repair retry after validation, but the compiled setup still has a remaining transformation or encoding problem.",
+                "",
+                "Please adjust the dataset preprocessing or encoding choices and rerun compilation. You only need to revise the protocol if you want different variables or roles.",
+            ]
+        ).strip()
+
+    if len(guidance) == 1:
+        item = guidance[0]
+        lines = [
+            "I applied one automatic repair retry after validation, but one transformation or encoding issue still remains.",
             "",
-            validation_message.strip(),
-            "",
-            "Please revise the protocol discussion or the expected encodings before trying again.",
+            f"Remaining issue: {item.issue}",
         ]
-    ).strip()
+        if item.fix_hint:
+            lines.extend(["", f"Most direct fix: {item.fix_hint}"])
+        lines.extend(
+            [
+                "",
+                "Please keep the same locked treatment, outcome, covariate, and effect-modifier roles, adjust the preprocessing or encoding accordingly, and rerun compilation.",
+            ]
+        )
+        return "\n".join(lines).strip()
+
+    lines = [
+        "I applied one automatic repair retry after validation, but a few transformation or encoding issues still remain.",
+        "",
+        "Remaining issues:",
+    ]
+    for item in guidance:
+        lines.append(f"- {item.issue}")
+        if item.fix_hint:
+            lines.append(f"  Most direct fix: {item.fix_hint}")
+    lines.extend(
+        [
+            "",
+            "Please keep the same locked treatment, outcome, covariate, and effect-modifier roles, adjust the preprocessing or encoding accordingly, and rerun compilation.",
+        ]
+    )
+    return "\n".join(lines).strip()
 
 
 def _build_hard_validation_message(
@@ -1190,3 +1305,119 @@ def _build_review_summary_fallback(
         f"Warnings and cautions: {warning_text}. "
         f"{recommendation} Please confirm this compiled setup, or tell me what should change."
     )
+
+
+def _parse_required_dataset_changes(
+    required_dataset_changes: str,
+) -> list[_DatasetChangeGuidance]:
+    guidance: list[_DatasetChangeGuidance] = []
+    current: dict[str, str | None] | None = None
+
+    for raw_line in required_dataset_changes.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if line.startswith("Column '"):
+            if current is not None:
+                guidance.append(
+                    _DatasetChangeGuidance(
+                        column=current["column"] or "unknown",
+                        role=current["role"],
+                        problem=current["problem"] or "Dataset change required.",
+                        required_change=current["required_change"],
+                        suggested_next_step=current["suggested_next_step"],
+                    )
+                )
+
+            current = {
+                "column": None,
+                "role": None,
+                "problem": None,
+                "required_change": None,
+                "suggested_next_step": None,
+            }
+
+            remainder = line[len("Column '") :]
+            column, _, after_column = remainder.partition("'")
+            current["column"] = column.strip() or None
+            if after_column.startswith(" ("):
+                role_text, _, problem = after_column[2:].partition("):")
+                current["role"] = role_text.strip() or None
+                current["problem"] = problem.strip() or None
+            elif after_column.startswith(":"):
+                current["problem"] = after_column[1:].strip() or None
+            continue
+
+        if current is None:
+            continue
+
+        if line.startswith("Required dataset change:"):
+            current["required_change"] = (
+                line.removeprefix("Required dataset change:").strip() or None
+            )
+            continue
+
+        if line.startswith("Suggested next step:"):
+            current["suggested_next_step"] = (
+                line.removeprefix("Suggested next step:").strip() or None
+            )
+
+    if current is not None:
+        guidance.append(
+            _DatasetChangeGuidance(
+                column=current["column"] or "unknown",
+                role=current["role"],
+                problem=current["problem"] or "Dataset change required.",
+                required_change=current["required_change"],
+                suggested_next_step=current["suggested_next_step"],
+            )
+        )
+
+    return guidance
+
+
+def _parse_validation_retry_guidance(
+    validation_message: str,
+) -> list[_ValidationRepairGuidance]:
+    guidance: list[_ValidationRepairGuidance] = []
+    current_issue: str | None = None
+    current_fix_hint: str | None = None
+    in_repair_section = False
+
+    for raw_line in validation_message.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if line == "Repairable validation errors:":
+            in_repair_section = True
+            continue
+
+        if not in_repair_section:
+            continue
+
+        if line.startswith("- "):
+            if current_issue is not None:
+                guidance.append(
+                    _ValidationRepairGuidance(
+                        issue=current_issue,
+                        fix_hint=current_fix_hint,
+                    )
+                )
+            current_issue = line[2:].strip()
+            current_fix_hint = None
+            continue
+
+        if line.startswith("What to fix:") and current_issue is not None:
+            current_fix_hint = line.removeprefix("What to fix:").strip() or None
+
+    if current_issue is not None:
+        guidance.append(
+            _ValidationRepairGuidance(
+                issue=current_issue,
+                fix_hint=current_fix_hint,
+            )
+        )
+
+    return guidance
