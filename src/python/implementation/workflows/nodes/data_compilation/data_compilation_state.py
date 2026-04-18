@@ -9,6 +9,9 @@ from python.domain.models.validation import ValidationIssueModel, ValidationStat
 from python.domain.workflows.node_state import NodeState
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec_draft import (
+    CausalSpecDraft,
+)
 from python.implementation.workflows.tools.common.model.data_summary import (
     DatasetSummaryModel,
 )
@@ -29,6 +32,7 @@ class DataCompilationPayloadModel(BaseModel):
     source_dataset_id: UUID | None = None
     source_protocol_discussion: str | None = None
     source_protocol_cleaning_instructions: str | None = None
+    source_causal_spec_draft: CausalSpecDraft | None = None
     compiled_dataset_id: UUID | None = None
     compiled_dataset_summary: DatasetSummaryModel | None = None
     compiled_causal_spec: CausalSpec | None = None
@@ -37,6 +41,11 @@ class DataCompilationPayloadModel(BaseModel):
     compilation_warnings: list[str] = Field(default_factory=list)
     validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
     validation_status: ValidationStatus | None = None
+    compile_retry_count: int = Field(default=0, ge=0)
+    transformation_retry_count: int = Field(default=0, ge=0)
+    validation_retry_count: int = Field(default=0, ge=0)
+    retry_feedback: str | None = None
+    repair_context: str | None = None
     phase: DataCompilationPhase = "INIT"
     assistant_message: str | None = None
     system_message: str | None = None
@@ -50,6 +59,8 @@ class DataCompilationPayloadModel(BaseModel):
     @field_validator(
         "source_protocol_discussion",
         "source_protocol_cleaning_instructions",
+        "retry_feedback",
+        "repair_context",
         "assistant_message",
         "system_message",
         "error_message",
@@ -70,12 +81,14 @@ class DataCompilationPayloadModel(BaseModel):
         dataset_id: UUID,
         protocol_discussion: str,
         protocol_cleaning_instructions: str | None,
+        causal_spec_draft: CausalSpecDraft,
     ) -> DataCompilationPayloadModel:
         return self.model_copy(
             update={
                 "source_dataset_id": dataset_id,
                 "source_protocol_discussion": protocol_discussion,
                 "source_protocol_cleaning_instructions": protocol_cleaning_instructions,
+                "source_causal_spec_draft": causal_spec_draft,
             }
         )
 
@@ -85,12 +98,14 @@ class DataCompilationPayloadModel(BaseModel):
         dataset_id: UUID,
         protocol_discussion: str,
         protocol_cleaning_instructions: str | None,
+        causal_spec_draft: CausalSpecDraft,
     ) -> DataCompilationPayloadModel:
         return self.model_copy(
             update={
                 "source_dataset_id": dataset_id,
                 "source_protocol_discussion": protocol_discussion,
                 "source_protocol_cleaning_instructions": protocol_cleaning_instructions,
+                "source_causal_spec_draft": causal_spec_draft,
                 "compiled_dataset_id": None,
                 "compiled_dataset_summary": None,
                 "compiled_causal_spec": None,
@@ -99,6 +114,11 @@ class DataCompilationPayloadModel(BaseModel):
                 "compilation_warnings": [],
                 "validation_issues": [],
                 "validation_status": None,
+                "compile_retry_count": 0,
+                "transformation_retry_count": 0,
+                "validation_retry_count": 0,
+                "retry_feedback": None,
+                "repair_context": None,
                 "phase": "INIT",
                 "assistant_message": None,
                 "system_message": None,

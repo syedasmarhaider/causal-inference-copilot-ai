@@ -80,7 +80,7 @@ def cleaning(
         dataset_profiling_tool=datasetProfilingTool,
         dataframe=cleaned_df,
     )
-    causal_spec = _compile_causal_spec_with_retry(
+    causal_spec = compile_causal_spec_from_cleaned_summary(
         llm=llm,
         cleaned_summary=cleaned_summary,
         draft_causal_spec=draft_causal_spec,
@@ -184,15 +184,16 @@ def _profile_dataset(
     )
 
 
-def _compile_causal_spec_with_retry(
+def compile_causal_spec_from_cleaned_summary(
     *,
     llm: LLMService,
     cleaned_summary: DatasetSummaryModel,
     draft_causal_spec: CausalSpecDraft,
     protocol_discussion: str | None,
+    retry_feedback: str | None = None,
 ) -> CausalSpec:
     causal_specs_tool = CausalSpecsTool()
-    compile_feedback: str | None = None
+    compile_feedback = _normalize_text(retry_feedback) or None
 
     for _ in range(2):
         causal_spec = _compile_causal_spec_once(
@@ -213,12 +214,25 @@ def _compile_causal_spec_with_retry(
                 data_summary=cleaned_summary,
             )
 
-        compile_feedback = mismatch_message
+        compile_feedback = _merge_compile_feedback(
+            compile_feedback=compile_feedback,
+            mismatch_message=mismatch_message,
+        )
 
     raise ValueError(
         "compiled causal spec does not match draft causal spec after retry: "
         f"{compile_feedback}"
     )
+
+
+def _merge_compile_feedback(
+    *,
+    compile_feedback: str | None,
+    mismatch_message: str,
+) -> str:
+    if not compile_feedback:
+        return mismatch_message
+    return f"{compile_feedback}\n\nAlso fix this mismatch: {mismatch_message}"
 
 
 def _compile_causal_spec_once(

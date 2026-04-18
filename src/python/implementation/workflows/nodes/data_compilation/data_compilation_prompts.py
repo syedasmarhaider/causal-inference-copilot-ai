@@ -4,10 +4,10 @@ from __future__ import annotations
 def data_compilation_node_info() -> str:
     return (
         "Merged compilation and validation stage. It turns a confirmed protocol discussion "
-        "into a compiled causal spec, a protocol-scope cleaned dataset, a baseline "
-        "transformation plan, and a validation result, then asks the user either to resolve "
-        "blocking issues or to confirm the accepted compiled setup before publishing it to "
-        "orchestrator state."
+        "and causal draft into a compiled causal spec, a cleaned protocol-scope dataset, "
+        "a baseline transformation plan, and a validation result. Repairable downstream "
+        "issues trigger one automatic retry before the node presents a detailed clinician-"
+        "facing review for confirmation."
     )
 
 
@@ -92,6 +92,25 @@ Rules:
 - Never add treatment or outcome transformations to the transform plan; fix the data instead when needed.
 - Do not invent new cohort rules, new columns, or unsupported category merges.
 - Do not include validation, modeling, plotting, or non-SQL tasks.
+""".strip()
+
+
+def data_compilation_compile_retry_guidance_prompt() -> str:
+    return """
+Additional grounded repair guidance for the next full compilation attempt:
+- Treat the following feedback as required source-dataset fixes before a safe transformation plan can be produced.
+- Apply only changes that are explicitly grounded by the confirmed protocol, the causal draft, and the provided repair text.
+- Keep the dataset within the confirmed protocol scope and preserve all draft columns.
+- Prefer concrete dtype cleanup, value normalization, recoding, and missingness handling over speculative changes.
+""".strip()
+
+
+def data_compilation_transformation_retry_guidance_prompt() -> str:
+    return """
+Additional grounded retry guidance for the next causal-spec and transformation attempt:
+- Use the following repair text to revise the compiled causal specification details and baseline transformations without changing locked column identities or roles.
+- Keep treatment, outcome, covariates, and effect modifiers locked to the confirmed draft columns.
+- Revise only same-column causal-spec details or covariate/effect-modifier encoding choices that are grounded by the repair text.
 """.strip()
 
 
@@ -207,20 +226,21 @@ Task:
 - This is a review step before confirmation, not the final confirmation itself.
 
 Content rules:
-- Focus first on the data preparation changes made for causal modeling.
-- Explain which protocol-scope columns were retained and how the dataset was narrowed for modeling.
-- Explicitly mention grounded row removals, dropped invalid treatment/outcome values, and any corrective cleaning that was applied.
-- Surface non-blocking warnings clearly as warnings.
-- Summarize the planned baseline transformations in readable language with more detail than the treatment/outcome recap.
-- Summarize the validation result clearly, including any remaining warnings that do not block confirmation.
-- Summarize the treatment, outcome, covariates, and effect modifiers clearly.
-- Summarize the compiled dataset shape in readable language.
-- Ask the user to confirm the compiled dataset, transformation plan, and validation result or say exactly what should change.
+- Write for a clinician, not a data scientist. Prefer intuitive and practical language over mathematical language.
+- Start with what changed in the dataset and why those changes matter for the clinical question.
+- Explain which columns were kept, how the data was narrowed, and any grounded row removals or corrective cleaning that happened.
+- Explain the planned baseline transformations in detail, column by column when helpful, including why each transformation is needed and what it means in plain language.
+- Explain what validation checked in practical terms.
+- Surface non-blocking warnings clearly and explain what each warning means for interpretation or trust in the analysis.
+- State explicitly whether you recommend accepting the setup now or revising it before moving forward.
+- If recommending acceptance with cautions, say that plainly and explain the cautions.
+- Summarize the treatment, outcome, covariates, effect modifiers, and compiled dataset shape clearly.
+- End by asking the user to confirm the compiled dataset, transformation plan, and validation result or say exactly what should change.
 - Do not mention internal JSON, validators, or workflow implementation details.
 
 Output JSON exactly:
 {
-  "assistant_message": "<specific review message that asks for confirmation or revision>"
+  "assistant_message": "<specific clinician-facing review message that asks for confirmation or revision>"
 }
 """.strip()
 
