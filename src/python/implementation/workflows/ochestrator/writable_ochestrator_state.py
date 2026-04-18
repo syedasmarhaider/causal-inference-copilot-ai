@@ -24,6 +24,7 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec_draft import CausalSpecDraft
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 log = get_logger(__name__)
@@ -45,21 +46,22 @@ class GlobalStateModel(BaseModel):
     # stage 2 — protocol discussion
     protocol_discussion: str | None = None
     protocol_cleaning_instructions: str | None = None
+    causal_spec_draft: CausalSpecDraft | None = None
 
-    # stage 4 — causal spec + dataset freeze
+    # stage 3 — causal spec + dataset freeze
     causal_spec: CausalSpec | None = None
     data_transformation_plan: TransformPlan | None = None
     working_dataset_frozen: bool = False
 
-    # stage 5 — validation
+    # stage 4 — validation
     validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
     is_validated: bool = False
 
-    # stage 6
+    # stage 5
     selected_model: str | None = None
     selection_reasoning: str | None = None
 
-    # stage 7 — model training
+    # stage 6 — model training
     trained_model_id: UUID | None = None
     training_warnings: list[str] = Field(default_factory=list)
 
@@ -124,14 +126,11 @@ class WritableOchestratorState(OchestratorState):
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> WritableOchestratorState:
         normalized = dict(payload)
-        # migrate legacy field name
         if "working_dataset_id" in normalized and "working_dataset_ids" not in normalized:
             old = normalized.pop("working_dataset_id")
             normalized["working_dataset_ids"] = [old] if old is not None else []
-        # migrate legacy summary field name
         if "working_dataset_summary" in normalized and "latest_dataset_summary" not in normalized:
             normalized["latest_dataset_summary"] = normalized.pop("working_dataset_summary")
-        # migrate legacy training_id field
         if "model_training_id" in normalized and "trained_model_id" not in normalized:
             normalized["trained_model_id"] = normalized.pop("model_training_id")
         normalized.pop("data_cleaned", None)
