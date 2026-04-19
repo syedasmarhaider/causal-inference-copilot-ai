@@ -73,6 +73,7 @@ class CausalSpec(BaseModel):
     covariates: list[NonEmptyStr]
     effect_modifiers: list[NonEmptyStr]
     experiment_type: ExperimentType
+    id_col: NonEmptyStr
 
     @model_validator(mode="after")
     def _validate_against_summary(self) -> CausalSpec:

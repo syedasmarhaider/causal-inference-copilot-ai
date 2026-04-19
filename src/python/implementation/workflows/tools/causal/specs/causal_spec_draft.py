@@ -14,11 +14,14 @@ from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 
+ID_COL_AUTO_FILL = "__auto_id__"
+
 class CausalSpecDraft(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     SUMMARY_FIELD_NAMES: ClassVar[tuple[str, ...] | None] = None
 
+    id_col: NonEmptyStr = Field(default=ID_COL_AUTO_FILL)
     treatment_column: NonEmptyStr
     outcome_column: NonEmptyStr
     covariates: list[NonEmptyStr] = Field(default_factory=list)
