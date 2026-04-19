@@ -153,8 +153,7 @@ def _generate_batch_result(
                 ),
                 config=LLMConfig(
                     model="basic",
-                    temperature=0.2,
-                    max_tokens=8000,
+                    temperature=0.6,
                 ),
                 history=None,
                 max_attempts=2,

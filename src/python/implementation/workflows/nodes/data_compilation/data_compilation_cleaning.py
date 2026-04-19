@@ -415,7 +415,7 @@ def _plan_missingness_resolution(
         schema=_MissingnessPlanDraft,
         system_prompt=data_compilation_cleaning_instructions_prompt(),
         user_prompt=json.dumps(payload, ensure_ascii=False),
-        config=LLMConfig(model="basic", temperature=0.1),
+        config=LLMConfig(model="basic", temperature=0.6),
         history=None,
         max_attempts=2,
     )

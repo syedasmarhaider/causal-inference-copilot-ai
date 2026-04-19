@@ -150,7 +150,7 @@ async def get_conversation(
     workflow: WorkflowApp = WORKFLOW_APP_DEP,
 ) -> ConversationSnapshotResponse:
     response = await asyncio.to_thread(
-        workflow.get_current_workflow_info,
+        workflow.get_current_conversation_info,
         user_id=authenticated_user.uid,
         conversation_id=conversation_id,
         conversation_type=conversation_type,
