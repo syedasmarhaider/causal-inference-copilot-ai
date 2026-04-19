@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, cast
@@ -371,6 +372,8 @@ class CausalInferenceNode(Node):
             "ate_result": _loads_or_none(payload.ate_result_raw_json_str),
             "latest_cate_result": _loads_or_none(payload.latest_cate_result_raw_json_str),
             "latest_cate_request_summary": payload.latest_cate_request_summary,
+            "queryable_columns": _dataset_summary_column_names(resolved.dataset_summary),
+            "identifier_column": str(resolved.inference_ready_spec.causal_spec.id_col).strip(),
             "effect_modifiers": resolved.inference_ready_spec.get_effect_modifiers_order(),
             "selected_model": resolved.selected_model,
         }
@@ -499,29 +502,38 @@ class CausalInferenceNode(Node):
                 ),
             )
 
-        effect_modifier_frame = dataframe.loc[:, effect_modifier_columns].copy()
-        effect_modifier_summary = _filter_dataset_summary_to_effect_modifiers(
-            summary=resolved.dataset_summary,
-            effect_modifiers=effect_modifier_columns,
+        queryable_columns = _dataset_summary_column_names(resolved.dataset_summary)
+        identifier_column = str(resolved.inference_ready_spec.causal_spec.id_col).strip()
+        requested_filter_columns = _extract_explicit_column_mentions(
+            texts=[user_request, request_summary],
+            available_columns=queryable_columns,
         )
+        effect_modifier_set = {str(column).strip() for column in effect_modifier_columns}
+        non_effect_modifier_filter_columns = [
+            column
+            for column in requested_filter_columns
+            if str(column).strip() not in effect_modifier_set
+        ]
 
         try:
             selection_df = self._run_data_manipulation_tool(
-                dataframe=effect_modifier_frame,
+                dataframe=dataframe.copy(),
                 conversation_id=request.conversation_id,
-                summary_json=self._profiling_tool.dataset_summary_to_json(effect_modifier_summary),
+                summary_json=self._profiling_tool.dataset_summary_to_json(resolved.dataset_summary),
                 instructions=_build_cate_selection_instructions(
                     request_summary=request_summary,
                     effect_modifier_columns=effect_modifier_columns,
+                    identifier_column=identifier_column,
                 ),
             )
         except Exception as exc:
             return self._invalid_cate_plan_result(
                 request=request,
                 payload=payload,
-                effect_modifier_summary=effect_modifier_summary,
+                dataset_summary=resolved.dataset_summary,
+                queryable_columns=queryable_columns,
                 effect_modifier_columns=effect_modifier_columns,
-                user_request=request_summary,
+                user_request=user_request,
                 issue_text=f"Subgroup cohort selection failed: {safe_err(exc)}",
                 history=history,
             )
@@ -535,9 +547,10 @@ class CausalInferenceNode(Node):
             return self._invalid_cate_plan_result(
                 request=request,
                 payload=payload,
-                effect_modifier_summary=effect_modifier_summary,
+                dataset_summary=resolved.dataset_summary,
+                queryable_columns=queryable_columns,
                 effect_modifier_columns=effect_modifier_columns,
-                user_request=request_summary,
+                user_request=user_request,
                 issue_text=issue_text,
                 history=history,
             )
@@ -550,6 +563,9 @@ class CausalInferenceNode(Node):
             selection_df=selection_df,
             request_summary=request_summary,
             effect_modifier_columns=effect_modifier_columns,
+            identifier_column=identifier_column,
+            requested_filter_columns=requested_filter_columns,
+            non_effect_modifier_filter_columns=non_effect_modifier_filter_columns,
         )
         if isinstance(cate_payload, dict) and cate_plot_df is None and cate_payload.get("errors"):
             return self._needs_input_result(
@@ -626,7 +642,8 @@ class CausalInferenceNode(Node):
         *,
         request: NodeRequest,
         payload: CausalInferencePayloadModel,
-        effect_modifier_summary: DatasetSummaryModel,
+        dataset_summary: DatasetSummaryModel,
+        queryable_columns: Sequence[str],
         effect_modifier_columns: Sequence[str],
         user_request: str,
         issue_text: str,
@@ -636,7 +653,8 @@ class CausalInferenceNode(Node):
             assistant_message = self._llm.generate(
                 system_prompt=INVALID_CATE_PLAN_SYSTEM_PROMPT,
                 user_prompt=INVALID_CATE_PLAN_USER_PROMPT_TEMPLATE.format(
-                    effect_modifier_summary_json=effect_modifier_summary.model_dump_json(),
+                    dataset_summary_json=dataset_summary.model_dump_json(),
+                    queryable_columns_json=_dumps(list(queryable_columns)),
                     effect_modifier_columns_json=_dumps(list(effect_modifier_columns)),
                     user_request=user_request,
                     issue_text=issue_text,
@@ -646,8 +664,9 @@ class CausalInferenceNode(Node):
             ).content.strip()
         except Exception:
             assistant_message = (
-                "I could not prepare that subgroup analysis yet. Please restate the subgroup "
-                "using only confirmed effect modifiers."
+                "I could not prepare that subgroup analysis yet. You can define the cohort "
+                "with any compiled column, but the final cohort output must contain only "
+                "group_key plus the confirmed effect modifiers used for effect estimation."
             )
 
         return self._needs_input_result(
@@ -667,6 +686,9 @@ class CausalInferenceNode(Node):
         selection_df: pd.DataFrame,
         request_summary: str,
         effect_modifier_columns: Sequence[str],
+        identifier_column: str,
+        requested_filter_columns: Sequence[str],
+        non_effect_modifier_filter_columns: Sequence[str],
     ) -> tuple[dict[str, Any] | None, pd.DataFrame | None]:
         plot_frames: list[pd.DataFrame] = []
         cohort_summaries: list[dict[str, Any]] = []
@@ -766,6 +788,11 @@ class CausalInferenceNode(Node):
             if cohort_errors:
                 return {
                     "request_summary": request_summary,
+                    "identifier_column": identifier_column,
+                    "requested_filter_columns": list(requested_filter_columns),
+                    "non_effect_modifier_filter_columns": list(
+                        non_effect_modifier_filter_columns
+                    ),
                     "effect_modifier_columns": list(effect_modifier_columns),
                     "errors": cohort_errors,
                 }, None
@@ -776,6 +803,9 @@ class CausalInferenceNode(Node):
             "request_summary": request_summary,
             "outcome_kind": str(resolved.inference_ready_spec.causal_spec.outcome_spec.kind),
             "experiment_type": str(resolved.inference_ready_spec.causal_spec.experiment_type),
+            "identifier_column": identifier_column,
+            "requested_filter_columns": list(requested_filter_columns),
+            "non_effect_modifier_filter_columns": list(non_effect_modifier_filter_columns),
             "effect_modifier_columns": list(effect_modifier_columns),
             "cohorts": cohort_summaries,
             "errors": cohort_errors,
@@ -1138,7 +1168,7 @@ def _summarize_cate(
         "causal_spec": causal_spec.model_dump(mode="json"),
     }
     try:
-        return llm.generate(
+        summary = llm.generate(
             system_prompt=CATE_SUMMARY_SYSTEM_PROMPT,
             user_prompt=CATE_SUMMARY_USER_PROMPT_TEMPLATE.format(
                 context_json=_dumps(context),
@@ -1149,10 +1179,11 @@ def _summarize_cate(
         ).content.strip()
     except Exception:
         cohorts = cate_payload.get("cohorts") or []
-        return (
+        summary = (
             f"I computed subgroup effect estimates for {len(cohorts)} cohort(s). "
             "Please review the effect graph or ask a follow-up question about the heterogeneity."
         )
+    return _append_cate_filter_disclaimer(summary=summary, cate_payload=cate_payload)
 
 
 def _should_reuse_latest_cate(
@@ -1167,30 +1198,126 @@ def _should_reuse_latest_cate(
     )
 
 
-def _filter_dataset_summary_to_effect_modifiers(
+def _dataset_summary_column_names(summary: DatasetSummaryModel) -> list[str]:
+    columns: list[str] = []
+    seen: set[str] = set()
+    for profile in summary.profiles:
+        column = str(profile.name).strip()
+        if not column or column in seen:
+            continue
+        seen.add(column)
+        columns.append(column)
+    return columns
+
+
+def _extract_explicit_column_mentions(
     *,
-    summary: DatasetSummaryModel,
-    effect_modifiers: Sequence[str],
-) -> DatasetSummaryModel:
-    wanted = {str(column) for column in effect_modifiers}
-    kept = [profile for profile in summary.profiles if str(profile.name) in wanted]
-    return DatasetSummaryModel.model_validate(
-        {
-            "n_rows": int(summary.n_rows),
-            "profiles": [profile.model_dump(mode="python") for profile in kept],
-        }
+    texts: Sequence[str],
+    available_columns: Sequence[str],
+) -> list[str]:
+    normalized_columns: list[str] = []
+    seen_columns: set[str] = set()
+    for column in available_columns:
+        normalized = str(column).strip()
+        if not normalized or normalized.casefold() in seen_columns:
+            continue
+        seen_columns.add(normalized.casefold())
+        normalized_columns.append(normalized)
+
+    normalized_texts = [str(text) for text in texts if str(text).strip()]
+    if not normalized_columns or not normalized_texts:
+        return []
+
+    matches: list[tuple[int, int, int, int, str]] = []
+    for column_index, column in enumerate(normalized_columns):
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])",
+            re.IGNORECASE,
+        )
+        for text_index, text in enumerate(normalized_texts):
+            for match in pattern.finditer(text):
+                matches.append(
+                    (
+                        text_index,
+                        match.start(),
+                        -(match.end() - match.start()),
+                        column_index,
+                        column,
+                    )
+                )
+
+    selected_columns: list[str] = []
+    seen_selected: set[str] = set()
+    occupied_ranges: dict[int, list[tuple[int, int]]] = {}
+    for text_index, start, negative_length, _column_index, column in sorted(matches):
+        end = start - negative_length
+        ranges = occupied_ranges.setdefault(text_index, [])
+        if any(not (end <= range_start or start >= range_end) for range_start, range_end in ranges):
+            continue
+        if column.casefold() in seen_selected:
+            continue
+        ranges.append((start, end))
+        seen_selected.add(column.casefold())
+        selected_columns.append(column)
+
+    return selected_columns
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, str):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item).strip()
+        if not text or text.casefold() in seen:
+            continue
+        seen.add(text.casefold())
+        normalized.append(text)
+    return normalized
+
+
+def _build_cate_filter_disclaimer(*, cate_payload: Mapping[str, Any]) -> str:
+    non_effect_modifier_filter_columns = _normalize_string_list(
+        cate_payload.get("non_effect_modifier_filter_columns")
     )
+    if not non_effect_modifier_filter_columns:
+        return ""
+
+    effect_modifier_columns = _normalize_string_list(cate_payload.get("effect_modifier_columns"))
+    quoted_filter_columns = ", ".join(non_effect_modifier_filter_columns)
+    quoted_effect_modifier_columns = ", ".join(effect_modifier_columns) or "none"
+    return (
+        f"Note: the subgroup was filtered using {quoted_filter_columns}, but the effect "
+        "estimate was still calculated using only the confirmed effect modifiers: "
+        f"{quoted_effect_modifier_columns}."
+    )
+
+
+def _append_cate_filter_disclaimer(*, summary: str, cate_payload: Mapping[str, Any]) -> str:
+    disclaimer = _build_cate_filter_disclaimer(cate_payload=cate_payload)
+    if not disclaimer:
+        return summary
+    if disclaimer.casefold() in summary.casefold():
+        return summary
+    return f"{summary} {disclaimer}".strip()
 
 
 def _build_cate_selection_instructions(
     *,
     request_summary: str,
     effect_modifier_columns: Sequence[str],
+    identifier_column: str,
 ) -> str:
     quoted_columns = ", ".join(effect_modifier_columns)
     return (
         "Prepare a read-only analytical result set for CATE cohort selection. "
-        "Use only the provided effect modifier columns. "
+        "You may use any compiled column in the provided dataframe to define the cohort, "
+        "including identifier, treatment, outcome, covariates, effect modifiers, and other "
+        "compiled columns. "
+        f"The identifier column is `{identifier_column}`. "
+        "The CATE effect itself will still be calculated using only these confirmed effect "
+        f"modifiers: {quoted_columns}. "
         "Return one row per matched individual and do not aggregate. "
         f"The final result set must contain exactly these columns: {_GROUP_KEY_COLUMN}, {quoted_columns}. "
         f"`{_GROUP_KEY_COLUMN}` must be a non-empty text label describing the requested cohort. "
@@ -1198,7 +1325,8 @@ def _build_cate_selection_instructions(
         f"with distinct `{_GROUP_KEY_COLUMN}` values. "
         "If the request implies a single subgroup, still return a single cohort with a constant "
         f"`{_GROUP_KEY_COLUMN}` value. "
-        "Do not return treatment, outcome, covariates, IDs, or invented columns. "
+        "Non-effect-modifier columns may be used for filtering only and must not appear in the "
+        "final returned dataframe. Do not return invented columns. "
         f"Clinical subgroup request: {request_summary}"
     )
 
@@ -1221,8 +1349,10 @@ def _validate_cate_selection_dataframe(
     extra_columns = sorted(set(columns) - expected_columns)
     if extra_columns:
         return (
-            "The cohort-selection result contains unsupported columns outside the confirmed "
-            f"effect modifiers: {extra_columns}."
+            "The cohort-selection result returned extra columns: "
+            f"{extra_columns}. Non-effect-modifier columns may be used for filtering only, "
+            "and the final returned dataframe must contain only group_key plus the confirmed "
+            "effect modifiers."
         )
 
     group_series = selection_df[_GROUP_KEY_COLUMN].astype(str).str.strip()

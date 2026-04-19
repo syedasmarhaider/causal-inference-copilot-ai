@@ -5,7 +5,8 @@ def get_causal_inference_node_info() -> str:
     return (
         "Conversational causal inference stage. It computes and caches ATE from the "
         "trained causal model, answers follow-up questions from cached inference context, "
-        "computes CATE for effect-modifier-defined cohorts, and generates causal effect graphs."
+        "computes CATE for user-defined cohorts while estimating effects with confirmed "
+        "effect modifiers, and generates causal effect graphs."
     )
 
 
@@ -65,14 +66,15 @@ Allowed actions
 
 Decision rules
 - Use answer_from_context only when the question can be answered from the existing cached ATE/latest CATE context and recent conversation.
-- Use compute_cate when the user requests a new subgroup effect estimate or subgroup comparison that requires cohort filtering on effect modifiers.
+- Use compute_cate when the user requests a new subgroup effect estimate or subgroup comparison that requires cohort filtering on the compiled dataset.
 - Use generate_ate_graph only for effect visualizations of the global ATE.
 - Use generate_cate_graph only for effect visualizations of subgroup/CATE results.
 - Use clarify if the request is too vague to safely answer or compute, or if it is a raw descriptive data-chart request that does not belong to causal inference.
 
 Important
 - Raw data charts do NOT belong to this node.
-- CATE cohort definitions may only be based on confirmed effect modifiers.
+- Any compiled dataset column may define a CATE cohort, including identifier, treatment, outcome, covariates, and effect modifiers.
+- The CATE effect itself is still calculated using only the confirmed effect modifiers.
 - For compute_cate and generate_cate_graph, provide a short cate_request_summary that captures the subgroup intent.
 - For answer_from_context and clarify, provide the final assistant_message directly.
 
@@ -111,10 +113,12 @@ Return STRICT JSON only in this schema:
 }
 
 Rules
-- Use only the allowed effect modifier columns.
+- You may use any compiled dataset column to define the requested cohorts.
 - SQL must run on DuckDB.
 - The final statement for each cohort must return rows from "cohort_df".
-- Never filter on treatment, outcome, covariates, IDs, or invented columns.
+- The final returned dataframe may be filtered using identifier, treatment, outcome, covariates, effect modifiers, or other compiled columns.
+- The final returned dataframe must contain only `group_key` plus the confirmed effect modifier columns used for CATE estimation.
+- Never use invented columns.
 - If the user requests a comparison, return one cohort per requested group.
 - If the user requests a single subgroup, return exactly one cohort.
 - If the request is vague, still try to produce a clinically sensible subgroup split grounded in the provided summary.
@@ -146,6 +150,7 @@ Rules
 - If multiple groups exist, compare them directly.
 - If estimates vary across groups, explain the heterogeneity briefly.
 - If uncertainty is wide or intervals include zero, say so clearly.
+- If `non_effect_modifier_filter_columns` is non-empty, treat those as cohort-filter columns only; the effect estimate still comes from the confirmed `effect_modifier_columns`.
 - If the study is observational, remind the user that subgroup interpretation still relies on observational assumptions.
 - Avoid ML jargon.
 """.strip()
@@ -168,17 +173,21 @@ Task
 
 Rules
 - Use clinician-friendly language.
-- Mention that subgroup definitions may only use confirmed effect modifiers.
+- Mention that cohort filtering may use any compiled dataset column.
+- Mention that the final cohort-selection output must return only `group_key` plus the confirmed effect modifier columns because the effect estimate is still calculated from those effect modifiers.
 - Be concrete about what is missing, unsupported, or too restrictive.
 - Ask for a corrected subgroup request.
 """.strip()
 
 
 INVALID_CATE_PLAN_USER_PROMPT_TEMPLATE = """
-Allowed effect modifiers summary (JSON):
-{effect_modifier_summary_json}
+Compiled dataset summary (JSON):
+{dataset_summary_json}
 
-Allowed effect modifier columns:
+Queryable cohort-definition columns:
+{queryable_columns_json}
+
+Confirmed effect modifier columns used for CATE estimation:
 {effect_modifier_columns_json}
 
 User request:

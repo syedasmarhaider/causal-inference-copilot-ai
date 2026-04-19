@@ -81,31 +81,29 @@ class WorkflowApp:
     # Read current state (no execution)
     # ------------------------------------------------------------------
 
-    def get_last_conversation_state(
+    def load_current_state_info(
         self,
         *,
         user_id: UUID,
         conversation_id: UUID,
-    ) -> WorkflowResponse | None:
-        ochestrator_state = self._repo.load_ochestrator_state(
+    ) -> list[str]:
+        return self._ochestrator.load_state_info(
             user_id=user_id,
             conversation_id=conversation_id,
         )
-        if not isinstance(ochestrator_state, WritableOchestratorState):
-            return None
-        
-        history = self._repo.load_message_history(
+    
+    
+    def load_conversation_messages(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        limit: int = 30,
+    ) -> Sequence[ChatMessage]:
+        return self._repo.load_message_history(
             user_id=user_id,
             conversation_id=conversation_id,
-            limit=10,
-        )
-        return WorkflowResponse(
-            messages=history or (),
-            current_stage_name=ochestrator_state.get_current_node_name() or "",
-            current_stage_status="PENDING",  # We don't store stage status, so we return PENDING as a default. It will be updated on next handle call after state execution.
-            action="NEEDS_INPUT" if ochestrator_state.get_current_node_name() else "NONE",
-            current_data_id=ochestrator_state.get("working_dataset_ids")[-1] if ochestrator_state.get("working_dataset_ids") else None,
-            is_dataset_frozen=ochestrator_state.get("working_dataset_frozen"),
+            limit=limit,
         )
 
         
@@ -173,6 +171,12 @@ class WorkflowApp:
                 conversation_id=conversation_id,
                 state_name=name_to_delete,
             )
+        
+        self._repo.delete_state(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                state_name=state_name,
+        )    
             
         self._repo.store_ochestrator_state(
             user_id=user_id,

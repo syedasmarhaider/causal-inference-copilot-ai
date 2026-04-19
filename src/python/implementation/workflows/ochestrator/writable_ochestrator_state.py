@@ -327,6 +327,22 @@ class WritableOchestratorState(OchestratorState):
                 return [DataStatisticsNode.NAME]
             case _:
                 raise ValueError(f"Unknown node name for companions: {node_name!r}")
+    
+    def get_completed_and_last_pending_nodes(self) -> list[str]:
+        answer_arr: list[str] = []
+        if self._is_stage1_complete():
+            answer_arr.append(DataManupulationNode.NAME)
+        if self._is_stage2_complete():
+            answer_arr.append(ProtocolDiscussionNode.NAME)
+        if self._is_stage3_complete():
+            answer_arr.append(DataCompilationNode.NAME)
+        if self._is_stage4_complete():
+            answer_arr.append(ModelSelectionNode.NAME)
+        if self._is_stage5_complete():
+            answer_arr.append(ModelTrainNode.NAME)
+        if len(answer_arr) < self._MAX_STAGE:
+            answer_arr.append(self.get_current_node_name())
+        return answer_arr    
 
     def rocover_failure(self, current_failed_node: str) -> None:
         match current_failed_node:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pandas as pd
@@ -17,6 +17,7 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_dep
 )
 from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
     CausalInferenceNode,
+    _extract_explicit_column_mentions,
 )
 from python.implementation.workflows.nodes.causal_inference.causal_inference_prompts import (
     get_causal_inference_node_info,
@@ -69,6 +70,7 @@ from python.implementation.workflows.tools.plot_tool.plot_tool import PlotTool
 def _build_dataframe() -> pd.DataFrame:
     return pd.DataFrame(
         {
+            "patient_id": ["p1", "p2", "p3", "p4"],
             "treatment": ["drug", "control", "drug", "control"],
             "outcome": [1.2, 0.4, 1.0, 0.6],
             "age": [61, 55, 70, 49],
@@ -102,6 +104,7 @@ def _build_inference_ready_spec() -> InferenceReadyCausalSpec:
             "covariates": ["age"],
             "effect_modifiers": ["sex"],
             "experiment_type": "OBSERVATIONAL",
+            "id_col": "patient_id",
         }
     )
     plan = TransformPlan.model_validate(
@@ -713,11 +716,162 @@ def test_causal_inference_cate_graph_uses_data_manipulation_and_plot_tools() -> 
     assert result.payload.message_artifact_refs
     assert len(fake_data_manip.calls) == 1
     assert "group_key" in str(fake_data_manip.calls[0]["instructions"])
+    assert list(fake_data_manip.calls[0]["dataframe"].columns) == list(_build_dataframe().columns)
     assert len(fake_plot_tool.calls) == 1
     plotted_df = fake_plot_tool.calls[0]["dataframe"]
     assert isinstance(plotted_df, pd.DataFrame)
     assert {"group_key", "cate", "cate_lower", "cate_upper"}.issubset(plotted_df.columns)
     assert len(fake_model.commands) == 2
+    assert list(fake_model.commands[0].inputs.x_rows.columns) == ["sex"]
+    payload = json.loads(result.payload.latest_cate_result_raw_json_str)
+    assert payload["requested_filter_columns"] == []
+    assert payload["non_effect_modifier_filter_columns"] == []
+
+
+def test_causal_inference_cate_allows_age_filter_with_disclaimer() -> None:
+    compile_state = _compile_state()
+    selection_state = _selection_state()
+    train_state = _train_state()
+    dataset_state = _dataset_state()
+    fake_model = _FakeCausalModel(
+        results=[
+            CATESuccess(
+                run_id=uuid4(),
+                started_at=None,
+                finished_at=None,
+                warnings=[],
+                meta={},
+                fitted_model_id=train_state.payload.trained_model_id,
+                x_cols=["sex"],
+                effects={"cate": [0.4], "cate_interval": [[0.1], [0.7]]},
+            )
+        ]
+    )
+    fake_data_manip = _FakeDataManipulationTool(
+        result_dataframe=pd.DataFrame([{"group_key": "older", "sex": "F"}])
+    )
+    node = CausalInferenceNode(
+        llm=_FakeLLM(
+            generate_content="Clinical subgroup summary.",
+            generate_json_results=[
+                {
+                    "action": "compute_cate",
+                    "cate_request_summary": "Estimate treatment effects for age >= 60.",
+                }
+            ],
+        ),
+        data_repo=_FakeDataRepo(dataframe=_build_dataframe()),
+        tool_factory=_FakeToolFactory(
+            model_factory=_FakeModelFactory(model=fake_model),
+            data_manipulation_tool=fake_data_manip,
+            plot_tool=_FakePlotTool(),
+            profiling_tool=DatasetProfilingTool(),
+        ),
+    )
+
+    result = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        state=CausalInferenceState(
+            CausalInferencePayloadModel(
+                ate_result_raw_json_str=json.dumps(
+                    {"estimate": 0.5, "interval": {"lower": 0.1, "upper": 0.9}}
+                )
+            )
+        ),
+        previous_state_dependencies={
+            DatasetState.NAME: dataset_state,
+            CompileAndValidateState.NAME: compile_state,
+            ModelSelectionState.NAME: selection_state,
+            ModelTrainState.NAME: train_state,
+        },
+        messages_history=[ChatMessage(role="user", content="Estimate CATE for age >= 60.")],
+    )
+
+    assert result.status() == "PENDING"
+    assert result.error() is None
+    assert len(fake_model.commands) == 1
+    assert list(fake_model.commands[0].inputs.x_rows.columns) == ["sex"]
+    payload = json.loads(cast(str, result.payload.latest_cate_result_raw_json_str))
+    assert payload["requested_filter_columns"] == ["age"]
+    assert payload["non_effect_modifier_filter_columns"] == ["age"]
+    assert payload["effect_modifier_columns"] == ["sex"]
+    assert "filtered using age" in cast(str, result.payload.assistant_message).lower()
+    assert "confirmed effect modifiers: sex" in cast(
+        str, result.payload.assistant_message
+    ).lower()
+
+
+def test_causal_inference_cate_allows_identifier_filter_with_disclaimer() -> None:
+    compile_state = _compile_state()
+    selection_state = _selection_state()
+    train_state = _train_state()
+    dataset_state = _dataset_state()
+    fake_model = _FakeCausalModel(
+        results=[
+            CATESuccess(
+                run_id=uuid4(),
+                started_at=None,
+                finished_at=None,
+                warnings=[],
+                meta={},
+                fitted_model_id=train_state.payload.trained_model_id,
+                x_cols=["sex"],
+                effects={"cate": [0.4], "cate_interval": [[0.1], [0.7]]},
+            )
+        ]
+    )
+    fake_data_manip = _FakeDataManipulationTool(
+        result_dataframe=pd.DataFrame([{"group_key": "patient", "sex": "F"}])
+    )
+    node = CausalInferenceNode(
+        llm=_FakeLLM(
+            generate_content="Clinical subgroup summary.",
+            generate_json_results=[
+                {
+                    "action": "compute_cate",
+                    "cate_request_summary": "Estimate treatment effects for patient_id p1.",
+                }
+            ],
+        ),
+        data_repo=_FakeDataRepo(dataframe=_build_dataframe()),
+        tool_factory=_FakeToolFactory(
+            model_factory=_FakeModelFactory(model=fake_model),
+            data_manipulation_tool=fake_data_manip,
+            plot_tool=_FakePlotTool(),
+            profiling_tool=DatasetProfilingTool(),
+        ),
+    )
+
+    result = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        state=CausalInferenceState(
+            CausalInferencePayloadModel(
+                ate_result_raw_json_str=json.dumps(
+                    {"estimate": 0.5, "interval": {"lower": 0.1, "upper": 0.9}}
+                )
+            )
+        ),
+        previous_state_dependencies={
+            DatasetState.NAME: dataset_state,
+            CompileAndValidateState.NAME: compile_state,
+            ModelSelectionState.NAME: selection_state,
+            ModelTrainState.NAME: train_state,
+        },
+        messages_history=[
+            ChatMessage(role="user", content="Estimate CATE for patient_id p1.")
+        ],
+    )
+
+    assert result.status() == "PENDING"
+    assert result.error() is None
+    assert len(fake_model.commands) == 1
+    assert list(fake_model.commands[0].inputs.x_rows.columns) == ["sex"]
+    payload = json.loads(cast(str, result.payload.latest_cate_result_raw_json_str))
+    assert payload["requested_filter_columns"] == ["patient_id"]
+    assert payload["non_effect_modifier_filter_columns"] == ["patient_id"]
+    assert "filtered using patient_id" in cast(str, result.payload.assistant_message).lower()
 
 
 def test_causal_inference_invalid_cate_selection_stays_pending() -> None:
@@ -734,7 +888,10 @@ def test_causal_inference_invalid_cate_selection_stays_pending() -> None:
     )
     node = CausalInferenceNode(
         llm=_FakeLLM(
-            generate_content="unused",
+            generate_content=(
+                "The final returned dataframe must contain only group_key plus the confirmed "
+                "effect modifiers."
+            ),
             generate_json_results=[
                 {
                     "action": "compute_cate",
@@ -776,8 +933,36 @@ def test_causal_inference_invalid_cate_selection_stays_pending() -> None:
     assert result.status() == "PENDING"
     assert result.error() is None
     assert result.payload.latest_cate_result_raw_json_str is None
-    assert result.payload.system_message is not None
-    assert "unsupported columns" in result.payload.system_message.lower()
+    assert "final returned dataframe must contain only group_key" in cast(
+        str, result.payload.assistant_message
+    ).lower()
+
+
+def test_extract_explicit_column_mentions_is_case_insensitive() -> None:
+    matches = _extract_explicit_column_mentions(
+        texts=["Compare AGE and patient_ID cohorts."],
+        available_columns=["age", "patient_id", "sex"],
+    )
+
+    assert matches == ["age", "patient_id"]
+
+
+def test_extract_explicit_column_mentions_does_not_match_substrings() -> None:
+    matches = _extract_explicit_column_mentions(
+        texts=["Compare stage 2 patients only."],
+        available_columns=["age", "stage"],
+    )
+
+    assert matches == ["stage"]
+
+
+def test_extract_explicit_column_mentions_prefers_longer_overlapping_names() -> None:
+    matches = _extract_explicit_column_mentions(
+        texts=["Estimate effects for age_group high."],
+        available_columns=["age", "age_group"],
+    )
+
+    assert matches == ["age_group"]
 
 
 def test_causal_inference_dataset_load_failure_stays_pending_with_system_detail() -> None:
