@@ -93,7 +93,8 @@ class Ochestrator:
         )
     
     
-    def load_state_info(self, user_id: UUID, conversation_id: UUID) -> list[str]:    
+    
+    def get_current_ochestrator_state(self, user_id: UUID, conversation_id: UUID) -> WritableOchestratorState:    
         orch_state = self._workflow_repo.load_ochestrator_state(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -102,7 +103,7 @@ class Ochestrator:
             orch_state = WritableOchestratorState.init_empty()
         if not isinstance(orch_state, WritableOchestratorState):
             raise ValueError("Orchestrator state must be WritableOchestratorState")
-        return orch_state.get_completed_and_last_pending_nodes()
+        return orch_state
     
     def answer(
         self,

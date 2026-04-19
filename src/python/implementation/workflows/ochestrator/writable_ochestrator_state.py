@@ -125,6 +125,10 @@ class WritableOchestratorState(OchestratorState):
         if key not in GlobalStateModel.model_fields:
             raise KeyError(f"Unknown global state key: {key!r}")
         return deepcopy(getattr(self._model, key))
+    
+    def get_working_dataset_id_and_frozen_status(self) -> tuple[UUID | None, bool]:
+        dataset_id = self._model.working_dataset_ids[-1] if self._model.working_dataset_ids else None
+        return dataset_id, self._model.working_dataset_frozen
 
     def set(self, key: str, value: dict[str, Any]) -> None:  # noqa: C901
         match key:

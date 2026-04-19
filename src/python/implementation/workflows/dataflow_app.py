@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 import json
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
