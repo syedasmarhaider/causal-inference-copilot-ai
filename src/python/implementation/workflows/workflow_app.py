@@ -99,9 +99,9 @@ class WorkflowApp:
     def list_conversations(self, user_id: UUID) -> Sequence[Conversation]:
         return self._repo.get_conversations(user_id=user_id)
     
-    def get_current_workflow_info(
+    def get_current_conversation_info(
         self,
-        *,
+        *,  
         user_id: UUID,
         conversation_id: UUID,
         conversation_type: str,

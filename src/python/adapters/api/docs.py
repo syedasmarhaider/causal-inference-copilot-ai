@@ -4,7 +4,9 @@ OPENAPI_TAGS = [
     {"name": "system", "description": "Health and service status endpoints."},
     {
         "name": "conversations",
-        "description": "Create, inspect, invoke, and revert authenticated workflow conversations.",
+        "description": (
+            "Create, list, inspect, message, and revert authenticated workflow conversations."
+        ),
     },
     {"name": "datasets", "description": "Upload CSV datasets for a conversation."},
     {
@@ -20,14 +22,16 @@ API_TITLE = "AitiaMed Copilot API"
 API_VERSION = "0.1.0"
 API_SUMMARY = "Authenticated API for medical causal inference workflow interactions."
 API_DESCRIPTION = (
-    "Upload a CSV dataset, invoke the causal workflow, inspect the current stage, and download generated artifacts.\n\n"
+    "Create typed conversations, upload CSV datasets, send workflow messages, inspect workflow state, and download generated artifacts.\n\n"
     "Authentication:\n"
     "- All `/v1/...` endpoints require a Firebase Bearer token.\n"
     "- `/healthz` is public.\n"
-    "- The authenticated Firebase identity is mapped to the internal workflow `user_id`.\n\n"
-    "Workflow responses:\n"
-    "- `invoke` and `lateststate` return assistant messages, workflow action, stage/status, and latest working dataset info.\n"
-    '- To trigger dataset-history revert inside workflow execution, send `user_text="revert_data_changes"` to the invoke endpoint.\n\n'
+    "- The authenticated Firebase identity is resolved server-side; clients do not send a `user_id`.\n\n"
+    "Conversation scope:\n"
+    "- Conversation-scoped endpoints use `/v1/conversations/{conversation_id}/types/{conversation_type}`.\n"
+    "- `conversation_type` enum: `causal | data`\n\n"
+    "Workflow messages:\n"
+    '- Send `user_text="revert_data_changes"` to the `/messages` endpoint to request a dataset-history revert inside the workflow.\n\n'
     "Artifacts:\n"
     "- `artifact_kind` enum: `graph | data`\n"
     "- `artifact_format` enum: `json | csv`\n"

@@ -29,6 +29,10 @@ CREDENTIALS_SECURITY = Security(bearer_scheme)
 
 
 CONVERSATION_ID_PATH_PARAM = Path(description="Conversation UUID.")
+CONVERSATION_TYPE_PATH_PARAM = Path(
+    ...,
+    description="Conversation type. Allowed values: `causal` or `data`.",
+)
 ARTIFACT_ID_PATH_PARAM = Path(description="Artifact UUID to download.")
 ARTIFACT_KIND_QUERY_PARAM = Query(
     ...,

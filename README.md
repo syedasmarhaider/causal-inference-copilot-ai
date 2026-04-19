@@ -94,19 +94,36 @@ Public:
 
 Authenticated (`Authorization: Bearer <firebase_id_token>`):
 
+- `GET /v1/conversations`
 - `POST /v1/conversations`
-- `POST /v1/conversations/{conversation_id}/datasets` (CSV upload)
-- `POST /v1/conversations/{conversation_id}/invoke`
-- `GET /v1/conversations/{conversation_id}/lateststate`
-- `POST /v1/conversations/{conversation_id}/revert`
-- `GET /v1/conversations/{conversation_id}/artifacts/{artifact_id}`
+- `GET /v1/conversations/{conversation_id}/types/{conversation_type}`
+- `POST /v1/conversations/{conversation_id}/types/{conversation_type}/messages`
+- `POST /v1/conversations/{conversation_id}/types/{conversation_type}/state-reversions`
+- `POST /v1/conversations/{conversation_id}/types/{conversation_type}/datasets` (CSV upload)
+- `GET /v1/conversations/{conversation_id}/types/{conversation_type}/artifacts/{artifact_id}`
+
+Conversation type enum:
+
+- `causal`
+- `data`
 
 ## Typical API Flow
 
-1. Create conversation.
-2. Upload CSV dataset.
-3. Call `invoke` repeatedly until stage completion or user input is requested.
-4. Download artifacts by ID when returned in `artifact_ids`.
+1. Create a conversation with `POST /v1/conversations` and a body such as `{ "conversation_type": "causal" }`.
+2. Build the scoped base path: `/v1/conversations/{conversation_id}/types/{conversation_type}`.
+3. Upload a CSV dataset with `POST {scope}/datasets` when the workflow is ready for data.
+4. Send user input with `POST {scope}/messages` until the workflow reaches the next decision point.
+5. Read the current snapshot with `GET {scope}` when the frontend needs the latest messages, states, and working dataset metadata.
+6. Revert a workflow stage with `POST {scope}/state-reversions` when needed.
+7. Download artifacts with `GET {scope}/artifacts/{artifact_id}`.
+
+Dataset-history revert inside the workflow is triggered through the messages endpoint by sending:
+
+```json
+{
+  "user_text": "revert_data_changes"
+}
+```
 
 ## LLM Evals
 

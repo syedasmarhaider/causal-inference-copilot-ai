@@ -1,28 +1,19 @@
+"""Pydantic request and response schemas for the HTTP adapter."""
+
 from __future__ import annotations
-
-"""Pydantic request/response schemas for the Causal Inference Copilot API.
-
-All models use ``extra="forbid"`` to reject unknown fields at the boundary,
-keeping the public contract explicit and preventing silent data leakage.
-
-Schema design notes
--------------------
-* ``InvokeResponse`` and the lateststate endpoint share the same schema.
-  ``latest_working_dataset`` is now derived entirely from ``WorkflowResponse``
-  (fields ``current_data_id`` / ``is_dataset_frozen``) — the adapter no longer
-  issues a separate DataflowApp query.
-* ``ArtifactRefResponse`` mirrors the domain ``ArtifactRef`` TypedDict but as a
-  validated Pydantic model safe for JSON serialisation.
-* ``ChatMessageResponse`` carries optional ``artifact_refs`` so the frontend
-  can link inline artifact downloads to the specific message that produced them.
-"""
 
 from collections.abc import Sequence
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from python.domain.models.models import ArtifactFormat, ArtifactKind, MessageRole
+from python.domain.models.models import (
+    ArtifactFormat,
+    ArtifactKind,
+    MessageRole,
+    NonEmptyStr,
+)
+from python.domain.repo.workflow_state_repo import ConversationType
 from python.domain.workflows.node import Action, Status
 
 
@@ -30,50 +21,55 @@ class ArtifactRefResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: UUID = Field(description="Artifact UUID.")
-    kind: ArtifactKind = Field(description="Artifact kind enum: `graph` or `data`.")
-    format: ArtifactFormat = Field(description="Artifact format enum: `json` or `csv`.")
+    kind: ArtifactKind = Field(description="Artifact kind.")
+    format: ArtifactFormat = Field(description="Artifact format.")
     artifact_meta: dict[str, str] | None = Field(
         default=None,
-        description="Optional artifact metadata attached by the workflow node.",
+        description="Optional metadata emitted by the workflow node.",
     )
 
 
 class ChatMessageResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    role: MessageRole = Field(
-        description="Message role. Workflow API responses return assistant messages."
-    )
-    content: str = Field(description="Assistant-visible message text.")
+    role: MessageRole = Field(description="Message role.")
+    content: str = Field(description="Message content.")
     id: str | None = Field(default=None, description="Optional message identifier.")
     artifact_refs: Sequence[ArtifactRefResponse] | None = Field(
         default=None,
-        description="Optional artifact references emitted with this assistant message.",
+        description="Optional artifact references attached to the message.",
     )
 
 
-class WorkingDatasetInfoResponse(BaseModel):
+class WorkingDatasetResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     dataset_id: UUID = Field(description="Current working dataset UUID.")
-    is_freezed: bool = Field(description="Whether the current working dataset is frozen/read-only.")
+    is_frozen: bool = Field(description="Whether the dataset is frozen for editing.")
 
 
-class CreateConversationResponse(BaseModel):
+class ConversationSummaryResponse(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         json_schema_extra={
             "example": {
-                "user_id": "11111111-1111-1111-1111-111111111111",
                 "conversation_id": "22222222-2222-2222-2222-222222222222",
+                "conversation_type": "causal",
             }
         },
     )
 
-    user_id: UUID = Field(
-        description="Authenticated internal user UUID derived from the Firebase token."
+    conversation_id: UUID = Field(description="Conversation UUID.")
+    conversation_type: ConversationType = Field(description="Conversation type.")
+
+
+class CreateConversationRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"example": {"conversation_type": "causal"}},
     )
-    conversation_id: UUID = Field(description="Newly created conversation UUID.")
+
+    conversation_type: ConversationType = Field(description="Conversation type to create.")
 
 
 class UploadDatasetResponse(BaseModel):
@@ -81,26 +77,24 @@ class UploadDatasetResponse(BaseModel):
         extra="forbid",
         json_schema_extra={
             "example": {
-                "user_id": "11111111-1111-1111-1111-111111111111",
                 "conversation_id": "22222222-2222-2222-2222-222222222222",
+                "conversation_type": "data",
                 "dataset_id": "33333333-3333-3333-3333-333333333333",
             }
         },
     )
 
-    user_id: UUID = Field(
-        description="Authenticated internal user UUID derived from the Firebase token."
-    )
-    conversation_id: UUID = Field(description="Conversation UUID that owns the dataset.")
+    conversation_id: UUID = Field(description="Conversation UUID.")
+    conversation_type: ConversationType = Field(description="Conversation type.")
     dataset_id: UUID = Field(description="Stored dataset UUID.")
 
 
-class InvokeRequest(BaseModel):
+class ConversationMessageCreateRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         json_schema_extra={
             "example": {
-                "user_text": "Please summarize the uploaded dataset and tell me what I should check first.",
+                "user_text": "Please summarize the uploaded dataset and tell me what to check first.",
             }
         },
     )
@@ -108,40 +102,69 @@ class InvokeRequest(BaseModel):
     user_text: str | None = Field(
         default=None,
         description=(
-            "User message forwarded to the current workflow stage. "
-            "To trigger dataset-history revert behavior inside workflow execution, "
-            "send exactly `revert_data_changes`."
+            "Optional user message forwarded to the current workflow stage. "
+            "Send `revert_data_changes` to request a dataset-history revert inside the workflow."
         ),
     )
 
 
-class RevertStateRequest(BaseModel):
+class ConversationStateReversionRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
-        json_schema_extra={
-            "example": {
-                "state_name": "MODEL_SELECTION",
-            }
-        },
+        json_schema_extra={"example": {"state_name": "MODEL_SELECTION"}},
     )
 
-    state_name: str | None = Field(
-        default=None,
-        description="Workflow state name to revert to. This is not the dataset-history revert mechanism.",
-    )
+    state_name: NonEmptyStr = Field(description="Workflow state name to revert to.")
 
 
-class InvokeResponse(BaseModel):
+class ConversationSnapshotResponse(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         json_schema_extra={
             "example": {
                 "conversation_id": "22222222-2222-2222-2222-222222222222",
-                "user_id": "11111111-1111-1111-1111-111111111111",
+                "conversation_type": "causal",
                 "messages": [
                     {
                         "role": "assistant",
                         "content": "I loaded your dataset and summarized the main columns.",
+                        "artifact_refs": None,
+                    }
+                ],
+                "states": ["DATASET", "DATA_COMPILATION"],
+                "working_dataset": {
+                    "dataset_id": "33333333-3333-3333-3333-333333333333",
+                    "is_frozen": False,
+                },
+            }
+        },
+    )
+
+    conversation_id: UUID = Field(description="Conversation UUID.")
+    conversation_type: ConversationType = Field(description="Conversation type.")
+    messages: Sequence[ChatMessageResponse] = Field(
+        description="Conversation messages returned by the workflow."
+    )
+    states: list[str] = Field(
+        description="Ordered workflow states: completed states plus the current pending state."
+    )
+    working_dataset: WorkingDatasetResponse | None = Field(
+        default=None,
+        description="Current working dataset metadata, when a dataset exists.",
+    )
+
+
+class ConversationExecutionResponse(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "conversation_id": "22222222-2222-2222-2222-222222222222",
+                "conversation_type": "causal",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "I summarized the dataset.",
                         "artifact_refs": [
                             {
                                 "id": "44444444-4444-4444-4444-444444444444",
@@ -152,31 +175,25 @@ class InvokeResponse(BaseModel):
                     }
                 ],
                 "action": "NEEDS_INPUT",
-                "current_stage_name": "DATASET",
+                "current_stage_name": "DATA_COMPILATION",
                 "current_stage_status": "PENDING",
-                "latest_working_dataset": {
+                "working_dataset": {
                     "dataset_id": "33333333-3333-3333-3333-333333333333",
-                    "is_freezed": False,
+                    "is_frozen": False,
                 },
             }
         },
     )
 
     conversation_id: UUID = Field(description="Conversation UUID.")
-    user_id: UUID = Field(
-        description="Authenticated internal user UUID derived from the Firebase token."
-    )
+    conversation_type: ConversationType = Field(description="Conversation type.")
     messages: Sequence[ChatMessageResponse] = Field(
-        description="Assistant-visible messages returned by the workflow.",
+        description="Messages produced by the workflow step."
     )
-    action: Action = Field(description="Workflow action requested by the current stage.")
+    action: Action = Field(description="Next action requested by the workflow.")
     current_stage_name: str = Field(description="Current workflow stage name.")
     current_stage_status: Status = Field(description="Current workflow stage status.")
-    latest_working_dataset: WorkingDatasetInfoResponse | None = Field(
+    working_dataset: WorkingDatasetResponse | None = Field(
         default=None,
-        description=(
-            "Current working dataset info derived from the workflow response. "
-            "Present when ``current_data_id`` is set in the workflow state; "
-            "``null`` when no dataset has been uploaded yet."
-        ),
+        description="Current working dataset metadata, when a dataset exists.",
     )
