@@ -11,7 +11,7 @@ from python.domain.workflows.node import Action, Status
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.dataflow_app import DataflowArtifactResponse
 from python.implementation.workflows.ochestrator.ochestraotor import Ochestrator
-from python.implementation.workflows.ochestrator.writable_ochestrator_state import WritableOchestratorState
+from python.implementation.workflows.ochestrator.causal_ochestrator_state import CausalOchestratorState
 
 
 @dataclass(frozen=True)
@@ -192,7 +192,7 @@ class WorkflowApp:
             user_id=user_id,
             conversation_id=conversation_id,
         )
-        if not isinstance(ochestrator_state, WritableOchestratorState):
+        if not isinstance(ochestrator_state, CausalOchestratorState):
             raise StateNotFoundError(state_name=state_name)
 
         ochestrator_state.roll_back_to_state(state_name)

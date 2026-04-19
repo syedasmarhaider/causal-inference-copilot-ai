@@ -38,8 +38,8 @@ from python.implementation.workflows.nodes.data_manupulation.data_manupulation_s
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionState,
 )
-from python.implementation.workflows.ochestrator.writable_ochestrator_state import (
-    WritableOchestratorState,
+from python.implementation.workflows.ochestrator.causal_ochestrator_state import (
+    CausalOchestratorState,
 )
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
@@ -317,8 +317,8 @@ def _tool_factory() -> _FakeToolFactory:
     )
 
 
-def _build_orchestrator_state(*, dataset_id: UUID, dataset_summary: Any) -> WritableOchestratorState:
-    state = WritableOchestratorState.init_empty()
+def _build_orchestrator_state(*, dataset_id: UUID, dataset_summary: Any) -> CausalOchestratorState:
+    state = CausalOchestratorState.init_empty()
     state.set(
         DataManupulationState.NAME,
         {

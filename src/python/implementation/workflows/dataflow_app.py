@@ -18,7 +18,7 @@ from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.workflow_state_repo import Conversation, WorkflowStateRepo
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_node import DataManupulationNode
-from python.implementation.workflows.ochestrator.writable_ochestrator_state import WritableOchestratorState
+from python.implementation.workflows.ochestrator.causal_ochestrator_state import CausalOchestratorState
 
 # TODO: add distributed tnx or locks later
 
@@ -116,9 +116,9 @@ class DataflowApp:
             conversation_id=conversation_id,
         )
         if not ochestrator_state:
-            ochestrator_state = WritableOchestratorState.init_empty()
+            ochestrator_state = CausalOchestratorState.init_empty()
         
-        if not isinstance(ochestrator_state, WritableOchestratorState):
+        if not isinstance(ochestrator_state, CausalOchestratorState):
             raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation_id)
 
         if ochestrator_state.get_current_node_name() != DataManupulationNode.NAME:
@@ -127,7 +127,7 @@ class DataflowApp:
                 reason="Cannot upload dataset while in the middle of a manipulation stage. Please finish or cancel the current stage before uploading a new dataset.",
             )
 
-        dataset_id = WritableOchestratorState.INIT_DATA_ID
+        dataset_id = CausalOchestratorState.INIT_DATA_ID
         self._data_repo.save_csv_data(
             user_id=user_id,
             conversation_id=conversation_id,

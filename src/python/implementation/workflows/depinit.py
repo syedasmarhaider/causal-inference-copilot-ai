@@ -28,7 +28,7 @@ from python.implementation.workflows.ochestrator.ochestraotor import (
     build_state_classes_by_name,
 )
 
-from python.implementation.workflows.ochestrator.writable_ochestrator_state import WritableOchestratorState
+from python.implementation.workflows.ochestrator.causal_ochestrator_state import CausalOchestratorState
 from python.implementation.workflows.workflow_app import WorkflowApp
 
 log = get_logger(__name__, component="workflow_depinit", log_type="dependency_bootstrap")
@@ -93,7 +93,7 @@ def _make_workflow_state_repo(
     return FirebaseRealtimeWorkflowStateRepo(
         app=app,
         state_classes_by_name=state_classes_by_name,
-        ochestrator_state_classes_by_name={"OCHESTRATOR_STATE": WritableOchestratorState},  # TODO: make this dynamic when we have more orch states
+        ochestrator_state_classes_by_name={"OCHESTRATOR_STATE": CausalOchestratorState},  # TODO: make this dynamic when we have more orch states
         
     )
 

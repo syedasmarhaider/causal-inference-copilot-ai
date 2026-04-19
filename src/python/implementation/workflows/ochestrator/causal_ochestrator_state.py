@@ -74,7 +74,7 @@ class GlobalStateModel(BaseModel):
         return v if isinstance(v, UUID) else UUID(str(v))
 
 
-class WritableOchestratorState(OchestratorState):
+class CausalOchestratorState(OchestratorState):
     INIT_DATA_ID = UUID("00000000-0000-0000-0000-000000000000")
 
     _STAGE_FIELDS: ClassVar[dict[int, tuple[str, ...]]] = {
@@ -110,11 +110,11 @@ class WritableOchestratorState(OchestratorState):
         return self._model.model_dump(mode="json")
 
     @classmethod
-    def from_json_dict(cls, payload: dict[str, Any]) -> WritableOchestratorState:
+    def from_json_dict(cls, payload: dict[str, Any]) -> CausalOchestratorState:
         return cls(GlobalStateModel.model_validate(payload))
 
     @classmethod
-    def init_empty(cls) -> WritableOchestratorState:
+    def init_empty(cls) -> CausalOchestratorState:
         global_model = GlobalStateModel()
         global_model.working_dataset_ids = [cls.INIT_DATA_ID]
         return cls(global_model)

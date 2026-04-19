@@ -19,8 +19,8 @@ from python.implementation.workflows.nodes.model_selection.mode_selection_state 
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionState,
 )
-from python.implementation.workflows.ochestrator.writable_ochestrator_state import (
-    WritableOchestratorState,
+from python.implementation.workflows.ochestrator.causal_ochestrator_state import (
+    CausalOchestratorState,
 )
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
@@ -70,7 +70,7 @@ def _transform_plan() -> TransformPlan:
 def test_data_compilation_dataset_only_publish_preserves_protocol_and_invalidates_downstream() -> (
     None
 ):
-    state = WritableOchestratorState.init_empty()
+    state = CausalOchestratorState.init_empty()
     source_dataset_id = uuid4()
     compiled_dataset_id = uuid4()
     repaired_dataset_id = uuid4()
@@ -137,7 +137,7 @@ def test_data_compilation_dataset_only_publish_preserves_protocol_and_invalidate
 
 
 def test_data_compilation_dataset_only_publish_allows_partial_payload() -> None:
-    state = WritableOchestratorState.init_empty()
+    state = CausalOchestratorState.init_empty()
     source_dataset_id = uuid4()
     repaired_dataset_id = uuid4()
 
@@ -171,7 +171,7 @@ def test_data_compilation_dataset_only_publish_allows_partial_payload() -> None:
 
 
 def test_data_compilation_full_publish_still_requires_full_payload() -> None:
-    state = WritableOchestratorState.init_empty()
+    state = CausalOchestratorState.init_empty()
     source_dataset_id = uuid4()
 
     state.set(

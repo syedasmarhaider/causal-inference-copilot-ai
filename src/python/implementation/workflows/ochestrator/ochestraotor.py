@@ -35,19 +35,8 @@ from python.implementation.workflows.nodes.noop_done.noop_done_state import Noop
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import ProtocolDiscussionNode
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
 from python.implementation.workflows.ochestrator.ochestrator_prompts import ROUTE_SYSTEM_PROMPT
-from python.implementation.workflows.ochestrator.writable_ochestrator_state import WritableOchestratorState
+from python.implementation.workflows.ochestrator.causal_ochestrator_state import CausalOchestratorState
 from python.implementation.workflows.tools.tools_factory import DefaultToolFactory
-
-# Linear workflow order used for forward-state deletion on abort recovery
-_WORKFLOW_STATE_ORDER: tuple[str, ...] = (
-    DataManupulationState.NAME,
-    ProtocolDiscussionState.NAME,
-    DataCompilationState.NAME,
-    ModelSelectionState.NAME,
-    ModelTrainState.NAME,
-    CausalInferenceState.NAME,
-    NoopDoneState.NAME,
-)
 
 @dataclass(frozen=True)
 class OchestrationResponse:
@@ -57,9 +46,6 @@ class OchestrationResponse:
     current_status: Status
     current_data_id: UUID | None = None
     is_dataset_frozen: bool | None = None
-
-    
-
 
 class _RouteDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -94,15 +80,15 @@ class Ochestrator:
     
     
     
-    def get_current_ochestrator_state(self, user_id: UUID, conversation_id: UUID) -> WritableOchestratorState:    
+    def get_current_ochestrator_state(self, user_id: UUID, conversation_id: UUID) -> CausalOchestratorState:    
         orch_state = self._workflow_repo.load_ochestrator_state(
             user_id=user_id,
             conversation_id=conversation_id,
         )
         if orch_state is None:
-            orch_state = WritableOchestratorState.init_empty()
-        if not isinstance(orch_state, WritableOchestratorState):
-            raise ValueError("Orchestrator state must be WritableOchestratorState")
+            orch_state = CausalOchestratorState.init_empty()
+        if not isinstance(orch_state, CausalOchestratorState):
+            raise ValueError("Orchestrator state must be CausalOchestratorState")
         return orch_state
     
     def answer(
@@ -131,9 +117,9 @@ class Ochestrator:
             conversation_id=conversation_id,
         )
         if orch_state is None:
-            orch_state = WritableOchestratorState.init_empty()
-        if not isinstance(orch_state, WritableOchestratorState):
-            raise ValueError("Orchestrator state must be WritableOchestratorState")
+            orch_state = CausalOchestratorState.init_empty()
+        if not isinstance(orch_state, CausalOchestratorState):
+            raise ValueError("Orchestrator state must be CausalOchestratorState")
         
         
 
@@ -172,7 +158,7 @@ class Ochestrator:
 
         # 5. Persist
         new_orch_state = result.new_orchestrator_state
-        if not isinstance(new_orch_state, WritableOchestratorState):
+        if not isinstance(new_orch_state, CausalOchestratorState):
             raise ValueError("New orchestrator state must be WritableOchestratorState")
         self._workflow_repo.store_ochestrator_state(
             user_id=user_id,
