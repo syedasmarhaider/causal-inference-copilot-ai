@@ -4,9 +4,9 @@ from __future__ import annotations
 def data_statistics_node_info() -> str:
     return (
         "Data statistics stage. Uses the working dataset provided by orchestrator "
-        "state to run analytical queries via DuckDB SQL, formal statistical tests "
+        "state to run analytical queries, formal statistical tests "
         "(regression, t-test, chi-squared, propensity scores), and generate charts. "
-        "This stage never mutates or replaces the working dataset."
+        "This stage never mutates or replaces the working dataset and this state is not for causal modeling."
     )
 
 
