@@ -36,12 +36,16 @@ def validate_data_compilation(
     causal_spec: CausalSpec,
     transform_plan: TransformPlan | None,
 ) -> DataCompilationValidationResult:
+    issues = _protocol_scope_missingness_issues(
+        candidate_df=candidate_df,
+        causal_spec=causal_spec,
+    )
     report = ValidationBackdoorTool().validate(
         causal_spec=causal_spec,
         dataframe=candidate_df,
         transform_plan=transform_plan,
     )
-    issues = list(report.issues)
+    issues.extend(report.issues)
     return DataCompilationValidationResult(
         validation_errors=issues,
         user_suggestion_message=_build_user_suggestion_message(
@@ -99,6 +103,50 @@ def _is_repairable_transform_issue(issue: ValidationIssueModel) -> bool:
         if part and part.strip()
     ).lower()
     return any(marker in haystack for marker in _REPAIRABLE_MARKERS)
+
+
+def _protocol_scope_missingness_issues(
+    *,
+    candidate_df: pd.DataFrame,
+    causal_spec: CausalSpec,
+) -> list[ValidationIssueModel]:
+    issues: list[ValidationIssueModel] = []
+    role_by_column: list[tuple[str, str]] = [
+        (str(causal_spec.treatment_spec.column).strip(), "treatment"),
+        (str(causal_spec.outcome_spec.column).strip(), "outcome"),
+        *((str(column).strip(), "covariate") for column in causal_spec.covariates),
+        *((str(column).strip(), "effect_modifier") for column in causal_spec.effect_modifiers),
+    ]
+
+    seen: set[str] = set()
+    for column, role in role_by_column:
+        if not column or column in seen or column not in candidate_df.columns:
+            continue
+        seen.add(column)
+        missing_count = int(candidate_df[column].isna().sum())
+        if missing_count == 0:
+            continue
+        issues.append(
+            ValidationIssueModel(
+                severity="FAIL",
+                message=(
+                    f"Protocol-scope column '{column}' ({role}) still contains missing values "
+                    "after cleaning."
+                ),
+                evidence={
+                    "column": column,
+                    "role": role,
+                    "missing_count": missing_count,
+                    "missing_rate": float(candidate_df[column].isna().mean()),
+                },
+                fix_hint=(
+                    "Resolve the remaining missing values during cleaning before rebuilding "
+                    "the compiled dataset."
+                ),
+            )
+        )
+
+    return issues
 
 
 __all__ = [

@@ -18,12 +18,14 @@ from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.data_compilation.data_compilation_cleaning import (
     cleaning,
     compile_causal_spec_from_cleaned_summary,
+    MissingnessDecisionList,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_deps import (
     DataCompilationDeps,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
     data_compilation_node_info,
+    data_compilation_review_query_prompt,
     data_compilation_review_decision_prompt,
     data_compilation_review_summary_prompt,
     data_compilation_transformation_retry_guidance_prompt,
@@ -68,8 +70,9 @@ class _ReviewSummary(BaseModel):
 class _ReviewDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    action: Literal["confirm", "revise", "clarify"]
+    action: Literal["confirm", "recompile", "answer_query", "reject", "clarify"]
     assistant_message: str = Field(..., min_length=1)
+    recompile_request: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,7 @@ class _CompiledArtifacts:
     dataframe: pd.DataFrame
     summary: DatasetSummaryModel
     causal_spec: CausalSpec
+    missingness_decisions: MissingnessDecisionList
     actions: list[str]
     warnings: list[str]
 
@@ -252,12 +256,14 @@ class DataCompilationNode(Node):
         deps: DataCompilationDeps,
         source_df: pd.DataFrame,
         source_changed: bool,
+        review_recompile_request: str | None = None,
     ) -> NodeExecutionResult:
         try:
             compiled_artifacts = self._compile_from_source(
                 request=request,
                 deps=deps,
                 source_df=source_df,
+                review_recompile_request=review_recompile_request,
             )
         except Exception as exc:
             log.exception("data compilation full compile failed", error=safe_err(exc))
@@ -279,6 +285,7 @@ class DataCompilationNode(Node):
                 "compiled_dataset_id": compiled_artifacts.dataset_id,
                 "compiled_dataset_summary": compiled_artifacts.summary,
                 "compiled_causal_spec": compiled_artifacts.causal_spec,
+                "missingness_decisions": compiled_artifacts.missingness_decisions,
                 "transformation_plan": None,
                 "transformation_suggestions": None,
                 "compilation_actions": compiled_artifacts.actions,
@@ -308,12 +315,14 @@ class DataCompilationNode(Node):
         request: NodeRequest,
         deps: DataCompilationDeps,
         source_df: pd.DataFrame,
+        review_recompile_request: str | None = None,
     ) -> _CompiledArtifacts:
         cleaning_result = cleaning(
             protocol_discussion=deps.protocol_discussion,
             cleaning_instructions=self._build_cleaning_instructions(
                 protocol_cleaning_instructions=deps.protocol_cleaning_instructions,
             ),
+            review_recompile_request=review_recompile_request,
             draft_causal_spec=deps.causal_spec_draft,
             data_summary=deps.dataset_summary,
             to_clean_df=source_df,
@@ -337,10 +346,13 @@ class DataCompilationNode(Node):
             dataframe=cleaning_result.pd_cleaned,
             summary=cleaning_result.cleaned_data_summary,
             causal_spec=cleaning_result.causal,
+            missingness_decisions=cleaning_result.missingness_decisions,
             actions=_summarize_compile_actions(
                 source_summary=deps.dataset_summary,
                 cleaned_summary=cleaning_result.cleaned_data_summary,
                 causal_spec=cleaning_result.causal,
+                missingness_decisions=cleaning_result.missingness_decisions,
+                review_recompile_request=review_recompile_request,
             ),
             warnings=[],
         )
@@ -526,6 +538,7 @@ class DataCompilationNode(Node):
             dataframe=compiled_artifacts.dataframe,
             summary=compiled_artifacts.summary,
             causal_spec=revised_causal_spec,
+            missingness_decisions=compiled_artifacts.missingness_decisions,
             actions=payload.compilation_actions,
             warnings=payload.compilation_warnings,
         )
@@ -559,6 +572,7 @@ class DataCompilationNode(Node):
                 or "",
                 compiled_causal_spec=compiled_artifacts.causal_spec,
                 compiled_dataset_summary=compiled_artifacts.summary,
+                missingness_decisions=compiled_artifacts.missingness_decisions,
                 transformation_plan=transformation_plan,
                 transformation_suggestions=transformation_suggestions,
                 compilation_actions=payload.compilation_actions,
@@ -572,6 +586,7 @@ class DataCompilationNode(Node):
             review_message = _build_review_summary_fallback(
                 compiled_dataset_summary=compiled_artifacts.summary,
                 compiled_causal_spec=compiled_artifacts.causal_spec,
+                missingness_decisions=compiled_artifacts.missingness_decisions,
                 transformation_plan=transformation_plan,
                 transformation_suggestions=transformation_suggestions,
                 compilation_actions=payload.compilation_actions,
@@ -590,6 +605,7 @@ class DataCompilationNode(Node):
             update={
                 "compiled_causal_spec": compiled_artifacts.causal_spec,
                 "compiled_dataset_summary": compiled_artifacts.summary,
+                "missingness_decisions": compiled_artifacts.missingness_decisions,
                 "transformation_plan": transformation_plan,
                 "transformation_suggestions": transformation_suggestions,
                 "validation_issues": validation_result.validation_errors,
@@ -635,9 +651,17 @@ class DataCompilationNode(Node):
                     "compiled_causal_spec": payload.compiled_causal_spec.model_dump(
                         mode="json"
                     ),
+                    "missingness_decisions": payload.missingness_decisions.model_dump(
+                        mode="json"
+                    ),
                     "transformation_plan": payload.transformation_plan.model_dump(
                         mode="json"
                     ),
+                    "transformation_suggestions": payload.transformation_suggestions.model_dump(
+                        mode="json"
+                    ),
+                    "compilation_actions": list(payload.compilation_actions),
+                    "compilation_warnings": list(payload.compilation_warnings),
                     "validation_status": payload.validation_status,
                     "validation_issues": [
                         issue.model_dump(mode="json", exclude_none=True)
@@ -681,7 +705,114 @@ class DataCompilationNode(Node):
                 user_message=decision.assistant_message,
             )
 
-        if decision.action == "revise":
+        if decision.action == "answer_query":
+            try:
+                answer_message = self._build_review_query_answer_message(
+                    protocol_discussion=payload.source_protocol_discussion
+                    or request.orchestrator_state.get("protocol_discussion")
+                    or "",
+                    compiled_causal_spec=payload.compiled_causal_spec,
+                    compiled_dataset_summary=payload.compiled_dataset_summary,
+                    missingness_decisions=payload.missingness_decisions,
+                    transformation_plan=payload.transformation_plan,
+                    transformation_suggestions=payload.transformation_suggestions,
+                    compilation_actions=payload.compilation_actions,
+                    compilation_warnings=payload.compilation_warnings,
+                    validation_status=payload.validation_status or "WARN",
+                    validation_issues=payload.validation_issues,
+                    latest_user_message=latest_user_message,
+                    messages_history=request.read_only_messages_history,
+                )
+            except Exception as exc:
+                log.exception("data compilation review query answer failed", error=safe_err(exc))
+                answer_message = _build_review_query_answer_fallback(
+                    latest_user_message=latest_user_message,
+                    compiled_dataset_summary=payload.compiled_dataset_summary,
+                    compiled_causal_spec=payload.compiled_causal_spec,
+                    missingness_decisions=payload.missingness_decisions,
+                    transformation_plan=payload.transformation_plan,
+                    compilation_actions=payload.compilation_actions,
+                    validation_status=payload.validation_status or "WARN",
+                )
+            answered_payload = payload.model_copy(
+                update={
+                    "assistant_message": answer_message,
+                    "hard_failure": False,
+                    "system_message": None,
+                    "error_message": None,
+                }
+            )
+            return self._needs_input_result(
+                request=request,
+                payload=answered_payload,
+                user_message=answer_message,
+            )
+
+        if decision.action == "recompile":
+            normalized_recompile_request = _normalize_text(decision.recompile_request)
+            if not normalized_recompile_request:
+                clarified_payload = payload.model_copy(
+                    update={
+                        "assistant_message": (
+                            "I understood that you want changes before accepting, but I "
+                            "still need one clear sentence describing the same-column "
+                            "cleaning or preprocessing change to apply."
+                        ),
+                        "hard_failure": False,
+                        "system_message": None,
+                        "error_message": None,
+                    }
+                )
+                return self._needs_input_result(
+                    request=request,
+                    payload=clarified_payload,
+                    user_message=clarified_payload.assistant_message or "",
+                )
+
+            try:
+                deps = DataCompilationDeps.from_request(request)
+                source_dataset_id = payload.source_dataset_id or deps.dataset_id
+                source_df = self._data_repo.get_csv_data(
+                    user_id=request.user_id,
+                    conversation_id=request.conversation_id,
+                    dataset_id=source_dataset_id,
+                    limit=1_000_000,
+                )
+            except Exception as exc:
+                log.exception(
+                    "failed to reload original source dataset for recompilation",
+                    error=safe_err(exc),
+                )
+                return self._failed_result(
+                    request=request,
+                    payload=payload,
+                    user_message=(
+                        "I understood the requested same-column changes, but I could not "
+                        "reload the original source dataset to recompile from scratch. "
+                        f"Error: {safe_err(exc)}"
+                    ),
+                    error_message=(
+                        "review-time recompilation source reload failed: "
+                        f"{safe_err(exc)}"
+                    ),
+                )
+
+            recompiling_payload = payload.reset_for_recompile(
+                dataset_id=deps.dataset_id,
+                protocol_discussion=deps.protocol_discussion,
+                protocol_cleaning_instructions=deps.protocol_cleaning_instructions,
+                causal_spec_draft=deps.causal_spec_draft,
+            )
+            return self._run_pipeline_from_source(
+                request=request,
+                payload=recompiling_payload,
+                deps=deps,
+                source_df=source_df,
+                source_changed=False,
+                review_recompile_request=normalized_recompile_request,
+            )
+
+        if decision.action == "reject":
             revised_payload = payload.model_copy(
                 update={
                     "phase": "FAILED",
@@ -717,6 +848,7 @@ class DataCompilationNode(Node):
         protocol_discussion: str,
         compiled_causal_spec: CausalSpec,
         compiled_dataset_summary: DatasetSummaryModel,
+        missingness_decisions: MissingnessDecisionList,
         transformation_plan: TransformPlan,
         transformation_suggestions: ColumnTransformationSuggestionList | None,
         compilation_actions: Sequence[str],
@@ -740,6 +872,7 @@ class DataCompilationNode(Node):
                             for profile in compiled_dataset_summary.profiles
                         ],
                     },
+                    "missingness_decisions": missingness_decisions.model_dump(mode="json"),
                     "transformation_plan": transformation_plan.model_dump(mode="json"),
                     "transformation_suggestions": (
                         transformation_suggestions.model_dump(mode="json")
@@ -762,12 +895,68 @@ class DataCompilationNode(Node):
         )
         return review_summary.assistant_message
 
+    def _build_review_query_answer_message(
+        self,
+        *,
+        protocol_discussion: str,
+        compiled_causal_spec: CausalSpec,
+        compiled_dataset_summary: DatasetSummaryModel,
+        missingness_decisions: MissingnessDecisionList,
+        transformation_plan: TransformPlan,
+        transformation_suggestions: ColumnTransformationSuggestionList | None,
+        compilation_actions: Sequence[str],
+        compilation_warnings: Sequence[str],
+        validation_status: ValidationStatus,
+        validation_issues: Sequence[ValidationIssueModel],
+        latest_user_message: str,
+        messages_history: Sequence[ChatMessage] | None,
+    ) -> str:
+        history = list(messages_history[-4:]) if messages_history else None
+        review_answer = self._llm.generate_json(
+            schema=_ReviewSummary,
+            system_prompt=data_compilation_review_query_prompt(),
+            user_prompt=json.dumps(
+                {
+                    "protocol_discussion": protocol_discussion,
+                    "compiled_causal_spec": compiled_causal_spec.model_dump(mode="json"),
+                    "compiled_dataset_summary": {
+                        "n_rows": compiled_dataset_summary.n_rows,
+                        "columns": [
+                            str(profile.name).strip()
+                            for profile in compiled_dataset_summary.profiles
+                        ],
+                    },
+                    "missingness_decisions": missingness_decisions.model_dump(mode="json"),
+                    "transformation_plan": transformation_plan.model_dump(mode="json"),
+                    "transformation_suggestions": (
+                        transformation_suggestions.model_dump(mode="json")
+                        if transformation_suggestions is not None
+                        else {"suggestions": []}
+                    ),
+                    "compilation_actions": list(compilation_actions),
+                    "compilation_warnings": list(compilation_warnings),
+                    "validation_status": validation_status,
+                    "validation_issues": [
+                        issue.model_dump(mode="json", exclude_none=True)
+                        for issue in validation_issues
+                    ],
+                    "latest_user_message": latest_user_message,
+                },
+                ensure_ascii=False,
+            ),
+            config=LLMConfig(model="mini", temperature=0.2),
+            history=history,
+            max_attempts=2,
+        )
+        return review_answer.assistant_message
+
     def _review_payload_complete(self, payload: DataCompilationPayloadModel) -> bool:
         return (
             payload.source_causal_spec_draft is not None
             and payload.compiled_dataset_id is not None
             and payload.compiled_dataset_summary is not None
             and payload.compiled_causal_spec is not None
+            and payload.missingness_decisions is not None
             and payload.transformation_plan is not None
             and payload.transformation_suggestions is not None
             and payload.validation_status is not None
@@ -943,11 +1132,14 @@ def _summarize_compile_actions(
     source_summary: DatasetSummaryModel,
     cleaned_summary: DatasetSummaryModel,
     causal_spec: CausalSpec,
+    missingness_decisions: MissingnessDecisionList,
+    review_recompile_request: str | None,
 ) -> list[str]:
     actions = [
         "Retained only the confirmed protocol-scope columns for compilation: "
         + ", ".join(_protocol_scope_columns(causal_spec))
     ]
+    actions.extend(_summarize_missingness_decisions(missingness_decisions))
     if source_summary.n_rows != cleaned_summary.n_rows:
         actions.append(
             f"Row count changed from {source_summary.n_rows} to {cleaned_summary.n_rows} during cleaning."
@@ -962,8 +1154,36 @@ def _summarize_compile_actions(
             + ", ".join(removed_columns)
         )
 
+    normalized_review_recompile_request = _normalize_text(review_recompile_request)
+    if normalized_review_recompile_request:
+        actions.append(
+            "Applied a review-time recompilation request on the original working dataset: "
+            + normalized_review_recompile_request
+        )
+
     actions.append("Recompiled the causal specification on the cleaned dataset summary.")
     return actions
+
+
+def _summarize_missingness_decisions(
+    missingness_decisions: MissingnessDecisionList,
+) -> list[str]:
+    affected = [
+        decision
+        for decision in missingness_decisions.decisions
+        if decision.missing_count_before > 0
+    ]
+    if not affected:
+        return ["No protocol-scope missingness was detected before cleaning."]
+
+    return [
+        (
+            f"Resolved missingness for '{decision.column}' ({decision.role}) via "
+            f"{decision.resolution}; before={decision.missing_count_before}, "
+            f"after={decision.missing_count_after}."
+        )
+        for decision in affected
+    ]
 
 
 def _merge_unique_text_items(
@@ -1111,6 +1331,7 @@ def _build_review_summary_fallback(
     *,
     compiled_dataset_summary: DatasetSummaryModel,
     compiled_causal_spec: CausalSpec,
+    missingness_decisions: MissingnessDecisionList,
     transformation_plan: TransformPlan,
     transformation_suggestions: ColumnTransformationSuggestionList | None,
     compilation_actions: Sequence[str],
@@ -1130,6 +1351,7 @@ def _build_review_summary_fallback(
         if note:
             line = f"{line} ({note})"
         transform_lines.append(line)
+    missingness_text = "; ".join(_summarize_missingness_decisions(missingness_decisions))
     warning_text = (
         "No non-blocking warnings remain."
         if not compilation_warnings and not validation_issues
@@ -1156,6 +1378,7 @@ def _build_review_summary_fallback(
         f"The compiled dataset now has {compiled_dataset_summary.n_rows} rows and "
         f"{len(compiled_dataset_summary.profiles)} columns: "
         f"{', '.join(retained_columns) if retained_columns else 'none'}. "
+        f"Missingness handling: {missingness_text}. "
         f"The treatment column is {compiled_causal_spec.treatment_spec.column}, the "
         f"outcome column is {compiled_causal_spec.outcome_spec.column}, the baseline "
         f"covariates are {', '.join(compiled_causal_spec.covariates) if compiled_causal_spec.covariates else 'none'}, "
@@ -1165,6 +1388,39 @@ def _build_review_summary_fallback(
         f"Validation status: {validation_status}. "
         f"Warnings and cautions: {warning_text}. "
         f"{recommendation} Please confirm this compiled setup, or tell me what should change."
+    )
+
+
+def _build_review_query_answer_fallback(
+    *,
+    latest_user_message: str,
+    compiled_dataset_summary: DatasetSummaryModel,
+    compiled_causal_spec: CausalSpec,
+    missingness_decisions: MissingnessDecisionList,
+    transformation_plan: TransformPlan,
+    compilation_actions: Sequence[str],
+    validation_status: ValidationStatus,
+) -> str:
+    retained_columns = [
+        str(profile.name).strip() for profile in compiled_dataset_summary.profiles
+    ]
+    transform_text = "; ".join(
+        f"{column.column}: {column.encoding.preset}" for column in transformation_plan.columns
+    )
+    missingness_text = "; ".join(_summarize_missingness_decisions(missingness_decisions))
+    return (
+        f"Your question was: {latest_user_message.strip()} "
+        f"The compiled dataset currently has {compiled_dataset_summary.n_rows} rows and "
+        f"{len(retained_columns)} columns: {', '.join(retained_columns) if retained_columns else 'none'}. "
+        f"Treatment is {compiled_causal_spec.treatment_spec.column}, outcome is "
+        f"{compiled_causal_spec.outcome_spec.column}, covariates are "
+        f"{', '.join(compiled_causal_spec.covariates) if compiled_causal_spec.covariates else 'none'}, "
+        f"and effect modifiers are "
+        f"{', '.join(compiled_causal_spec.effect_modifiers) if compiled_causal_spec.effect_modifiers else 'none'}. "
+        f"Missingness handling: {missingness_text}. "
+        f"Planned transformations: {transform_text}. "
+        f"Data preparation steps: {'; '.join(compilation_actions) if compilation_actions else 'none recorded'}. "
+        f"Validation status is {validation_status}. Please confirm this setup or tell me what should change."
     )
 
 

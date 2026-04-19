@@ -15,6 +15,8 @@ from python.domain.workflows.node import NodeRequest
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.data_compilation.data_compilation_cleaning import (
     CleaningResult,
+    MissingnessDecision,
+    MissingnessDecisionList,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_node import (
     DataCompilationNode,
@@ -94,6 +96,7 @@ def _causal_spec() -> CausalSpec:
             "covariates": ["age"],
             "effect_modifiers": ["isex"],
             "experiment_type": "RCT",
+            "id_col": "__rowid__",
         }
     )
 
@@ -339,6 +342,50 @@ def _cleaning_result(dataframe: pd.DataFrame) -> CleaningResult:
         cleaned_data_summary=_build_summary(dataframe),
         pd_cleaned=dataframe.copy(),
         causal=_causal_spec(),
+        missingness_decisions=_missingness_decisions(),
+    )
+
+
+def _missingness_decisions() -> MissingnessDecisionList:
+    return MissingnessDecisionList(
+        decisions=[
+            MissingnessDecision(
+                column="treatment",
+                role="treatment",
+                missing_count_before=0,
+                resolution="none_needed",
+                reason="Treatment is already complete.",
+                instruction="No missingness action is required.",
+                missing_count_after=0,
+            ),
+            MissingnessDecision(
+                column="outcome",
+                role="outcome",
+                missing_count_before=0,
+                resolution="none_needed",
+                reason="Outcome is already complete.",
+                instruction="No missingness action is required.",
+                missing_count_after=0,
+            ),
+            MissingnessDecision(
+                column="age",
+                role="covariate",
+                missing_count_before=0,
+                resolution="none_needed",
+                reason="Age is already complete.",
+                instruction="No missingness action is required.",
+                missing_count_after=0,
+            ),
+            MissingnessDecision(
+                column="isex",
+                role="effect_modifier",
+                missing_count_before=0,
+                resolution="none_needed",
+                reason="Effect modifier is already complete.",
+                instruction="No missingness action is required.",
+                missing_count_after=0,
+            ),
+        ]
     )
 
 
@@ -389,6 +436,7 @@ def test_data_compilation_node_saves_transformation_suggestions_without_cleaning
     assert payload.phase == "REVIEW_READY"
     assert payload.compiled_dataset_id is not None
     assert payload.compiled_dataset_id in data_repo.dataframes
+    assert payload.missingness_decisions is not None
     assert payload.transformation_suggestions is not None
     assert len(payload.transformation_suggestions.suggestions) == 2
     assert "preferred future raw type is CATEGORICAL" in " ".join(payload.compilation_warnings)
@@ -406,6 +454,7 @@ def test_data_compilation_node_saves_transformation_suggestions_without_cleaning
     assert cleaning_mock.call_count == 1
     assert transform_mock.call_count == 1
     review_payload = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
+    assert review_payload["missingness_decisions"]["decisions"][2]["column"] == "age"
     assert review_payload["transformation_suggestions"]["suggestions"][1]["preferred_type"] == (
         "CATEGORICAL"
     )
@@ -622,14 +671,17 @@ def test_data_compilation_node_review_confirm_publishes_outputs() -> None:
     assert orchestrator_state.get("causal_spec_draft").model_dump(mode="json") == _causal_draft().model_dump(mode="json")
 
 
-def test_data_compilation_node_review_revise_keeps_only_preaccept_dataset_refresh() -> None:
+def test_data_compilation_node_review_reject_aborts_and_leaves_upstream_state_unchanged() -> None:
     dataframe = _build_dataframe()
     dataset_summary = _build_summary(dataframe)
     dataset_id = uuid4()
     llm = _FakeLLM(
         json_outputs=[
             {"assistant_message": "Detailed clinician review."},
-            {"action": "revise", "assistant_message": "Please revise this compiled setup."},
+            {
+                "action": "reject",
+                "assistant_message": "I do not accept this setup. Please send me back.",
+            },
         ]
     )
     data_repo = _InMemoryDataRepo(dataframes={dataset_id: dataframe.copy()})
@@ -674,7 +726,7 @@ def test_data_compilation_node_review_revise_keeps_only_preaccept_dataset_refres
                 orchestrator_state=orchestrator_state,
                 read_only_messages_history=[
                     ChatMessage(role="assistant", content=first_payload.assistant_message or ""),
-                    ChatMessage(role="user", content="revise it"),
+                    ChatMessage(role="user", content="I do not accept this, take me back."),
                 ],
             )
         )
@@ -684,6 +736,9 @@ def test_data_compilation_node_review_revise_keeps_only_preaccept_dataset_refres
     assert second_result.status == "ABORTED"
     assert second_result.new_node_state.payload.phase == "FAILED"
     assert second_result.new_node_state.payload.hard_failure is False
+    assert second_result.new_node_state.payload.system_message == (
+        "DATA_COMPILATION_REVISION_REQUESTED"
+    )
     assert orchestrator_state.get("working_dataset_id") == dataset_id
     assert orchestrator_state.get("latest_dataset_summary") == dataset_summary
     assert orchestrator_state.get("causal_spec") is None
@@ -700,9 +755,10 @@ def test_data_compilation_node_review_question_reuses_cached_payload_without_rec
         json_outputs=[
             {"assistant_message": "Detailed clinician review."},
             {
-                "action": "clarify",
-                "assistant_message": "The cleaned dataset is cached; no recompilation is needed.",
+                "action": "answer_query",
+                "assistant_message": "I can answer from the cached compiled payload.",
             },
+            {"assistant_message": "The cleaned dataset is cached; no recompilation is needed."},
         ]
     )
     data_repo = _InMemoryDataRepo(dataframes={dataset_id: dataframe.copy()})
@@ -762,12 +818,115 @@ def test_data_compilation_node_review_question_reuses_cached_payload_without_rec
         second_result.new_node_state.payload.assistant_message
         == "The cleaned dataset is cached; no recompilation is needed."
     )
+    assert len(llm.generate_json_calls) == 3
+    decision_payload = json.loads(str(llm.generate_json_calls[1]["user_prompt"]))
+    assert decision_payload["missingness_decisions"]["decisions"][0]["column"] == "treatment"
+    answer_payload = json.loads(str(llm.generate_json_calls[2]["user_prompt"]))
+    assert answer_payload["latest_user_message"] == "What changed in the compiled data?"
     assert cleaning_mock.call_count == 1
     assert transform_mock.call_count == 1
     assert validate_mock.call_count == 1
     assert data_repo.get_csv_data_calls == [dataset_id]
     assert orchestrator_state.get("working_dataset_id") == dataset_id
     assert orchestrator_state.get("latest_dataset_summary") == dataset_summary
+
+
+def test_data_compilation_node_review_recompile_uses_original_source_dataset() -> None:
+    dataframe = _build_dataframe()
+    updated_dataframe = dataframe.copy()
+    updated_dataframe["age"] = updated_dataframe["age"] + 5
+    dataset_summary = _build_summary(dataframe)
+    dataset_id = uuid4()
+    llm = _FakeLLM(
+        json_outputs=[
+            {"assistant_message": "Detailed clinician review."},
+            {
+                "action": "recompile",
+                "assistant_message": "I will recompile from the original dataset.",
+                "recompile_request": "Reclean age without changing columns or roles.",
+            },
+            {"assistant_message": "Recompiled clinician review."},
+        ]
+    )
+    data_repo = _InMemoryDataRepo(dataframes={dataset_id: dataframe.copy()})
+    node = DataCompilationNode(data_repo=data_repo, llm=llm, tools_factory=_tool_factory())
+    orchestrator_state = _build_orchestrator_state(
+        dataset_id=dataset_id,
+        dataset_summary=dataset_summary,
+    )
+
+    with (
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.cleaning",
+            side_effect=[_cleaning_result(dataframe), _cleaning_result(updated_dataframe)],
+        ) as cleaning_mock,
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
+            side_effect=[
+                _transformation_result(transformation_plan=_transform_plan()),
+                _transformation_result(transformation_plan=_transform_plan()),
+            ],
+        ) as transform_mock,
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
+            side_effect=[
+                DataCompilationValidationResult(
+                    validation_errors=[],
+                    user_suggestion_message=None,
+                ),
+                DataCompilationValidationResult(
+                    validation_errors=[],
+                    user_suggestion_message=None,
+                ),
+            ],
+        ) as validate_mock,
+    ):
+        first_result = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=DataCompilationState.init_empty(),
+                orchestrator_state=orchestrator_state,
+                read_only_messages_history=[ChatMessage(role="user", content="compile it")],
+            )
+        )
+        first_payload = first_result.new_node_state.payload
+
+        second_result = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=first_result.new_node_state,
+                orchestrator_state=orchestrator_state,
+                read_only_messages_history=[
+                    ChatMessage(role="assistant", content=first_payload.assistant_message or ""),
+                    ChatMessage(
+                        role="user",
+                        content="Please reclean age from the original dataset before I accept.",
+                    ),
+                ],
+            )
+        )
+
+    assert first_payload.phase == "REVIEW_READY"
+    assert second_result.status == "PENDING"
+    assert second_result.action == "NEEDS_INPUT"
+    assert second_result.new_node_state.payload.phase == "REVIEW_READY"
+    assert second_result.new_node_state.payload.compiled_dataset_id != first_payload.compiled_dataset_id
+    assert "Recompiled clinician review." == second_result.new_node_state.payload.assistant_message
+    assert cleaning_mock.call_count == 2
+    assert cleaning_mock.call_args_list[1].kwargs["review_recompile_request"] == (
+        "Reclean age without changing columns or roles."
+    )
+    assert transform_mock.call_count == 2
+    assert validate_mock.call_count == 2
+    assert data_repo.get_csv_data_calls == [dataset_id, dataset_id]
+    assert second_result.new_node_state.payload.missingness_decisions is not None
+    assert any(
+        "Applied a review-time recompilation request on the original working dataset"
+        in action
+        for action in second_result.new_node_state.payload.compilation_actions
+    )
 
 
 def test_data_compilation_node_recompiles_when_upstream_protocol_changes() -> None:

@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
     data_compilation_causal_semantics_prompt,
+    data_compilation_cleaning_instructions_prompt,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import (
     BinaryTreatmentSpecModel,
@@ -43,6 +44,45 @@ class CleaningResult:
     cleaned_data_summary: DatasetSummaryModel
     pd_cleaned: pd.DataFrame
     causal: CausalSpec
+    missingness_decisions: MissingnessDecisionList
+
+
+ColumnRole = Literal["treatment", "outcome", "covariate", "effect_modifier"]
+MissingnessResolution = Literal["none_needed", "drop_rows", "impute"]
+
+
+class MissingnessDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    column: str = Field(..., min_length=1)
+    role: ColumnRole
+    missing_count_before: int = Field(..., ge=0)
+    resolution: MissingnessResolution
+    reason: str = Field(..., min_length=1)
+    instruction: str = Field(..., min_length=1)
+    missing_count_after: int = Field(..., ge=0)
+
+
+class MissingnessDecisionList(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decisions: list[MissingnessDecision] = Field(..., min_length=1)
+
+
+class _MissingnessDecisionDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    column: str = Field(..., min_length=1)
+    role: ColumnRole
+    resolution: MissingnessResolution
+    reason: str = Field(..., min_length=1)
+    instruction: str = Field(..., min_length=1)
+
+
+class _MissingnessPlanDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decisions: list[_MissingnessDecisionDraft] = Field(..., min_length=1)
 
 
 class _TreatmentSemanticsModel(BaseModel):
@@ -109,6 +149,7 @@ def cleaning(
     *,
     protocol_discussion: str | None,
     cleaning_instructions: str,
+    review_recompile_request: str | None,
     draft_causal_spec: CausalSpecDraft,
     data_summary: DatasetSummaryModel,
     to_clean_df: pd.DataFrame,
@@ -134,11 +175,22 @@ def cleaning(
         dataset_profiling_tool=datasetProfilingTool,
         dataframe=scoped_df,
     )
+    missingness_plan = _plan_missingness_resolution(
+        llm=llm,
+        scoped_df=scoped_df,
+        scoped_summary=scoped_summary,
+        draft_causal_spec=draft_causal_spec,
+        protocol_discussion=protocol_discussion,
+        cleaning_instructions=cleaning_instructions,
+        review_recompile_request=review_recompile_request,
+    )
 
     effective_instructions = _build_manipulation_instructions(
         protocol_discussion=protocol_discussion,
         cleaning_instructions=cleaning_instructions,
+        review_recompile_request=review_recompile_request,
         draft_scope_columns=input_scope_columns,
+        missingness_plan=missingness_plan,
     )
     cleaned_candidate_df = scoped_df.copy()
     if effective_instructions:
@@ -165,6 +217,12 @@ def cleaning(
         include_auto_generated_identifier=True,
     )
     cleaned_df = cleaned_candidate_df.loc[:, final_scope_columns].copy()
+    missingness_decisions = _finalize_missingness_decisions(
+        draft_causal_spec=draft_causal_spec,
+        scoped_df=scoped_df,
+        cleaned_df=cleaned_df,
+        missingness_plan=missingness_plan,
+    )
     cleaned_summary = _profile_dataset(
         dataset_profiling_tool=datasetProfilingTool,
         dataframe=cleaned_df,
@@ -180,6 +238,7 @@ def cleaning(
         cleaned_data_summary=cleaned_summary,
         pd_cleaned=cleaned_df,
         causal=causal_spec,
+        missingness_decisions=missingness_decisions,
     )
 
 
@@ -251,11 +310,22 @@ def _build_manipulation_instructions(
     *,
     protocol_discussion: str | None,
     cleaning_instructions: str,
+    review_recompile_request: str | None,
     draft_scope_columns: Sequence[str],
+    missingness_plan: Sequence[_MissingnessDecisionDraft],
 ) -> str:
     normalized_cleaning_instructions = _normalize_text(cleaning_instructions)
     normalized_protocol_discussion = _normalize_text(protocol_discussion)
-    if not normalized_cleaning_instructions and not normalized_protocol_discussion:
+    normalized_review_recompile_request = _normalize_text(review_recompile_request)
+    missingness_actions = [
+        draft for draft in missingness_plan if draft.resolution != "none_needed"
+    ]
+    if (
+        not normalized_cleaning_instructions
+        and not normalized_protocol_discussion
+        and not normalized_review_recompile_request
+        and not missingness_actions
+    ):
         return ""
 
     parts: list[str] = []
@@ -275,6 +345,24 @@ def _build_manipulation_instructions(
                 normalized_protocol_discussion,
             ]
         )
+    if normalized_review_recompile_request:
+        if parts:
+            parts.append("")
+        parts.extend(
+            [
+                "Review-time recompilation request:",
+                normalized_review_recompile_request,
+            ]
+        )
+    if missingness_actions:
+        if parts:
+            parts.append("")
+        parts.append("Resolve protocol-scope missingness exactly as follows:")
+        for draft in missingness_actions:
+            parts.append(
+                f"- Column '{draft.column}' ({draft.role}): {draft.resolution}. "
+                f"Reason: {draft.reason} Instruction: {draft.instruction}"
+            )
 
     if parts:
         parts.extend(
@@ -286,6 +374,173 @@ def _build_manipulation_instructions(
             ]
         )
     return "\n".join(parts).strip()
+
+
+def _plan_missingness_resolution(
+    *,
+    llm: LLMService,
+    scoped_df: pd.DataFrame,
+    scoped_summary: DatasetSummaryModel,
+    draft_causal_spec: CausalSpecDraft,
+    protocol_discussion: str | None,
+    cleaning_instructions: str,
+    review_recompile_request: str | None,
+) -> list[_MissingnessDecisionDraft]:
+    role_by_column = _expected_role_by_column(draft_causal_spec)
+    missing_counts_before = _missing_counts_by_column(scoped_df, role_by_column)
+    if not any(count > 0 for count in missing_counts_before.values()):
+        return [
+            _MissingnessDecisionDraft(
+                column=column,
+                role=role,
+                resolution="none_needed",
+                reason="No missing values were detected in the scoped input column.",
+                instruction="No missingness action is required for this column.",
+            )
+            for column, role in role_by_column.items()
+        ]
+
+    payload: dict[str, Any] = {
+        "confirmed_protocol_discussion": _normalize_text(protocol_discussion),
+        "confirmed_protocol_cleaning_instructions": _normalize_text(cleaning_instructions),
+        "scoped_dataset_summary": _dataset_summary_prompt_payload(scoped_summary),
+        "expected_role_by_column": role_by_column,
+        "missing_count_by_column": missing_counts_before,
+    }
+    normalized_review_recompile_request = _normalize_text(review_recompile_request)
+    if normalized_review_recompile_request:
+        payload["review_recompile_request"] = normalized_review_recompile_request
+
+    draft = llm.generate_json(
+        schema=_MissingnessPlanDraft,
+        system_prompt=data_compilation_cleaning_instructions_prompt(),
+        user_prompt=json.dumps(payload, ensure_ascii=False),
+        config=LLMConfig(model="basic", temperature=0.1),
+        history=None,
+        max_attempts=2,
+    )
+    indexed = _validate_and_index_missingness_plan(
+        decisions=draft.decisions,
+        expected_role_by_column=role_by_column,
+        missing_count_by_column=missing_counts_before,
+    )
+    return [indexed[column] for column in role_by_column]
+
+
+def _validate_and_index_missingness_plan(
+    *,
+    decisions: Sequence[_MissingnessDecisionDraft],
+    expected_role_by_column: dict[str, ColumnRole],
+    missing_count_by_column: dict[str, int],
+) -> dict[str, _MissingnessDecisionDraft]:
+    indexed: dict[str, _MissingnessDecisionDraft] = {}
+    duplicates: list[str] = []
+
+    for decision in decisions:
+        column = str(decision.column).strip()
+        expected_role = expected_role_by_column.get(column)
+        if expected_role is None:
+            raise ValueError(f"missingness plan contains non-eligible column: {column}")
+        if decision.role != expected_role:
+            raise ValueError(
+                f"missingness plan assigned wrong role for column '{column}': "
+                f"expected {expected_role}, got {decision.role}"
+            )
+        if column in indexed:
+            duplicates.append(column)
+            continue
+        actual_missing_count = missing_count_by_column.get(column, 0)
+        if actual_missing_count == 0 and decision.resolution != "none_needed":
+            raise ValueError(
+                f"missingness plan must use resolution='none_needed' for complete column '{column}'"
+            )
+        if actual_missing_count > 0 and decision.resolution == "none_needed":
+            raise ValueError(
+                f"missingness plan must resolve missingness for column '{column}'"
+            )
+        indexed[column] = decision
+
+    if duplicates:
+        raise ValueError(
+            f"missingness plan contains duplicate column entries: {sorted(duplicates)}"
+        )
+
+    missing_columns = sorted(set(expected_role_by_column) - set(indexed))
+    if missing_columns:
+        raise ValueError(f"missingness plan is missing scoped columns: {missing_columns}")
+
+    return indexed
+
+
+def _finalize_missingness_decisions(
+    *,
+    draft_causal_spec: CausalSpecDraft,
+    scoped_df: pd.DataFrame,
+    cleaned_df: pd.DataFrame,
+    missingness_plan: Sequence[_MissingnessDecisionDraft],
+) -> MissingnessDecisionList:
+    role_by_column = _expected_role_by_column(draft_causal_spec)
+    before_counts = _missing_counts_by_column(scoped_df, role_by_column)
+    after_counts = _missing_counts_by_column(cleaned_df, role_by_column)
+    decisions = MissingnessDecisionList(
+        decisions=[
+            MissingnessDecision(
+                column=str(draft.column).strip(),
+                role=draft.role,
+                missing_count_before=before_counts.get(str(draft.column).strip(), 0),
+                resolution=draft.resolution,
+                reason=str(draft.reason).strip(),
+                instruction=str(draft.instruction).strip(),
+                missing_count_after=after_counts.get(str(draft.column).strip(), 0),
+            )
+            for draft in missingness_plan
+        ]
+    )
+    unresolved = [
+        decision
+        for decision in decisions.decisions
+        if decision.missing_count_after > 0
+    ]
+    if unresolved:
+        formatted = ", ".join(
+            f"{decision.column}={decision.missing_count_after}" for decision in unresolved
+        )
+        raise ValueError(
+            "cleaned dataframe still contains protocol-scope missing values: "
+            f"{formatted}"
+        )
+    return decisions
+
+
+def _expected_role_by_column(
+    draft_causal_spec: CausalSpecDraft,
+) -> dict[str, ColumnRole]:
+    role_by_column: dict[str, ColumnRole] = {
+        str(draft_causal_spec.treatment_column).strip(): "treatment",
+        str(draft_causal_spec.outcome_column).strip(): "outcome",
+    }
+    for column in draft_causal_spec.covariates:
+        normalized = str(column).strip()
+        if normalized:
+            role_by_column[normalized] = "covariate"
+    for column in draft_causal_spec.effect_modifiers:
+        normalized = str(column).strip()
+        if normalized:
+            role_by_column[normalized] = "effect_modifier"
+    return role_by_column
+
+
+def _missing_counts_by_column(
+    dataframe: pd.DataFrame,
+    role_by_column: dict[str, ColumnRole],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for column in role_by_column:
+        if column not in dataframe.columns:
+            counts[column] = 0
+            continue
+        counts[column] = int(dataframe[column].isna().sum())
+    return counts
 
 
 def _normalize_text(raw: str | None) -> str:
@@ -306,6 +561,13 @@ def _profile_dataset(
         compute_quantiles=False,
         strict=True,
     )
+
+
+def _dataset_summary_prompt_payload(summary: DatasetSummaryModel) -> dict[str, Any]:
+    return {
+        "n_rows": summary.n_rows,
+        "columns": [_column_prompt_payload(profile) for profile in summary.profiles],
+    }
 
 
 def compile_causal_spec_from_cleaned_summary(

@@ -85,23 +85,30 @@ Output policy:
 
 def data_compilation_cleaning_instructions_prompt() -> str:
     return """
-You are preparing first-pass SQL-oriented cleaning instructions before protocol compilation.
+You are planning how protocol-scope missingness should be resolved before protocol compilation.
 
 Inputs:
 - confirmed protocol discussion
 - confirmed protocol cleaning instructions
-- authoritative source dataset summary
+- scoped dataset summary
+- expected_role_by_column
+- optional review_recompile_request
 
 Rules:
-- Return only user-intent text for a SQL data manipulation tool.
-- Keep it executable and concrete.
-- Include only grounded row filters, normalization steps, type fixes, and column handling derived from the confirmed protocol and confirmed protocol cleaning instructions.
-- Do not compile the causal spec yourself; only prepare the dataset so later compilation can use it.
-- Preserve any columns that may still be needed for later protocol compilation unless the confirmed cleaning instructions explicitly narrow them already.
-- If treatment is binary, normalize its labels only when grounded by the confirmed protocol.
-- If outcome is binary, normalize its labels only when grounded by the confirmed protocol.
-- Do not invent filters, columns, or value mappings.
-- Do not include validation, modeling, plotting, or non-SQL tasks.
+- Output one decision for every scoped column.
+- The compiled dataset must end with no missing values in treatment, outcome, covariates, or effect modifiers.
+- Prefer grounded imputation when the protocol or data type supports it cleanly.
+- Prefer row removal only when imputation would be clinically or statistically misleading.
+- Keep all column identities and roles locked.
+- Do not invent new columns, values, or unsupported mappings.
+- If review_recompile_request is present, use it only when it preserves the same locked columns and roles.
+- Return JSON only.
+- Each decision must contain:
+  - `column`
+  - `role`
+  - `resolution` as `none_needed` | `drop_rows` | `impute`
+  - `reason`
+  - `instruction`
 """.strip()
 
 
@@ -246,6 +253,7 @@ Inputs:
 - confirmed protocol discussion
 - compiled causal specification
 - compiled dataset summary
+- missingness_decisions
 - compiled transformation plan
 - transformation_suggestions
 - compilation_actions
@@ -260,7 +268,8 @@ Task:
 Content rules:
 - Write for a clinician, not a data scientist. Prefer intuitive and practical language over mathematical language.
 - Start with what changed in the dataset and why those changes matter for the clinical question.
-- Explain which columns were kept, how the data was narrowed, and any grounded row removals or corrective cleaning that happened.
+- Explain which columns were kept, how the data was narrowed, and how missing values were resolved before compilation.
+- Make it clear whether missing values were handled by row removal, imputation, or whether no action was needed.
 - Explain the planned baseline transformations in detail, column by column when helpful, including why each transformation is needed and what it means in plain language.
 - When a column has a preferred future raw type that differs from its current stored type, mention that as a non-blocking recommendation and explain why.
 - Explain what validation checked in practical terms.
@@ -283,22 +292,60 @@ def data_compilation_review_decision_prompt() -> str:
 You are reviewing a compiled dataset and transformation plan with the user.
 
 Task:
-- Interpret the latest user reply to decide whether the compiled and validated setup is accepted, rejected for revision, or still unclear.
+- Interpret the latest user reply to decide whether to accept the compiled setup, answer a review-time question, recompile from the original source dataset, reject and go back, or ask for clarification.
 
 Decision rules:
 - Choose `confirm` only when the user is clearly accepting the compiled dataset, transformation plan, and validation result as-is.
-- Choose `revise` when the user is asking to change the compiled dataset scope, treatment, outcome, covariates, effect modifiers, protocol filters, normalization, planned encodings, or validation outcome.
+- Choose `answer_query` when the user is asking an explanatory question about the currently cached compiled setup and is not asking to change it.
+- Choose `recompile` when the user wants same-column preprocessing, cleaning, missingness handling, row filtering, normalization, or other same-column compilation changes while keeping treatment, outcome, covariates, effect modifiers, and their roles unchanged.
+- Choose `reject` when the user explicitly does not accept the setup and wants to go back, or when the requested change would alter locked column identities or roles.
 - Choose `clarify` when the reply is ambiguous, incomplete, or not enough to confirm or reject safely.
 
 Style rules:
 - Keep the assistant message plain, direct, and user-facing.
 - If `clarify`, ask one focused follow-up question.
+- If `recompile`, summarize the requested same-column changes briefly in `recompile_request`.
+- If the reply is a question, do not choose `clarify`; choose `answer_query`.
 - Do not invent new protocol content.
 
 Output JSON exactly:
 {
-  "action": "confirm" | "revise" | "clarify",
-  "assistant_message": "<short user-facing message>"
+  "action": "confirm" | "recompile" | "answer_query" | "reject" | "clarify",
+  "assistant_message": "<short user-facing message>",
+  "recompile_request": "<brief grounded recompilation request or null>"
+}
+""".strip()
+
+
+def data_compilation_review_query_prompt() -> str:
+    return """
+You are answering a user question during the compilation review step.
+
+Inputs:
+- confirmed protocol discussion
+- compiled causal specification
+- compiled dataset summary
+- missingness_decisions
+- compiled transformation plan
+- transformation_suggestions
+- compilation_actions
+- compilation_warnings
+- validation_status
+- validation_issues
+- latest_user_message
+
+Task:
+- Answer the user's question using only the cached compiled review context.
+- Do not confirm, reject, or modify the compiled setup unless the user explicitly asks for a change.
+
+Style rules:
+- Keep the answer user-facing and specific.
+- Explain current compiled facts only; do not invent new protocol content.
+- If the question asks what changed, highlight missingness handling, row removals, retained columns, transformations, and validation in plain language.
+
+Output JSON exactly:
+{
+  "assistant_message": "<specific answer to the user's review-time question>"
 }
 """.strip()
 

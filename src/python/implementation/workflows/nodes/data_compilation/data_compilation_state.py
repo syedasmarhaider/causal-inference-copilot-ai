@@ -7,6 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from python.domain.models.validation import ValidationIssueModel, ValidationStatus
 from python.domain.workflows.node_state import NodeState
+from python.implementation.workflows.nodes.data_compilation.data_compilation_cleaning import (
+    MissingnessDecisionList,
+)
 from python.implementation.workflows.nodes.data_compilation.data_compilation_transformation import (
     ColumnTransformationSuggestionList,
 )
@@ -39,6 +42,7 @@ class DataCompilationPayloadModel(BaseModel):
     compiled_dataset_id: UUID | None = None
     compiled_dataset_summary: DatasetSummaryModel | None = None
     compiled_causal_spec: CausalSpec | None = None
+    missingness_decisions: MissingnessDecisionList | None = None
     transformation_plan: TransformPlan | None = None
     transformation_suggestions: ColumnTransformationSuggestionList | None = None
     compilation_actions: list[str] = Field(default_factory=list)
@@ -110,6 +114,7 @@ class DataCompilationPayloadModel(BaseModel):
                 "compiled_dataset_id": None,
                 "compiled_dataset_summary": None,
                 "compiled_causal_spec": None,
+                "missingness_decisions": None,
                 "transformation_plan": None,
                 "transformation_suggestions": None,
                 "compilation_actions": [],

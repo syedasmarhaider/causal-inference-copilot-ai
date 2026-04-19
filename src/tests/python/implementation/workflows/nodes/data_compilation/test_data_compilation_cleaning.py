@@ -115,6 +115,47 @@ def _semantic_payload(
     }
 
 
+def _missingness_plan_payload(
+    *,
+    treatment: str = "none_needed",
+    outcome: str = "none_needed",
+    age: str = "none_needed",
+    isex: str = "none_needed",
+) -> dict[str, Any]:
+    return {
+        "decisions": [
+            {
+                "column": "treatment",
+                "role": "treatment",
+                "resolution": treatment,
+                "reason": "Treatment missingness policy is grounded by the protocol.",
+                "instruction": "Drop rows where treatment is missing.",
+            },
+            {
+                "column": "outcome",
+                "role": "outcome",
+                "resolution": outcome,
+                "reason": "Outcome missingness policy is grounded by the protocol.",
+                "instruction": "Drop rows where outcome is missing.",
+            },
+            {
+                "column": "age",
+                "role": "covariate",
+                "resolution": age,
+                "reason": "Age should be complete after cleaning.",
+                "instruction": "Impute missing age values using a grounded numeric strategy.",
+            },
+            {
+                "column": "isex",
+                "role": "effect_modifier",
+                "resolution": isex,
+                "reason": "Sex should be complete after cleaning.",
+                "instruction": "Impute missing sex values using the observed mode.",
+            },
+        ]
+    }
+
+
 @dataclass
 class _FakeLLM:
     json_outputs: list[Any] = field(default_factory=list)
@@ -183,6 +224,7 @@ def test_cleaning_narrows_input_dataframe_to_draft_scope_and_preserves_order() -
     result = cleaning(
         protocol_discussion=None,
         cleaning_instructions="",
+        review_recompile_request=None,
         draft_causal_spec=_draft(),
         data_summary=_build_summary(dataframe),
         to_clean_df=dataframe,
@@ -211,6 +253,7 @@ def test_cleaning_fails_immediately_when_input_dataframe_missing_draft_column() 
         cleaning(
             protocol_discussion="Confirmed protocol discussion",
             cleaning_instructions="Keep only protocol columns.",
+            review_recompile_request=None,
             draft_causal_spec=_draft(),
             data_summary=_build_summary(dataframe),
             to_clean_df=dataframe,
@@ -228,6 +271,7 @@ def test_cleaning_runs_manipulation_when_effective_instructions_are_present() ->
     result = cleaning(
         protocol_discussion="Treatment is binary and age is a baseline covariate.",
         cleaning_instructions="Normalize only grounded values.",
+        review_recompile_request=None,
         draft_causal_spec=_draft(),
         data_summary=_build_summary(dataframe),
         to_clean_df=dataframe,
@@ -257,6 +301,7 @@ def test_cleaning_skips_manipulation_when_effective_instructions_are_empty() -> 
     result = cleaning(
         protocol_discussion=None,
         cleaning_instructions="   ",
+        review_recompile_request=None,
         draft_causal_spec=_draft(),
         data_summary=_build_summary(dataframe),
         to_clean_df=dataframe,
@@ -286,6 +331,7 @@ def test_cleaning_fails_when_manipulation_drops_required_draft_column() -> None:
         cleaning(
             protocol_discussion="Confirmed protocol discussion",
             cleaning_instructions="Apply the protocol cleaning.",
+            review_recompile_request=None,
             draft_causal_spec=_draft(),
             data_summary=_build_summary(dataframe),
             to_clean_df=dataframe,
@@ -307,6 +353,7 @@ def test_cleaning_retries_compile_when_first_semantic_compile_is_invalid() -> No
     result = cleaning(
         protocol_discussion="Confirmed protocol discussion",
         cleaning_instructions="   ",
+        review_recompile_request=None,
         draft_causal_spec=_draft(),
         data_summary=_build_summary(dataframe),
         to_clean_df=dataframe,
@@ -340,6 +387,7 @@ def test_cleaning_fails_when_semantic_compile_is_still_invalid_after_retry() -> 
         cleaning(
             protocol_discussion="Confirmed protocol discussion",
             cleaning_instructions="",
+            review_recompile_request=None,
             draft_causal_spec=_draft(),
             data_summary=_build_summary(dataframe),
             to_clean_df=dataframe,
@@ -356,6 +404,7 @@ def test_cleaning_compiles_without_protocol_discussion() -> None:
     result = cleaning(
         protocol_discussion=None,
         cleaning_instructions="Keep protocol columns only.",
+        review_recompile_request=None,
         draft_causal_spec=_draft(),
         data_summary=_build_summary(dataframe),
         to_clean_df=dataframe,
@@ -382,6 +431,7 @@ def test_cleaning_preserves_explicit_identifier_column_and_compiles_it_into_caus
     result = cleaning(
         protocol_discussion=None,
         cleaning_instructions="",
+        review_recompile_request=None,
         draft_causal_spec=_draft_with_identifier("patient_id"),
         data_summary=_build_summary(dataframe),
         to_clean_df=dataframe,
@@ -399,3 +449,72 @@ def test_cleaning_preserves_explicit_identifier_column_and_compiles_it_into_caus
     ]
     assert result.pd_cleaned["patient_id"].tolist() == ["p1", "p2"]
     assert result.causal.id_col == "patient_id"
+
+
+def test_cleaning_plans_and_records_missingness_resolution() -> None:
+    dataframe = _build_dataframe()
+    dataframe.loc[0, "age"] = None
+    data_manipulation_tool = _FakeDataManipulationTool(
+        responses=[
+            dataframe.assign(age=[53.0, 61.0]),
+        ]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            _missingness_plan_payload(age="impute"),
+            _semantic_payload(),
+        ]
+    )
+
+    result = cleaning(
+        protocol_discussion="Keep the treatment and outcome grounded.",
+        cleaning_instructions="Resolve missingness before compilation.",
+        review_recompile_request="Handle the baseline age gap before review.",
+        draft_causal_spec=_draft(),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        dataManipulationTool=data_manipulation_tool,
+        llm=llm,
+    )
+
+    assert len(llm.generate_json_calls) == 2
+    missingness_call_payload = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
+    assert missingness_call_payload["missing_count_by_column"]["age"] == 1
+    assert data_manipulation_tool.calls
+    assert "Review-time recompilation request:" in data_manipulation_tool.calls[0]["instructions"]
+    assert "Resolve protocol-scope missingness exactly as follows:" in (
+        data_manipulation_tool.calls[0]["instructions"]
+    )
+    age_decision = next(
+        decision for decision in result.missingness_decisions.decisions if decision.column == "age"
+    )
+    assert age_decision.resolution == "impute"
+    assert age_decision.missing_count_before == 1
+    assert age_decision.missing_count_after == 0
+
+
+def test_cleaning_fails_when_protocol_scope_missingness_remains_after_cleaning() -> None:
+    dataframe = _build_dataframe()
+    dataframe.loc[0, "age"] = None
+    llm = _FakeLLM(
+        json_outputs=[
+            _missingness_plan_payload(age="impute"),
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cleaned dataframe still contains protocol-scope missing values: age=1",
+    ):
+        cleaning(
+            protocol_discussion="Confirmed protocol discussion",
+            cleaning_instructions="Resolve missingness before compilation.",
+            review_recompile_request=None,
+            draft_causal_spec=_draft(),
+            data_summary=_build_summary(dataframe),
+            to_clean_df=dataframe,
+            datasetProfilingTool=DatasetProfilingTool(),
+            dataManipulationTool=_FakeDataManipulationTool(),
+            llm=llm,
+        )
