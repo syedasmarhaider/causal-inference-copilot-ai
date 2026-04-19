@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Literal
 
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
+    get_questions,
+)
 from python.implementation.workflows.tools.common.model.data_summary import (
     BooleanColumnProfileModel,
     CategoricalColumnProfileModel,
@@ -19,6 +23,13 @@ BlockerIssue = Literal[
     "unknown_category_present",
     "coded_categories_need_decision",
 ]
+
+_QUESTION_LINE_RE = re.compile(r"^(?P<number>\d+)\)")
+_ANSWER_LINE_RE = re.compile(r"^A(?P<number>\d+)\)")
+_CANONICAL_QUESTION_BY_NUMBER = {
+    str(index): question.strip()
+    for index, question in enumerate(get_questions(), start=1)
+}
 
 
 @dataclass(frozen=True)
@@ -126,15 +137,18 @@ def unresolved_summary_blockers(
 ) -> list[ProtocolSummaryBlocker]:
     unresolved: list[ProtocolSummaryBlocker] = []
     for blocker in blockers:
-        relevant_line = _find_protocol_line(protocol_discussion, blocker.protocol_question_prefix)
-        if relevant_line is None:
+        answer_text = extract_protocol_answer_text(
+            protocol_discussion,
+            blocker.protocol_question_prefix,
+        )
+        if answer_text is None:
             unresolved.append(blocker)
             continue
-        lower_line = relevant_line.lower()
-        if "unclear" in lower_line:
+        lower_answer = answer_text.lower()
+        if "unclear" in lower_answer:
             unresolved.append(blocker)
             continue
-        if blocker.column.lower() not in lower_line:
+        if not _answer_resolves_blocker(blocker=blocker, answer_text=lower_answer):
             unresolved.append(blocker)
             continue
     return unresolved
@@ -249,17 +263,133 @@ def _looks_unknown_like(value: str) -> bool:
     return normalized in tokens
 
 
-def _find_protocol_line(protocol_discussion: str, prefix: str) -> str | None:
-    for line in protocol_discussion.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(prefix):
-            return stripped
+def extract_protocol_answer_text(protocol_discussion: str, prefix: str) -> str | None:
+    question_number = _question_number_from_prefix(prefix)
+    if question_number is None:
+        return None
+
+    answer_prefix = f"A{question_number})"
+    canonical_question = _CANONICAL_QUESTION_BY_NUMBER.get(question_number)
+    lines = [line.strip() for line in protocol_discussion.splitlines()]
+
+    for index, line in enumerate(lines):
+        if line.startswith(answer_prefix):
+            return _collect_answer_block(
+                lines=lines,
+                start_index=index,
+                question_number=question_number,
+                include_start=True,
+            )
+
+    for index, line in enumerate(lines):
+        if not line.startswith(prefix):
+            continue
+        if canonical_question is not None and line == canonical_question:
+            continue
+        return _collect_answer_block(
+            lines=lines,
+            start_index=index,
+            question_number=question_number,
+            include_start=True,
+        )
+
+    if canonical_question is None:
+        return None
+
+    for index, line in enumerate(lines):
+        if line != canonical_question:
+            continue
+        return _collect_answer_block(
+            lines=lines,
+            start_index=index + 1,
+            question_number=question_number,
+            include_start=False,
+        )
+
     return None
+
+
+def _answer_resolves_blocker(
+    *,
+    blocker: ProtocolSummaryBlocker,
+    answer_text: str,
+) -> bool:
+    if blocker.column.lower() in answer_text:
+        return True
+
+    if blocker.role == "treatment":
+        role_tokens = ("treatment", "exposure", "treated", "control")
+    elif blocker.role == "outcome":
+        role_tokens = ("outcome", "endpoint")
+    else:
+        role_tokens = ()
+
+    if blocker.issue == "missing_values":
+        return bool(role_tokens) and any(token in answer_text for token in role_tokens) and any(
+            token in answer_text for token in ("missing", "drop", "exclude", "imput", "keep")
+        )
+
+    if blocker.issue == "outcome_mapping_required":
+        return bool(role_tokens) and any(token in answer_text for token in role_tokens) and any(
+            token in answer_text
+            for token in ("map", "mapping", "binary", "success", "failure")
+        )
+
+    if blocker.issue == "treatment_not_binary":
+        return bool(role_tokens) and any(token in answer_text for token in role_tokens) and any(
+            token in answer_text
+            for token in ("binary", "treated", "control", "map", "keep")
+        )
+
+    return False
+
+
+def _question_number_from_prefix(prefix: str) -> str | None:
+    match = _QUESTION_LINE_RE.match(prefix)
+    if match is None:
+        return None
+    return str(match.group("number"))
+
+
+def _collect_answer_block(
+    *,
+    lines: list[str],
+    start_index: int,
+    question_number: str,
+    include_start: bool,
+) -> str | None:
+    collected: list[str] = []
+    if include_start and start_index < len(lines):
+        start_line = lines[start_index].strip()
+        if start_line:
+            collected.append(start_line)
+
+    for line in lines[start_index + (1 if include_start else 0) :]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        question_match = _QUESTION_LINE_RE.match(stripped)
+        if question_match is not None and question_match.group("number") != question_number:
+            break
+
+        answer_match = _ANSWER_LINE_RE.match(stripped)
+        if answer_match is not None and answer_match.group("number") != question_number:
+            break
+
+        collected.append(stripped)
+
+    if not collected:
+        return None
+
+    normalized = " ".join(collected).strip()
+    return normalized or None
 
 
 __all__ = [
     "ProtocolSummaryBlocker",
     "build_summary_blocker_follow_up_message",
+    "extract_protocol_answer_text",
     "scan_protocol_summary_blockers",
     "unresolved_summary_blockers",
 ]

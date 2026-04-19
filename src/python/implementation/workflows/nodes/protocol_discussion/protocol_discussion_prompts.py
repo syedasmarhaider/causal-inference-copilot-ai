@@ -102,7 +102,7 @@ Tasks:
 {_CONFIRM_RULES}
 
 Assistant message policy:
-- Do not be terse. The user prefers comprehensive, specific responses.
+- The user prefers comprehensive, specific responses.
 - For next_action="continue", answer the latest user point first and then ask the most important unresolved blocker question if one is still needed.
 - For next_action="confirm", acknowledge that the protocol discussion is now confirmed and explain that the compilation stage will clean, compile, transform, and validate next.
 - If the protocol cannot proceed under the current assumptions or data, keep next_action="continue" and explain clearly what is not possible, apologize briefly, and state what would need to change.

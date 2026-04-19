@@ -25,6 +25,7 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     initial_user_message,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_summary_blockers import (
+    extract_protocol_answer_text,
     scan_protocol_summary_blockers,
     unresolved_summary_blockers,
 )
@@ -101,6 +102,10 @@ class _ReviewDecisionModel(BaseModel):
 
     action: ReviewAction
     assistant_message: str = Field(..., min_length=1)
+
+
+class _ProtocolSummaryBlockersError(ValueError):
+    """Raised when deterministic protocol blockers remain unresolved at confirmation time."""
 
 
 
@@ -190,7 +195,15 @@ class ProtocolDiscussionNode(Node):
 
     @staticmethod
     def _initial_discussion(*, questions: Sequence[str]) -> str:
-        return "\n".join(str(question).strip() for question in questions if str(question).strip())
+        lines: list[str] = []
+        for question in questions:
+            question_text = str(question).strip()
+            if not question_text:
+                continue
+            lines.append(question_text)
+            question_number = question_text.split(")", 1)[0].strip()
+            lines.append(f"A{question_number}) UNCLEAR")
+        return "\n".join(lines)
 
     @staticmethod
     def _prefix_dataset_reset_message(
@@ -368,8 +381,12 @@ class ProtocolDiscussionNode(Node):
                     blockers=blockers,
                 )
                 if pending_blockers:
-                    blocker_message = self._llm_blocker_message(pending_blockers, protocol_discussion, deps.dataset_summary)
-                    raise ValueError(blocker_message)
+                    blocker_message = self._llm_blocker_message(
+                        pending_blockers,
+                        protocol_discussion,
+                        deps.dataset_summary,
+                    )
+                    raise _ProtocolSummaryBlockersError(blocker_message)
                 return draft
 
             previous_draft = draft
@@ -511,6 +528,21 @@ class ProtocolDiscussionNode(Node):
                         request=request,
                         deps=deps,
                         protocol_discussion=payload.discussion,
+                    )
+                except _ProtocolSummaryBlockersError as e:
+                    log.exception(
+                        "PROTOCOL_DISCUSSION unresolved protocol blockers at confirmation: %s",
+                        safe_err(e),
+                    )
+                    return self._needs_input_result(
+                        request=request,
+                        payload=payload.model_copy(
+                            update={
+                                "phase": "DISCUSSING",
+                                "pending_dataset_change_request": None,
+                                "assistant_message": safe_err(e),
+                            }
+                        ),
                     )
                 except Exception as e:
                     log.exception(
@@ -741,10 +773,10 @@ def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str 
 def summarize_upstream_data_prep_decisions(protocol_discussion: str) -> str | None:
     items: list[str] = []
     for prefix in ("14)", "15)"):
-        line = _find_protocol_line(protocol_discussion, prefix)
-        if line is None:
+        answer_text = extract_protocol_answer_text(protocol_discussion, prefix)
+        if answer_text is None:
             continue
-        normalized = line.strip()
+        normalized = answer_text.strip()
         lowered = normalized.lower()
         if "unclear" in lowered:
             continue
@@ -759,11 +791,11 @@ def summarize_identifier_choice(
     *,
     suggested_identifier_column: str | None = None,
 ) -> str | None:
-    line = _find_protocol_line(protocol_discussion, "16)")
-    if line is None:
+    answer_text = extract_protocol_answer_text(protocol_discussion, "16)")
+    if answer_text is None:
         return None
 
-    normalized = line.strip()
+    normalized = answer_text.strip()
     lowered = normalized.lower()
     if "unclear" in lowered:
         return None
@@ -824,11 +856,3 @@ def _identifier_column_candidates(
 
 def _normalized_identifier_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
-
-
-def _find_protocol_line(protocol_discussion: str, prefix: str) -> str | None:
-    for line in protocol_discussion.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(prefix):
-            return stripped
-    return None
