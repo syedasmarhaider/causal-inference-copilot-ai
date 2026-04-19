@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, Sequence
+from typing import Any, Literal, Sequence, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
@@ -24,128 +24,69 @@ from python.implementation.workflows.tools.common.model.data_summary import (
     OtherColumnProfileModel,
 )
 
+ColumnRole: TypeAlias = Literal["covariate", "effect_modifier"]
+PreferredType: TypeAlias = Literal[
+    "NUMERIC",
+    "CATEGORICAL",
+    "BOOLEAN",
+    "DATETIME",
+    "OTHER",
+]
+DraftPreset: TypeAlias = Literal[
+    "drop",
+    "passthrough",
+    "cat_onehot",
+    "num_standard",
+    "num_minmax",
+    "num_log1p",
+    "datetime_epoch_seconds",
+]
+ColumnProfile: TypeAlias = (
+    NumericColumnProfileModel
+    | DatetimeColumnProfileModel
+    | BooleanColumnProfileModel
+    | CategoricalColumnProfileModel
+    | OtherColumnProfileModel
+)
+
+_ALLOWED_PRESETS_BY_KIND: dict[PreferredType, set[DraftPreset]] = {
+    "NUMERIC": {"passthrough", "num_standard", "num_minmax", "num_log1p"},
+    "CATEGORICAL": {"cat_onehot"},
+    "BOOLEAN": {"passthrough", "cat_onehot"},
+    "DATETIME": {"datetime_epoch_seconds"},
+    "OTHER": {"drop"},
+}
+
 
 @dataclass(frozen=True)
 class TransformationResult:
     transformation_plan: TransformPlan | None
-    required_dataset_changes: DatasetRepairPlan | None
+    transformation_suggestions: ColumnTransformationSuggestionList | None
 
 
-class DatasetRepairAction(BaseModel):
+class ColumnTransformationSuggestion(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     column: str = Field(..., min_length=1)
-    role: Literal["covariate", "effect_modifier"]
-    problem: Literal[
-        "missing_values",
-        "numeric_coded_category",
-        "unsupported_dtype",
-        "ungrounded_mapping",
-        "ungrounded_order",
-        "other",
-    ]
-    action: Literal[
-        "impute_missing",
-        "normalize_dtype",
-        "normalize_categorical_representation",
-        "recode_values",
-    ]
-    reason: str = Field(..., min_length=1)
-    repair_instruction: str = Field(..., min_length=1)
-    user_explanation: str | None = None
-
-    @model_validator(mode="after")
-    def _validate_action_problem_pair(self) -> "DatasetRepairAction":
-        if self.problem == "missing_values" and self.action != "impute_missing":
-            raise ValueError(
-                "missing_values blockers must use action='impute_missing'"
-            )
-        if self.action == "impute_missing" and self.problem != "missing_values":
-            raise ValueError(
-                "action='impute_missing' is only allowed for problem='missing_values'"
-            )
-        return self
+    role: ColumnRole
+    preferred_type: PreferredType
+    preferred_type_reason: str = Field(..., min_length=1)
 
 
-class DatasetRepairPlan(BaseModel):
+class ColumnTransformationSuggestionList(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    actions: list[DatasetRepairAction] = Field(..., min_length=1)
+    suggestions: list[ColumnTransformationSuggestion] = Field(..., min_length=1)
 
 
-class _DraftColumnBase(BaseModel):
+class _DraftColumn(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     column: str = Field(..., min_length=1)
-    role: Literal["covariate", "effect_modifier"]
-
-
-class _PlanDraftColumn(_DraftColumnBase):
-    decision: Literal["plan"]
-    preset: Literal[
-        "drop",
-        "passthrough",
-        "cat_onehot",
-        "num_standard",
-        "num_minmax",
-        "num_log1p",
-        "datetime_epoch_seconds",
-        "map_binary",
-        "map_ordinal",
-    ]
-    mapping: dict[str, float] | None = None
-    order: list[str] | None = None
-
-    @model_validator(mode="after")
-    def _validate_plan_column(self) -> _PlanDraftColumn:
-        if self.preset == "map_binary" and not self.mapping:
-            raise ValueError("map_binary requires a grounded mapping")
-        if self.preset == "map_ordinal" and not self.order:
-            raise ValueError("map_ordinal requires a grounded order")
-        if self.preset != "map_binary" and self.mapping is not None:
-            raise ValueError("mapping is only allowed for map_binary")
-        if self.preset != "map_ordinal" and self.order is not None:
-            raise ValueError("order is only allowed for map_ordinal")
-        return self
-
-
-class _DatasetChangeDraftColumn(_DraftColumnBase):
-    decision: Literal["dataset_change"]
-    problem: Literal[
-        "missing_values",
-        "numeric_coded_category",
-        "unsupported_dtype",
-        "ungrounded_mapping",
-        "ungrounded_order",
-        "other",
-    ]
-    action: Literal[
-        "impute_missing",
-        "normalize_dtype",
-        "normalize_categorical_representation",
-        "recode_values",
-    ]
-    reason: str = Field(..., min_length=1)
-    repair_instruction: str = Field(..., min_length=1)
-    user_explanation: str | None = None
-
-    @model_validator(mode="after")
-    def _validate_dataset_change(self) -> "_DatasetChangeDraftColumn":
-        if self.problem == "missing_values" and self.action != "impute_missing":
-            raise ValueError(
-                "missing_values blockers must use action='impute_missing'"
-            )
-        if self.action == "impute_missing" and self.problem != "missing_values":
-            raise ValueError(
-                "action='impute_missing' is only allowed for problem='missing_values'"
-            )
-        return self
-
-
-_DraftColumn = Annotated[
-    _PlanDraftColumn | _DatasetChangeDraftColumn,
-    Field(discriminator="decision"),
-]
+    role: ColumnRole
+    preset: DraftPreset
+    preferred_type: PreferredType
+    preferred_type_reason: str = Field(..., min_length=1)
 
 
 class _BatchTransformDraft(BaseModel):
@@ -165,7 +106,7 @@ def transform(
     if not expected_role_by_column:
         return TransformationResult(
             transformation_plan=None,
-            required_dataset_changes=None,
+            transformation_suggestions=None,
         )
 
     scoped_summary = _eligible_dataset_summary(
@@ -190,10 +131,10 @@ def _generate_batch_result(
     transformation_instructions: str,
     causal_spec: CausalSpec,
     scoped_summary: DatasetSummaryModel,
-    expected_role_by_column: dict[str, Literal["covariate", "effect_modifier"]],
+    expected_role_by_column: dict[str, ColumnRole],
     encoding_plan_tool: EncodingPlanTool,
 ) -> TransformationResult:
-    repair_request: str | None = None
+    retry_note: str | None = None
 
     for _ in range(2):
         try:
@@ -206,7 +147,7 @@ def _generate_batch_result(
                         causal_spec=causal_spec,
                         scoped_summary=scoped_summary,
                         expected_role_by_column=expected_role_by_column,
-                        repair_request=repair_request,
+                        retry_note=retry_note,
                     ),
                     ensure_ascii=False,
                 ),
@@ -225,11 +166,11 @@ def _generate_batch_result(
                 encoding_plan_tool=encoding_plan_tool,
             )
         except Exception as exc:
-            repair_request = _exception_chain_text(exc)
+            retry_note = _exception_chain_text(exc)
 
     raise ValueError(
         "batch transformation draft failed after retry: "
-        f"{repair_request or 'unknown batch generation error'}"
+        f"{retry_note or 'unknown batch generation error'}"
     )
 
 
@@ -237,46 +178,38 @@ def _result_from_draft(
     *,
     draft_columns: Sequence[_DraftColumn],
     scoped_summary: DatasetSummaryModel,
-    expected_role_by_column: dict[str, Literal["covariate", "effect_modifier"]],
+    expected_role_by_column: dict[str, ColumnRole],
     encoding_plan_tool: EncodingPlanTool,
 ) -> TransformationResult:
     column_drafts_by_name = _validate_and_index_draft_columns(
         draft_columns=draft_columns,
         expected_role_by_column=expected_role_by_column,
     )
-
-    blockers = [
-        draft
-        for draft in column_drafts_by_name.values()
-        if isinstance(draft, _DatasetChangeDraftColumn)
-    ]
-    if blockers:
-        return TransformationResult(
-            transformation_plan=None,
-            required_dataset_changes=_build_dataset_repair_plan(blockers),
-        )
+    profiles_by_name = _profiles_by_name(scoped_summary)
+    _validate_draft_presets_by_profile(
+        draft_columns=column_drafts_by_name,
+        profiles_by_name=profiles_by_name,
+    )
 
     payload = _materialize_transform_plan_payload(
         planned_columns=[
-            column_drafts_by_name[column]
-            for column in expected_role_by_column
-            if isinstance(column_drafts_by_name[column], _PlanDraftColumn)
-        ],  # type: ignore[arg-type]
+            column_drafts_by_name[column] for column in expected_role_by_column
+        ],
         scoped_summary=scoped_summary,
     )
+    covariate_columns = [
+        column for column, role in expected_role_by_column.items() if role == "covariate"
+    ]
+    effect_modifier_columns = [
+        column
+        for column, role in expected_role_by_column.items()
+        if role == "effect_modifier"
+    ]
     model_dict, issues = encoding_plan_tool.validate_encoding_payload_structured(
         payload=payload,
         data_summary=scoped_summary,
-        covariate_columns=[
-            column
-            for column, role in expected_role_by_column.items()
-            if role == "covariate"
-        ],
-        effect_modifier_columns=[
-            column
-            for column, role in expected_role_by_column.items()
-            if role == "effect_modifier"
-        ],
+        covariate_columns=covariate_columns,
+        effect_modifier_columns=effect_modifier_columns,
     )
     if issues:
         raise ValueError(_format_structured_issues(issues))
@@ -286,27 +219,23 @@ def _result_from_draft(
     validated_plan = encoding_plan_tool.validate_encoding_payload(
         payload=payload,
         data_summary=scoped_summary,
-        covariate_columns=[
-            column
-            for column, role in expected_role_by_column.items()
-            if role == "covariate"
-        ],
-        effect_modifier_columns=[
-            column
-            for column, role in expected_role_by_column.items()
-            if role == "effect_modifier"
-        ],
+        covariate_columns=covariate_columns,
+        effect_modifier_columns=effect_modifier_columns,
     )
     return TransformationResult(
         transformation_plan=validated_plan,
-        required_dataset_changes=None,
+        transformation_suggestions=_build_transformation_suggestions(
+            planned_columns=[
+                column_drafts_by_name[column] for column in expected_role_by_column
+            ]
+        ),
     )
 
 
 def _validate_and_index_draft_columns(
     *,
     draft_columns: Sequence[_DraftColumn],
-    expected_role_by_column: dict[str, Literal["covariate", "effect_modifier"]],
+    expected_role_by_column: dict[str, ColumnRole],
 ) -> dict[str, _DraftColumn]:
     indexed: dict[str, _DraftColumn] = {}
     duplicates: list[str] = []
@@ -337,14 +266,34 @@ def _validate_and_index_draft_columns(
     return indexed
 
 
+def _profiles_by_name(summary: DatasetSummaryModel) -> dict[str, ColumnProfile]:
+    return {str(profile.name).strip(): profile for profile in summary.profiles}
+
+
+def _validate_draft_presets_by_profile(
+    *,
+    draft_columns: dict[str, _DraftColumn],
+    profiles_by_name: dict[str, ColumnProfile],
+) -> None:
+    for column, draft in draft_columns.items():
+        profile = profiles_by_name.get(column)
+        if profile is None:
+            raise ValueError(f"draft references unknown dataset summary column: {column}")
+        current_kind = _profile_kind(profile)
+        allowed_presets = _ALLOWED_PRESETS_BY_KIND[current_kind]
+        if draft.preset not in allowed_presets:
+            raise ValueError(
+                f"column '{column}' has current kind '{current_kind}' so preset "
+                f"'{draft.preset}' is not allowed; allowed presets: {sorted(allowed_presets)}"
+            )
+
+
 def _materialize_transform_plan_payload(
     *,
-    planned_columns: Sequence[_PlanDraftColumn],
+    planned_columns: Sequence[_DraftColumn],
     scoped_summary: DatasetSummaryModel,
 ) -> dict[str, Any]:
-    profiles_by_name = {
-        str(profile.name).strip(): profile for profile in scoped_summary.profiles
-    }
+    profiles_by_name = _profiles_by_name(scoped_summary)
     payload_columns: list[dict[str, Any]] = []
 
     for draft_column in planned_columns:
@@ -368,16 +317,17 @@ def _materialize_transform_plan_payload(
 
 def _materialize_encoding_payload_from_draft_column(
     *,
-    draft_column: _PlanDraftColumn,
-    profile: (
-        NumericColumnProfileModel
-        | DatetimeColumnProfileModel
-        | BooleanColumnProfileModel
-        | CategoricalColumnProfileModel
-        | OtherColumnProfileModel
-    ),
+    draft_column: _DraftColumn,
+    profile: ColumnProfile,
 ) -> dict[str, Any]:
-    _ = profile
+    current_kind = _profile_kind(profile)
+    allowed_presets = _ALLOWED_PRESETS_BY_KIND[current_kind]
+    if draft_column.preset not in allowed_presets:
+        raise ValueError(
+            f"column '{draft_column.column}' has current kind '{current_kind}' so preset "
+            f"'{draft_column.preset}' is not allowed"
+        )
+
     match draft_column.preset:
         case "drop":
             return {"preset": "drop"}
@@ -419,41 +369,37 @@ def _materialize_encoding_payload_from_draft_column(
                 "unit": "s",
                 "add_missing_indicator": True,
             }
-        case "map_binary":
-            if not draft_column.mapping:
-                raise ValueError(
-                    f"map_binary requires a grounded mapping for column '{draft_column.column}'"
-                )
-            return {
-                "preset": "map_binary",
-                "mapping": draft_column.mapping,
-                "allow_unknown": True,
-                "unknown_value": -1.0,
-                "missing": "as_unknown",
-            }
-        case "map_ordinal":
-            if not draft_column.order:
-                raise ValueError(
-                    f"map_ordinal requires a grounded order for column '{draft_column.column}'"
-                )
-            return {
-                "preset": "map_ordinal",
-                "order": draft_column.order,
-                "start": 0,
-                "allow_unknown": True,
-                "unknown_value": -1,
-                "missing": "as_unknown",
-            }
         case _:
             raise ValueError(
                 f"unsupported preset '{draft_column.preset}' for column '{draft_column.column}'"
             )
 
 
+def _build_transformation_suggestions(
+    *,
+    planned_columns: Sequence[_DraftColumn],
+) -> ColumnTransformationSuggestionList:
+    return ColumnTransformationSuggestionList(
+        suggestions=[
+            ColumnTransformationSuggestion(
+                column=str(draft.column).strip(),
+                role=draft.role,
+                preferred_type=draft.preferred_type,
+                preferred_type_reason=str(draft.preferred_type_reason).strip(),
+            )
+            for draft in planned_columns
+        ]
+    )
+
+
+def _profile_kind(profile: ColumnProfile) -> PreferredType:
+    return str(profile.inferred_kind)  # type: ignore[return-value]
+
+
 def _protocol_scope_role_by_column(
     causal_spec: CausalSpec,
-) -> dict[str, Literal["covariate", "effect_modifier"]]:
-    role_by_column: dict[str, Literal["covariate", "effect_modifier"]] = {}
+) -> dict[str, ColumnRole]:
+    role_by_column: dict[str, ColumnRole] = {}
     for column in causal_spec.covariates:
         normalized = str(column).strip()
         if normalized:
@@ -499,8 +445,8 @@ def _batch_prompt_payload(
     transformation_instructions: str,
     causal_spec: CausalSpec,
     scoped_summary: DatasetSummaryModel,
-    expected_role_by_column: dict[str, Literal["covariate", "effect_modifier"]],
-    repair_request: str | None,
+    expected_role_by_column: dict[str, ColumnRole],
+    retry_note: str | None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "transformation_instructions": _normalize_text(transformation_instructions),
@@ -509,9 +455,12 @@ def _batch_prompt_payload(
         "eligible_columns": list(expected_role_by_column.keys()),
         "expected_role_by_column": expected_role_by_column,
         "required_plan_column_count": len(expected_role_by_column),
+        "allowed_presets_by_kind": {
+            kind: sorted(presets) for kind, presets in _ALLOWED_PRESETS_BY_KIND.items()
+        },
     }
-    if repair_request:
-        payload["repair_request"] = repair_request
+    if retry_note:
+        payload["retry_note"] = retry_note
     return payload
 
 
@@ -522,15 +471,7 @@ def _dataset_summary_prompt_payload(summary: DatasetSummaryModel) -> dict[str, A
     }
 
 
-def _column_prompt_payload(
-    profile: (
-        NumericColumnProfileModel
-        | DatetimeColumnProfileModel
-        | BooleanColumnProfileModel
-        | CategoricalColumnProfileModel
-        | OtherColumnProfileModel
-    ),
-) -> dict[str, Any]:
+def _column_prompt_payload(profile: ColumnProfile) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "name": str(profile.name).strip(),
         "kind": str(profile.inferred_kind),
@@ -558,9 +499,7 @@ def _column_prompt_payload(
         return payload
 
     if isinstance(profile, CategoricalColumnProfileModel):
-        payload["top_values"] = [
-            item.value for item in profile.summary.top_categories
-        ]
+        payload["top_values"] = [item.value for item in profile.summary.top_categories]
         return payload
 
     if isinstance(profile, OtherColumnProfileModel):
@@ -568,29 +507,6 @@ def _column_prompt_payload(
         return payload
 
     return payload
-
-
-def _build_dataset_repair_plan(
-    blockers: Sequence[_DatasetChangeDraftColumn],
-) -> DatasetRepairPlan:
-    return DatasetRepairPlan(
-        actions=[
-            DatasetRepairAction(
-                column=str(blocker.column).strip(),
-                role=blocker.role,
-                problem=blocker.problem,
-                action=blocker.action,
-                reason=str(blocker.reason).strip(),
-                repair_instruction=str(blocker.repair_instruction).strip(),
-                user_explanation=(
-                    str(blocker.user_explanation).strip()
-                    if blocker.user_explanation is not None
-                    else None
-                ),
-            )
-            for blocker in blockers
-        ]
-    )
 
 
 def _format_structured_issues(issues: Sequence[dict[str, Any]]) -> str:
@@ -618,9 +534,10 @@ def _exception_chain_text(exc: Exception) -> str:
         current = current.__cause__ or current.__context__
     return " | ".join(chain[:5])
 
+
 __all__ = [
-    "DatasetRepairAction",
-    "DatasetRepairPlan",
+    "ColumnTransformationSuggestion",
+    "ColumnTransformationSuggestionList",
     "TransformationResult",
     "transform",
 ]

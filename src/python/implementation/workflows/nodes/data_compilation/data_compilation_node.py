@@ -33,7 +33,7 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_sta
     DataCompilationState,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_transformation import (
-    DatasetRepairPlan,
+    ColumnTransformationSuggestionList,
     transform,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_valiation import (
@@ -252,43 +252,19 @@ class DataCompilationNode(Node):
         deps: DataCompilationDeps,
         source_df: pd.DataFrame,
         source_changed: bool,
-        cleaning_retry_plan: DatasetRepairPlan | None = None,
     ) -> NodeExecutionResult:
         try:
             compiled_artifacts = self._compile_from_source(
                 request=request,
                 deps=deps,
                 source_df=source_df,
-                cleaning_retry_plan=cleaning_retry_plan,
             )
         except Exception as exc:
             log.exception("data compilation full compile failed", error=safe_err(exc))
-            if cleaning_retry_plan is not None and payload.compile_retry_count < 1:
-                retry_payload = payload.model_copy(
-                    update={
-                        "compile_retry_count": payload.compile_retry_count + 1,
-                        "repair_context": _summarize_dataset_repair_plan(
-                            cleaning_retry_plan
-                        ),
-                    }
-                )
-                return self._run_pipeline_from_source(
-                    request=request,
-                    payload=retry_payload,
-                    deps=deps,
-                    source_df=source_df,
-                    source_changed=source_changed,
-                    cleaning_retry_plan=cleaning_retry_plan,
-                )
             return self._failed_result(
                 request=request,
                 payload=payload,
                 user_message=_build_compile_failure_message(
-                    retry_context=(
-                        _summarize_dataset_repair_plan(cleaning_retry_plan)
-                        if cleaning_retry_plan is not None
-                        else None
-                    ),
                     error=safe_err(exc),
                 ),
                 error_message=f"full compile failed: {safe_err(exc)}",
@@ -304,6 +280,7 @@ class DataCompilationNode(Node):
                 "compiled_dataset_summary": compiled_artifacts.summary,
                 "compiled_causal_spec": compiled_artifacts.causal_spec,
                 "transformation_plan": None,
+                "transformation_suggestions": None,
                 "compilation_actions": compiled_artifacts.actions,
                 "compilation_warnings": compiled_artifacts.warnings,
                 "validation_issues": [],
@@ -314,11 +291,6 @@ class DataCompilationNode(Node):
                 "system_message": None,
                 "error_message": None,
                 "retry_feedback": None,
-                "repair_context": (
-                    _summarize_dataset_repair_plan(cleaning_retry_plan)
-                    if cleaning_retry_plan is not None
-                    else None
-                ),
             }
         )
 
@@ -326,7 +298,6 @@ class DataCompilationNode(Node):
             request=request,
             payload=compiled_payload,
             deps=deps,
-            source_df=source_df,
             compiled_artifacts=compiled_artifacts,
             source_changed=source_changed,
         )
@@ -337,13 +308,11 @@ class DataCompilationNode(Node):
         request: NodeRequest,
         deps: DataCompilationDeps,
         source_df: pd.DataFrame,
-        cleaning_retry_plan: DatasetRepairPlan | None,
     ) -> _CompiledArtifacts:
         cleaning_result = cleaning(
             protocol_discussion=deps.protocol_discussion,
             cleaning_instructions=self._build_cleaning_instructions(
                 protocol_cleaning_instructions=deps.protocol_cleaning_instructions,
-                cleaning_retry_plan=cleaning_retry_plan,
             ),
             draft_causal_spec=deps.causal_spec_draft,
             data_summary=deps.dataset_summary,
@@ -373,9 +342,7 @@ class DataCompilationNode(Node):
                 cleaned_summary=cleaning_result.cleaned_data_summary,
                 causal_spec=cleaning_result.causal,
             ),
-            warnings=_summarize_compile_warnings(
-                repair_plan=cleaning_retry_plan,
-            ),
+            warnings=[],
         )
 
     def _run_pipeline_from_compiled_dataset(
@@ -384,7 +351,6 @@ class DataCompilationNode(Node):
         request: NodeRequest,
         payload: DataCompilationPayloadModel,
         deps: DataCompilationDeps,
-        source_df: pd.DataFrame,
         compiled_artifacts: _CompiledArtifacts,
         source_changed: bool,
     ) -> NodeExecutionResult:
@@ -411,16 +377,6 @@ class DataCompilationNode(Node):
                 error_message=f"transformation failed: {safe_err(exc)}",
             )
 
-        if transformation_result.required_dataset_changes:
-            return self._handle_required_dataset_changes(
-                request=request,
-                payload=payload,
-                deps=deps,
-                source_df=source_df,
-                source_changed=source_changed,
-                required_dataset_changes=transformation_result.required_dataset_changes,
-            )
-
         if transformation_result.transformation_plan is None:
             return self._failed_result(
                 request=request,
@@ -432,6 +388,10 @@ class DataCompilationNode(Node):
                 error_message="transformation plan missing after successful transform stage",
             )
 
+        transformation_suggestion_warnings = _summarize_transformation_suggestions(
+            summary=compiled_artifacts.summary,
+            transformation_suggestions=transformation_result.transformation_suggestions,
+        )
         validation_result = validate_data_compilation(
             candidate_df=compiled_artifacts.dataframe,
             causal_spec=compiled_artifacts.causal_spec,
@@ -442,6 +402,11 @@ class DataCompilationNode(Node):
             update={
                 "compiled_causal_spec": compiled_artifacts.causal_spec,
                 "transformation_plan": transformation_result.transformation_plan,
+                "transformation_suggestions": transformation_result.transformation_suggestions,
+                "compilation_warnings": _merge_unique_text_items(
+                    payload.compilation_warnings,
+                    transformation_suggestion_warnings,
+                ),
                 "validation_issues": validation_result.validation_errors,
                 "validation_status": validation_status,
             }
@@ -452,7 +417,6 @@ class DataCompilationNode(Node):
                 request=request,
                 payload=validated_payload,
                 deps=deps,
-                source_df=source_df,
                 compiled_artifacts=compiled_artifacts,
                 validation_result=validation_result,
                 source_changed=source_changed,
@@ -463,46 +427,9 @@ class DataCompilationNode(Node):
             payload=validated_payload,
             compiled_artifacts=compiled_artifacts,
             transformation_plan=transformation_result.transformation_plan,
+            transformation_suggestions=transformation_result.transformation_suggestions,
             validation_result=validation_result,
             source_changed=source_changed,
-        )
-
-    def _handle_required_dataset_changes(
-        self,
-        *,
-        request: NodeRequest,
-        payload: DataCompilationPayloadModel,
-        deps: DataCompilationDeps,
-        source_df: pd.DataFrame,
-        source_changed: bool,
-        required_dataset_changes: DatasetRepairPlan,
-    ) -> NodeExecutionResult:
-        if payload.transformation_retry_count >= 1:
-            return self._failed_result(
-                request=request,
-                payload=payload,
-                user_message=_build_transformation_retry_exhausted_message(
-                    required_dataset_changes=required_dataset_changes
-                ),
-                error_message="transformation required dataset changes after retry budget was exhausted",
-            )
-
-        retry_payload = payload.model_copy(
-            update={
-                "transformation_retry_count": payload.transformation_retry_count + 1,
-                "retry_feedback": None,
-                "repair_context": _summarize_dataset_repair_plan(
-                    required_dataset_changes
-                ),
-            }
-        )
-        return self._run_pipeline_from_source(
-            request=request,
-            payload=retry_payload,
-            deps=deps,
-            source_df=source_df,
-            source_changed=source_changed,
-            cleaning_retry_plan=required_dataset_changes,
         )
 
     def _handle_validation_failure(
@@ -511,7 +438,6 @@ class DataCompilationNode(Node):
         request: NodeRequest,
         payload: DataCompilationPayloadModel,
         deps: DataCompilationDeps,
-        source_df: pd.DataFrame,
         compiled_artifacts: _CompiledArtifacts,
         validation_result: DataCompilationValidationResult,
         source_changed: bool,
@@ -543,7 +469,6 @@ class DataCompilationNode(Node):
             update={
                 "validation_retry_count": payload.validation_retry_count + 1,
                 "retry_feedback": retry_feedback,
-                "repair_context": retry_feedback,
                 "compilation_actions": [
                     *payload.compilation_actions,
                     "Applied one automatic retry after repairable validation feedback.",
@@ -558,7 +483,6 @@ class DataCompilationNode(Node):
             request=request,
             payload=retry_payload,
             deps=deps,
-            source_df=source_df,
             compiled_artifacts=compiled_artifacts,
             source_changed=source_changed,
             retry_feedback=retry_feedback,
@@ -570,7 +494,6 @@ class DataCompilationNode(Node):
         request: NodeRequest,
         payload: DataCompilationPayloadModel,
         deps: DataCompilationDeps,
-        source_df: pd.DataFrame,
         compiled_artifacts: _CompiledArtifacts,
         source_changed: bool,
         retry_feedback: str,
@@ -611,7 +534,6 @@ class DataCompilationNode(Node):
             request=request,
             payload=retry_payload,
             deps=deps,
-            source_df=source_df,
             compiled_artifacts=retried_artifacts,
             source_changed=source_changed,
         )
@@ -623,6 +545,7 @@ class DataCompilationNode(Node):
         payload: DataCompilationPayloadModel,
         compiled_artifacts: _CompiledArtifacts,
         transformation_plan: TransformPlan,
+        transformation_suggestions: ColumnTransformationSuggestionList | None,
         validation_result: DataCompilationValidationResult,
         source_changed: bool,
     ) -> NodeExecutionResult:
@@ -637,6 +560,7 @@ class DataCompilationNode(Node):
                 compiled_causal_spec=compiled_artifacts.causal_spec,
                 compiled_dataset_summary=compiled_artifacts.summary,
                 transformation_plan=transformation_plan,
+                transformation_suggestions=transformation_suggestions,
                 compilation_actions=payload.compilation_actions,
                 compilation_warnings=payload.compilation_warnings,
                 validation_status=validation_status,
@@ -649,6 +573,7 @@ class DataCompilationNode(Node):
                 compiled_dataset_summary=compiled_artifacts.summary,
                 compiled_causal_spec=compiled_artifacts.causal_spec,
                 transformation_plan=transformation_plan,
+                transformation_suggestions=transformation_suggestions,
                 compilation_actions=payload.compilation_actions,
                 compilation_warnings=payload.compilation_warnings,
                 validation_status=validation_status,
@@ -666,6 +591,7 @@ class DataCompilationNode(Node):
                 "compiled_causal_spec": compiled_artifacts.causal_spec,
                 "compiled_dataset_summary": compiled_artifacts.summary,
                 "transformation_plan": transformation_plan,
+                "transformation_suggestions": transformation_suggestions,
                 "validation_issues": validation_result.validation_errors,
                 "validation_status": validation_status,
                 "phase": "REVIEW_READY",
@@ -792,6 +718,7 @@ class DataCompilationNode(Node):
         compiled_causal_spec: CausalSpec,
         compiled_dataset_summary: DatasetSummaryModel,
         transformation_plan: TransformPlan,
+        transformation_suggestions: ColumnTransformationSuggestionList | None,
         compilation_actions: Sequence[str],
         compilation_warnings: Sequence[str],
         validation_status: ValidationStatus,
@@ -814,6 +741,11 @@ class DataCompilationNode(Node):
                         ],
                     },
                     "transformation_plan": transformation_plan.model_dump(mode="json"),
+                    "transformation_suggestions": (
+                        transformation_suggestions.model_dump(mode="json")
+                        if transformation_suggestions is not None
+                        else {"suggestions": []}
+                    ),
                     "compilation_actions": list(compilation_actions),
                     "compilation_warnings": list(compilation_warnings),
                     "validation_status": validation_status,
@@ -837,6 +769,7 @@ class DataCompilationNode(Node):
             and payload.compiled_dataset_summary is not None
             and payload.compiled_causal_spec is not None
             and payload.transformation_plan is not None
+            and payload.transformation_suggestions is not None
             and payload.validation_status is not None
         )
 
@@ -844,21 +777,9 @@ class DataCompilationNode(Node):
         self,
         *,
         protocol_cleaning_instructions: str | None,
-        cleaning_retry_plan: DatasetRepairPlan | None,
     ) -> str:
-        parts: list[str] = []
         normalized_protocol_instructions = _normalize_text(protocol_cleaning_instructions)
-
-        if normalized_protocol_instructions:
-            parts.append(normalized_protocol_instructions)
-        if cleaning_retry_plan is not None:
-            retry_cleaning_instructions = _build_cleaning_retry_instructions(
-                cleaning_retry_plan
-            )
-            if parts:
-                parts.append("")
-            parts.append(retry_cleaning_instructions)
-        return "\n".join(parts).strip()
+        return normalized_protocol_instructions
 
     def _build_transformation_instructions(
         self,
@@ -1044,13 +965,41 @@ def _summarize_compile_actions(
     return actions
 
 
-def _summarize_compile_warnings(*, repair_plan: DatasetRepairPlan | None) -> list[str]:
-    if repair_plan is None:
+def _merge_unique_text_items(
+    existing_items: Sequence[str],
+    new_items: Sequence[str],
+) -> list[str]:
+    merged = list(existing_items)
+    for item in new_items:
+        if item not in merged:
+            merged.append(item)
+    return merged
+
+
+def _summarize_transformation_suggestions(
+    *,
+    summary: DatasetSummaryModel,
+    transformation_suggestions: ColumnTransformationSuggestionList | None,
+) -> list[str]:
+    if transformation_suggestions is None:
         return []
-    return [
-        "One automatic repair retry was applied before final review.",
-        _summarize_dataset_repair_plan(repair_plan),
-    ]
+
+    current_kind_by_column = {
+        str(profile.name).strip(): str(profile.inferred_kind)
+        for profile in summary.profiles
+        if str(profile.name).strip()
+    }
+    warnings: list[str] = []
+    for suggestion in transformation_suggestions.suggestions:
+        current_kind = current_kind_by_column.get(suggestion.column)
+        if current_kind is None or suggestion.preferred_type == current_kind:
+            continue
+        warnings.append(
+            f"Column '{suggestion.column}' is currently stored as {current_kind}; "
+            f"preferred future raw type is {suggestion.preferred_type}. "
+            f"{suggestion.preferred_type_reason}"
+        )
+    return warnings
 
 
 def _build_validation_retry_feedback(validation_message: str) -> str:
@@ -1079,86 +1028,14 @@ def _format_issue_lines(issues: Sequence[ValidationIssueModel]) -> list[str]:
     return lines
 
 
-def _build_cleaning_retry_instructions(repair_plan: DatasetRepairPlan) -> str:
-    lines = [
-        "Automatic retry fix request from downstream transformation planning:",
-        "Apply the following grounded dataset fixes before recompiling the causal specification.",
-        "Keep treatment, outcome, covariates, and effect modifiers locked to the confirmed draft columns.",
-        "Never remove locked draft columns.",
-        "If a locked baseline covariate or effect modifier has blocking missingness, repair it through imputation-oriented cleaning rather than automatic row dropping.",
-    ]
-    for action in repair_plan.actions:
-        role_text = f" ({action.role.replace('_', ' ')})"
-        lines.append(f"- {action.column}{role_text}: {action.problem.replace('_', ' ')}")
-        lines.append(f"  Why this matters: {action.reason}")
-        lines.append(f"  Required dataset fix: {action.repair_instruction}")
-        if action.action == "impute_missing":
-            lines.append(
-                "  Missingness rule: impute the missing values in this locked baseline column; do not use row dropping as the automatic retry strategy."
-            )
-        if action.user_explanation:
-            lines.append(f"  Practical option: {action.user_explanation}")
-    return "\n".join(lines).strip()
-
-
 def _build_compile_failure_message(
     *,
-    retry_context: str | None,
     error: str,
 ) -> str:
-    if retry_context:
-        return (
-            "I tried to recompile the source dataset after grounded repair feedback, but "
-            f"the compile step still failed. Error: {error}"
-        )
     return (
         "I could not clean and compile the current dataset into a stable causal setup. "
         f"Error: {error}"
     )
-
-
-def _build_transformation_retry_exhausted_message(
-    *,
-    required_dataset_changes: DatasetRepairPlan,
-) -> str:
-    if len(required_dataset_changes.actions) == 1:
-        item = required_dataset_changes.actions[0]
-        role_text = f" used as an {item.role.replace('_', ' ')}"
-        lines = [
-            "I retried compilation once, but one remaining data issue still blocks a safe baseline transformation plan.",
-            "",
-            f"The column '{item.column}'{role_text} still needs to be fixed before estimation can continue.",
-            item.reason,
-        ]
-        lines.extend(["", f"Most direct fix: {item.repair_instruction}"])
-        if item.user_explanation:
-            lines.extend(["", f"Practical option: {item.user_explanation}"])
-        lines.extend(
-            [
-                "",
-                "If you want to keep the current causal draft, update the dataset and rerun compilation. You only need to revise the protocol if you want different variables or roles.",
-            ]
-        )
-        return "\n".join(lines).strip()
-
-    lines = [
-        "I retried compilation once, but a few remaining data issues still block a safe baseline transformation plan.",
-        "",
-        "Remaining issues:",
-    ]
-    for item in required_dataset_changes.actions:
-        role_text = f" ({item.role.replace('_', ' ')})"
-        lines.append(f"- {item.column}{role_text}: {item.reason}")
-        lines.append(f"  Most direct fix: {item.repair_instruction}")
-        if item.user_explanation:
-            lines.append(f"  Practical option: {item.user_explanation}")
-    lines.extend(
-        [
-            "",
-            "If you want to keep the current causal draft, update the dataset and rerun compilation. You only need to revise the protocol if you want different variables or roles.",
-        ]
-    )
-    return "\n".join(lines).strip()
 
 
 def _build_validation_retry_exhausted_message(
@@ -1234,15 +1111,24 @@ def _build_review_summary_fallback(
     compiled_dataset_summary: DatasetSummaryModel,
     compiled_causal_spec: CausalSpec,
     transformation_plan: TransformPlan,
+    transformation_suggestions: ColumnTransformationSuggestionList | None,
     compilation_actions: Sequence[str],
     compilation_warnings: Sequence[str],
     validation_status: ValidationStatus,
     validation_issues: Sequence[ValidationIssueModel],
 ) -> str:
     retained_columns = [str(profile.name).strip() for profile in compiled_dataset_summary.profiles]
-    transform_lines = [
-        f"{column.column}: {column.encoding.preset}" for column in transformation_plan.columns
-    ]
+    preferred_type_notes = _preferred_type_note_by_column(
+        summary=compiled_dataset_summary,
+        transformation_suggestions=transformation_suggestions,
+    )
+    transform_lines = []
+    for column in transformation_plan.columns:
+        line = f"{column.column}: {column.encoding.preset}"
+        note = preferred_type_notes.get(column.column)
+        if note:
+            line = f"{line} ({note})"
+        transform_lines.append(line)
     warning_text = (
         "No non-blocking warnings remain."
         if not compilation_warnings and not validation_issues
@@ -1281,16 +1167,29 @@ def _build_review_summary_fallback(
     )
 
 
-def _summarize_dataset_repair_plan(repair_plan: DatasetRepairPlan) -> str:
-    parts: list[str] = []
-    for action in repair_plan.actions:
-        role_text = action.role.replace("_", " ")
-        summary = (
-            f"{action.column} ({role_text}): {action.action.replace('_', ' ')}. "
-            f"{action.reason}"
+def _preferred_type_note_by_column(
+    *,
+    summary: DatasetSummaryModel,
+    transformation_suggestions: ColumnTransformationSuggestionList | None,
+) -> dict[str, str]:
+    if transformation_suggestions is None:
+        return {}
+
+    current_kind_by_column = {
+        str(profile.name).strip(): str(profile.inferred_kind)
+        for profile in summary.profiles
+        if str(profile.name).strip()
+    }
+    notes: dict[str, str] = {}
+    for suggestion in transformation_suggestions.suggestions:
+        current_kind = current_kind_by_column.get(suggestion.column)
+        if current_kind is None or suggestion.preferred_type == current_kind:
+            continue
+        notes[suggestion.column] = (
+            f"preferred future raw type {suggestion.preferred_type}: "
+            f"{suggestion.preferred_type_reason}"
         )
-        parts.append(summary)
-    return "; ".join(parts)
+    return notes
 
 
 def _parse_validation_retry_guidance(

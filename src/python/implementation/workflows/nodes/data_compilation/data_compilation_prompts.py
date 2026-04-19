@@ -134,7 +134,9 @@ def data_compilation_transformation_retry_guidance_prompt() -> str:
 Additional grounded retry guidance for the next causal-spec and transformation attempt:
 - Use the following repair text to revise the compiled causal specification details and baseline transformations without changing locked column identities or roles.
 - Keep treatment, outcome, covariates, and effect modifiers locked to the confirmed draft columns.
-- Revise only same-column causal-spec details or covariate/effect-modifier encoding choices that are grounded by the repair text.
+- Revise only same-column causal-spec details or datatype-constrained covariate/effect-modifier encoding choices that are grounded by the repair text.
+- Keep the applied transformation aligned to the column's current dataset kind.
+- Treat any preferred future raw type as advisory only; do not let it override the applied preset rules.
 """.strip()
 
 
@@ -142,10 +144,10 @@ _PLAN_GUARDRAILS = """
 Transformation-plan safety rules:
 - Build the plan only for covariates and effect modifiers from the compiled causal specification.
 - Never include treatment or outcome in the transformation plan.
-- Use the compiled dataset summary as the source of truth for column types.
-- Prefer conservative, broadly safe encodings.
-- Avoid row dropping unless it is clearly grounded and necessary.
-- Prefer explicit missingness handling when possible.
+- Use the compiled dataset summary as the source of truth for the current stored kind of each column.
+- The applied preset must stay compatible with the current stored kind; do not reinterpret the current type.
+- Keep the plan conservative and type-driven.
+- Keep preferred future raw type suggestions separate from the applied preset.
 """.strip()
 
 
@@ -160,20 +162,26 @@ Inputs:
 - eligible_columns
 - expected_role_by_column
 - required_plan_column_count
-- optional repair_request
+- allowed_presets_by_kind
+- optional retry_note
 - optional validation_issues
 
 Task:
 - Produce one compact transformation-plan draft JSON object that matches the provided schema exactly.
 - The runtime will expand the draft into the final TransformPlan using safe defaults.
+- For each eligible column, output:
+  - `column`
+  - `role`
+  - `preset`
+  - `preferred_type`
+  - `preferred_type_reason`
 
 Defaults:
-- NUMERIC baseline features usually default to `num_standard`.
-- NUMERIC columns with very small distinct_count can be numeric-coded binary, categorical, or ordinal fields; choose a discrete encoding when the profile supports that interpretation.
-- Binary categorical or boolean baseline features usually default to `map_binary` when the mapping is grounded.
-- Multi-category baseline features usually default to `cat_onehot`.
-- DATETIME baseline features may use `datetime_epoch_seconds` when the timestamp itself is intended as a baseline feature; otherwise prefer `drop`.
-- OTHER features should usually be `drop` unless there is a grounded reason to keep them.
+- NUMERIC columns usually default to `passthrough`; only choose `num_standard`, `num_minmax`, or `num_log1p` when the instructions make that useful.
+- BOOLEAN columns usually default to `passthrough`.
+- CATEGORICAL columns default to `cat_onehot`.
+- DATETIME columns default to `datetime_epoch_seconds`.
+- OTHER columns default to `drop`.
 
 Role rules:
 - Use `role="covariate"` exactly for compiled causal-spec covariates.
@@ -183,10 +191,10 @@ Role rules:
 - Do not include any column outside `eligible_columns`.
 - The number of entries in `columns` must equal `required_plan_column_count`.
 - For each entry, `role` must exactly match `expected_role_by_column[column]`.
-- Use `map_binary` only when you can provide a grounded `mapping`.
-- Use `map_ordinal` only when you can provide a grounded `order`.
-- Use the confirmed protocol discussion and compiled causal specification to resolve semantic ambiguity, especially for low-cardinality numeric codes, ordinal categories, baseline datetime fields, and columns that could be either dropped or retained.
-- If repair_request or validation_issues are provided, revise the plan to address them while keeping the same eligible columns and roles.
+- The applied `preset` must be chosen only from `allowed_presets_by_kind[column.kind]`.
+- Do not reinterpret a numeric-coded category as categorical for the applied preset; keep the applied preset aligned to the current stored kind.
+- Use `preferred_type` only to express the ideal future raw type of the column.
+- If `retry_note` or `validation_issues` are provided, revise the draft to correct the same-column choice while keeping the same eligible columns and roles.
 
 {_PLAN_GUARDRAILS}
 
@@ -207,7 +215,8 @@ Inputs:
 - column_name
 - expected_role
 - column_profile
-- optional repair_request
+- allowed_presets_by_kind
+- optional retry_note
 - optional validation_issues
 
 Task:
@@ -215,14 +224,12 @@ Task:
 
 Rules:
 - The schema already fixes the allowed `column` and `role`; do not invent or change them.
-- Use the confirmed protocol discussion and compiled causal specification to understand the semantic role of the column within the study design.
-- Use the provided column_profile as the source of truth for kind, dtype, missingness, distinct_count, range, and known/sample values.
-- NUMERIC columns with very small distinct_count can represent binary, categorical, or ordinal coded fields; choose a discrete encoding when grounded by the profile.
-- Use `map_binary` only when you can provide a grounded `mapping`.
-- Use `map_ordinal` only when you can provide a grounded `order`.
-- Prefer conservative, broadly safe encodings.
-- Avoid `drop` unless there is a grounded reason to exclude the feature.
-- If repair_request or validation_issues are provided, revise the encoding choice to address them while keeping the same locked column and role.
+- Use the provided column_profile as the source of truth for kind, dtype, distinct_count, range, and known/sample values.
+- Choose `preset` only from `allowed_presets_by_kind[column_profile.kind]`.
+- Keep the applied `preset` aligned to the current stored kind; do not reinterpret the kind.
+- Use `preferred_type` only as an advisory future raw type suggestion.
+- `preferred_type_reason` must explain why that future raw type would make the column cleaner or easier to transform later.
+- If `retry_note` or `validation_issues` are provided, revise the choice while keeping the same locked column and role.
 
 Output policy:
 - Output JSON only.
@@ -240,6 +247,7 @@ Inputs:
 - compiled causal specification
 - compiled dataset summary
 - compiled transformation plan
+- transformation_suggestions
 - compilation_actions
 - compilation_warnings
 - validation_status
@@ -254,6 +262,7 @@ Content rules:
 - Start with what changed in the dataset and why those changes matter for the clinical question.
 - Explain which columns were kept, how the data was narrowed, and any grounded row removals or corrective cleaning that happened.
 - Explain the planned baseline transformations in detail, column by column when helpful, including why each transformation is needed and what it means in plain language.
+- When a column has a preferred future raw type that differs from its current stored type, mention that as a non-blocking recommendation and explain why.
 - Explain what validation checked in practical terms.
 - Surface non-blocking warnings clearly and explain what each warning means for interpretation or trust in the analysis.
 - State explicitly whether you recommend accepting the setup now or revising it before moving forward.
@@ -358,7 +367,7 @@ Output policy:
 
 def batch_transform_prompt() -> str:
     return """
-You are compiling a minimal transformation draft for covariates and effect modifiers only.
+You are compiling a strict datatype-driven transformation draft for covariates and effect modifiers only.
 
 Inputs:
 - transformation_instructions
@@ -367,32 +376,37 @@ Inputs:
 - eligible_columns
 - expected_role_by_column
 - required_plan_column_count
-- optional repair_request
+- allowed_presets_by_kind
+- optional retry_note
 
 Task:
 - Produce one JSON object with a `columns` array.
 - Include every eligible column exactly once.
 - Never include treatment or outcome.
-- Use `decision="plan"` when the current summarized data can be transformed safely as-is.
-- Use `decision="dataset_change"` when the source dataset must be changed before a safe grounded encoding can be chosen.
+- Each `columns` entry must contain exactly:
+  - `column`
+  - `role`
+  - `preset`
+  - `preferred_type`
+  - `preferred_type_reason`
 
 Planning rules:
-- Prefer `passthrough` when the column is already analysis-ready.
-- Only choose a real preset when the summary or transformation_instructions make it necessary.
-- Use the scoped dataset summary as the source of truth for data kind, missingness, distinct_count, and grounded known values.
-- Never guess label mappings or ordinal order for numeric-coded categories.
-- If categorical or ordinal semantics are required but not grounded by the summary, emit `decision="dataset_change"` instead of inventing mappings.
-- Only use `map_binary` when you can provide a grounded `mapping`.
-- Only use `map_ordinal` when you can provide a grounded `order`.
-
-Dataset-change rules:
-- Emit `problem`, `action`, `reason`, and `repair_instruction` for every dataset-change blocker.
-- `reason` must clearly explain why the current summarized data cannot be transformed safely.
-- `repair_instruction` must say exactly what should be changed in the dataset before recompilation.
-- `user_explanation` should give a short clinician-facing next step when helpful.
-- If `problem="missing_values"` for a locked covariate or effect modifier, you must use `action="impute_missing"`.
-- Never propose row dropping as the automatic retry strategy for baseline missingness.
-- If a locked baseline column looks categorical but is stored numerically, request normalization or recoding only when that need is grounded by the summary and instructions.
+- The applied `preset` must follow the column's current `kind` from the scoped dataset summary.
+- Do not reinterpret the current stored kind for the applied preset.
+- Use `allowed_presets_by_kind` as a hard constraint.
+- Use `preferred_type` only as a non-blocking recommendation for the ideal future raw type of the column.
+- `preferred_type` must not override or change the applied `preset`.
+- Prefer minimal transformation when allowed for the current kind.
+- Current-kind defaults:
+  - `NUMERIC` usually defaults to `passthrough`
+  - `BOOLEAN` usually defaults to `passthrough`
+  - `CATEGORICAL` defaults to `cat_onehot`
+  - `DATETIME` defaults to `datetime_epoch_seconds`
+  - `OTHER` defaults to `drop`
+- Only choose a non-default preset when `transformation_instructions` or retry guidance make it necessary and the preset is still allowed for the current kind.
+- Do not emit dataset-change actions.
+- Do not emit missing-data logic.
+- If `retry_note` is present, use it only to correct malformed, incomplete, or previously incompatible draft output while keeping the same eligible columns and roles.
 
 Output policy:
 - Output JSON only.
@@ -403,7 +417,7 @@ Output policy:
 
 def single_column_transform_prompt() -> str:
     return """
-You are selecting a minimal transformation for one covariate or effect modifier.
+You are selecting a strict datatype-driven transformation for one covariate or effect modifier.
 
 Inputs:
 - transformation_instructions
@@ -411,6 +425,8 @@ Inputs:
 - column_name
 - expected_role
 - column_profile
+- allowed_presets_by_kind
+- optional retry_note
 
 Task:
 - Produce one JSON object with a single `column` entry.
@@ -418,17 +434,19 @@ Task:
 - Never refer to treatment or outcome.
 
 Rules:
-- Prefer `decision="plan"` with `preset="passthrough"` when the column is already analysis-ready.
-- Choose a real preset only when the column actually needs transformation.
-- Use the column profile as the source of truth for dtype, inferred kind, missingness, distinct_count, and grounded known values.
-- Never guess label mappings or ordinal order for numeric-coded categories.
-- If safe categorical or ordinal semantics cannot be grounded from the profile and instructions, emit `decision="dataset_change"`.
-
-Dataset-change rules:
-- Emit `problem`, `action`, `reason`, and `repair_instruction` for the blocker.
-- `user_explanation` should give a short clinician-facing next step when helpful.
-- If `problem="missing_values"` for a locked covariate or effect modifier, you must use `action="impute_missing"`.
-- Never propose row dropping as the automatic retry strategy for baseline missingness.
+- Output exactly:
+  - `column`
+  - `role`
+  - `preset`
+  - `preferred_type`
+  - `preferred_type_reason`
+- Choose `preset` only from `allowed_presets_by_kind[column_profile.kind]`.
+- The applied `preset` must stay aligned to the current stored kind.
+- Use `preferred_type` only as a saved future recommendation.
+- Prefer the minimal current-kind-compatible transform unless instructions require a different allowed preset.
+- Do not emit dataset-change actions.
+- Do not emit missing-data logic.
+- If `retry_note` is present, use it only to correct malformed, incomplete, or incompatible prior output.
 
 Output policy:
 - Output JSON only.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import patch
@@ -22,8 +23,8 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_sta
     DataCompilationState,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_transformation import (
-    DatasetRepairAction,
-    DatasetRepairPlan,
+    ColumnTransformationSuggestion,
+    ColumnTransformationSuggestionList,
     TransformationResult,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_valiation import (
@@ -127,30 +128,36 @@ def _transform_plan() -> TransformPlan:
     )
 
 
-def _dataset_repair_plan(
-    *,
-    column: str,
-    role: str,
-    problem: str,
-    action: str,
-    reason: str,
-    repair_instruction: str,
-    user_explanation: str | None = None,
-) -> DatasetRepairPlan:
-    return DatasetRepairPlan(
-        actions=[
-            DatasetRepairAction.model_validate(
-                {
-                    "column": column,
-                    "role": role,
-                    "problem": problem,
-                    "action": action,
-                    "reason": reason,
-                    "repair_instruction": repair_instruction,
-                    "user_explanation": user_explanation,
-                }
-            )
+def _transformation_suggestions() -> ColumnTransformationSuggestionList:
+    return ColumnTransformationSuggestionList(
+        suggestions=[
+            ColumnTransformationSuggestion(
+                column="age",
+                role="covariate",
+                preferred_type="NUMERIC",
+                preferred_type_reason="Age is already stored as numeric values.",
+            ),
+            ColumnTransformationSuggestion(
+                column="isex",
+                role="effect_modifier",
+                preferred_type="CATEGORICAL",
+                preferred_type_reason="The numeric codes would be clearer as explicit category labels.",
+            ),
         ]
+    )
+
+
+def _transformation_result(
+    *,
+    transformation_plan: TransformPlan | None = None,
+    transformation_suggestions: ColumnTransformationSuggestionList | None = None,
+) -> TransformationResult:
+    suggestions = transformation_suggestions
+    if transformation_plan is not None and suggestions is None:
+        suggestions = _transformation_suggestions()
+    return TransformationResult(
+        transformation_plan=transformation_plan,
+        transformation_suggestions=suggestions,
     )
 
 
@@ -335,12 +342,12 @@ def _cleaning_result(dataframe: pd.DataFrame) -> CleaningResult:
     )
 
 
-def test_data_compilation_node_auto_retries_full_compile_when_transform_requires_dataset_changes() -> None:
+def test_data_compilation_node_saves_transformation_suggestions_without_cleaning_retry() -> None:
     dataframe = _build_dataframe()
     dataset_summary = _build_summary(dataframe)
     dataset_id = uuid4()
     llm = _FakeLLM(
-        json_outputs=[{"assistant_message": "Review the automatically repaired compiled setup."}]
+        json_outputs=[{"assistant_message": "Review the compiled setup with type recommendations."}]
     )
     data_repo = _InMemoryDataRepo(dataframes={dataset_id: dataframe.copy()})
     node = DataCompilationNode(data_repo=data_repo, llm=llm, tools_factory=_tool_factory())
@@ -352,39 +359,11 @@ def test_data_compilation_node_auto_retries_full_compile_when_transform_requires
     with (
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.cleaning",
-            side_effect=[_cleaning_result(dataframe), _cleaning_result(dataframe)],
+            return_value=_cleaning_result(dataframe),
         ) as cleaning_mock,
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
-            side_effect=[
-                TransformationResult(
-                    transformation_plan=None,
-                    required_dataset_changes=_dataset_repair_plan(
-                        column="isex",
-                        role="effect_modifier",
-                        problem="numeric_coded_category",
-                        action="normalize_categorical_representation",
-                        reason=(
-                            "This effect modifier appears to need categorical handling, "
-                            "but the current numeric coding does not ground a safe "
-                            "categorical encoding plan."
-                        ),
-                        repair_instruction=(
-                            "Replace numeric codes 1 and 2 with explicit category labels "
-                            "such as male and female in the source dataset before "
-                            "recompilation."
-                        ),
-                        user_explanation=(
-                            "Update the stored values first, then rerun compilation so "
-                            "categorical encoding can be grounded safely."
-                        ),
-                    ),
-                ),
-                TransformationResult(
-                    transformation_plan=_transform_plan(),
-                    required_dataset_changes=None,
-                ),
-            ],
+            return_value=_transformation_result(transformation_plan=_transform_plan()),
         ) as transform_mock,
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
@@ -408,9 +387,12 @@ def test_data_compilation_node_auto_retries_full_compile_when_transform_requires
     assert result.status == "PENDING"
     assert result.action == "NEEDS_INPUT"
     assert payload.phase == "REVIEW_READY"
-    assert payload.transformation_retry_count == 1
     assert payload.compiled_dataset_id is not None
     assert payload.compiled_dataset_id in data_repo.dataframes
+    assert payload.transformation_suggestions is not None
+    assert len(payload.transformation_suggestions.suggestions) == 2
+    assert "preferred future raw type is CATEGORICAL" in " ".join(payload.compilation_warnings)
+    assert not hasattr(payload, "transformation_retry_count")
     assert orchestrator_state.get("working_dataset_id") == dataset_id
     assert orchestrator_state.get("latest_dataset_summary") == dataset_summary
     assert (
@@ -421,75 +403,12 @@ def test_data_compilation_node_auto_retries_full_compile_when_transform_requires
     assert orchestrator_state.get("data_transformation_plan") is None
     assert orchestrator_state.get("working_dataset_frozen") is False
     assert orchestrator_state.get("is_validated") is False
-    assert cleaning_mock.call_count == 2
-    assert transform_mock.call_count == 2
-    second_cleaning_call = cleaning_mock.call_args_list[1]
-    assert "isex" in second_cleaning_call.kwargs["cleaning_instructions"]
-    assert "Required dataset fix:" in second_cleaning_call.kwargs["cleaning_instructions"]
-    assert "Automatic retry fix request from downstream transformation planning" in second_cleaning_call.kwargs["cleaning_instructions"]
-
-
-def test_data_compilation_node_transformation_retry_exhausted_message_is_clinician_facing() -> None:
-    dataframe = _build_dataframe()
-    dataset_summary = _build_summary(dataframe)
-    dataset_id = uuid4()
-    llm = _FakeLLM()
-    data_repo = _InMemoryDataRepo(dataframes={dataset_id: dataframe.copy()})
-    node = DataCompilationNode(data_repo=data_repo, llm=llm, tools_factory=_tool_factory())
-    orchestrator_state = _build_orchestrator_state(
-        dataset_id=dataset_id,
-        dataset_summary=dataset_summary,
+    assert cleaning_mock.call_count == 1
+    assert transform_mock.call_count == 1
+    review_payload = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
+    assert review_payload["transformation_suggestions"]["suggestions"][1]["preferred_type"] == (
+        "CATEGORICAL"
     )
-    required_dataset_changes = _dataset_repair_plan(
-        column="iage",
-        role="effect_modifier",
-        problem="missing_values",
-        action="impute_missing",
-        reason="Effect modifiers must not contain missing values for the current estimation configuration.",
-        repair_instruction="Impute the missing values in 'iage' before recompilation.",
-        user_explanation="There is very little missingness in 'iage' (approximately 1 row), so a simple grounded imputation strategy should be sufficient.",
-    )
-
-    with (
-        patch(
-            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.cleaning",
-            side_effect=[_cleaning_result(dataframe), _cleaning_result(dataframe)],
-        ),
-        patch(
-            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
-            side_effect=[
-                TransformationResult(
-                    transformation_plan=None,
-                    required_dataset_changes=required_dataset_changes,
-                ),
-                TransformationResult(
-                    transformation_plan=None,
-                    required_dataset_changes=required_dataset_changes,
-                ),
-            ],
-        ),
-    ):
-        result = node.run(
-            request=NodeRequest(
-                user_id=uuid4(),
-                conversation_id=uuid4(),
-                node_state=DataCompilationState.init_empty(),
-                orchestrator_state=orchestrator_state,
-                read_only_messages_history=[ChatMessage(role="user", content="compile it")],
-            )
-        )
-
-    message = result.response_messages[0].content if result.response_messages else ""
-    assert result.status == "ABORTED"
-    assert result.action == "NONE"
-    assert "one remaining data issue still blocks a safe baseline transformation plan" in message
-    assert result.new_node_state.payload.hard_failure is True
-    assert "The column 'iage' used as an effect modifier still needs to be fixed" in message
-    assert "Most direct fix: Impute the missing values in 'iage' before recompilation." in message
-    assert "Practical option: There is very little missingness in 'iage' (approximately 1 row)" in message
-    assert "If you want to keep the current causal draft, update the dataset and rerun compilation." in message
-    assert "Source dataset changes are required before a safe transformation plan can be produced." not in message
-    assert "drop" not in message.lower()
 
 
 def test_data_compilation_node_auto_retries_validation_on_cleaned_dataset() -> None:
@@ -519,14 +438,8 @@ def test_data_compilation_node_auto_retries_validation_on_cleaned_dataset() -> N
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
             side_effect=[
-                TransformationResult(
-                    transformation_plan=_transform_plan(),
-                    required_dataset_changes=None,
-                ),
-                TransformationResult(
-                    transformation_plan=_transform_plan(),
-                    required_dataset_changes=None,
-                ),
+                _transformation_result(transformation_plan=_transform_plan()),
+                _transformation_result(transformation_plan=_transform_plan()),
             ],
         ) as transform_mock,
         patch(
@@ -573,6 +486,7 @@ def test_data_compilation_node_auto_retries_validation_on_cleaned_dataset() -> N
     assert validate_mock.call_count == 2
     assert compile_retry_mock.call_count == 1
     assert len(data_repo.dataframes) == 2
+    assert payload.transformation_suggestions is not None
 
 
 def test_data_compilation_node_aborts_on_hard_validation_failure() -> None:
@@ -599,10 +513,7 @@ def test_data_compilation_node_aborts_on_hard_validation_failure() -> None:
         ),
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
-            return_value=TransformationResult(
-                transformation_plan=_transform_plan(),
-                required_dataset_changes=None,
-            ),
+            return_value=_transformation_result(transformation_plan=_transform_plan()),
         ),
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
@@ -656,10 +567,7 @@ def test_data_compilation_node_review_confirm_publishes_outputs() -> None:
         ),
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
-            return_value=TransformationResult(
-                transformation_plan=_transform_plan(),
-                required_dataset_changes=None,
-            ),
+            return_value=_transformation_result(transformation_plan=_transform_plan()),
         ),
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
@@ -738,10 +646,7 @@ def test_data_compilation_node_review_revise_keeps_only_preaccept_dataset_refres
         ),
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
-            return_value=TransformationResult(
-                transformation_plan=_transform_plan(),
-                required_dataset_changes=None,
-            ),
+            return_value=_transformation_result(transformation_plan=_transform_plan()),
         ),
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
@@ -814,10 +719,7 @@ def test_data_compilation_node_review_question_reuses_cached_payload_without_rec
         ) as cleaning_mock,
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
-            return_value=TransformationResult(
-                transformation_plan=_transform_plan(),
-                required_dataset_changes=None,
-            ),
+            return_value=_transformation_result(transformation_plan=_transform_plan()),
         ) as transform_mock,
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
@@ -892,10 +794,7 @@ def test_data_compilation_node_recompiles_when_upstream_protocol_changes() -> No
         ) as cleaning_mock,
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
-            return_value=TransformationResult(
-                transformation_plan=_transform_plan(),
-                required_dataset_changes=None,
-            ),
+            return_value=_transformation_result(transformation_plan=_transform_plan()),
         ) as transform_mock,
         patch(
             "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
