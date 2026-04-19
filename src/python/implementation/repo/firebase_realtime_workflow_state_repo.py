@@ -6,14 +6,14 @@ import os
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import firebase_admin
 from firebase_admin import credentials, db
 
 from python.domain.models.models import ChatMessage
-from python.domain.repo.workflow_state_repo import WorkflowStateRepo
+from python.domain.repo.workflow_state_repo import Conversation, WorkflowStateRepo
 from python.domain.workflows.node_state import NodeState
 from python.domain.workflows.ochestrator_state import OchestratorState
 
@@ -28,7 +28,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
     Storage layout::
 
-        /workflow_conversation_index/{user_id}/{conversation_id}: true
+        /workflow_conversation_index/{user_id}/{conversation_id}: {"conversation_type": "..."}
 
         /workflows/{user_id}/{conversation_id}/_meta:
             created: true
@@ -83,11 +83,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     ) -> None:
         if app is None:
             raise ValueError("app must not be None")
-        if not isinstance(state_classes_by_name, Mapping):
-            raise ValueError("state_classes_by_name must be a mapping")
-        if not isinstance(ochestrator_state_classes_by_name, Mapping):
-            raise ValueError("ochestrator_state_classes_by_name must be a mapping")
-
+        
         self._root_ref = db.reference("/", app=app)
         self._state_classes_by_name = dict(state_classes_by_name)
         self._ochestrator_state_classes_by_name = dict(
@@ -98,41 +94,62 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     # Conversation persistence
     # ------------------------------------------------------------------
 
-    def save_conversation_id(self, *, user_id: UUID, conversation_id: UUID) -> None:
+    def save_conversation(self, *, user_id: UUID, conversation: Conversation) -> None:
         updates = {
             self._conversation_index_path(
                 user_id=user_id,
-                conversation_id=conversation_id,
-            ): True,
+                conversation_id=conversation.conversation_id,
+            ): {
+                "conversation_type": conversation.conversation_type,
+            },
             self._conversation_meta_path(
                 user_id=user_id,
-                conversation_id=conversation_id,
+                conversation_id=conversation.conversation_id,
             ): {"created": True},
         }
         self._root_ref.update(updates)
 
-    def get_conversation_ids_for_user(self, *, user_id: UUID) -> Sequence[UUID]:
+    def get_conversations(self, *, user_id: UUID) -> Sequence[Conversation]:
         data = self._conversation_index_user_ref(user_id=user_id).get()
         if not isinstance(data, dict):
             return []
 
-        conversation_ids: list[UUID] = []
+        conversations: list[Conversation] = []
         for key in sorted(data.keys()):
+            value = data[key]
+
             try:
-                conversation_ids.append(UUID(key))
+                conversation_id = UUID(key)
             except (TypeError, ValueError):
                 continue
-        return conversation_ids
+
+            if not isinstance(value, dict):
+                continue
+
+            conversation_type = value.get("conversation_type")
+            if conversation_type not in {"causal", "data"}:
+                raise ValueError(
+                    f"Invalid conversation type: {conversation_type}"
+                )
+
+            conversations.append(
+                Conversation(
+                    conversation_id=conversation_id,
+                    conversation_type=cast("Any", conversation_type),
+                )
+            )
+
+        return conversations
 
     def is_conversation_id_for_user_id_exists(
         self,
         *,
         user_id: UUID,
-        conversation_id: UUID,
+        conversation: Conversation,
     ) -> bool:
         value = self._conversation_index_ref(
             user_id=user_id,
-            conversation_id=conversation_id,
+            conversation_id=conversation.conversation_id,
         ).get()
         return value is not None
 
