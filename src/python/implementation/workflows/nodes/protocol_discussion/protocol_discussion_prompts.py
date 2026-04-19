@@ -34,6 +34,17 @@ Protocol edit rules:
 """.strip()
 
 
+_IDENTIFIER_RULES = """
+Identifier column policy:
+- Identifier column handling is optional and non-blocking.
+- Use exact dataset column names only.
+- If the user names a real patient/unit identifier column, record it exactly in answer 16.
+- If suggested_identifier_column is present and the identifier choice is still unresolved, write that suggestion into answer 16 and ask the user to confirm or correct it.
+- If no obvious identifier candidate exists, or the user says there is no real identifier column, set answer 16 to __auto_id__.
+- Never invent an identifier column.
+""".strip()
+
+
 _FEASIBILITY_RULES = """
 Feasibility and design checks:
 - If no time support exists, treat as snapshot mode and avoid time-to-event claims that require event or censor times.
@@ -68,6 +79,8 @@ Inputs:
 - PROTOCOL_DISCUSSION: the current canonical protocol Q/A document
 - recent chat context
 - dataset metadata summary (authoritative)
+- identifier_column_candidates: optional suggestion-only list of likely patient/unit identifier columns from dataset metadata
+- suggested_identifier_column: optional single best identifier-column suggestion from dataset metadata
 
 Tasks:
 1) Update PROTOCOL_DISCUSSION using grounded user evidence.
@@ -78,6 +91,8 @@ Tasks:
 {_SHARED_GUARDRAILS}
 
 {_PROTOCOL_EDIT_RULES}
+
+{_IDENTIFIER_RULES}
 
 {_FEASIBILITY_RULES}
 
@@ -125,6 +140,7 @@ You are preparing a protocol review step before confirmation.
 Inputs:
 - proposed protocol discussion text
 - authoritative dataset metadata summary
+- suggested_identifier_column: optional single best identifier-column suggestion from dataset metadata
 
 Task:
 - Write a concise but specific review summary of the proposed final protocol.
@@ -135,6 +151,9 @@ Rules:
 - Do not say the protocol is already confirmed.
 - Do not mention internal phases, JSON, or workflow implementation.
 - Summarize the proposed treatment, outcome, study type, target population, time-zero approach, covariates, and effect modifiers when grounded.
+- Summarize the identifier column choice when grounded.
+- If the proposed protocol currently uses suggested_identifier_column as the likely identifier, say that confirming this review will accept that identifier choice unless the user corrects it.
+- If no real identifier column exists, say that __auto_id__ will be used.
 - Summarize the approved upstream data-preparation decisions when grounded, especially treatment/outcome value handling and baseline feature preparation decisions.
 - Mention important outcome-mapping or snapshot assumptions when grounded.
 - End with a direct confirmation question.
@@ -197,6 +216,9 @@ def get_questions() -> list[str]:
         "15) Baseline feature preparation decisions: For selected covariates/effect modifiers with missingness, unknown "
         "categories, or coded categorical values, how should they be prepared before modeling? State the approved "
         "imputation, category handling, or normalization decisions.",
+        "16) Identifier column (optional): If the dataset has a real patient/unit identifier column, name it exactly. "
+        "If a likely identifier exists in the dataset metadata, confirm or correct it. If no real identifier column exists, "
+        "use __auto_id__.",
     ]
 
 
@@ -204,8 +226,8 @@ def initial_user_message() -> str:
     return (
         "Let’s define the protocol carefully from the current dataset. "
         "Please state the causal question, treatment, outcome, study type, target population, "
-        "how you want to define time zero, and any upstream data-handling decisions you already "
-        "want for treatment, outcome, or baseline features."
+        "how you want to define time zero, which identifier column should represent the patient or unit if one exists, "
+        "and any upstream data-handling decisions you already want for treatment, outcome, or baseline features."
     )
 
 def get_llm_blocker_message_prompt() -> str:

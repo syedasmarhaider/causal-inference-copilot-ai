@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Literal, cast
 from uuid import UUID
@@ -24,11 +25,9 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     initial_user_message,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_summary_blockers import (
-scan_protocol_summary_blockers,
-unresolved_summary_blockers
+    scan_protocol_summary_blockers,
+    unresolved_summary_blockers,
 )
-
-    
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionPayloadModel,
     ProtocolDiscussionState,
@@ -44,6 +43,34 @@ log = get_logger(__name__)
 
 NextAction = Literal["continue", "confirm"]
 ReviewAction = Literal["confirm", "revise", "clarify"]
+
+_STRONG_IDENTIFIER_KEYS = frozenset(
+    {
+        "patientid",
+        "subjectid",
+        "personid",
+        "memberid",
+        "recordid",
+        "encounterid",
+        "visitid",
+        "stayid",
+        "mrn",
+        "empi",
+    }
+)
+_IDENTIFIER_CONTEXT_TOKENS = (
+    "patient",
+    "subject",
+    "person",
+    "member",
+    "record",
+    "encounter",
+    "visit",
+    "stay",
+    "unit",
+    "mrn",
+    "empi",
+)
 
 
 class _DiscussionDecisionModel(BaseModel):
@@ -145,10 +172,20 @@ class ProtocolDiscussionNode(Node):
         *,
         questions: Sequence[str],
         summary_string: str,
+        identifier_column_candidates: Sequence[str],
     ) -> dict[str, Any]:
+        suggested_identifier_column = (
+            str(identifier_column_candidates[0]).strip()
+            if identifier_column_candidates
+            else None
+        )
         return {
             "canonical_questions": list(questions),
             "dataset_columns_summary": summary_string,
+            "identifier_column_candidates": [
+                str(candidate).strip() for candidate in identifier_column_candidates
+            ],
+            "suggested_identifier_column": suggested_identifier_column,
         }
 
     @staticmethod
@@ -212,7 +249,13 @@ class ProtocolDiscussionNode(Node):
         *,
         protocol_discussion: str,
         dataset_summary_json: str,
+        identifier_column_candidates: Sequence[str],
     ) -> _ReviewSummaryModel:
+        suggested_identifier_column = (
+            str(identifier_column_candidates[0]).strip()
+            if identifier_column_candidates
+            else None
+        )
         return self._llm.generate_json(
             schema=_ReviewSummaryModel,
             system_prompt=get_protocol_discussion_review_summary_prompt(),
@@ -220,6 +263,7 @@ class ProtocolDiscussionNode(Node):
                 {
                     "protocol_discussion": protocol_discussion,
                     "dataset_summary": json.loads(dataset_summary_json),
+                    "suggested_identifier_column": suggested_identifier_column,
                 },
                 ensure_ascii=False,
             ),
@@ -252,18 +296,31 @@ class ProtocolDiscussionNode(Node):
         )
 
     @staticmethod
-    def _fallback_review_summary(protocol_discussion: str) -> str:
+    def _fallback_review_summary(
+        protocol_discussion: str,
+        *,
+        suggested_identifier_column: str | None = None,
+    ) -> str:
         compact_lines = [line.strip() for line in protocol_discussion.splitlines() if line.strip()]
         preview = " ".join(compact_lines[:6])
         if len(preview) > 900:
             preview = preview[:897].rstrip() + "..."
+        identifier_choice = summarize_identifier_choice(
+            protocol_discussion,
+            suggested_identifier_column=suggested_identifier_column,
+        )
         prep_decisions = summarize_upstream_data_prep_decisions(protocol_discussion)
         summary = (
             "I drafted the final protocol summary based on the current discussion. "
             f"{preview}"
         )
+        if identifier_choice:
+            summary += f" {identifier_choice}"
         if prep_decisions:
-            summary += f" Before modeling, we will also follow these agreed data-preparation decisions: {prep_decisions}"
+            summary += (
+                " Before modeling, we will also follow these agreed data-preparation "
+                f"decisions: {prep_decisions}"
+            )
         return f"{summary} Please confirm this protocol, or tell me exactly what should change."
 
     def _compile_confirmed_causal_spec_draft(
@@ -383,8 +440,9 @@ class ProtocolDiscussionNode(Node):
             )
 
         deps = ProtocolDiscussionDeps.from_request(request)
-        
+
         questions = get_questions()
+        identifier_column_candidates = _identifier_column_candidates(deps.dataset_summary)
         prior_dataset_id = request.node_state.payload.dataset_id
         dataset_changed = prior_dataset_id is not None and prior_dataset_id != deps.dataset_id
         needs_initialization = not request.node_state.payload.discussion.strip()
@@ -414,7 +472,11 @@ class ProtocolDiscussionNode(Node):
             )
 
         summary_string = deps.dataset_summary.model_dump_json()
-        base_payload = self._base_payload(questions=questions, summary_string=summary_string)
+        base_payload = self._base_payload(
+            questions=questions,
+            summary_string=summary_string,
+            identifier_column_candidates=identifier_column_candidates,
+        )
         last_4_messages = (
             list(request.read_only_messages_history[-4:])
             if request.read_only_messages_history
@@ -571,11 +633,19 @@ class ProtocolDiscussionNode(Node):
                 review_summary = self._call_review_summary(
                     protocol_discussion=decision.discussion,
                     dataset_summary_json=summary_string,
+                    identifier_column_candidates=identifier_column_candidates,
                 )
                 review_message = review_summary.assistant_message
             except Exception as e:
                 log.exception("PROTOCOL_DISCUSSION review summary failure: %s", safe_err(e))
-                review_message = self._fallback_review_summary(decision.discussion)
+                review_message = self._fallback_review_summary(
+                    decision.discussion,
+                    suggested_identifier_column=(
+                        identifier_column_candidates[0]
+                        if identifier_column_candidates
+                        else None
+                    ),
+                )
             return self._needs_input_result(
                 request=request,
                 payload=payload.model_copy(
@@ -682,6 +752,78 @@ def summarize_upstream_data_prep_decisions(protocol_discussion: str) -> str | No
     if not items:
         return None
     return " ".join(items)
+
+
+def summarize_identifier_choice(
+    protocol_discussion: str,
+    *,
+    suggested_identifier_column: str | None = None,
+) -> str | None:
+    line = _find_protocol_line(protocol_discussion, "16)")
+    if line is None:
+        return None
+
+    normalized = line.strip()
+    lowered = normalized.lower()
+    if "unclear" in lowered:
+        return None
+    if "__auto_id__" in lowered:
+        return (
+            "Identifier handling: no real patient/unit identifier column is being used, "
+            "so __auto_id__ will be used."
+        )
+
+    if (
+        suggested_identifier_column is not None
+        and suggested_identifier_column.strip()
+        and suggested_identifier_column.strip().lower() in lowered
+    ):
+        return (
+            f"Identifier handling: the likely identifier column is "
+            f"{suggested_identifier_column.strip()}. If you confirm this review, that "
+            "identifier choice will be accepted unless you correct it."
+        )
+
+    details = normalized.split(":", 1)[1].strip() if ":" in normalized else normalized
+    return f"Identifier handling: {details}"
+
+
+def _identifier_column_candidates(
+    dataset_summary: DatasetSummaryModel,
+    *,
+    limit: int = 3,
+) -> list[str]:
+    strong_matches: list[str] = []
+    contextual_matches: list[str] = []
+    generic_matches: list[str] = []
+    seen: set[str] = set()
+
+    for profile in dataset_summary.profiles:
+        column_name = str(profile.name).strip()
+        if not column_name or column_name in seen:
+            continue
+        seen.add(column_name)
+
+        normalized = _normalized_identifier_name(column_name)
+        compact = normalized.replace("_", "")
+        if compact in _STRONG_IDENTIFIER_KEYS:
+            strong_matches.append(column_name)
+            continue
+
+        ends_with_identifier_suffix = normalized.endswith("_id") or compact.endswith("id")
+        if not ends_with_identifier_suffix:
+            continue
+
+        if any(token in normalized for token in _IDENTIFIER_CONTEXT_TOKENS):
+            contextual_matches.append(column_name)
+            continue
+        generic_matches.append(column_name)
+
+    return (strong_matches + contextual_matches + generic_matches)[:limit]
+
+
+def _normalized_identifier_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
 
 
 def _find_protocol_line(protocol_discussion: str, prefix: str) -> str | None:
