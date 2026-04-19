@@ -11,7 +11,7 @@ from python.domain.models.models import ChatMessage
 from python.domain.workflows.ochestrator_state import OchestratorState
 from python.domain.workflows.node_state import NodeState
 
-ConversationType = Literal["causal_backdoor", "data_dashboard"]
+ConversationType = Literal["causal", "data"]
 
 
 class Conversation(BaseModel):

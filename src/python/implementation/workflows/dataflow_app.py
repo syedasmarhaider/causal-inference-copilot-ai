@@ -14,9 +14,9 @@ from python.domain.models.errors import (
     ConversationNotFoundError,
     ValidationError,
 )
-from python.domain.models.models import ArtifactFormat, ArtifactKind, WorkingDatasetInfo
+from python.domain.models.models import ArtifactFormat, ArtifactKind
 from python.domain.repo.data_repo import DataRepo
-from python.domain.repo.workflow_state_repo import WorkflowStateRepo
+from python.domain.repo.workflow_state_repo import Conversation, WorkflowStateRepo
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_node import DataManupulationNode
 from python.implementation.workflows.ochestrator.writable_ochestrator_state import WritableOchestratorState
@@ -47,30 +47,37 @@ class DataflowApp:
             component=self.__class__.__name__,
             log_type="workflow_service",
         )
-
-    def raise_if_userid_not_relates_to_conversation_id(
+        
+    def _raise_if_userid_not_relates_to_conversation_id(
         self,
         *,
         user_id: UUID,
         conversation_id: UUID,
+        conversation_type: str,
     ) -> None:
+        if conversation_type not in ["causal", "data"]:
+            raise ValidationError("conversation_type", f"Invalid conversation type: {conversation_type}")
+        
+        conversation = Conversation(conversation_id=conversation_id, conversation_type=conversation_type)
         if not self._repo.is_conversation_id_for_user_id_exists(
             user_id=user_id,
-            conversation_id=conversation_id,
+            conversation=conversation,
         ):
-            raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation_id)
+            raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation.conversation_id)
 
     def get_csv_data(
         self,
         *,
         user_id: UUID,
         conversation_id: UUID,
+        conversation_type: str,
         dataset_id: UUID,
         limit: int | None = None,
     ) -> pd.DataFrame:
-        self.raise_if_userid_not_relates_to_conversation_id(
+        self._raise_if_userid_not_relates_to_conversation_id(
             user_id=user_id,
             conversation_id=conversation_id,
+            conversation_type=conversation_type,
         )
         return self._data_repo.get_csv_data(
             user_id=user_id,
@@ -79,62 +86,18 @@ class DataflowApp:
             limit=limit,
         )
 
-    def get_all_working_dataset_ids(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-    ) -> Sequence[UUID]:
-        self.raise_if_userid_not_relates_to_conversation_id(
-            user_id=user_id,
-            conversation_id=conversation_id,
-        )
-        ochestrator_state = self._repo.load_ochestrator_state(
-            user_id=user_id,
-            conversation_id=conversation_id,
-        )
-        if ochestrator_state is None:
-            return []
-        dataset_ids = ochestrator_state.get("working_dataset_ids")
-        if dataset_ids is None:
-            return []
-        return dataset_ids
-
-    def get_current_working_dataset_info(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-    ) -> WorkingDatasetInfo | None:
-        self.raise_if_userid_not_relates_to_conversation_id(
-            user_id=user_id,
-            conversation_id=conversation_id,
-        )
-        ochestrator_state = self._repo.load_ochestrator_state(
-            user_id=user_id,
-            conversation_id=conversation_id,
-        )
-        if ochestrator_state is None:
-            return None
-        dataset_ids = ochestrator_state.get("working_dataset_ids")
-        if not dataset_ids:
-            return None
-        current_dataset_id = dataset_ids[-1]
-        is_frozen = ochestrator_state.get("working_dataset_frozen")
-        if is_frozen is None:
-            is_frozen = False
-        return WorkingDatasetInfo(dataset_id=current_dataset_id, is_freezed=is_frozen)
-
     def upload_csv_data(
         self,
         *,
         user_id: UUID,
         conversation_id: UUID,
+        conversation_type: str,
         csv_bytes: bytes,
     ) -> UUID:
-        self.raise_if_userid_not_relates_to_conversation_id(
+        self._raise_if_userid_not_relates_to_conversation_id(
             user_id=user_id,
             conversation_id=conversation_id,
+            conversation_type=conversation_type,
         )
         try:
             df = pd.read_csv(
@@ -189,13 +152,15 @@ class DataflowApp:
         *,
         user_id: UUID,
         conversation_id: UUID,
+        conversation_type: str,
         artifact_id: UUID,
         artifact_kind: ArtifactKind,
         artifact_format: ArtifactFormat,
     ) -> DataflowArtifactResponse:
-        self.raise_if_userid_not_relates_to_conversation_id(
+        self._raise_if_userid_not_relates_to_conversation_id(
             user_id=user_id,
             conversation_id=conversation_id,
+            conversation_type=conversation_type,
         )
         if artifact_kind == "graph" and artifact_format != "json":
             raise ValidationError(

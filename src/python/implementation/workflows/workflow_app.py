@@ -4,9 +4,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
+from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError, ValidationError
 from python.domain.models.models import ArtifactRef, ChatMessage
-from python.domain.repo.workflow_state_repo import WorkflowStateRepo
+from python.domain.repo.workflow_state_repo import Conversation, ConversationType, WorkflowStateRepo
 from python.domain.workflows.node import Action, Status
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.dataflow_app import DataflowArtifactResponse
@@ -33,14 +33,15 @@ class WorkflowResponse:
 
 @dataclass(frozen=True)
 class ConversationResponse:
-    conversation_type
+    conversation_type: ConversationType
     messages: Sequence[ChatMessage]
-    states : list[str]
-    
-      
+    states: list[str]
+    current_data_id: UUID | None = None
+    is_dataset_frozen: bool | None = None
 
 
 ArtifactResponse = DataflowArtifactResponse
+
 
 class WorkflowApp:
     def __init__(
@@ -61,21 +62,35 @@ class WorkflowApp:
     # Conversation management
     # ------------------------------------------------------------------
 
-    def raise_if_userid_not_relates_to_conversation_id(
+    def _raise_if_userid_not_relates_to_conversation_id(
         self,
         *,
         user_id: UUID,
         conversation_id: UUID,
+        conversation_type: str,
     ) -> None:
+        if conversation_type not in ["causal", "data"]:
+            raise ValidationError("conversation_type", f"Invalid conversation type: {conversation_type}")
+        
+        conversation = Conversation(conversation_id=conversation_id, conversation_type=conversation_type)
         if not self._repo.is_conversation_id_for_user_id_exists(
             user_id=user_id,
-            conversation_id=conversation_id,
+            conversation=conversation,
         ):
-            raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation_id)
+            raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation.conversation_id)
 
-    def create_conversation(self, user_id: UUID) -> UUID:
+    def create_conversation(self, user_id: UUID, conversation_type: str) -> UUID:
         conversation_id = uuid4()
-        self._repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
+        if conversation_type not in ["causal", "data"]:
+            raise ValidationError("conversation_type", f"Invalid conversation type: {conversation_type}")
+        
+        # Depending on how Conversation is defined, you might need ConversationType(conversation_type) here
+        conversation = Conversation(
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+        )
+        
+        self._repo.save_conversation(user_id=user_id, conversation=conversation)
         self._log.info(
             "conversation created",
             user_id=user_id,
@@ -83,8 +98,38 @@ class WorkflowApp:
         )
         return conversation_id
 
-    def list_conversations(self, user_id: UUID) -> Sequence[UUID]:
-        return self._repo.get_conversation_ids_for_user(user_id=user_id)
+    def list_conversations(self, user_id: UUID) -> Sequence[Conversation]:
+        return self._repo.get_conversations(user_id=user_id)
+    
+    def get_current_conversation_state(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        conversation_type: str,
+    ) -> ConversationResponse:
+        # FIXED: Pass arguments to match the method signature
+        self._raise_if_userid_not_relates_to_conversation_id(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+        )
+        
+        messages = self._repo.load_message_history(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            limit=30,
+        )
+        state_info = self._ochestrator.load_state_info(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        return ConversationResponse(
+            # FIXED: Cast the string back to the ConversationType enum/type required by the dataclass
+            conversation_type=ConversationType(conversation_type),
+            messages=messages,
+            states=state_info,
+        )
 
     # ------------------------------------------------------------------
     # Read current state (no execution)
@@ -101,22 +146,24 @@ class WorkflowApp:
             conversation_id=conversation_id,
         )
     
-    
     def load_conversation_messages(
         self,
         *,
         user_id: UUID,
         conversation_id: UUID,
+        conversation_type: str,
         limit: int = 30,
     ) -> Sequence[ChatMessage]:
+        self._raise_if_userid_not_relates_to_conversation_id(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+        )
         return self._repo.load_message_history(
             user_id=user_id,
             conversation_id=conversation_id,
             limit=limit,
         )
-
-        
-        
 
     # ------------------------------------------------------------------
     # Execution
@@ -126,8 +173,14 @@ class WorkflowApp:
         self,
         user_id: UUID,
         conversation_id: UUID,
+        conversation_type: str,
         user_message: str | None,
     ) -> WorkflowResponse:
+        self._raise_if_userid_not_relates_to_conversation_id(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+        )
         self._log.debug(
             "workflow handle requested",
             user_id=user_id,
@@ -141,7 +194,6 @@ class WorkflowApp:
             user_id=user_id,
             user_message=ChatMessage(role="user", content=user_message),
         )
-        
 
         return WorkflowResponse(
             messages=response.messages,
@@ -161,8 +213,14 @@ class WorkflowApp:
         *,
         user_id: UUID,
         conversation_id: UUID,
+        conversation_type: str,
         state_name: str,
     ) -> None:
+        self._raise_if_userid_not_relates_to_conversation_id(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+        )
         ochestrator_state = self._repo.load_ochestrator_state(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -170,10 +228,8 @@ class WorkflowApp:
         if not isinstance(ochestrator_state, WritableOchestratorState):
             raise StateNotFoundError(state_name=state_name)
 
-        # Roll back the global orchestrator state to the recovery point.
         ochestrator_state.roll_back_to_state(state_name)
 
-        # Delete all states at and after the recovery point so they re-execute fresh.
         for name_to_delete in ochestrator_state.get_forward_states_after_node(state_name):
             self._repo.delete_state(
                 user_id=user_id,
@@ -198,3 +254,4 @@ class WorkflowApp:
             conversation_id=conversation_id,
             state_name=state_name,
         )
+    
