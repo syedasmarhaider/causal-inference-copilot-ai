@@ -2,20 +2,29 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from typing import Literal
 from uuid import UUID
+
+from pydantic import BaseModel
 
 from python.domain.models.models import ChatMessage
 from python.domain.workflows.ochestrator_state import OchestratorState
 from python.domain.workflows.node_state import NodeState
 
+ConversationType = Literal["causal_backdoor", "data_dashboard"]
 
+
+class Conversation(BaseModel):
+    conversation_id: UUID
+    conversation_type: ConversationType
+    
 class WorkflowStateRepo(ABC):
     # -----------------------
     # Conversation persistence
     # -----------------------
 
     @abstractmethod
-    def save_conversation_id(self, *, user_id: UUID, conversation_id: UUID) -> None:
+    def save_conversation(self, *, user_id: UUID, conversation: Conversation) -> None:
         raise NotImplementedError
 
     # -----------------------
@@ -23,12 +32,12 @@ class WorkflowStateRepo(ABC):
     # -----------------------
 
     @abstractmethod
-    def get_conversation_ids_for_user(self, *, user_id: UUID) -> Sequence[UUID]:
+    def get_conversations(self, *, user_id: UUID) -> Sequence[Conversation]:
         raise NotImplementedError
 
     @abstractmethod
     def is_conversation_id_for_user_id_exists(
-        self, *, user_id: UUID, conversation_id: UUID
+        self, *, user_id: UUID, conversation: Conversation
     ) -> bool:
         raise NotImplementedError
 

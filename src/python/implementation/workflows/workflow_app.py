@@ -31,6 +31,15 @@ class WorkflowResponse:
         return refs or None
 
 
+@dataclass(frozen=True)
+class ConversationResponse:
+    conversation_type
+    messages: Sequence[ChatMessage]
+    states : list[str]
+    
+      
+
+
 ArtifactResponse = DataflowArtifactResponse
 
 class WorkflowApp:
