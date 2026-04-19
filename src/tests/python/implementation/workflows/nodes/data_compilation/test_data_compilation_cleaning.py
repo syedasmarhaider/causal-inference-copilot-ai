@@ -12,7 +12,10 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_cle
     CleaningResult,
     cleaning,
 )
-from python.implementation.workflows.tools.causal.specs.causal_spec_draft import CausalSpecDraft
+from python.implementation.workflows.tools.causal.specs.causal_spec_draft import (
+    ID_COL_AUTO_FILL,
+    CausalSpecDraft,
+)
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
@@ -24,6 +27,7 @@ def _build_dataframe() -> pd.DataFrame:
         [
             {
                 "extra": "drop-me",
+                "patient_id": "p1",
                 "isex": 1,
                 "outcome": "event",
                 "treatment": "drug",
@@ -31,6 +35,7 @@ def _build_dataframe() -> pd.DataFrame:
             },
             {
                 "extra": "drop-me-too",
+                "patient_id": "p2",
                 "isex": 2,
                 "outcome": "non_event",
                 "treatment": "control",
@@ -53,6 +58,18 @@ def _build_summary(dataframe: pd.DataFrame) -> DatasetSummaryModel:
 def _draft() -> CausalSpecDraft:
     return CausalSpecDraft.model_validate(
         {
+            "treatment_column": "treatment",
+            "outcome_column": "outcome",
+            "covariates": ["age"],
+            "effect_modifiers": ["isex"],
+        }
+    )
+
+
+def _draft_with_identifier(identifier_column: str) -> CausalSpecDraft:
+    return CausalSpecDraft.model_validate(
+        {
+            "id_col": identifier_column,
             "treatment_column": "treatment",
             "outcome_column": "outcome",
             "covariates": ["age"],
@@ -175,7 +192,15 @@ def test_cleaning_narrows_input_dataframe_to_draft_scope_and_preserves_order() -
     )
 
     assert isinstance(result, CleaningResult)
-    assert list(result.pd_cleaned.columns) == ["treatment", "outcome", "age", "isex"]
+    assert list(result.pd_cleaned.columns) == [
+        ID_COL_AUTO_FILL,
+        "treatment",
+        "outcome",
+        "age",
+        "isex",
+    ]
+    assert result.causal.id_col == ID_COL_AUTO_FILL
+    assert result.pd_cleaned[ID_COL_AUTO_FILL].tolist() == [1, 2]
     assert "extra" not in result.cleaned_data_summary.model_dump_json()
 
 
@@ -242,7 +267,13 @@ def test_cleaning_skips_manipulation_when_effective_instructions_are_empty() -> 
 
     assert isinstance(result, CleaningResult)
     assert data_manipulation_tool.calls == []
-    assert list(result.pd_cleaned.columns) == ["treatment", "outcome", "age", "isex"]
+    assert list(result.pd_cleaned.columns) == [
+        ID_COL_AUTO_FILL,
+        "treatment",
+        "outcome",
+        "age",
+        "isex",
+    ]
 
 
 def test_cleaning_fails_when_manipulation_drops_required_draft_column() -> None:
@@ -290,6 +321,7 @@ def test_cleaning_retries_compile_when_first_semantic_compile_is_invalid() -> No
     assert "compile_feedback" in second_call_payload
     assert result.causal.treatment_spec.column == "treatment"
     assert result.causal.outcome_spec.column == "outcome"
+    assert result.causal.id_col == ID_COL_AUTO_FILL
     assert result.causal.covariates == ["age"]
     assert result.causal.effect_modifiers == ["isex"]
     assert result.causal.experiment_type == "OBSERVATIONAL"
@@ -335,4 +367,35 @@ def test_cleaning_compiles_without_protocol_discussion() -> None:
     first_call_payload = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
     assert isinstance(result, CleaningResult)
     assert "protocol_discussion" not in first_call_payload
-    assert list(result.pd_cleaned.columns) == ["treatment", "outcome", "age", "isex"]
+    assert list(result.pd_cleaned.columns) == [
+        ID_COL_AUTO_FILL,
+        "treatment",
+        "outcome",
+        "age",
+        "isex",
+    ]
+
+
+def test_cleaning_preserves_explicit_identifier_column_and_compiles_it_into_causal_spec() -> None:
+    dataframe = _build_dataframe()
+
+    result = cleaning(
+        protocol_discussion=None,
+        cleaning_instructions="",
+        draft_causal_spec=_draft_with_identifier("patient_id"),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        dataManipulationTool=_FakeDataManipulationTool(),
+        llm=_FakeLLM(json_outputs=[_semantic_payload()]),
+    )
+
+    assert list(result.pd_cleaned.columns) == [
+        "patient_id",
+        "treatment",
+        "outcome",
+        "age",
+        "isex",
+    ]
+    assert result.pd_cleaned["patient_id"].tolist() == ["p1", "p2"]
+    assert result.causal.id_col == "patient_id"

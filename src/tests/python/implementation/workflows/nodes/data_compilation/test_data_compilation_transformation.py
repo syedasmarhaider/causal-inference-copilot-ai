@@ -25,6 +25,7 @@ def _build_dataframe() -> pd.DataFrame:
     for index in range(60):
         rows.append(
             {
+                "patient_id": f"p{index + 1}",
                 "treatment": "drug" if index % 2 == 0 else "control",
                 "outcome": "event" if index % 3 == 0 else "non_event",
                 "age": 30 + index,
@@ -69,6 +70,7 @@ def _causal_spec_payload(
             effect_modifiers if effect_modifiers is not None else ["isex"]
         ),
         "experiment_type": "OBSERVATIONAL",
+        "id_col": "patient_id",
     }
 
 
@@ -124,6 +126,44 @@ def test_transform_returns_none_when_no_protocol_scope_columns_exist() -> None:
     assert result.transformation_plan is None
     assert result.transformation_suggestions is None
     assert llm.generate_json_calls == []
+
+
+def test_transform_does_not_offer_identifier_column_as_eligible_feature() -> None:
+    dataframe = _build_dataframe()
+    llm = _FakeLLM(
+        json_outputs=[
+            {
+                "columns": [
+                    {
+                        "column": "age",
+                        "role": "covariate",
+                        "preset": "passthrough",
+                        "preferred_type": "NUMERIC",
+                        "preferred_type_reason": "Age is already numeric.",
+                    },
+                    {
+                        "column": "isex",
+                        "role": "effect_modifier",
+                        "preset": "passthrough",
+                        "preferred_type": "CATEGORICAL",
+                        "preferred_type_reason": "The numeric codes act like categories.",
+                    },
+                ]
+            }
+        ]
+    )
+
+    _ = transform(
+        transformation_instructions="",
+        causal_spec=CausalSpec.model_validate(_causal_spec_payload()),
+        data_summary=_build_summary(dataframe),
+        llm=llm,
+    )
+
+    prompt_payload = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
+    assert prompt_payload["compiled_causal_specification"]["id_col"] == "patient_id"
+    assert prompt_payload["eligible_columns"] == ["age", "isex"]
+    assert "patient_id" not in prompt_payload["eligible_columns"]
 
 
 def test_transform_builds_type_driven_plan_and_saves_preferred_type_suggestions() -> None:

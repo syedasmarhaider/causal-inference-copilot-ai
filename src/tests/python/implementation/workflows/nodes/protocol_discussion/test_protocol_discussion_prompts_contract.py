@@ -33,6 +33,8 @@ def test_protocol_discussion_update_prompt_mentions_identifier_handling_rules() 
     assert "Identifier column handling is optional and non-blocking." in prompt
     assert "set answer 16 to __auto_id__" in prompt
     assert "Never invent an identifier column." in prompt
+    assert "covariates are baseline variables used to control or adjust" in prompt
+    assert "effect modifiers are baseline variables that can change the size or direction" in prompt
 
 
 def test_protocol_discussion_review_prompt_mentions_identifier_handling() -> None:
@@ -42,6 +44,23 @@ def test_protocol_discussion_review_prompt_mentions_identifier_handling() -> Non
     assert "suggested_identifier_column" in prompt
     assert "confirming this review will accept that identifier choice" in prompt
     assert "__auto_id__ will be used" in prompt
+    assert "baseline adjustment or control variables" in prompt
+    assert "enable heterogeneous treatment effects across subgroups" in prompt
+
+
+def test_protocol_discussion_questions_clarify_covariates_and_effect_modifiers() -> None:
+    questions = get_questions()
+
+    assert any(
+        "used to control or adjust for confounding or prognostic differences"
+        in question
+        for question in questions
+    )
+    assert any(
+        "change the size or direction of the treatment effect across subgroups"
+        in question
+        for question in questions
+    )
 
 
 def test_initial_user_message_mentions_identifier_selection() -> None:

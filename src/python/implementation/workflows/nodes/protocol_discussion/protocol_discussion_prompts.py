@@ -31,6 +31,7 @@ Protocol edit rules:
 - If missing, ambiguous, or contradictory, write UNCLEAR for the relevant answer.
 - Keep terminology consistent: treatment/exposure, comparator/control, outcome, time zero (t0), population.
 - Lists remain lists for covariates and effect modifiers; do not infer causal roles beyond grounded evidence.
+- If the user mixes up covariates and effect modifiers, explain the distinction in plain language: covariates are baseline variables used to control or adjust, while effect modifiers are baseline variables that can change the size or direction of the treatment effect across subgroups.
 """.strip()
 
 
@@ -151,6 +152,8 @@ Rules:
 - Do not say the protocol is already confirmed.
 - Do not mention internal phases, JSON, or workflow implementation.
 - Summarize the proposed treatment, outcome, study type, target population, time-zero approach, covariates, and effect modifiers when grounded.
+- Describe covariates as baseline adjustment or control variables.
+- Describe effect modifiers as baseline variables that enable heterogeneous treatment effects across subgroups.
 - Summarize the identifier column choice when grounded.
 - If the proposed protocol currently uses suggested_identifier_column as the likely identifier, say that confirming this review will accept that identifier choice unless the user corrects it.
 - If no real identifier column exists, say that __auto_id__ will be used.
@@ -206,8 +209,8 @@ def get_questions() -> list[str]:
         "Define horizon relative to t0.",
         "9) Censoring & missingness: Any dropouts, missing outcomes, or selection filters? "
         "If none, write: None / complete outcome capture.",
-        "10) Baseline adjustment covariates (W): variables measured at/before t0 that affect both T and Y.",
-        "11) Effect modifiers / heterogeneity features (X, optional): baseline variables for subgroup effects.",
+        "10) Baseline adjustment covariates (W): baseline variables measured at/before t0 that are used to control or adjust for confounding or prognostic differences affecting T and Y.",
+        "11) Effect modifiers / heterogeneity features (X, optional): baseline variables measured at/before t0 that may change the size or direction of the treatment effect across subgroups.",
         "12) Suspected post-treatment variables (optional): variables measured after t0 or after treatment starts.",
         "13) If Q4=No: acknowledge snapshot assumptions (Yes/No): shared baseline, T before Y, positivity, consistency, "
         "no post-treatment adjustment.",

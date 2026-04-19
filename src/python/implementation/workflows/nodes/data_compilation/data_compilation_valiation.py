@@ -69,6 +69,7 @@ def _build_user_suggestion_message(
     lines = [
         "Validation found repairable transformation or encoding issues. These can still be addressed without changing locked column identities or roles.",
         "",
+        f"Locked identifier column: {causal_spec.id_col}",
         f"Locked treatment column: {causal_spec.treatment_spec.column}",
         f"Locked outcome column: {causal_spec.outcome_spec.column}",
         f"Locked covariates: {', '.join(causal_spec.covariates) if causal_spec.covariates else 'None'}",

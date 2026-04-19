@@ -21,6 +21,7 @@ def _build_dataframe() -> pd.DataFrame:
     for index in range(40):
         rows.append(
             {
+                "patient_id": f"p{index + 1}",
                 "treatment": "1" if index % 2 == 0 else "0",
                 "outcome": float(index + 1),
                 "age": 30 + index,
@@ -49,6 +50,7 @@ def _build_causal_spec(
             "covariates": covariates,
             "effect_modifiers": effect_modifiers,
             "experiment_type": experiment_type,
+            "id_col": "patient_id",
         }
     )
 
@@ -73,6 +75,7 @@ def _build_binary_outcome_causal_spec(
             "covariates": covariates,
             "effect_modifiers": effect_modifiers,
             "experiment_type": experiment_type,
+            "id_col": "patient_id",
         }
     )
 
@@ -135,7 +138,7 @@ def test_validate_backdoor_reports_transform_compile_failure_as_issue() -> None:
     compile_issue = next(
         issue
         for issue in report.issues
-        if issue.message == "Transform plan failed transformer compilation."
+        if issue.message.startswith("Transform plan failed transformer compilation:")
     )
     assert compile_issue.severity == "FAIL"
     assert "dropped" in str(compile_issue.evidence.get("error")).lower()
@@ -172,6 +175,72 @@ def test_validate_backdoor_reports_invalid_treatment_values() -> None:
     )
     assert treatment_issue.severity == "FAIL"
     assert treatment_issue.evidence["unexpected_values"] == ["num:2.0"]
+
+
+def test_validate_backdoor_fails_when_identifier_column_has_duplicates() -> None:
+    dataframe = _build_dataframe()
+    dataframe.loc[1, "patient_id"] = dataframe.loc[0, "patient_id"]
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
+        dataframe=dataframe,
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {
+                        "column": "age",
+                        "role": "covariate",
+                        "encoding": {"preset": "num_standard"},
+                    }
+                ]
+            }
+        ),
+    )
+
+    assert report.status == "FAIL"
+    identifier_issue = next(
+        issue
+        for issue in report.issues
+        if issue.message == "Identifier column must be unique across all rows."
+    )
+    assert identifier_issue.evidence["identifier_col"] == "patient_id"
+
+
+def test_validate_backdoor_fails_when_transform_plan_includes_identifier_column() -> None:
+    dataframe = _build_dataframe()
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["age"], effect_modifiers=[]
+        ),
+        dataframe=dataframe,
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {
+                        "column": "patient_id",
+                        "role": "covariate",
+                        "encoding": {"preset": "cat_onehot"},
+                    },
+                    {
+                        "column": "age",
+                        "role": "covariate",
+                        "encoding": {"preset": "num_standard"},
+                    },
+                ]
+            }
+        ),
+    )
+
+    assert report.status == "FAIL"
+    assert any(
+        issue.message.startswith(
+            "Transform plan must not include identifier, treatment, or outcome columns"
+        )
+        for issue in report.issues
+    )
 
 
 def test_validate_backdoor_effect_modifier_missing_with_passthrough_fails() -> None:
@@ -525,7 +594,7 @@ def test_validate_backdoor_does_not_add_low_cardinality_warning_for_numeric_colu
 
     assert any(
         issue.message
-        == "Transform plan preset is incompatible with the observed dataframe column type."
+        == "Column 'score_code' has preset 'cat_onehot', but the observed data type is NUMERIC. These are incompatible."
         for issue in report.issues
     )
     assert not any(
@@ -879,17 +948,21 @@ def test_validate_backdoor_reports_plan_structure_errors() -> None:
     )
 
     assert any(
-        issue.message == "Transform plan must not include treatment or outcome columns."
+        issue.message.startswith(
+            "Transform plan must not include identifier, treatment, or outcome columns"
+        )
         for issue in report.issues
     )
     assert any(
-        issue.message == "Transform plan is missing eligible columns." for issue in report.issues
+        issue.message.startswith("Transform plan is missing eligible columns:")
+        for issue in report.issues
     )
     assert any(
-        issue.message == "Transform plan contains non-eligible columns." for issue in report.issues
+        issue.message.startswith("Transform plan contains columns not declared in the causal spec:")
+        for issue in report.issues
     )
     assert any(
-        issue.message == "Transform plan assigns the wrong role to a column."
+        issue.message.startswith("Column 'age' has role 'effect_modifier' in the transform plan")
         for issue in report.issues
     )
 
@@ -942,7 +1015,7 @@ def test_validate_backdoor_reports_datetime_parse_failures() -> None:
     )
 
     issue = _get_issue(
-        report, "Transform plan preset is incompatible with the observed dataframe column type."
+        report, "Column 'visit_dt' has preset 'datetime_epoch_seconds'"
     )
     assert issue.severity == "FAIL"
     assert issue.evidence["preset"] == "datetime_epoch_seconds"
@@ -1129,7 +1202,7 @@ def test_validate_backdoor_reports_real_world_dtype_mismatch_for_numeric_preset(
     )
 
     issue = _get_issue(
-        report, "Transform plan preset is incompatible with the observed dataframe column type."
+        report, "Column 'age' has preset 'num_standard'"
     )
     assert issue.severity == "FAIL"
     assert issue.evidence["column"] == "age"

@@ -17,7 +17,10 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import (
     ContinuousOutcomeSpecModel,
     BinaryOutcomeSpecModel,
 )
-from python.implementation.workflows.tools.causal.specs.causal_spec_draft import CausalSpecDraft
+from python.implementation.workflows.tools.causal.specs.causal_spec_draft import (
+    ID_COL_AUTO_FILL,
+    CausalSpecDraft,
+)
 from python.implementation.workflows.tools.causal.specs.causal_specs_tool import (
     CausalSpecsTool,
 )
@@ -115,14 +118,18 @@ def cleaning(
 ) -> CleaningResult:
     _ = data_summary
 
-    draft_scope_columns = _draft_scope_columns(draft_causal_spec)
+    input_scope_columns = _draft_scope_columns(
+        draft_causal_spec,
+        include_auto_generated_identifier=False,
+    )
     _ensure_draft_matches_dataframe(
         draft_causal_spec=draft_causal_spec,
         dataframe=to_clean_df,
         context="input dataframe",
+        require_generated_identifier=False,
     )
 
-    scoped_df = to_clean_df.loc[:, draft_scope_columns].copy()
+    scoped_df = to_clean_df.loc[:, input_scope_columns].copy()
     scoped_summary = _profile_dataset(
         dataset_profiling_tool=datasetProfilingTool,
         dataframe=scoped_df,
@@ -131,7 +138,7 @@ def cleaning(
     effective_instructions = _build_manipulation_instructions(
         protocol_discussion=protocol_discussion,
         cleaning_instructions=cleaning_instructions,
-        draft_scope_columns=draft_scope_columns,
+        draft_scope_columns=input_scope_columns,
     )
     cleaned_candidate_df = scoped_df.copy()
     if effective_instructions:
@@ -143,12 +150,21 @@ def cleaning(
             retry_attempts=3,
         )
 
+    cleaned_candidate_df = _materialize_identifier_column(
+        dataframe=cleaned_candidate_df,
+        draft_causal_spec=draft_causal_spec,
+    )
     _ensure_draft_matches_dataframe(
         draft_causal_spec=draft_causal_spec,
         dataframe=cleaned_candidate_df,
         context="cleaned dataframe",
+        require_generated_identifier=True,
     )
-    cleaned_df = cleaned_candidate_df.loc[:, draft_scope_columns].copy()
+    final_scope_columns = _draft_scope_columns(
+        draft_causal_spec,
+        include_auto_generated_identifier=True,
+    )
+    cleaned_df = cleaned_candidate_df.loc[:, final_scope_columns].copy()
     cleaned_summary = _profile_dataset(
         dataset_profiling_tool=datasetProfilingTool,
         dataframe=cleaned_df,
@@ -167,8 +183,18 @@ def cleaning(
     )
 
 
-def _draft_scope_columns(draft_causal_spec: CausalSpecDraft) -> list[str]:
+def _draft_scope_columns(
+    draft_causal_spec: CausalSpecDraft,
+    *,
+    include_auto_generated_identifier: bool,
+) -> list[str]:
+    id_col = str(draft_causal_spec.id_col).strip()
     ordered_columns = [
+        (
+            id_col
+            if id_col != ID_COL_AUTO_FILL or include_auto_generated_identifier
+            else None
+        ),
         str(draft_causal_spec.treatment_column).strip(),
         str(draft_causal_spec.outcome_column).strip(),
         *(str(column).strip() for column in draft_causal_spec.covariates),
@@ -181,18 +207,43 @@ def _draft_scope_columns(draft_causal_spec: CausalSpecDraft) -> list[str]:
     return deduped_columns
 
 
+def _materialize_identifier_column(
+    *,
+    dataframe: pd.DataFrame,
+    draft_causal_spec: CausalSpecDraft,
+) -> pd.DataFrame:
+    identifier_column = str(draft_causal_spec.id_col).strip()
+    if identifier_column != ID_COL_AUTO_FILL:
+        return dataframe
+
+    prepared = dataframe.copy()
+    prepared[ID_COL_AUTO_FILL] = pd.RangeIndex(start=1, stop=len(prepared) + 1, step=1)
+    return prepared
+
+
 def _ensure_draft_matches_dataframe(
     *,
     draft_causal_spec: CausalSpecDraft,
     dataframe: pd.DataFrame,
     context: str,
+    require_generated_identifier: bool,
 ) -> None:
     validation_issue = draft_causal_spec.validate_against_dataframe(df=dataframe)
-    if validation_issue is None:
+    if validation_issue is not None:
+        raise ValueError(
+            f"{context} does not satisfy draft causal spec: "
+            f"[{validation_issue.severity}] {validation_issue.message}"
+        )
+
+    identifier_column = str(draft_causal_spec.id_col).strip()
+    if identifier_column == ID_COL_AUTO_FILL and not require_generated_identifier:
         return
+    if identifier_column in dataframe.columns:
+        return
+
     raise ValueError(
-        f"{context} does not satisfy draft causal spec: "
-        f"[{validation_issue.severity}] {validation_issue.message}"
+        f'{context} does not satisfy draft causal spec: [FAIL] Identifier column '
+        f'"{identifier_column}" not found in dataset'
     )
 
 
@@ -386,6 +437,7 @@ def _assemble_causal_spec(
             str(column).strip() for column in draft_causal_spec.effect_modifiers
         ],
         experiment_type=semantics.experiment_type,
+        id_col=str(draft_causal_spec.id_col).strip(),
     )
 
 

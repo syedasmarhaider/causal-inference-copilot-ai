@@ -70,9 +70,16 @@ class ValidationBackdoorTool(Tool):
     ) -> ValidationBackdoorReport:
         treatment_col = str(causal_spec.treatment_spec.column)
         outcome_col = str(causal_spec.outcome_spec.column)
+        identifier_col = str(causal_spec.id_col)
         covariates = _dedup_keep_order(list(causal_spec.covariates))
         effect_modifiers = _dedup_keep_order(list(causal_spec.effect_modifiers))
-        eligible_cols = _dedup_keep_order(covariates + effect_modifiers)
+        eligible_cols = _dedup_keep_order(
+            [
+                column
+                for column in covariates + effect_modifiers
+                if column != identifier_col
+            ]
+        )
 
         metrics: dict[str, Any] = {
             "experiment_type": causal_spec.experiment_type,
@@ -81,6 +88,7 @@ class ValidationBackdoorTool(Tool):
             "columns": [str(column) for column in dataframe.columns.tolist()],
             "treatment_col": treatment_col,
             "outcome_col": outcome_col,
+            "identifier_col": identifier_col,
             "covariates": covariates,
             "effect_modifiers": effect_modifiers,
             "eligible_plan_columns": eligible_cols,
@@ -99,6 +107,7 @@ class ValidationBackdoorTool(Tool):
                     dataframe=dataframe,
                     treatment_col=treatment_col,
                     outcome_col=outcome_col,
+                    identifier_col=identifier_col,
                     eligible_cols=eligible_cols,
                 ),
             )
@@ -110,6 +119,7 @@ class ValidationBackdoorTool(Tool):
                     causal_spec=causal_spec,
                     treatment_col=treatment_col,
                     outcome_col=outcome_col,
+                    identifier_col=identifier_col,
                     covariates=covariates,
                     effect_modifiers=effect_modifiers,
                 ),
@@ -137,6 +147,17 @@ class ValidationBackdoorTool(Tool):
                         treatment_spec=causal_spec.treatment_spec,
                         outcome_spec=causal_spec.outcome_spec,
                     ),
+            )
+        )
+
+        if identifier_col in dataframe.columns:
+            issues.extend(
+                _guard_validation_step(
+                    step_name="identifier column",
+                    validator=lambda: _validate_identifier_column(
+                        dataframe=dataframe,
+                        identifier_col=identifier_col,
+                    ),
                 )
             )
 
@@ -150,6 +171,7 @@ class ValidationBackdoorTool(Tool):
                     covariates=covariates,
                     effect_modifiers=effect_modifiers,
                     eligible_cols=eligible_cols,
+                    identifier_col=identifier_col,
                     treatment_col=treatment_col,
                     outcome_col=outcome_col,
                 ),
@@ -195,6 +217,7 @@ def _validate_dataframe_structure(
     dataframe: pd.DataFrame,
     treatment_col: str,
     outcome_col: str,
+    identifier_col: str,
     eligible_cols: list[str],
 ) -> list[ValidationIssueModel]:
     issues: list[ValidationIssueModel] = []
@@ -231,7 +254,7 @@ def _validate_dataframe_structure(
             )
         )
 
-    required_cols = _dedup_keep_order([treatment_col, outcome_col, *eligible_cols])
+    required_cols = _dedup_keep_order([identifier_col, treatment_col, outcome_col, *eligible_cols])
     missing_cols = [column for column in required_cols if column not in dataframe.columns]
     if missing_cols:
         issues.append(
@@ -239,7 +262,7 @@ def _validate_dataframe_structure(
                 severity="FAIL",
                 message="Dataframe is missing columns referenced by the causal spec.",
                 evidence={"missing_columns": missing_cols},
-                fix_hint="Ensure the working dataset still contains every referenced treatment, outcome, covariate, and effect modifier column.",
+                fix_hint="Ensure the working dataset still contains every referenced identifier, treatment, outcome, covariate, and effect modifier column.",
             )
         )
 
@@ -251,6 +274,7 @@ def _validate_causal_spec(
     causal_spec: CausalSpec,
     treatment_col: str,
     outcome_col: str,
+    identifier_col: str,
     covariates: list[str],
     effect_modifiers: list[str],
 ) -> list[ValidationIssueModel]:
@@ -316,6 +340,37 @@ def _validate_causal_spec(
             )
         )
 
+    if identifier_col in {treatment_col, outcome_col}:
+        issues.append(
+            _issue(
+                severity="FAIL",
+                message="Identifier column must be different from treatment and outcome columns.",
+                evidence={
+                    "identifier_col": identifier_col,
+                    "treatment_col": treatment_col,
+                    "outcome_col": outcome_col,
+                },
+                fix_hint="Choose a dedicated row or patient identifier column that is not the treatment or outcome column.",
+            )
+        )
+
+    identifier_overlap = sorted(
+        {
+            column
+            for column in covariates + effect_modifiers
+            if column == identifier_col
+        }
+    )
+    if identifier_overlap:
+        issues.append(
+            _issue(
+                severity="FAIL",
+                message="Identifier column must not be used as a covariate or effect modifier.",
+                evidence={"identifier_col": identifier_col},
+                fix_hint="Remove the identifier column from adjustment features and keep it only as an identifier.",
+            )
+        )
+
     if causal_spec.experiment_type == "OBSERVATIONAL" and not covariates:
         issues.append(
             _issue(
@@ -333,6 +388,48 @@ def _validate_causal_spec(
                 message="RCT has no covariates; this is acceptable but limits precision gains.",
                 evidence={"experiment_type": causal_spec.experiment_type},
                 fix_hint="Add prognostic covariates only if you want adjusted estimates.",
+            )
+        )
+
+    return issues
+
+
+def _validate_identifier_column(
+    *,
+    dataframe: pd.DataFrame,
+    identifier_col: str,
+) -> list[ValidationIssueModel]:
+    issues: list[ValidationIssueModel] = []
+    series = dataframe[identifier_col]
+
+    missing_count = int(series.isna().sum())
+    if missing_count > 0:
+        issues.append(
+            _issue(
+                severity="FAIL",
+                message="Identifier column contains missing values.",
+                evidence={"identifier_col": identifier_col, "missing_count": missing_count},
+                fix_hint="Ensure every row has a non-missing identifier value before validation.",
+            )
+        )
+
+    non_missing = series.dropna()
+    duplicate_mask = non_missing.duplicated(keep=False)
+    duplicate_count = int(duplicate_mask.sum())
+    if duplicate_count > 0:
+        duplicate_values = [
+            str(value) for value in non_missing.loc[duplicate_mask].astype(str).unique().tolist()[:10]
+        ]
+        issues.append(
+            _issue(
+                severity="FAIL",
+                message="Identifier column must be unique across all rows.",
+                evidence={
+                    "identifier_col": identifier_col,
+                    "duplicate_count": duplicate_count,
+                    "sample_duplicate_values": duplicate_values,
+                },
+                fix_hint="Use a unique row or patient identifier column, or regenerate the auto identifier for the compiled dataset.",
             )
         )
 
@@ -617,6 +714,7 @@ def _validate_transform_plan(
     covariates: list[str],
     effect_modifiers: list[str],
     eligible_cols: list[str],
+    identifier_col: str,
     treatment_col: str,
     outcome_col: str,
 ) -> list[ValidationIssueModel]:
@@ -653,19 +751,31 @@ def _validate_transform_plan(
     plan_set = set(plan_columns)
     eligible_set = set(eligible_cols)
 
-    illegal_columns = sorted(plan_set.intersection({treatment_col, outcome_col}))
+    illegal_columns = sorted(
+        plan_set.intersection({treatment_col, outcome_col, identifier_col})
+    )
     if illegal_columns:
+        protected_labels: list[str] = []
+        for column in illegal_columns:
+            if column == identifier_col:
+                protected_labels.append(f"{column} (identifier)")
+            elif column == treatment_col:
+                protected_labels.append(f"{column} (treatment)")
+            elif column == outcome_col:
+                protected_labels.append(f"{column} (outcome)")
+            else:
+                protected_labels.append(column)
         issues.append(
             _issue(
                 severity="FAIL",
                 message=(
-                    f"Transform plan must not include treatment or outcome columns, "
-                    f"but found: {', '.join(illegal_columns)}."
+                    f"Transform plan must not include identifier, treatment, or outcome columns, "
+                    f"but found: {', '.join(protected_labels)}."
                 ),
                 evidence={"illegal_columns": illegal_columns},
                 fix_hint=(
                     f"Remove {', '.join(illegal_columns)} from the transform plan. "
-                    f"Keep only covariates and effect modifiers."
+                    f"Keep only covariates and effect modifiers in the transform plan."
                 ),
             )
         )
@@ -687,7 +797,7 @@ def _validate_transform_plan(
             )
         )
 
-    extra_columns = sorted(plan_set - eligible_set)
+    extra_columns = sorted(plan_set - eligible_set - set(illegal_columns))
     if extra_columns:
         issues.append(
             _issue(

@@ -400,13 +400,14 @@ def _protocol_scope_role_by_column(
     causal_spec: CausalSpec,
 ) -> dict[str, ColumnRole]:
     role_by_column: dict[str, ColumnRole] = {}
+    identifier_column = str(causal_spec.id_col).strip()
     for column in causal_spec.covariates:
         normalized = str(column).strip()
-        if normalized:
+        if normalized and normalized != identifier_column:
             role_by_column[normalized] = "covariate"
     for column in causal_spec.effect_modifiers:
         normalized = str(column).strip()
-        if normalized:
+        if normalized and normalized != identifier_column:
             role_by_column[normalized] = "effect_modifier"
     return role_by_column
 

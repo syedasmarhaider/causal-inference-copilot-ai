@@ -921,6 +921,7 @@ def _normalize_text(raw: str | None) -> str:
 
 def _protocol_scope_columns(causal_spec: CausalSpec) -> list[str]:
     ordered_columns = [
+        str(causal_spec.id_col).strip(),
         str(causal_spec.treatment_spec.column).strip(),
         str(causal_spec.outcome_spec.column).strip(),
         *(str(column).strip() for column in causal_spec.covariates),
