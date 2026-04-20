@@ -126,9 +126,50 @@ class _StubWorkflowApp:
 class _StubDataflowApp:
     def __init__(self) -> None:
         self.upload_calls: list[dict[str, object]] = []
+        self.diff_calls: list[dict[str, object]] = []
         self.artifact_calls: list[dict[str, object]] = []
 
         self.upload_result = uuid4()
+        self.diff_result = SimpleNamespace(
+            previous_dataset_id=uuid4(),
+            current_dataset_id=uuid4(),
+            diff={
+                "identity_mode": "position",
+                "key_columns": [],
+                "schema_diff": {
+                    "columns_added": ["bmi"],
+                    "columns_removed": [],
+                    "column_type_changes": [],
+                },
+                "row_changes": [
+                    {
+                        "row_ref": {
+                            "mode": "position",
+                            "key": None,
+                            "position": 1,
+                        },
+                        "op": "updated",
+                        "cell_changes": [
+                            {
+                                "column": "age",
+                                "op": "modified",
+                                "old_value": 44,
+                                "new_value": 45,
+                            }
+                        ],
+                    }
+                ],
+                "summary": {
+                    "old_row_count": 2,
+                    "new_row_count": 2,
+                    "inserted_rows": 0,
+                    "deleted_rows": 0,
+                    "updated_rows": 1,
+                    "total_changed_rows": 1,
+                    "total_changed_cells": 1,
+                },
+            },
+        )
         self.artifact_result = DataflowArtifactResponse(
             id=uuid4(),
             kind="graph",
@@ -176,6 +217,24 @@ class _StubDataflowApp:
             }
         )
         return self.artifact_result
+
+    def get_working_dataset_diff(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        conversation_type: str,
+        key_columns: list[str] | None,
+    ) -> object:
+        self.diff_calls.append(
+            {
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "conversation_type": conversation_type,
+                "key_columns": key_columns,
+            }
+        )
+        return self.diff_result
 
 
 @pytest.fixture
@@ -558,6 +617,34 @@ def test_upload_dataset_maps_value_error_to_400(
     assert response.json()["detail"] == "Uploaded file is not a valid CSV: parse error"
 
 
+def test_create_dataset_diff_returns_structured_response_without_request_body(
+    api_client: tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser],
+) -> None:
+    client, _, dataflow, user = api_client
+    conversation_id = uuid4()
+
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/types/data/dataset-diffs",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "conversation_id": str(conversation_id),
+        "conversation_type": "data",
+        "previous_dataset_id": str(dataflow.diff_result.previous_dataset_id),
+        "current_dataset_id": str(dataflow.diff_result.current_dataset_id),
+        "diff": dataflow.diff_result.diff,
+    }
+    assert dataflow.diff_calls == [
+        {
+            "user_id": user.uid,
+            "conversation_id": conversation_id,
+            "conversation_type": "data",
+            "key_columns": None,
+        }
+    ]
+
+
 def test_get_artifact_returns_csv_attachment(
     api_client: tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser],
 ) -> None:
@@ -663,3 +750,19 @@ def test_openapi_mentions_scoped_paths_and_enums() -> None:
     artifact_parameters = {param["name"]: param for param in artifact_operation["parameters"]}
     assert artifact_parameters["artifact_kind"]["schema"]["enum"] == ["graph", "data"]
     assert artifact_parameters["artifact_format"]["schema"]["enum"] == ["json", "csv"]
+
+    diff_operation = schema["paths"][
+        "/v1/conversations/{conversation_id}/types/{conversation_type}/dataset-diffs"
+    ]["post"]
+    assert "key_columns" in diff_operation["description"]
+    diff_response_ref = diff_operation["responses"]["200"]["content"]["application/json"]["schema"][
+        "$ref"
+    ].split("/")[-1]
+    diff_response_schema = schema["components"]["schemas"][diff_response_ref]
+    assert "previous_dataset_id" in diff_response_schema["properties"]
+    assert "current_dataset_id" in diff_response_schema["properties"]
+
+    dataframe_diff_schema = schema["components"]["schemas"]["DataFrameDiff"]
+    assert "schema_diff" in dataframe_diff_schema["properties"]
+    assert "row_changes" in dataframe_diff_schema["properties"]
+    assert "summary" in dataframe_diff_schema["properties"]

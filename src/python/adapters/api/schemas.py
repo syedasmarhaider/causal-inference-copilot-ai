@@ -16,6 +16,7 @@ from python.domain.models.models import (
 )
 from python.domain.repo.workflow_state_repo import ConversationType
 from python.domain.workflows.node import Action, Status
+from python.implementation.workflows.utils.diff_util import DataFrameDiff
 
 ConversationName = Annotated[
     str,
@@ -111,6 +112,62 @@ class UploadDatasetResponse(BaseModel):
     conversation_id: UUID = Field(description="Conversation UUID.")
     conversation_type: ConversationType = Field(description="Conversation type.")
     dataset_id: UUID = Field(description="Stored dataset UUID.")
+
+
+class DatasetDiffCreateRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"example": {"key_columns": ["record_id"]}},
+    )
+
+    key_columns: list[NonEmptyStr] = Field(
+        default_factory=list,
+        description=(
+            "Optional columns used to match rows across dataset versions. "
+            "When omitted, rows are compared by position."
+        ),
+    )
+
+
+class DatasetDiffResponse(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "conversation_id": "22222222-2222-2222-2222-222222222222",
+                "conversation_type": "data",
+                "previous_dataset_id": "33333333-3333-3333-3333-333333333333",
+                "current_dataset_id": "44444444-4444-4444-4444-444444444444",
+                "diff": {
+                    "identity_mode": "position",
+                    "key_columns": [],
+                    "schema_diff": {
+                        "columns_added": [],
+                        "columns_removed": [],
+                        "column_type_changes": [],
+                    },
+                    "row_changes": [],
+                    "summary": {
+                        "old_row_count": 10,
+                        "new_row_count": 10,
+                        "inserted_rows": 0,
+                        "deleted_rows": 0,
+                        "updated_rows": 0,
+                        "total_changed_rows": 0,
+                        "total_changed_cells": 0,
+                    },
+                },
+            }
+        },
+    )
+
+    conversation_id: UUID = Field(description="Conversation UUID.")
+    conversation_type: ConversationType = Field(description="Conversation type.")
+    previous_dataset_id: UUID = Field(description="Previous working dataset UUID.")
+    current_dataset_id: UUID = Field(description="Current working dataset UUID.")
+    diff: DataFrameDiff = Field(
+        description="Structured diff from the previous working dataset version to the current one."
+    )
 
 
 class ConversationMessageCreateRequest(BaseModel):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -19,6 +20,7 @@ from python.domain.repo.workflow_state_repo import Conversation, WorkflowStateRe
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_node import DataManupulationNode
 from python.implementation.workflows.ochestrator.causal_ochestrator_state import CausalOchestratorState
+from python.implementation.workflows.utils.diff_util import DataFrameDiff, diff_dataframes
 
 # TODO: add distributed tnx or locks later
 
@@ -29,6 +31,13 @@ class DataflowArtifactResponse:
     format: ArtifactFormat
     mime: str
     content: bytes
+
+
+@dataclass(frozen=True)
+class DataflowDatasetDiffResponse:
+    previous_dataset_id: UUID
+    current_dataset_id: UUID
+    diff: DataFrameDiff
 
 
 class DataflowApp:
@@ -82,6 +91,70 @@ class DataflowApp:
             conversation_id=conversation_id,
             dataset_id=dataset_id,
             limit=limit,
+        )
+
+    def get_working_dataset_diff(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        conversation_type: str,
+        key_columns: Sequence[str] | None = None,
+    ) -> DataflowDatasetDiffResponse:
+        self._raise_if_userid_not_relates_to_conversation_id(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+        )
+
+        working_dataset_ids = self._get_working_dataset_ids(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if len(working_dataset_ids) < 2:
+            raise ValidationError(
+                field="working_dataset_ids",
+                reason=(
+                    "At least two working dataset versions are required to calculate a diff."
+                ),
+            )
+
+        previous_dataset_id = working_dataset_ids[-2]
+        current_dataset_id = working_dataset_ids[-1]
+        older_df = self._data_repo.get_csv_data(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            dataset_id=previous_dataset_id,
+        )
+        newer_df = self._data_repo.get_csv_data(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            dataset_id=current_dataset_id,
+        )
+
+        try:
+            diff = diff_dataframes(
+                older_df=older_df,
+                newer_df=newer_df,
+                key_columns=self._normalize_key_columns(key_columns),
+            )
+        except ValueError as exc:
+            raise ValidationError(field="key_columns", reason=str(exc)) from exc
+
+        self._log.debug(
+            "working dataset diff calculated",
+            user_id=user_id,
+            conversation_id=conversation_id,
+            previous_dataset_id=previous_dataset_id,
+            current_dataset_id=current_dataset_id,
+            key_columns=list(diff.key_columns),
+            changed_rows=diff.summary.total_changed_rows,
+            changed_cells=diff.summary.total_changed_cells,
+        )
+        return DataflowDatasetDiffResponse(
+            previous_dataset_id=previous_dataset_id,
+            current_dataset_id=current_dataset_id,
+            diff=diff,
         )
 
     def upload_csv_data(
@@ -234,3 +307,60 @@ class DataflowApp:
             mime=mime,
             content=content,
         )
+
+    def _get_working_dataset_ids(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+    ) -> list[UUID]:
+        ochestrator_state = self._repo.load_ochestrator_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if ochestrator_state is None:
+            return []
+
+        try:
+            dataset_ids_raw = ochestrator_state.get("working_dataset_ids") or []
+        except KeyError:
+            return []
+
+        if not isinstance(dataset_ids_raw, list):
+            raise ValidationError(
+                field="working_dataset_ids",
+                reason="Stored working dataset history is invalid.",
+            )
+
+        dataset_ids: list[UUID] = []
+        for item in dataset_ids_raw:
+            try:
+                dataset_ids.append(item if isinstance(item, UUID) else UUID(str(item)))
+            except (TypeError, ValueError) as exc:
+                raise ValidationError(
+                    field="working_dataset_ids",
+                    reason=f"Stored working dataset history contains an invalid dataset id: {item!r}",
+                ) from exc
+        return dataset_ids
+
+    @staticmethod
+    def _normalize_key_columns(key_columns: Sequence[str] | None) -> list[str]:
+        normalized_key_columns: list[str] = []
+        seen: set[str] = set()
+
+        for raw_column in key_columns or ():
+            column = raw_column.strip()
+            if not column:
+                raise ValidationError(
+                    field="key_columns",
+                    reason="Key columns cannot contain empty values.",
+                )
+            if column in seen:
+                raise ValidationError(
+                    field="key_columns",
+                    reason=f"Duplicate key column provided: {column}",
+                )
+            seen.add(column)
+            normalized_key_columns.append(column)
+
+        return normalized_key_columns

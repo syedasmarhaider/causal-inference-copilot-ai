@@ -35,6 +35,8 @@ from python.adapters.api.schemas import (
     ConversationStateReversionRequest,
     ConversationSummaryResponse,
     CreateConversationRequest,
+    DatasetDiffCreateRequest,
+    DatasetDiffResponse,
     UploadDatasetResponse,
     WorkingDatasetResponse,
 )
@@ -295,6 +297,54 @@ async def upload_dataset(
         conversation_id=conversation_id,
         conversation_type=conversation_type,
         dataset_id=dataset_id,
+    )
+
+
+@api_router.post(
+    f"{_CONVERSATION_SCOPE_PATH}/dataset-diffs",
+    response_model=DatasetDiffResponse,
+    tags=["datasets"],
+    summary="Calculate the working dataset diff",
+    description=(
+        "Calculates a structured diff from the previous working dataset version to the current one. "
+        "The request body is optional; send an empty body for positional comparison, or provide "
+        "``key_columns`` to match rows by business key. "
+        "The response contains the dataset version ids that were compared plus a `diff` object "
+        "with `schema_diff`, `row_changes`, and `summary` sections."
+    ),
+    response_description="Structured diff between the two latest working dataset versions.",
+    responses={
+        401: {"description": "Missing or invalid Bearer token."},
+        404: {"description": "Conversation or dataset version not found."},
+        422: {
+            "description": (
+                "Validation failed, for example because fewer than two dataset versions exist "
+                "or the supplied key columns are invalid."
+            )
+        },
+        500: {"description": "Unexpected diff calculation failure."},
+    },
+)
+async def create_dataset_diff(
+    req: DatasetDiffCreateRequest | None = None,
+    conversation_id: UUID = CONVERSATION_ID_PATH_PARAM,
+    conversation_type: ConversationType = CONVERSATION_TYPE_PATH_PARAM,
+    authenticated_user: AuthenticatedUser = AUTHENTICATED_USER_DEP,
+    dataflow: DataflowApp = DATAFLOW_APP_DEP,
+) -> DatasetDiffResponse:
+    response = await asyncio.to_thread(
+        dataflow.get_working_dataset_diff,
+        user_id=authenticated_user.uid,
+        conversation_id=conversation_id,
+        conversation_type=conversation_type,
+        key_columns=None if req is None else req.key_columns,
+    )
+    return DatasetDiffResponse(
+        conversation_id=conversation_id,
+        conversation_type=conversation_type,
+        previous_dataset_id=response.previous_dataset_id,
+        current_dataset_id=response.current_dataset_id,
+        diff=response.diff,
     )
 
 

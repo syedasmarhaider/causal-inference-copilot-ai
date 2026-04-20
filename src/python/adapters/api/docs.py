@@ -8,7 +8,12 @@ OPENAPI_TAGS = [
             "Create, list, inspect, message, and revert authenticated workflow conversations."
         ),
     },
-    {"name": "datasets", "description": "Upload CSV datasets for a conversation."},
+    {
+        "name": "datasets",
+        "description": (
+            "Upload CSV datasets for a conversation and calculate structured diffs between the two latest working dataset versions."
+        ),
+    },
     {
         "name": "artifacts",
         "description": (
@@ -35,6 +40,10 @@ API_DESCRIPTION = (
     "- `conversation_type` enum: `causal | data`\n\n"
     "Workflow messages:\n"
     '- Send `user_text="revert_data_changes"` to the `/messages` endpoint to request a dataset-history revert inside the workflow.\n\n'
+    "Dataset diffs:\n"
+    "- `POST /v1/conversations/{conversation_id}/types/{conversation_type}/dataset-diffs` compares the previous working dataset version to the current one.\n"
+    "- Send an empty body for positional row matching, or send `key_columns` to match rows by business key.\n"
+    "- The response includes `previous_dataset_id`, `current_dataset_id`, `schema_diff`, `row_changes`, and `summary`.\n\n"
     "Artifacts:\n"
     "- `artifact_kind` enum: `graph | data`\n"
     "- `artifact_format` enum: `json | csv`\n"
