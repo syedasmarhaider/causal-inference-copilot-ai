@@ -78,10 +78,12 @@ class WorkflowApp:
         ):
             raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation.conversation_id)
 
-    def create_conversation(self, user_id: UUID, 
-            conversation_type: str,
-            conversation_name: str | None = None,
-            ) -> UUID:
+    def create_conversation(
+        self,
+        user_id: UUID,
+        conversation_type: str,
+        conversation_name: str | None = None,
+    ) -> Conversation:
         conversation_id = uuid4()
         if conversation_type not in ["causal", "data"]:
             raise ValidationError("conversation_type", f"Invalid conversation type: {conversation_type}")
@@ -99,7 +101,7 @@ class WorkflowApp:
             user_id=user_id,
             conversation_id=conversation_id,
         )
-        return conversation_id
+        return conversation
 
     def list_conversations(self, user_id: UUID) -> Sequence[Conversation]:
         return self._repo.get_conversations(user_id=user_id)

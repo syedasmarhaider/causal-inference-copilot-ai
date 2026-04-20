@@ -100,6 +100,7 @@ async def list_conversations(
     summary="Create a conversation",
     description=(
         "Creates a conversation for the authenticated user. "
+        "An optional `conversation_name` can be provided for UI display. "
         "Conversation-scoped operations use the path "
         "``/v1/conversations/{conversation_id}/types/{conversation_type}``."
     ),
@@ -115,15 +116,13 @@ async def create_conversation(
     authenticated_user: AuthenticatedUser = AUTHENTICATED_USER_DEP,
     workflow: WorkflowApp = WORKFLOW_APP_DEP,
 ) -> ConversationSummaryResponse:
-    conversation_id = await asyncio.to_thread(
+    conversation = await asyncio.to_thread(
         workflow.create_conversation,
         authenticated_user.uid,
         req.conversation_type,
+        req.conversation_name,
     )
-    return ConversationSummaryResponse(
-        conversation_id=conversation_id,
-        conversation_type=req.conversation_type,
-    )
+    return _to_conversation_summary_response(conversation)
 
 
 @api_router.get(
@@ -356,6 +355,8 @@ def _to_conversation_summary_response(
     return ConversationSummaryResponse(
         conversation_id=conversation.conversation_id,
         conversation_type=conversation.conversation_type,
+        conversation_name=conversation.name,
+        last_updated_at_utc=conversation.last_updated_at_utc,
     )
 
 

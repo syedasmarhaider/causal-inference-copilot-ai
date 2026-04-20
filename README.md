@@ -107,15 +107,32 @@ Conversation type enum:
 - `causal`
 - `data`
 
+Conversation metadata:
+
+- `POST /v1/conversations` accepts optional `conversation_name`
+- `GET /v1/conversations` returns `conversation_name` and `last_updated_at_utc`
+- `last_updated_at_utc` is a UTC Unix timestamp in seconds
+
 ## Typical API Flow
 
-1. Create a conversation with `POST /v1/conversations` and a body such as `{ "conversation_type": "causal" }`.
+1. Create a conversation with `POST /v1/conversations` and a body such as `{ "conversation_type": "causal", "conversation_name": "Hypertension cohort review" }`.
 2. Build the scoped base path: `/v1/conversations/{conversation_id}/types/{conversation_type}`.
 3. Upload a CSV dataset with `POST {scope}/datasets` when the workflow is ready for data.
 4. Send user input with `POST {scope}/messages` until the workflow reaches the next decision point.
 5. Read the current snapshot with `GET {scope}` when the frontend needs the latest messages, states, and working dataset metadata.
 6. Revert a workflow stage with `POST {scope}/state-reversions` when needed.
 7. Download artifacts with `GET {scope}/artifacts/{artifact_id}`.
+
+Example conversation summary returned by `GET /v1/conversations`:
+
+```json
+{
+  "conversation_id": "22222222-2222-2222-2222-222222222222",
+  "conversation_type": "causal",
+  "conversation_name": "Hypertension cohort review",
+  "last_updated_at_utc": 1712345678.123
+}
+```
 
 Dataset-history revert inside the workflow is triggered through the messages endpoint by sending:
 

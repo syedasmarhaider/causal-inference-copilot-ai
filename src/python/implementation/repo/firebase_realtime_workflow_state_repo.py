@@ -3,11 +3,6 @@ from __future__ import annotations
 import itertools
 import json
 import os
-from __future__ import annotations
-
-import itertools
-import json
-import os
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -122,11 +117,21 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         )
         meta_ref = conversation_ref.child("_meta")
         existing_meta = meta_ref.get()
+        existing_index = self._conversation_index_ref(
+            user_id=user_id,
+            conversation_id=conversation.conversation_id,
+        ).get()
+
+        name = conversation.name
+        if name is None and isinstance(existing_index, dict):
+            existing_name = existing_index.get("name")
+            if isinstance(existing_name, str):
+                name = existing_name
 
         index_payload: dict[str, Any] = {
             "conversation_type": conversation.conversation_type,
             "last_updated_at_utc": float(conversation.last_updated_at_utc),
-            "name": conversation.name,
+            "name": name,
         }
 
         updates: dict[str, Any] = {

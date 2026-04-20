@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from python.domain.models.models import (
     ArtifactFormat,
@@ -15,6 +16,11 @@ from python.domain.models.models import (
 )
 from python.domain.repo.workflow_state_repo import ConversationType
 from python.domain.workflows.node import Action, Status
+
+ConversationName = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=100),
+]
 
 
 class ArtifactRefResponse(BaseModel):
@@ -55,21 +61,39 @@ class ConversationSummaryResponse(BaseModel):
             "example": {
                 "conversation_id": "22222222-2222-2222-2222-222222222222",
                 "conversation_type": "causal",
+                "conversation_name": "Hypertension cohort review",
+                "last_updated_at_utc": 1712345678.123,
             }
         },
     )
 
     conversation_id: UUID = Field(description="Conversation UUID.")
     conversation_type: ConversationType = Field(description="Conversation type.")
+    conversation_name: str | None = Field(
+        default=None,
+        description="Optional conversation display name.",
+    )
+    last_updated_at_utc: float = Field(
+        description="Last update time as a UTC Unix timestamp in seconds.",
+    )
 
 
 class CreateConversationRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
-        json_schema_extra={"example": {"conversation_type": "causal"}},
+        json_schema_extra={
+            "example": {
+                "conversation_type": "causal",
+                "conversation_name": "Hypertension cohort review",
+            }
+        },
     )
 
     conversation_type: ConversationType = Field(description="Conversation type to create.")
+    conversation_name: ConversationName | None = Field(
+        default=None,
+        description="Optional conversation display name.",
+    )
 
 
 class UploadDatasetResponse(BaseModel):

@@ -29,7 +29,12 @@ class _StubWorkflowApp:
         self.revert_calls: list[dict[str, object]] = []
 
         self.list_conversations_result: list[Conversation] = []
-        self.create_conversation_result = uuid4()
+        self.create_conversation_result = Conversation(
+            conversation_id=uuid4(),
+            conversation_type="causal",
+            name="Created conversation",
+            last_updated_at_utc=1712345678.123,
+        )
         self.current_info_result = SimpleNamespace(
             messages=(),
             states=[],
@@ -50,16 +55,22 @@ class _StubWorkflowApp:
         self.list_conversations_calls.append(user_id)
         return self.list_conversations_result
 
-    def create_conversation(self, user_id: UUID, conversation_type: str) -> UUID:
+    def create_conversation(
+        self,
+        user_id: UUID,
+        conversation_type: str,
+        conversation_name: str | None = None,
+    ) -> Conversation:
         self.create_conversation_calls.append(
             {
                 "user_id": user_id,
                 "conversation_type": conversation_type,
+                "conversation_name": conversation_name,
             }
         )
         return self.create_conversation_result
 
-    def get_current_workflow_info(
+    def get_current_conversation_info(
         self,
         *,
         user_id: UUID,
@@ -208,8 +219,18 @@ def test_list_conversations_returns_conversation_resources(
     first_id = uuid4()
     second_id = uuid4()
     workflow.list_conversations_result = [
-        Conversation(conversation_id=first_id, conversation_type="causal"),
-        Conversation(conversation_id=second_id, conversation_type="data"),
+        Conversation(
+            conversation_id=first_id,
+            conversation_type="causal",
+            name="Causal review",
+            last_updated_at_utc=1712345678.123,
+        ),
+        Conversation(
+            conversation_id=second_id,
+            conversation_type="data",
+            name=None,
+            last_updated_at_utc=1712000000.0,
+        ),
     ]
 
     response = client.get("/v1/conversations")
@@ -219,10 +240,14 @@ def test_list_conversations_returns_conversation_resources(
         {
             "conversation_id": str(first_id),
             "conversation_type": "causal",
+            "conversation_name": "Causal review",
+            "last_updated_at_utc": 1712345678.123,
         },
         {
             "conversation_id": str(second_id),
             "conversation_type": "data",
+            "conversation_name": None,
+            "last_updated_at_utc": 1712000000.0,
         },
     ]
     assert workflow.list_conversations_calls == [user.uid]
@@ -232,21 +257,33 @@ def test_create_conversation_returns_created_resource(
     api_client: tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser],
 ) -> None:
     client, workflow, _, user = api_client
+    workflow.create_conversation_result = Conversation(
+        conversation_id=uuid4(),
+        conversation_type="causal",
+        name="Hypertension cohort review",
+        last_updated_at_utc=1712345678.123,
+    )
 
     response = client.post(
         "/v1/conversations",
-        json={"conversation_type": "causal"},
+        json={
+            "conversation_type": "causal",
+            "conversation_name": "Hypertension cohort review",
+        },
     )
 
     assert response.status_code == 201
     assert response.json() == {
-        "conversation_id": str(workflow.create_conversation_result),
+        "conversation_id": str(workflow.create_conversation_result.conversation_id),
         "conversation_type": "causal",
+        "conversation_name": "Hypertension cohort review",
+        "last_updated_at_utc": 1712345678.123,
     }
     assert workflow.create_conversation_calls == [
         {
             "user_id": user.uid,
             "conversation_type": "causal",
+            "conversation_name": "Hypertension cohort review",
         }
     ]
 
@@ -599,6 +636,15 @@ def test_openapi_mentions_scoped_paths_and_enums() -> None:
     assert schema["components"]["schemas"][create_schema_ref]["properties"]["conversation_type"][
         "enum"
     ] == ["causal", "data"]
+    conversation_name_schema = schema["components"]["schemas"][create_schema_ref]["properties"][
+        "conversation_name"
+    ]
+    assert conversation_name_schema["anyOf"][0]["maxLength"] == 100
+    assert conversation_name_schema["anyOf"][0]["minLength"] == 1
+
+    conversation_summary_schema = schema["components"]["schemas"]["ConversationSummaryResponse"]
+    assert "conversation_name" in conversation_summary_schema["properties"]
+    assert "last_updated_at_utc" in conversation_summary_schema["properties"]
 
     message_operation = schema["paths"][
         "/v1/conversations/{conversation_id}/types/{conversation_type}/messages"
