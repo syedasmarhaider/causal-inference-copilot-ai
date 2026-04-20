@@ -101,6 +101,7 @@ def transform(
     causal_spec: CausalSpec,
     data_summary: DatasetSummaryModel,
     llm: LLMService,
+    encoding_plan_tool: EncodingPlanTool,
 ) -> TransformationResult:
     expected_role_by_column = _protocol_scope_role_by_column(causal_spec)
     if not expected_role_by_column:
@@ -113,8 +114,7 @@ def transform(
         data_summary,
         include_columns=list(expected_role_by_column.keys()),
     )
-    encoding_plan_tool = EncodingPlanTool()
-
+    
     return _generate_batch_result(
         llm=llm,
         transformation_instructions=transformation_instructions,

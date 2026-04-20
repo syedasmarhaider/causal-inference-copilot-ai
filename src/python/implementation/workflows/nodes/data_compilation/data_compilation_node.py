@@ -43,6 +43,7 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_val
     validate_data_compilation,
 )
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.causal.encoding.encoding_plan_tool import EncodingPlanTool
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.specs.causal_spec_draft import (
     CausalSpecDraft,
@@ -109,6 +110,9 @@ class DataCompilationNode(Node):
         )
         self._data_manipulation_tool = cast(
             DataManipulationTool, tools_factory.get_tool(DataManipulationTool.NAME)
+        )
+        self._encoding_plan_tool = cast(
+            EncodingPlanTool, tools_factory.get_tool(EncodingPlanTool.NAME)
         )
 
     @property
@@ -205,6 +209,7 @@ class DataCompilationNode(Node):
             )
 
         return self._run_pipeline_from_source(
+            encoding_plan_tool=self._encoding_plan_tool,
             request=request,
             payload=payload,
             deps=deps,
@@ -251,6 +256,7 @@ class DataCompilationNode(Node):
     def _run_pipeline_from_source(
         self,
         *,
+        encoding_plan_tool: EncodingPlanTool,
         request: NodeRequest,
         payload: DataCompilationPayloadModel,
         deps: DataCompilationDeps,
@@ -307,6 +313,7 @@ class DataCompilationNode(Node):
             deps=deps,
             compiled_artifacts=compiled_artifacts,
             source_changed=source_changed,
+            encoding_plan_tool=encoding_plan_tool,
         )
 
     def _compile_from_source(
@@ -360,6 +367,7 @@ class DataCompilationNode(Node):
     def _run_pipeline_from_compiled_dataset(
         self,
         *,
+        encoding_plan_tool: EncodingPlanTool,
         request: NodeRequest,
         payload: DataCompilationPayloadModel,
         deps: DataCompilationDeps,
@@ -369,13 +377,12 @@ class DataCompilationNode(Node):
         try:
             transformation_result = transform(
                 transformation_instructions=self._build_transformation_instructions(
-                    protocol_discussion=deps.protocol_discussion,
-                    protocol_cleaning_instructions=deps.protocol_cleaning_instructions,
                     retry_feedback=payload.retry_feedback,
                 ),
                 causal_spec=compiled_artifacts.causal_spec,
                 data_summary=compiled_artifacts.summary,
                 llm=self._llm,
+                encoding_plan_tool=encoding_plan_tool,
             )
         except Exception as exc:
             log.exception("data compilation transformation failed", error=safe_err(exc))
@@ -432,6 +439,8 @@ class DataCompilationNode(Node):
                 compiled_artifacts=compiled_artifacts,
                 validation_result=validation_result,
                 source_changed=source_changed,
+                encoding_plan_tool=self._encoding_plan_tool,
+
             )
 
         return self._build_review_ready_result(
@@ -447,6 +456,7 @@ class DataCompilationNode(Node):
     def _handle_validation_failure(
         self,
         *,
+        encoding_plan_tool: EncodingPlanTool,
         request: NodeRequest,
         payload: DataCompilationPayloadModel,
         deps: DataCompilationDeps,
@@ -498,11 +508,13 @@ class DataCompilationNode(Node):
             compiled_artifacts=compiled_artifacts,
             source_changed=source_changed,
             retry_feedback=retry_feedback,
+            encoding_plan_tool=encoding_plan_tool,
         )
 
     def _retry_from_compiled_dataset(
         self,
         *,
+        encoding_plan_tool: EncodingPlanTool,
         request: NodeRequest,
         payload: DataCompilationPayloadModel,
         deps: DataCompilationDeps,
@@ -549,6 +561,7 @@ class DataCompilationNode(Node):
             deps=deps,
             compiled_artifacts=retried_artifacts,
             source_changed=source_changed,
+            encoding_plan_tool=self._encoding_plan_tool,
         )
 
     def _build_review_ready_result(
@@ -810,6 +823,7 @@ class DataCompilationNode(Node):
                 source_df=source_df,
                 source_changed=False,
                 review_recompile_request=normalized_recompile_request,
+                encoding_plan_tool=self._encoding_plan_tool,
             )
 
         if decision.action == "reject":
@@ -973,33 +987,9 @@ class DataCompilationNode(Node):
     def _build_transformation_instructions(
         self,
         *,
-        protocol_discussion: str,
-        protocol_cleaning_instructions: str | None,
         retry_feedback: str | None,
     ) -> str:
-        parts = [
-            "Confirmed protocol discussion:",
-            protocol_discussion.strip(),
-        ]
-        normalized_protocol_instructions = _normalize_text(protocol_cleaning_instructions)
-        normalized_retry_feedback = _normalize_text(retry_feedback)
-        if normalized_protocol_instructions:
-            parts.extend(
-                [
-                    "",
-                    "Confirmed protocol cleaning instructions:",
-                    normalized_protocol_instructions,
-                ]
-            )
-        if normalized_retry_feedback:
-            parts.extend(
-                [
-                    "",
-                    data_compilation_transformation_retry_guidance_prompt(),
-                    normalized_retry_feedback,
-                ]
-            )
-        return "\n".join(parts).strip()
+        return _normalize_text(retry_feedback)
 
     def _needs_input_result(
         self,
