@@ -33,7 +33,21 @@ CONVERSATION_TYPE_PATH_PARAM = Path(
     ...,
     description="Conversation type. Allowed values: `causal` or `data`.",
 )
+DATASET_ID_PATH_PARAM = Path(description="Dataset UUID to retrieve.")
 ARTIFACT_ID_PATH_PARAM = Path(description="Artifact UUID to download.")
+DATASET_START_QUERY_PARAM = Query(
+    default=0,
+    ge=0,
+    description="Zero-based row offset, excluding the CSV header row.",
+)
+DATASET_LIMIT_QUERY_PARAM = Query(
+    default=None,
+    ge=0,
+    description=(
+        "Maximum number of rows to return after applying `start`. "
+        "Use `0` to return only column metadata."
+    ),
+)
 ARTIFACT_KIND_QUERY_PARAM = Query(
     ...,
     description="Artifact kind enum. Allowed values: `graph` or `data`.",

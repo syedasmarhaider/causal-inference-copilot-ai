@@ -4,6 +4,7 @@ from collections.abc import Generator
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
@@ -126,10 +127,18 @@ class _StubWorkflowApp:
 class _StubDataflowApp:
     def __init__(self) -> None:
         self.upload_calls: list[dict[str, object]] = []
+        self.dataset_calls: list[dict[str, object]] = []
         self.diff_calls: list[dict[str, object]] = []
         self.artifact_calls: list[dict[str, object]] = []
 
         self.upload_result = uuid4()
+        self.dataset_result = pd.DataFrame(
+            [
+                {"patient_id": "P001", "age": 41},
+                {"patient_id": "P002", "age": 44},
+                {"patient_id": "P003", "age": 52},
+            ]
+        )
         self.diff_result = SimpleNamespace(
             previous_dataset_id=uuid4(),
             current_dataset_id=uuid4(),
@@ -195,6 +204,31 @@ class _StubDataflowApp:
             }
         )
         return self.upload_result
+
+    def get_csv_data(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        conversation_type: str,
+        dataset_id: UUID,
+        start: int = 0,
+        limit: int | None = None,
+    ) -> pd.DataFrame:
+        self.dataset_calls.append(
+            {
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "conversation_type": conversation_type,
+                "dataset_id": dataset_id,
+                "start": start,
+                "limit": limit,
+            }
+        )
+        frame = self.dataset_result.iloc[start:].copy()
+        if limit is None:
+            return frame
+        return frame.head(limit).copy()
 
     def get_artifact(
         self,
@@ -617,6 +651,41 @@ def test_upload_dataset_maps_value_error_to_400(
     assert response.json()["detail"] == "Uploaded file is not a valid CSV: parse error"
 
 
+def test_get_dataset_returns_paginated_rows(
+    api_client: tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser],
+) -> None:
+    client, _, dataflow, user = api_client
+    conversation_id = uuid4()
+    dataset_id = uuid4()
+
+    response = client.get(
+        f"/v1/conversations/{conversation_id}/types/data/datasets/{dataset_id}",
+        params={"start": 1, "limit": 1},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "conversation_id": str(conversation_id),
+        "conversation_type": "data",
+        "dataset_id": str(dataset_id),
+        "start": 1,
+        "limit": 1,
+        "row_count": 1,
+        "columns": ["patient_id", "age"],
+        "rows": [{"patient_id": "P002", "age": 44}],
+    }
+    assert dataflow.dataset_calls == [
+        {
+            "user_id": user.uid,
+            "conversation_id": conversation_id,
+            "conversation_type": "data",
+            "dataset_id": dataset_id,
+            "start": 1,
+            "limit": 1,
+        }
+    ]
+
+
 def test_create_dataset_diff_returns_structured_response_without_request_body(
     api_client: tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser],
 ) -> None:
@@ -761,6 +830,22 @@ def test_openapi_mentions_scoped_paths_and_enums() -> None:
     diff_response_schema = schema["components"]["schemas"][diff_response_ref]
     assert "previous_dataset_id" in diff_response_schema["properties"]
     assert "current_dataset_id" in diff_response_schema["properties"]
+
+    dataset_operation = schema["paths"][
+        "/v1/conversations/{conversation_id}/types/{conversation_type}/datasets/{dataset_id}"
+    ]["get"]
+    dataset_parameters = {param["name"]: param for param in dataset_operation["parameters"]}
+    assert dataset_parameters["dataset_id"]["schema"]["format"] == "uuid"
+    assert dataset_parameters["start"]["schema"]["minimum"] == 0
+    assert dataset_parameters["limit"]["schema"]["anyOf"][0]["minimum"] == 0
+    dataset_response_ref = dataset_operation["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]["$ref"].split("/")[-1]
+    dataset_response_schema = schema["components"]["schemas"][dataset_response_ref]
+    assert "columns" in dataset_response_schema["properties"]
+    assert "rows" in dataset_response_schema["properties"]
+    assert "start" in dataset_response_schema["properties"]
+    assert "limit" in dataset_response_schema["properties"]
 
     dataframe_diff_schema = schema["components"]["schemas"]["DataFrameDiff"]
     assert "schema_diff" in dataframe_diff_schema["properties"]

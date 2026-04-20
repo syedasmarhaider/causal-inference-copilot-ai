@@ -10,9 +10,12 @@ The adapter intentionally keeps the HTTP surface thin:
 from __future__ import annotations
 
 import asyncio
+from typing import Any, cast
 from uuid import UUID
 
+import pandas as pd
 from fastapi import APIRouter, HTTPException, UploadFile, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
 
 from python.adapters.api.dependencies import (
@@ -23,6 +26,9 @@ from python.adapters.api.dependencies import (
     CONVERSATION_ID_PATH_PARAM,
     CONVERSATION_TYPE_PATH_PARAM,
     DATAFLOW_APP_DEP,
+    DATASET_ID_PATH_PARAM,
+    DATASET_LIMIT_QUERY_PARAM,
+    DATASET_START_QUERY_PARAM,
     UPLOAD_DATASET_FILE_PARAM,
     WORKFLOW_APP_DEP,
 )
@@ -37,6 +43,7 @@ from python.adapters.api.schemas import (
     CreateConversationRequest,
     DatasetDiffCreateRequest,
     DatasetDiffResponse,
+    DatasetPageResponse,
     UploadDatasetResponse,
     WorkingDatasetResponse,
 )
@@ -300,6 +307,52 @@ async def upload_dataset(
     )
 
 
+@api_router.get(
+    f"{_CONVERSATION_SCOPE_PATH}/datasets/{{dataset_id}}",
+    response_model=DatasetPageResponse,
+    tags=["datasets"],
+    summary="Get paginated dataset rows",
+    description=(
+        "Loads rows from a stored CSV dataset for the conversation and returns them as JSON. "
+        "Use `start` for the zero-based row offset and optional `limit` for page size. "
+        "Set `limit=0` to return column metadata without any rows."
+    ),
+    response_description="Requested dataset page as JSON.",
+    responses={
+        401: {"description": "Missing or invalid Bearer token."},
+        404: {"description": "Conversation or dataset not found."},
+        422: {"description": "Invalid pagination or conversation type."},
+        500: {"description": "Unexpected dataset retrieval failure."},
+    },
+)
+async def get_dataset(
+    conversation_id: UUID = CONVERSATION_ID_PATH_PARAM,
+    conversation_type: ConversationType = CONVERSATION_TYPE_PATH_PARAM,
+    dataset_id: UUID = DATASET_ID_PATH_PARAM,
+    start: int = DATASET_START_QUERY_PARAM,
+    limit: int | None = DATASET_LIMIT_QUERY_PARAM,
+    authenticated_user: AuthenticatedUser = AUTHENTICATED_USER_DEP,
+    dataflow: DataflowApp = DATAFLOW_APP_DEP,
+) -> DatasetPageResponse:
+    dataframe = await asyncio.to_thread(
+        dataflow.get_csv_data,
+        user_id=authenticated_user.uid,
+        conversation_id=conversation_id,
+        conversation_type=conversation_type,
+        dataset_id=dataset_id,
+        start=start,
+        limit=limit,
+    )
+    return _to_dataset_page_response(
+        conversation_id=conversation_id,
+        conversation_type=conversation_type,
+        dataset_id=dataset_id,
+        start=start,
+        limit=limit,
+        dataframe=dataframe,
+    )
+
+
 @api_router.post(
     f"{_CONVERSATION_SCOPE_PATH}/dataset-diffs",
     response_model=DatasetDiffResponse,
@@ -421,6 +474,29 @@ def _to_working_dataset_response(
     return WorkingDatasetResponse(
         dataset_id=dataset_id,
         is_frozen=bool(is_dataset_frozen),
+    )
+
+
+def _to_dataset_page_response(
+    *,
+    conversation_id: UUID,
+    conversation_type: ConversationType,
+    dataset_id: UUID,
+    start: int,
+    limit: int | None,
+    dataframe: pd.DataFrame,
+) -> DatasetPageResponse:
+    normalized = dataframe.astype(object).where(pd.notnull(dataframe), None)
+    rows = cast(list[dict[str, Any]], jsonable_encoder(normalized.to_dict(orient="records")))
+    return DatasetPageResponse(
+        conversation_id=conversation_id,
+        conversation_type=conversation_type,
+        dataset_id=dataset_id,
+        start=start,
+        limit=limit,
+        row_count=int(len(dataframe)),
+        columns=[str(column) for column in dataframe.columns],
+        rows=rows,
     )
 
 

@@ -11,7 +11,7 @@ OPENAPI_TAGS = [
     {
         "name": "datasets",
         "description": (
-            "Upload CSV datasets for a conversation and calculate structured diffs between the two latest working dataset versions."
+            "Upload CSV datasets, page through stored dataset rows, and calculate structured diffs between the two latest working dataset versions."
         ),
     },
     {
@@ -44,6 +44,10 @@ API_DESCRIPTION = (
     "- `POST /v1/conversations/{conversation_id}/types/{conversation_type}/dataset-diffs` compares the previous working dataset version to the current one.\n"
     "- Send an empty body for positional row matching, or send `key_columns` to match rows by business key.\n"
     "- The response includes `previous_dataset_id`, `current_dataset_id`, `schema_diff`, `row_changes`, and `summary`.\n\n"
+    "Dataset paging:\n"
+    "- `GET /v1/conversations/{conversation_id}/types/{conversation_type}/datasets/{dataset_id}` returns dataset rows as JSON.\n"
+    "- Use `start` for the zero-based row offset and optional `limit` for page size.\n"
+    "- `limit=0` returns only dataset column metadata.\n\n"
     "Artifacts:\n"
     "- `artifact_kind` enum: `graph | data`\n"
     "- `artifact_format` enum: `json | csv`\n"

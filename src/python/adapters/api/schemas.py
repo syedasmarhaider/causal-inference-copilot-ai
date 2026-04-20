@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
@@ -112,6 +112,39 @@ class UploadDatasetResponse(BaseModel):
     conversation_id: UUID = Field(description="Conversation UUID.")
     conversation_type: ConversationType = Field(description="Conversation type.")
     dataset_id: UUID = Field(description="Stored dataset UUID.")
+
+
+class DatasetPageResponse(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "conversation_id": "22222222-2222-2222-2222-222222222222",
+                "conversation_type": "data",
+                "dataset_id": "33333333-3333-3333-3333-333333333333",
+                "start": 20,
+                "limit": 10,
+                "row_count": 2,
+                "columns": ["patient_id", "age", "bp_sys"],
+                "rows": [
+                    {"patient_id": "P021", "age": 64, "bp_sys": 132},
+                    {"patient_id": "P022", "age": 59, "bp_sys": 128},
+                ],
+            }
+        },
+    )
+
+    conversation_id: UUID = Field(description="Conversation UUID.")
+    conversation_type: ConversationType = Field(description="Conversation type.")
+    dataset_id: UUID = Field(description="Dataset UUID.")
+    start: int = Field(description="Zero-based row offset applied to the dataset.")
+    limit: int | None = Field(
+        default=None,
+        description="Requested maximum number of rows after applying `start`.",
+    )
+    row_count: int = Field(description="Number of rows returned in this page.")
+    columns: list[str] = Field(description="Dataset columns in source order.")
+    rows: list[dict[str, Any]] = Field(description="Dataset rows for the requested page.")
 
 
 class DatasetDiffCreateRequest(BaseModel):
