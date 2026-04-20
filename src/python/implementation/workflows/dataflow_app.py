@@ -20,6 +20,7 @@ from python.domain.repo.workflow_state_repo import Conversation, WorkflowStateRe
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_node import DataManupulationNode
 from python.implementation.workflows.ochestrator.causal_ochestrator_state import CausalOchestratorState
+from python.implementation.workflows.ochestrator.data_ochestrator_state import DataOchestratorState
 from python.implementation.workflows.utils.diff_util import DataFrameDiff, diff_dataframes
 
 # TODO: add distributed tnx or locks later
@@ -182,24 +183,25 @@ class DataflowApp:
                 csv_size_bytes=len(csv_bytes),
             )
             raise ValueError(f"Uploaded file is not a valid CSV: {exc}") from exc
-
+        
         ochestrator_state = self._repo.load_ochestrator_state(
             user_id=user_id,
             conversation_id=conversation_id,
         )
+        conversation_is_data = conversation_type == "data"
         if not ochestrator_state:
-            ochestrator_state = CausalOchestratorState.init_empty()
+            if conversation_is_data:
+                ochestrator_state = DataOchestratorState.init_empty()
+            else:
+                ochestrator_state = CausalOchestratorState.init_empty()    
         
-        if not isinstance(ochestrator_state, CausalOchestratorState):
-            raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation_id)
-
         if ochestrator_state.get_current_node_name() != DataManupulationNode.NAME:
             raise ValidationError(
                 field="conversation_id",
                 reason="Cannot upload dataset while in the middle of a manipulation stage. Please finish or cancel the current stage before uploading a new dataset.",
             )
 
-        dataset_id = CausalOchestratorState.INIT_DATA_ID
+        dataset_id = DataOchestratorState.INIT_DATA_ID if conversation_is_data else CausalOchestratorState.INIT_DATA_ID
         self._data_repo.save_csv_data(
             user_id=user_id,
             conversation_id=conversation_id,
