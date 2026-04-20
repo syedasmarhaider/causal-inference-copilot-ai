@@ -262,6 +262,10 @@ class Ochestrator:
     ) -> str:
         current_node_text = self._build_route_node_text(current_node)
         other_nodes_text = self._build_route_nodes_text(companions)
+        fallback_node = self._resolve_route_fallback_node(
+            current_node=current_node,
+            companions=companions,
+        )
         try:
             decision = self._llm.generate_json(
                 schema=_RouteDecision,
@@ -277,9 +281,34 @@ class Ochestrator:
             )
             if decision.node_name in companions or decision.node_name == current_node:
                 return decision.node_name
-        except Exception:
-            self._log.warning("LLM route pick failed, falling back to GENERAL_QUERIES")
-        return GeneralQueriesNode.NAME
+
+            self._log.warning(
+                "LLM route pick returned disallowed node, falling back to allowed node",
+                requested_node=decision.node_name,
+                current_node=current_node,
+                companions=companions,
+                fallback_node=fallback_node,
+            )
+        except Exception as exc:
+            self._log.warning(
+                "LLM route pick failed, falling back to allowed node",
+                current_node=current_node,
+                companions=companions,
+                fallback_node=fallback_node,
+                error_type=type(exc).__name__,
+            )
+        return fallback_node
+
+    @staticmethod
+    def _resolve_route_fallback_node(
+        *,
+        current_node: str,
+        companions: Sequence[str],
+    ) -> str:
+        allowed_nodes = {current_node, *companions}
+        if GeneralQueriesNode.NAME in allowed_nodes:
+            return GeneralQueriesNode.NAME
+        return current_node
 
     def _build_route_node_text(self, node_name: str) -> str:
         node_cls = self._node_classes_by_name.get(node_name)
