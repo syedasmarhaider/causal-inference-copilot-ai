@@ -118,6 +118,11 @@ class WorkflowApp:
             conversation_id=conversation_id,
             conversation_type=conversation_type,
         )
+        conversation = Conversation(
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+            last_updated_at_utc=utc_now(),
+        )
         
         messages = self._repo.load_message_history(
             user_id=user_id,
@@ -126,7 +131,7 @@ class WorkflowApp:
         )
         state = self._ochestrator.get_current_ochestrator_state(
             user_id=user_id,
-            conversation_id=conversation_id,
+            conversation=conversation,
         )
         
         state_info = state.get_completed_and_last_pending_nodes()
@@ -155,6 +160,11 @@ class WorkflowApp:
             conversation_id=conversation_id,
             conversation_type=conversation_type,
         )
+        conversation = Conversation(
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+            last_updated_at_utc=utc_now(),
+        )
         self._log.debug(
             "workflow handle requested",
             user_id=user_id,
@@ -164,16 +174,12 @@ class WorkflowApp:
         user_message = user_message or ""
 
         response = self._ochestrator.answer(
-            conversation_id=conversation_id,
+            conversation=  conversation,
             user_id=user_id,
             user_message=ChatMessage(role="user", content=user_message),
         )
         
-        self._repo.save_conversation(user_id=user_id, conversation=Conversation(
-            conversation_id=conversation_id,
-            conversation_type=conversation_type,
-            last_updated_at_utc=utc_now(),
-        ))
+        self._repo.save_conversation(user_id=user_id, conversation=conversation)
 
         return WorkflowResponse(
             messages=response.messages,
@@ -201,6 +207,14 @@ class WorkflowApp:
             conversation_id=conversation_id,
             conversation_type=conversation_type,
         )
+        conversation = Conversation(
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+            last_updated_at_utc=utc_now(),
+        )
+        
+        if conversation_type != "causal":
+            raise ValidationError("conversation_type", f"Revert is only supported for 'causal' conversation type, got: {conversation_type}")
         ochestrator_state = self._repo.load_ochestrator_state(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -244,16 +258,12 @@ class WorkflowApp:
         )
         state = self._ochestrator.get_current_ochestrator_state(
             user_id=user_id,
-            conversation_id=conversation_id,
+            conversation=conversation,
         )
         last_nodes = state.get_completed_and_last_pending_nodes()
         dataset_id, is_frozen = state.get_working_dataset_id_and_frozen_status()
         
-        self._repo.save_conversation(user_id=user_id, conversation=Conversation(
-            conversation_id=conversation_id,
-            conversation_type=conversation_type,
-            last_updated_at_utc=utc_now(),
-        ))
+        self._repo.save_conversation(user_id=user_id, conversation=conversation)
 
         return ConversationResponse(
             messages=messages,

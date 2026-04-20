@@ -16,12 +16,14 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_sta
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_node import DataManupulationNode
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_state import DataManupulationState
 from python.implementation.workflows.nodes.data_statistics.data_statistics_node import DataStatisticsNode
+from python.implementation.workflows.nodes.general_queries.general_queries_node import GeneralQueriesNode
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import ModelSelectionState
 from python.implementation.workflows.nodes.model_selection.model_selection_node import ModelSelectionNode
 from python.implementation.workflows.nodes.model_train.model_train_node import ModelTrainNode
 from python.implementation.workflows.nodes.model_train.model_train_state import ModelTrainState
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import ProtocolDiscussionNode
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
+from python.implementation.workflows.ochestrator.ochestrator_prompts import ROUTE_SYSTEM_PROMPT_CAUSAL
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.specs.causal_spec_draft import CausalSpecDraft
@@ -76,6 +78,8 @@ class GlobalStateModel(BaseModel):
 
 class CausalOchestratorState(OchestratorState):
     INIT_DATA_ID = UUID("00000000-0000-0000-0000-000000000000")
+    NAME: ClassVar[str] = "CAUSAL_OCHESTRATOR_STATE"
+    
 
     _STAGE_FIELDS: ClassVar[dict[int, tuple[str, ...]]] = {
         1: ("working_dataset_ids", "latest_dataset_summary"),
@@ -104,7 +108,7 @@ class CausalOchestratorState(OchestratorState):
         self._model = model
 
     def name(self) -> str:
-        return "OCHESTRATOR_STATE"
+        return self.NAME
 
     def to_json_dict(self) -> dict[str, Any]:
         return self._model.model_dump(mode="json")
@@ -318,17 +322,17 @@ class CausalOchestratorState(OchestratorState):
             case _ if node_name == DataManupulationNode.NAME:
                 if not self._model.working_dataset_ids or self._model.latest_dataset_summary is None:
                     return []
-                return [ProtocolDiscussionNode.NAME, DataStatisticsNode.NAME]
+                return [ProtocolDiscussionNode.NAME, DataStatisticsNode.NAME,GeneralQueriesNode.NAME]
             case _ if node_name == ProtocolDiscussionNode.NAME:
-                return [DataManupulationNode.NAME, DataStatisticsNode.NAME]
+                return [DataManupulationNode.NAME, DataStatisticsNode.NAME,GeneralQueriesNode.NAME]
             case _ if node_name == DataCompilationNode.NAME:
-                return [DataStatisticsNode.NAME]
+                return [DataStatisticsNode.NAME,GeneralQueriesNode.NAME]
             case _ if node_name == ModelSelectionNode.NAME:
-                return [DataStatisticsNode.NAME]
+                return [DataStatisticsNode.NAME,GeneralQueriesNode.NAME]
             case _ if node_name == ModelTrainNode.NAME:
                 return []
             case _ if node_name == CausalInferenceNode.NAME:
-                return [DataStatisticsNode.NAME]
+                return [DataStatisticsNode.NAME,GeneralQueriesNode.NAME]
             case _:
                 raise ValueError(f"Unknown node name for companions: {node_name!r}")
     
@@ -408,6 +412,9 @@ class CausalOchestratorState(OchestratorState):
                 pass
             case _:
                 raise ValueError(f"Unknown state name for rollback: {state_name!r}")
+    
+    def get_ochestration_prompt(self) -> str:
+        return ROUTE_SYSTEM_PROMPT_CAUSAL     
 
     def _is_stage1_complete(self) -> bool:
         return bool(self._model.working_dataset_ids) and self._model.latest_dataset_summary is not None

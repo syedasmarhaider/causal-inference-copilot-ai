@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -11,10 +11,11 @@ from python.domain.models.models import ChatMessage
 from python.domain.repo.analytics_repo import AnalyticsRepo
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.models_repo import ModelsRepo
-from python.domain.repo.workflow_state_repo import WorkflowStateRepo
+from python.domain.repo.workflow_state_repo import Conversation, WorkflowStateRepo
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.domain.workflows.node import Action, Node, NodeRequest, Status
 from python.domain.workflows.node_state import NodeState
+from python.domain.workflows.ochestrator_state import OchestratorState
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.causal_inference.causal_inference_node import CausalInferenceNode
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import CausalInferenceState
@@ -34,9 +35,10 @@ from python.implementation.workflows.nodes.noop_done.noop_done_node import NoopD
 from python.implementation.workflows.nodes.noop_done.noop_done_state import NoopDoneState
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import ProtocolDiscussionNode
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
-from python.implementation.workflows.ochestrator.ochestrator_prompts import ROUTE_SYSTEM_PROMPT
 from python.implementation.workflows.ochestrator.causal_ochestrator_state import CausalOchestratorState
+from python.implementation.workflows.ochestrator.data_ochestrator_state import DataOchestratorState
 from python.implementation.workflows.tools.tools_factory import DefaultToolFactory
+
 
 @dataclass(frozen=True)
 class OchestrationResponse:
@@ -46,6 +48,7 @@ class OchestrationResponse:
     current_status: Status
     current_data_id: UUID | None = None
     is_dataset_frozen: bool | None = None
+
 
 class _RouteDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -77,24 +80,21 @@ class Ochestrator:
             component=self.__class__.__name__,
             log_type="workflow_service",
         )
-    
-    
-    
-    def get_current_ochestrator_state(self, user_id: UUID, conversation_id: UUID) -> CausalOchestratorState:    
-        orch_state = self._workflow_repo.load_ochestrator_state(
+
+    def get_current_ochestrator_state(
+        self,
+        user_id: UUID,
+        conversation: Conversation,
+    ) -> OchestratorState:
+        return self._load_or_init_ochestrator_state(
             user_id=user_id,
-            conversation_id=conversation_id,
+            conversation=conversation,
         )
-        if orch_state is None:
-            orch_state = CausalOchestratorState.init_empty()
-        if not isinstance(orch_state, CausalOchestratorState):
-            raise ValueError("Orchestrator state must be CausalOchestratorState")
-        return orch_state
-    
+
     def answer(
         self,
         *,
-        conversation_id: UUID,
+        conversation: Conversation,
         user_id: UUID,
         user_message: ChatMessage,
     ) -> OchestrationResponse:
@@ -102,26 +102,20 @@ class Ochestrator:
         if user_message.content.strip():
             self._workflow_repo.append_message(
                 user_id=user_id,
-                conversation_id=conversation_id,
+                conversation_id=conversation.conversation_id,
                 message=user_message,
             )
         history = self._workflow_repo.load_message_history(
             user_id=user_id,
-            conversation_id=conversation_id,
+            conversation_id=conversation.conversation_id,
             limit=15,
         )
 
         # 2. Load orchestrator state
-        orch_state = self._workflow_repo.load_ochestrator_state(
+        orch_state = self._load_or_init_ochestrator_state(
             user_id=user_id,
-            conversation_id=conversation_id,
+            conversation=conversation,
         )
-        if orch_state is None:
-            orch_state = CausalOchestratorState.init_empty()
-        if not isinstance(orch_state, CausalOchestratorState):
-            raise ValueError("Orchestrator state must be CausalOchestratorState")
-        
-        
 
         # 3. Pick node to run
         last_msg = history[-1] if history else None
@@ -133,13 +127,17 @@ class Ochestrator:
             node_name = needed_node
         else:
             companions = orch_state.get_current_node_companion_names(needed_node)
-            companions.append(GeneralQueriesNode.NAME)
-            node_name = self._llm_pick_node(current_node=needed_node, companions=companions, history=history)
+            node_name = self._llm_pick_node(
+                current_node=needed_node,
+                companions=companions,
+                history=history,
+                ochestrator_state=orch_state,
+            )
 
         # 4. Load node state + run
         node_state = self._load_node_state_or_init(
             user_id=user_id,
-            conversation_id=conversation_id,
+            conversation_id=conversation.conversation_id,
             node_name=node_name,
         )
         node = self.nodes_by_name.get(node_name)
@@ -149,7 +147,7 @@ class Ochestrator:
         result = node.run(
             request=NodeRequest(
                 user_id=user_id,
-                conversation_id=conversation_id,
+                conversation_id=conversation.conversation_id,
                 node_state=node_state,
                 orchestrator_state=orch_state,
                 read_only_messages_history=history,
@@ -158,22 +156,20 @@ class Ochestrator:
 
         # 5. Persist
         new_orch_state = result.new_orchestrator_state
-        if not isinstance(new_orch_state, CausalOchestratorState):
-            raise ValueError("New orchestrator state must be WritableOchestratorState")
         self._workflow_repo.store_ochestrator_state(
             user_id=user_id,
-            conversation_id=conversation_id,
+            conversation_id=conversation.conversation_id,
             state=new_orch_state,
         )
         self._workflow_repo.store_state(
             user_id=user_id,
-            conversation_id=conversation_id,
+            conversation_id=conversation.conversation_id,
             state=result.new_node_state,
         )
         if result.response_messages:
             self._workflow_repo.append_messages(
                 user_id=user_id,
-                conversation_id=conversation_id,
+                conversation_id=conversation.conversation_id,
                 messages=result.response_messages,
             )
 
@@ -188,36 +184,78 @@ class Ochestrator:
             for state_name in new_orch_state.get_forward_states_after_node(node_name):
                 self._workflow_repo.delete_state(
                     user_id=user_id,
-                    conversation_id=conversation_id,
+                    conversation_id=conversation.conversation_id,
                     state_name=state_name,
                 )
             self._workflow_repo.store_ochestrator_state(
                 user_id=user_id,
-                conversation_id=conversation_id,
+                conversation_id=conversation.conversation_id,
                 state=new_orch_state,
             )
             self._workflow_repo.append_message(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            message=  ChatMessage(
+                user_id=user_id,
+                conversation_id=conversation.conversation_id,
+                message=ChatMessage(
                     role="system",
-                    content=(
-                        "The workflow encountered an error and has been recovered. "
-                    ),       )
-        )
-            
+                    content="The workflow encountered an error and has been recovered. ",
+                ),
+            )
+
         return OchestrationResponse(
             messages=user_facing,
             action=result.action,
             current_state=new_orch_state.get_current_node_name(),
             current_status=result.status,
-            current_data_id=new_orch_state.get("working_dataset_ids")[-1] if new_orch_state.get("working_dataset_ids") else None,
-            is_dataset_frozen=new_orch_state.get("working_dataset_frozen"),
+            current_data_id=self._safe_get_uuid(new_orch_state, "working_dataset_id"),
+            is_dataset_frozen=self._safe_get_bool(new_orch_state, "working_dataset_frozen"),
         )
-         
+
+    def _load_or_init_ochestrator_state(
+        self,
+        *,
+        user_id: UUID,
+        conversation: Conversation,
+    ) -> OchestratorState:
+        orch_state = self._workflow_repo.load_ochestrator_state(
+            user_id=user_id,
+            conversation_id=conversation.conversation_id,
+        )
+        if orch_state is not None:
+            return orch_state
+
+        return self._build_empty_ochestrator_state(conversation)
+
+    def _build_empty_ochestrator_state(self, conversation: Conversation) -> OchestratorState:
+        match conversation.conversation_type:
+            case "data":
+                return DataOchestratorState.init_empty()
+            case "causal":
+                return CausalOchestratorState.init_empty()
+            case _:
+                raise ValueError(
+                    f"Unsupported conversation type for orchestrator init: "
+                    f"{conversation.conversation_type!r}"
+                )
+
+    @staticmethod
+    def _safe_get(state: OchestratorState, key: str) -> Any:
+        try:
+            return state.get(key)
+        except KeyError:
+            return None
+
+    def _safe_get_uuid(self, state: OchestratorState, key: str) -> UUID | None:
+        value = self._safe_get(state, key)
+        return value if isinstance(value, UUID) else None
+
+    def _safe_get_bool(self, state: OchestratorState, key: str) -> bool | None:
+        value = self._safe_get(state, key)
+        return value if isinstance(value, bool) else None
+
     def _llm_pick_node(
         self,
         *,
+        ochestrator_state: OchestratorState,
         current_node: str,
         companions: list[str],
         history: Sequence[ChatMessage],
@@ -227,7 +265,7 @@ class Ochestrator:
         try:
             decision = self._llm.generate_json(
                 schema=_RouteDecision,
-                system_prompt=ROUTE_SYSTEM_PROMPT,
+                system_prompt=ochestrator_state.get_ochestration_prompt(),
                 user_prompt=(
                     f"Current node:\n{current_node_text}\n"
                     f"Other nodes:\n{other_nodes_text}\n"
@@ -319,6 +357,7 @@ def build_state_name_by_node_name() -> Mapping[str, str]:
         GeneralQueriesNode.NAME: GeneralQueriesState.NAME,
     }
 
+
 def build_node_name_by_node_name() -> Mapping[str, type[Node]]:
     return {
         DataManupulationNode.NAME: DataManupulationNode,
@@ -330,7 +369,7 @@ def build_node_name_by_node_name() -> Mapping[str, type[Node]]:
         CausalInferenceNode.NAME: CausalInferenceNode,
         NoopDoneNode.NAME: NoopDoneNode,
         GeneralQueriesNode.NAME: GeneralQueriesNode,
-    }    
+    }
 
 
 def init_all_nodes_with_name_as_key(

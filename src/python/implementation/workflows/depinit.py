@@ -23,6 +23,7 @@ from python.implementation.service.llms.llm_service_factory import (
 )
 from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.dataflow_app import DataflowApp
+from python.implementation.workflows.ochestrator.data_ochestrator_state import DataOchestratorState
 from python.implementation.workflows.ochestrator.ochestraotor import (
     Ochestrator,
     build_state_classes_by_name,
@@ -93,7 +94,9 @@ def _make_workflow_state_repo(
     return FirebaseRealtimeWorkflowStateRepo(
         app=app,
         state_classes_by_name=state_classes_by_name,
-        ochestrator_state_classes_by_name={"OCHESTRATOR_STATE": CausalOchestratorState},  # TODO: make this dynamic when we have more orch states
+        ochestrator_state_classes_by_name={CausalOchestratorState.NAME: CausalOchestratorState,
+                                           DataOchestratorState.NAME: DataOchestratorState
+                                                                                       },  # TODO: make this dynamic when we have more orch states
         
     )
 
