@@ -363,8 +363,9 @@ async def get_dataset(
         "The request body is optional; send an empty body for positional comparison, or provide "
         "``key_columns`` to match rows by business key. "
         "The response keeps the current schema and only returns what actually changed: "
-        "`schema_diff`, changed entries in `row_changes`, and `summary` counts. "
-        "Unchanged rows and unchanged cells are omitted."
+        "`schema_diff`, detailed matched-row updates in `row_changes`, and `summary` counts. "
+        "Inserted/deleted rows are counted in `summary`, while unchanged rows and unchanged cells are omitted. "
+        "For large diffs, `row_changes` may be truncated and `summary` still reports the full counts."
     ),
     response_description="Structured diff between the two latest working dataset versions.",
     responses={

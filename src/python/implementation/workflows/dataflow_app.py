@@ -153,6 +153,7 @@ class DataflowApp:
             key_columns=list(diff.key_columns),
             changed_rows=diff.summary.total_changed_rows,
             changed_cells=diff.summary.total_changed_cells,
+            detailed_rows_emitted=len(diff.row_changes),
         )
         return DataflowDatasetDiffResponse(
             previous_dataset_id=previous_dataset_id,

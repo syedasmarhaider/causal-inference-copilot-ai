@@ -44,7 +44,7 @@ API_DESCRIPTION = (
     "- `POST /v1/conversations/{conversation_id}/types/{conversation_type}/dataset-diffs` compares the previous working dataset version to the current one.\n"
     "- Send an empty body for positional row matching, or send `key_columns` to match rows by business key.\n"
     "- The response keeps the existing schema: `previous_dataset_id`, `current_dataset_id`, and `diff` with `schema_diff`, `row_changes`, and `summary`.\n"
-    "- `row_changes` only contains inserted, deleted, or updated rows. Unchanged rows and unchanged cells are omitted.\n\n"
+    "- `row_changes` contains detailed matched-row updates only. Inserted/deleted rows are counted in `summary`, unchanged rows/cells are omitted, and very large diffs may truncate `row_changes` while leaving `summary` complete.\n\n"
     "Dataset paging:\n"
     "- `GET /v1/conversations/{conversation_id}/types/{conversation_type}/datasets/{dataset_id}` returns dataset rows as JSON.\n"
     "- Use `start` for the zero-based row offset and optional `limit` for page size.\n"

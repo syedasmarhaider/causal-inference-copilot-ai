@@ -5,6 +5,8 @@ from typing import Any, Literal, Sequence
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
+DEFAULT_MAX_DETAILED_ROW_CHANGES = 500
+
 
 class RowRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -49,7 +51,7 @@ class RowChange(BaseModel):
     cell_changes: list[CellChange] = Field(
         default_factory=list,
         description=(
-            "Only changed cells for this row. "
+            "Only changed cells for this matched row update. "
             "Unchanged cells are omitted."
         ),
     )
@@ -159,8 +161,9 @@ class DataFrameDiff(BaseModel):
     )
     row_changes: list[RowChange] = Field(
         description=(
-            "Only changed rows are included. "
-            "Unchanged rows are omitted, and each row only includes changed cells."
+            "Detailed row-level updates for matched rows with changed cells. "
+            "Inserted and deleted row counts are reflected in `summary`; unchanged rows are omitted. "
+            "For large diffs this list may be truncated, while `summary` still reflects full counts."
         )
     )
     summary: DiffSummary = Field(
@@ -172,6 +175,7 @@ def diff_dataframes(
     older_df: pd.DataFrame,
     newer_df: pd.DataFrame,
     key_columns: Sequence[str] | None = None,
+    max_detailed_row_changes: int | None = DEFAULT_MAX_DETAILED_ROW_CHANGES,
 ) -> DataFrameDiff:
     """
     Return only the diff from older_df -> newer_df.
@@ -211,12 +215,10 @@ def diff_dataframes(
             schema_diff=schema_diff,
         )
 
-    compact_row_changes = _compact_row_changes(row_changes)
-
-    inserted_rows = sum(1 for r in compact_row_changes if r.op == "inserted")
-    deleted_rows = sum(1 for r in compact_row_changes if r.op == "deleted")
-    updated_rows = sum(1 for r in compact_row_changes if r.op == "updated")
-    total_changed_cells = sum(len(r.cell_changes) for r in compact_row_changes)
+    inserted_rows = sum(1 for r in row_changes if r.op == "inserted")
+    deleted_rows = sum(1 for r in row_changes if r.op == "deleted")
+    updated_rows = sum(1 for r in row_changes if r.op == "updated")
+    total_changed_cells = sum(len(r.cell_changes) for r in row_changes)
 
     summary = DiffSummary(
         old_row_count=len(old),
@@ -224,15 +226,20 @@ def diff_dataframes(
         inserted_rows=inserted_rows,
         deleted_rows=deleted_rows,
         updated_rows=updated_rows,
-        total_changed_rows=len(compact_row_changes),
+        total_changed_rows=len(row_changes),
         total_changed_cells=total_changed_cells,
+    )
+
+    detailed_row_changes = _compact_row_changes(
+        row_changes,
+        max_items=max_detailed_row_changes,
     )
 
     return DataFrameDiff(
         identity_mode=identity_mode,
         key_columns=resolved_key_columns,
         schema_diff=schema_diff,
-        row_changes=compact_row_changes,
+        row_changes=detailed_row_changes,
         summary=summary,
     )
 
@@ -549,10 +556,17 @@ def _build_cell_changes_for_matched_rows(
     return changes
 
 
-def _compact_row_changes(row_changes: Sequence[RowChange]) -> list[RowChange]:
+def _compact_row_changes(
+    row_changes: Sequence[RowChange],
+    *,
+    max_items: int | None,
+) -> list[RowChange]:
     compacted: list[RowChange] = []
 
     for row_change in row_changes:
+        if row_change.op != "updated":
+            continue
+
         compact_cell_changes: list[CellChange] = []
         for cell_change in row_change.cell_changes:
             if cell_change.op == "modified" and _values_equal(
@@ -560,13 +574,9 @@ def _compact_row_changes(row_changes: Sequence[RowChange]) -> list[RowChange]:
                 cell_change.new_value,
             ):
                 continue
-            if cell_change.op == "added" and _is_null_like(cell_change.new_value):
-                continue
-            if cell_change.op == "removed" and _is_null_like(cell_change.old_value):
-                continue
             compact_cell_changes.append(cell_change)
 
-        if row_change.op == "updated" and not compact_cell_changes:
+        if not compact_cell_changes:
             continue
 
         compacted.append(
@@ -576,6 +586,9 @@ def _compact_row_changes(row_changes: Sequence[RowChange]) -> list[RowChange]:
                 cell_changes=compact_cell_changes,
             )
         )
+
+        if max_items is not None and len(compacted) >= max_items:
+            break
 
     return compacted
 
