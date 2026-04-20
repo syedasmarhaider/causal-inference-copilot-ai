@@ -410,7 +410,10 @@ def _key_tuple_to_dict(
     key_columns: Sequence[str],
     key_tuple: tuple[Any, ...],
 ) -> dict[str, Any]:
-    return {col: value for col, value in zip(key_columns, key_tuple, strict=True)}
+    return {
+        col: _normalize_scalar(value)
+        for col, value in zip(key_columns, key_tuple, strict=True)
+    }
 
 
 def _assert_no_duplicate_keys(
