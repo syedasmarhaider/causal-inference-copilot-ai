@@ -30,8 +30,11 @@ class LocalFileDataRepo(DataRepo):
         user_id: UUID,
         conversation_id: UUID,
         dataset_id: UUID,
+        start: int = 0,
         limit: int | None = None,
     ) -> pd.DataFrame:
+        if start < 0:
+            raise ValueError("start must be >= 0")
         if limit is not None and limit < 0:
             raise ValueError("limit must be >= 0")
 
@@ -42,7 +45,8 @@ class LocalFileDataRepo(DataRepo):
         )
         self._require_file(path, "csv dataset")
 
-        return pd.read_csv(path, nrows=limit)
+        skiprows = range(1, start + 1) if start > 0 else None
+        return pd.read_csv(path, skiprows=skiprows, nrows=limit)
 
     def save_csv_data(
         self,

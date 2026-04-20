@@ -16,6 +16,7 @@ class DataRepo(ABC):
         user_id: UUID,
         conversation_id: UUID,
         dataset_id: UUID,
+        start: int = 0,
         limit: int | None = None,
     ) -> pd.DataFrame:
         """
@@ -24,7 +25,8 @@ class DataRepo(ABC):
         :param user_id: User UUID.
         :param conversation_id: Conversation UUID.
         :param dataset_id: Dataset UUID.
-        :param limit: Optional row limit (head).
+        :param start: Zero-based row offset, excluding the header row.
+        :param limit: Optional row limit after applying ``start``.
         """
 
     @abstractmethod

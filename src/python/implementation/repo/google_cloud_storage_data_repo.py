@@ -167,10 +167,13 @@ class GoogleCloudStorageDataRepo(DataRepo):
         user_id: UUID,
         conversation_id: UUID,
         dataset_id: UUID,
+        start: int = 0,
         limit: int | None = None,
     ) -> pd.DataFrame:
-        if limit is not None and limit <= 0:
-            raise ValueError(f"limit must be a positive int or None, got: {limit!r}")
+        if start < 0:
+            raise ValueError(f"start must be >= 0, got: {start!r}")
+        if limit is not None and limit < 0:
+            raise ValueError(f"limit must be >= 0 or None, got: {limit!r}")
 
         blob = self._blob(self._dataset_blob_name(user_id, conversation_id, dataset_id))
         if not blob.exists(timeout=DEFAULT_GCS_TIMEOUT_SECONDS):
@@ -178,7 +181,13 @@ class GoogleCloudStorageDataRepo(DataRepo):
 
         try:
             csv_bytes = blob.download_as_bytes(timeout=DEFAULT_GCS_TIMEOUT_SECONDS)
-            return pd.read_csv(io.BytesIO(csv_bytes), nrows=limit, low_memory=False)
+            skiprows = range(1, start + 1) if start > 0 else None
+            return pd.read_csv(
+                io.BytesIO(csv_bytes),
+                skiprows=skiprows,
+                nrows=limit,
+                low_memory=False,
+            )
         except FileNotFoundError:
             raise
         except Exception as exc:

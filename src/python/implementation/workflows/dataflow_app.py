@@ -80,6 +80,7 @@ class DataflowApp:
         conversation_id: UUID,
         conversation_type: str,
         dataset_id: UUID,
+        start: int = 0,
         limit: int | None = None,
     ) -> pd.DataFrame:
         self._raise_if_userid_not_relates_to_conversation_id(
@@ -91,6 +92,7 @@ class DataflowApp:
             user_id=user_id,
             conversation_id=conversation_id,
             dataset_id=dataset_id,
+            start=start,
             limit=limit,
         )
 

@@ -192,14 +192,16 @@ class _FakeDataRepo(DataRepo):
         user_id: UUID,
         conversation_id: UUID,
         dataset_id: UUID,
+        start: int = 0,
         limit: int | None = None,
     ) -> pd.DataFrame:
         _ = user_id, conversation_id, dataset_id
         if self.raise_on_load is not None:
             raise self.raise_on_load
+        dataframe = self.dataframe.iloc[start:].copy()
         if limit is None:
-            return self.dataframe.copy()
-        return self.dataframe.head(limit).copy()
+            return dataframe
+        return dataframe.head(limit).copy()
 
     def save_csv_data(
         self,

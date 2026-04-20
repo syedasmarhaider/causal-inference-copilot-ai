@@ -209,12 +209,13 @@ class _InMemoryDataRepo(DataRepo):
         user_id: UUID,
         conversation_id: UUID,
         dataset_id: UUID,
+        start: int = 0,
         limit: int | None = None,
     ) -> pd.DataFrame:
         _ = user_id
         _ = conversation_id
         self.get_csv_data_calls.append(dataset_id)
-        dataframe = self.dataframes[dataset_id]
+        dataframe = self.dataframes[dataset_id].iloc[start:]
         if limit is None:
             return dataframe.copy()
         return dataframe.head(limit).copy()

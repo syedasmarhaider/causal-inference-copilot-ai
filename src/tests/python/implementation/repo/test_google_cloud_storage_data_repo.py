@@ -141,28 +141,31 @@ def test_constructor_rejects_bucket_with_empty_name() -> None:
         GoogleCloudStorageDataRepo(bucket=_FakeBucket(name=""))
 
 
-def test_get_csv_data_reads_dataframe_and_applies_limit() -> None:
+def test_get_csv_data_reads_dataframe_and_applies_start_and_limit() -> None:
     user_id, conversation_id, dataset_id = _ids()
     bucket = _FakeBucket(name="bucket")
     repo = GoogleCloudStorageDataRepo(bucket=bucket)
 
     blob_name = repo._dataset_blob_name(user_id, conversation_id, dataset_id)  # noqa: SLF001
     blob = bucket.blob(blob_name)
-    blob.data = b"a,b\n1,2\n3,4\n"
+    blob.data = b"a,b\n1,2\n3,4\n5,6\n"
     blob.present = True
 
-    frame = repo.get_csv_data(user_id, conversation_id, dataset_id, limit=1)
+    frame = repo.get_csv_data(user_id, conversation_id, dataset_id, start=1, limit=1)
 
-    assert frame.to_dict(orient="records") == [{"a": 1, "b": 2}]
+    assert frame.to_dict(orient="records") == [{"a": 3, "b": 4}]
     assert blob.exists_calls == [DEFAULT_GCS_TIMEOUT_SECONDS]
 
 
-def test_get_csv_data_validates_limit_and_missing_blob() -> None:
+def test_get_csv_data_validates_pagination_and_missing_blob() -> None:
     user_id, conversation_id, dataset_id = _ids()
     repo = GoogleCloudStorageDataRepo(bucket=_FakeBucket(name="bucket"))
 
-    with pytest.raises(ValueError, match=r"limit must be a positive int"):
-        repo.get_csv_data(user_id, conversation_id, dataset_id, limit=0)
+    with pytest.raises(ValueError, match=r"start must be >= 0"):
+        repo.get_csv_data(user_id, conversation_id, dataset_id, start=-1)
+
+    with pytest.raises(ValueError, match=r"limit must be >= 0"):
+        repo.get_csv_data(user_id, conversation_id, dataset_id, limit=-1)
 
     with pytest.raises(FileNotFoundError, match=r"CSV not found"):
         repo.get_csv_data(user_id, conversation_id, dataset_id)

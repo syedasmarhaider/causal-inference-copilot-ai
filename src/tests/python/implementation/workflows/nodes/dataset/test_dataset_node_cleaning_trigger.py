@@ -32,10 +32,14 @@ class _FakeDataRepo:
         user_id: UUID,
         conversation_id: UUID,
         dataset_id: UUID,
+        start: int = 0,
         limit: int | None = None,
     ) -> pd.DataFrame:
-        del user_id, conversation_id, dataset_id, limit
-        return self.dataframe.copy()
+        del user_id, conversation_id, dataset_id
+        dataframe = self.dataframe.iloc[start:].copy()
+        if limit is None:
+            return dataframe
+        return dataframe.head(limit).copy()
 
     def save_csv_data(
         self,
