@@ -824,6 +824,7 @@ def test_openapi_mentions_scoped_paths_and_enums() -> None:
         "/v1/conversations/{conversation_id}/types/{conversation_type}/dataset-diffs"
     ]["post"]
     assert "key_columns" in diff_operation["description"]
+    assert "Unchanged rows and unchanged cells are omitted" in diff_operation["description"]
     diff_response_ref = diff_operation["responses"]["200"]["content"]["application/json"]["schema"][
         "$ref"
     ].split("/")[-1]

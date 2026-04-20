@@ -362,8 +362,9 @@ async def get_dataset(
         "Calculates a structured diff from the previous working dataset version to the current one. "
         "The request body is optional; send an empty body for positional comparison, or provide "
         "``key_columns`` to match rows by business key. "
-        "The response contains the dataset version ids that were compared plus a `diff` object "
-        "with `schema_diff`, `row_changes`, and `summary` sections."
+        "The response keeps the current schema and only returns what actually changed: "
+        "`schema_diff`, changed entries in `row_changes`, and `summary` counts. "
+        "Unchanged rows and unchanged cells are omitted."
     ),
     response_description="Structured diff between the two latest working dataset versions.",
     responses={

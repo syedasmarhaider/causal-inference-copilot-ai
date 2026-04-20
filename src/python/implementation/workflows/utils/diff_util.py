@@ -48,7 +48,10 @@ class RowChange(BaseModel):
     )
     cell_changes: list[CellChange] = Field(
         default_factory=list,
-        description="Cell-level changes for this row. Inserted and deleted rows typically include one entry per visible column.",
+        description=(
+            "Only changed cells for this row. "
+            "Unchanged cells are omitted."
+        ),
     )
 
 
@@ -155,7 +158,10 @@ class DataFrameDiff(BaseModel):
         description="Schema-level changes between the previous and current dataset versions."
     )
     row_changes: list[RowChange] = Field(
-        description="Only changed rows are included. Unchanged rows are omitted."
+        description=(
+            "Only changed rows are included. "
+            "Unchanged rows are omitted, and each row only includes changed cells."
+        )
     )
     summary: DiffSummary = Field(
         description="Compact counts summarizing the diff result."
@@ -205,10 +211,12 @@ def diff_dataframes(
             schema_diff=schema_diff,
         )
 
-    inserted_rows = sum(1 for r in row_changes if r.op == "inserted")
-    deleted_rows = sum(1 for r in row_changes if r.op == "deleted")
-    updated_rows = sum(1 for r in row_changes if r.op == "updated")
-    total_changed_cells = sum(len(r.cell_changes) for r in row_changes)
+    compact_row_changes = _compact_row_changes(row_changes)
+
+    inserted_rows = sum(1 for r in compact_row_changes if r.op == "inserted")
+    deleted_rows = sum(1 for r in compact_row_changes if r.op == "deleted")
+    updated_rows = sum(1 for r in compact_row_changes if r.op == "updated")
+    total_changed_cells = sum(len(r.cell_changes) for r in compact_row_changes)
 
     summary = DiffSummary(
         old_row_count=len(old),
@@ -216,7 +224,7 @@ def diff_dataframes(
         inserted_rows=inserted_rows,
         deleted_rows=deleted_rows,
         updated_rows=updated_rows,
-        total_changed_rows=len(row_changes),
+        total_changed_rows=len(compact_row_changes),
         total_changed_cells=total_changed_cells,
     )
 
@@ -224,7 +232,7 @@ def diff_dataframes(
         identity_mode=identity_mode,
         key_columns=resolved_key_columns,
         schema_diff=schema_diff,
-        row_changes=row_changes,
+        row_changes=compact_row_changes,
         summary=summary,
     )
 
@@ -447,11 +455,14 @@ def _assert_no_null_keys(
 def _build_deleted_row_cell_changes(old_row: pd.Series) -> list[CellChange]:
     changes: list[CellChange] = []
     for col in old_row.index:
+        old_value = old_row[col]
+        if _is_null_like(old_value):
+            continue
         changes.append(
             CellChange(
                 column=str(col),
                 op="removed",
-                old_value=_normalize_scalar(old_row[col]),
+                old_value=_normalize_scalar(old_value),
                 new_value=None,
             )
         )
@@ -461,12 +472,15 @@ def _build_deleted_row_cell_changes(old_row: pd.Series) -> list[CellChange]:
 def _build_inserted_row_cell_changes(new_row: pd.Series) -> list[CellChange]:
     changes: list[CellChange] = []
     for col in new_row.index:
+        new_value = new_row[col]
+        if _is_null_like(new_value):
+            continue
         changes.append(
             CellChange(
                 column=str(col),
                 op="added",
                 old_value=None,
-                new_value=_normalize_scalar(new_row[col]),
+                new_value=_normalize_scalar(new_value),
             )
         )
     return changes
@@ -533,6 +547,37 @@ def _build_cell_changes_for_matched_rows(
                 pass
 
     return changes
+
+
+def _compact_row_changes(row_changes: Sequence[RowChange]) -> list[RowChange]:
+    compacted: list[RowChange] = []
+
+    for row_change in row_changes:
+        compact_cell_changes: list[CellChange] = []
+        for cell_change in row_change.cell_changes:
+            if cell_change.op == "modified" and _values_equal(
+                cell_change.old_value,
+                cell_change.new_value,
+            ):
+                continue
+            if cell_change.op == "added" and _is_null_like(cell_change.new_value):
+                continue
+            if cell_change.op == "removed" and _is_null_like(cell_change.old_value):
+                continue
+            compact_cell_changes.append(cell_change)
+
+        if row_change.op == "updated" and not compact_cell_changes:
+            continue
+
+        compacted.append(
+            RowChange(
+                row_ref=row_change.row_ref,
+                op=row_change.op,
+                cell_changes=compact_cell_changes,
+            )
+        )
+
+    return compacted
 
 
 def _values_equal(a: Any, b: Any) -> bool:
