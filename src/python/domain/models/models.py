@@ -1,3 +1,4 @@
+from datetime import timezone, datetime
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -62,3 +63,6 @@ def get_chat_messages_role_and_message_json(messages: Sequence[ChatMessage]) -> 
 class WorkingDatasetInfo:
     dataset_id: UUID
     is_freezed: bool
+
+def utc_now():
+    return datetime.now(timezone.utc).timestamp()

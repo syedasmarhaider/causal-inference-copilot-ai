@@ -3,6 +3,11 @@ from __future__ import annotations
 import itertools
 import json
 import os
+from __future__ import annotations
+
+import itertools
+import json
+import os
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -28,10 +33,18 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
     Storage layout::
 
-        /workflow_conversation_index/{user_id}/{conversation_id}: {"conversation_type": "..."}
+        /workflow_conversation_index/{user_id}/{conversation_id}:
+            {
+                "conversation_type": "causal" | "data",
+                "name": "optional name",
+                "last_updated_at_utc": 1712345678.123
+            }
 
         /workflows/{user_id}/{conversation_id}/_meta:
-            created: true
+            {
+                "created": true,
+                "created_at_utc": 1712345678.123
+            }
 
         /workflows/{user_id}/{conversation_id}/ochestrator_state: json-string
         /workflows/{user_id}/{conversation_id}/states/{state_name}: json-string
@@ -83,7 +96,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     ) -> None:
         if app is None:
             raise ValueError("app must not be None")
-        
+
         self._root_ref = db.reference("/", app=app)
         self._state_classes_by_name = dict(state_classes_by_name)
         self._ochestrator_state_classes_by_name = dict(
@@ -95,18 +108,45 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     # ------------------------------------------------------------------
 
     def save_conversation(self, *, user_id: UUID, conversation: Conversation) -> None:
-        updates = {
+        """
+        Upsert conversation metadata.
+
+        Behavior:
+        - Always updates the conversation index entry.
+        - Creates workflow meta only if it does not already exist.
+        - Does not rely on any legacy conversation shape.
+        """
+        conversation_ref = self._conversation_ref(
+            user_id=user_id,
+            conversation_id=conversation.conversation_id,
+        )
+        meta_ref = conversation_ref.child("_meta")
+        existing_meta = meta_ref.get()
+
+        index_payload: dict[str, Any] = {
+            "conversation_type": conversation.conversation_type,
+            "last_updated_at_utc": float(conversation.last_updated_at_utc),
+            "name": conversation.name,
+        }
+
+        updates: dict[str, Any] = {
             self._conversation_index_path(
                 user_id=user_id,
                 conversation_id=conversation.conversation_id,
-            ): {
-                "conversation_type": conversation.conversation_type,
-            },
-            self._conversation_meta_path(
-                user_id=user_id,
-                conversation_id=conversation.conversation_id,
-            ): {"created": True},
+            ): index_payload,
         }
+
+        if not isinstance(existing_meta, dict):
+            updates[
+                self._conversation_meta_path(
+                    user_id=user_id,
+                    conversation_id=conversation.conversation_id,
+                )
+            ] = {
+                "created": True,
+                "created_at_utc": time.time(),
+            }
+
         self._root_ref.update(updates)
 
     def get_conversations(self, *, user_id: UUID) -> Sequence[Conversation]:
@@ -115,30 +155,42 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             return []
 
         conversations: list[Conversation] = []
-        for key in sorted(data.keys()):
-            value = data[key]
 
+        for key, value in data.items():
             try:
-                conversation_id = UUID(key)
+                conversation_id = UUID(str(key))
             except (TypeError, ValueError):
                 continue
 
             if not isinstance(value, dict):
                 continue
 
-            conversation_type = value.get("conversation_type")
-            if conversation_type not in {"causal", "data"}:
-                raise ValueError(
-                    f"Invalid conversation type: {conversation_type}"
-                )
+            raw_type = value.get("conversation_type")
+            if raw_type not in {"causal", "data"}:
+                continue
+
+            raw_name = value.get("name")
+            if raw_name is not None and not isinstance(raw_name, str):
+                continue
+
+            raw_last_updated = value.get("last_updated_at_utc")
+            last_updated_at_utc = self._coerce_float(raw_last_updated)
+            if last_updated_at_utc is None:
+                continue
 
             conversations.append(
                 Conversation(
+                    name=raw_name,
                     conversation_id=conversation_id,
-                    conversation_type=cast("Any", conversation_type),
+                    last_updated_at_utc=last_updated_at_utc,
+                    conversation_type=cast(Any, raw_type),
                 )
             )
 
+        conversations.sort(
+            key=lambda conversation: conversation.last_updated_at_utc,
+            reverse=True,
+        )
         return conversations
 
     def is_conversation_id_for_user_id_exists(
@@ -152,7 +204,6 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             conversation_id=conversation.conversation_id,
         ).get()
         return value is not None
-
     # ------------------------------------------------------------------
     # Orchestrator state
     # ------------------------------------------------------------------

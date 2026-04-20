@@ -13,7 +13,7 @@ from python.domain.models.errors import (
     ConversationNotFoundError,
     ValidationError,
 )
-from python.domain.models.models import ArtifactFormat, ArtifactKind
+from python.domain.models.models import ArtifactFormat, ArtifactKind, utc_now
 from python.domain.repo.data_repo import DataRepo
 from python.domain.repo.workflow_state_repo import Conversation, WorkflowStateRepo
 from python.implementation.service.logging.default_logging import get_app_logger
@@ -21,7 +21,6 @@ from python.implementation.workflows.nodes.data_manupulation.data_manupulation_n
 from python.implementation.workflows.ochestrator.causal_ochestrator_state import CausalOchestratorState
 
 # TODO: add distributed tnx or locks later
-
 
 @dataclass(frozen=True)
 class DataflowArtifactResponse:
@@ -57,7 +56,7 @@ class DataflowApp:
         if conversation_type not in ["causal", "data"]:
             raise ValidationError("conversation_type", f"Invalid conversation type: {conversation_type}")
         
-        conversation = Conversation(conversation_id=conversation_id, conversation_type=conversation_type)
+        conversation = Conversation(conversation_id=conversation_id, conversation_type=conversation_type, last_updated_at_utc=utc_now())
         if not self._repo.is_conversation_id_for_user_id_exists(
             user_id=user_id,
             conversation=conversation,

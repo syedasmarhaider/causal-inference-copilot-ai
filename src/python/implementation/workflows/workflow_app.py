@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError, ValidationError
-from python.domain.models.models import ArtifactRef, ChatMessage
+from python.domain.models.models import ArtifactRef, ChatMessage, utc_now
 from python.domain.repo.workflow_state_repo import Conversation, WorkflowStateRepo
 from python.domain.workflows.node import Action, Status
 from python.implementation.service.logging.default_logging import get_app_logger
@@ -71,14 +71,17 @@ class WorkflowApp:
         if conversation_type not in ["causal", "data"]:
             raise ValidationError("conversation_type", f"Invalid conversation type: {conversation_type}")
         
-        conversation = Conversation(conversation_id=conversation_id, conversation_type=conversation_type)
+        conversation = Conversation(conversation_id=conversation_id, conversation_type=conversation_type, last_updated_at_utc=utc_now())
         if not self._repo.is_conversation_id_for_user_id_exists(
             user_id=user_id,
             conversation=conversation,
         ):
             raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation.conversation_id)
 
-    def create_conversation(self, user_id: UUID, conversation_type: str) -> UUID:
+    def create_conversation(self, user_id: UUID, 
+            conversation_type: str,
+            conversation_name: str | None = None,
+            ) -> UUID:
         conversation_id = uuid4()
         if conversation_type not in ["causal", "data"]:
             raise ValidationError("conversation_type", f"Invalid conversation type: {conversation_type}")
@@ -86,8 +89,10 @@ class WorkflowApp:
         conversation = Conversation(
             conversation_id=conversation_id,
             conversation_type=conversation_type,
+            name=conversation_name,
+            last_updated_at_utc=utc_now(),
         )
-        
+                
         self._repo.save_conversation(user_id=user_id, conversation=conversation)
         self._log.info(
             "conversation created",
@@ -161,6 +166,12 @@ class WorkflowApp:
             user_id=user_id,
             user_message=ChatMessage(role="user", content=user_message),
         )
+        
+        self._repo.save_conversation(user_id=user_id, conversation=Conversation(
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+            last_updated_at_utc=utc_now(),
+        ))
 
         return WorkflowResponse(
             messages=response.messages,
@@ -235,6 +246,12 @@ class WorkflowApp:
         )
         last_nodes = state.get_completed_and_last_pending_nodes()
         dataset_id, is_frozen = state.get_working_dataset_id_and_frozen_status()
+        
+        self._repo.save_conversation(user_id=user_id, conversation=Conversation(
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+            last_updated_at_utc=utc_now(),
+        ))
 
         return ConversationResponse(
             messages=messages,

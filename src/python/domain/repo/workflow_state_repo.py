@@ -10,12 +10,15 @@ from pydantic import BaseModel
 from python.domain.models.models import ChatMessage
 from python.domain.workflows.ochestrator_state import OchestratorState
 from python.domain.workflows.node_state import NodeState
+from pydantic import Field
 
 ConversationType = Literal["causal", "data"]
 
 
 class Conversation(BaseModel):
+    name: str | None = Field(default=None, max_length=100)
     conversation_id: UUID
+    last_updated_at_utc: float
     conversation_type: ConversationType
     
 class WorkflowStateRepo(ABC):
@@ -26,7 +29,7 @@ class WorkflowStateRepo(ABC):
     @abstractmethod
     def save_conversation(self, *, user_id: UUID, conversation: Conversation) -> None:
         raise NotImplementedError
-
+    
     # -----------------------
     # Active stage pointer
     # -----------------------
