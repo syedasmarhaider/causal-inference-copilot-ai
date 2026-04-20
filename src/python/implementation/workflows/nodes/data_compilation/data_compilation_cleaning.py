@@ -159,18 +159,23 @@ def cleaning(
 ) -> CleaningResult:
     _ = data_summary
 
+    prepared_input_df = _materialize_identifier_column(
+        dataframe=to_clean_df,
+        draft_causal_spec=draft_causal_spec,
+        materialize_when_missing=True,
+    )
     input_scope_columns = _draft_scope_columns(
         draft_causal_spec,
-        include_auto_generated_identifier=False,
+        include_auto_generated_identifier=True,
     )
     _ensure_draft_matches_dataframe(
         draft_causal_spec=draft_causal_spec,
-        dataframe=to_clean_df,
+        dataframe=prepared_input_df,
         context="input dataframe",
-        require_generated_identifier=False,
+        require_generated_identifier=True,
     )
 
-    scoped_df = to_clean_df.loc[:, input_scope_columns].copy()
+    scoped_df = prepared_input_df.loc[:, input_scope_columns].copy()
     scoped_summary = _profile_dataset(
         dataset_profiling_tool=datasetProfilingTool,
         dataframe=scoped_df,
@@ -251,7 +256,8 @@ def _draft_scope_columns(
     ordered_columns = [
         (
             id_col
-            if id_col != ID_COL_AUTO_FILL or include_auto_generated_identifier
+            if not _is_auto_identifier_column(id_col)
+            or include_auto_generated_identifier
             else None
         ),
         str(draft_causal_spec.treatment_column).strip(),
@@ -270,13 +276,17 @@ def _materialize_identifier_column(
     *,
     dataframe: pd.DataFrame,
     draft_causal_spec: CausalSpecDraft,
+    materialize_when_missing: bool = False,
 ) -> pd.DataFrame:
     identifier_column = str(draft_causal_spec.id_col).strip()
-    if identifier_column != ID_COL_AUTO_FILL:
+    should_materialize = _is_auto_identifier_column(identifier_column) or (
+        materialize_when_missing and identifier_column not in dataframe.columns
+    )
+    if not should_materialize:
         return dataframe
 
     prepared = dataframe.copy()
-    prepared[ID_COL_AUTO_FILL] = pd.RangeIndex(start=1, stop=len(prepared) + 1, step=1)
+    prepared[identifier_column] = pd.RangeIndex(start=1, stop=len(prepared) + 1, step=1)
     return prepared
 
 
@@ -295,7 +305,7 @@ def _ensure_draft_matches_dataframe(
         )
 
     identifier_column = str(draft_causal_spec.id_col).strip()
-    if identifier_column == ID_COL_AUTO_FILL and not require_generated_identifier:
+    if _is_auto_identifier_column(identifier_column) and not require_generated_identifier:
         return
     if identifier_column in dataframe.columns:
         return
@@ -304,6 +314,11 @@ def _ensure_draft_matches_dataframe(
         f'{context} does not satisfy draft causal spec: [FAIL] Identifier column '
         f'"{identifier_column}" not found in dataset'
     )
+
+
+def _is_auto_identifier_column(identifier_column: str) -> bool:
+    normalized = identifier_column.strip().lower()
+    return normalized in {ID_COL_AUTO_FILL, "__autoid__"}
 
 
 def _build_manipulation_instructions(
