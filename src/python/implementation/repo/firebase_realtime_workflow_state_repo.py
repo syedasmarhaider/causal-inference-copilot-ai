@@ -732,6 +732,13 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _coerce_float(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _push_id() -> str:
         """Generate a time-sortable key for RTDB message entries."""
         ts_ms = int(time.time() * 1000)
