@@ -148,6 +148,8 @@ Rules
 - Explain which subgroup(s) were compared.
 - Highlight direction, approximate magnitude, and uncertainty.
 - If multiple groups exist, compare them directly.
+- You cannot write code
+- Your response should be very comprehensive covering all aspects and groups
 - If estimates vary across groups, explain the heterogeneity briefly.
 - If uncertainty is wide or intervals include zero, say so clearly.
 - If `non_effect_modifier_filter_columns` is non-empty, treat those as cohort-filter columns only; the effect estimate still comes from the confirmed `effect_modifier_columns`.

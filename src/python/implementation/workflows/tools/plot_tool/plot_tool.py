@@ -146,7 +146,7 @@ class PlotTool(Tool):
             schema=plan_schema,
             system_prompt=PLOT_SPECS_SYSTEM_PROMPT,
             user_prompt=user_prompt,
-            config=LLMConfig(model=self.model, temperature=0.0, top_p=1.0),
+            config=LLMConfig(model=self.model, temperature=0.5),
             history=None,
             max_attempts=max_attempts,
         )

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from collections import defaultdict, deque
+from dataclasses import dataclass
 from typing import Any, Literal, Sequence
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
 DEFAULT_MAX_DETAILED_ROW_CHANGES = 500
+MAX_UNKEYED_ALIGNMENT_MATRIX_CELLS = 200_000
 
 
 class RowRef(BaseModel):
@@ -51,8 +54,9 @@ class RowChange(BaseModel):
     cell_changes: list[CellChange] = Field(
         default_factory=list,
         description=(
-            "Only changed cells for this matched row update. "
-            "Unchanged cells are omitted."
+            "Only changed cells for this row-level change. "
+            "For updates, unchanged cells are omitted. "
+            "For inserts and deletes, non-null row values are emitted by default."
         ),
     )
 
@@ -91,63 +95,11 @@ class DiffSummary(BaseModel):
     deleted_rows: int = Field(description="Count of rows removed from the previous dataset.")
     updated_rows: int = Field(description="Count of matched rows with one or more changed cells.")
     total_changed_rows: int = Field(description="Total count of inserted, deleted, and updated rows.")
-    total_changed_cells: int = Field(description="Total count of emitted cell-level changes across all row changes.")
+    total_changed_cells: int = Field(description="Total count of cell-level changes across the full diff.")
 
 
 class DataFrameDiff(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid",
-        json_schema_extra={
-            "example": {
-                "identity_mode": "key",
-                "key_columns": ["patient_id"],
-                "schema_diff": {
-                    "columns_added": ["bmi"],
-                    "columns_removed": [],
-                    "column_type_changes": [
-                        {
-                            "column": "age",
-                            "old_dtype": "int64",
-                            "new_dtype": "float64",
-                        }
-                    ],
-                },
-                "row_changes": [
-                    {
-                        "row_ref": {
-                            "mode": "key",
-                            "key": {"patient_id": 101},
-                            "position": None,
-                        },
-                        "op": "updated",
-                        "cell_changes": [
-                            {
-                                "column": "age",
-                                "op": "modified",
-                                "old_value": 44,
-                                "new_value": 45,
-                            },
-                            {
-                                "column": "bmi",
-                                "op": "added",
-                                "old_value": None,
-                                "new_value": 27.1,
-                            },
-                        ],
-                    }
-                ],
-                "summary": {
-                    "old_row_count": 100,
-                    "new_row_count": 101,
-                    "inserted_rows": 1,
-                    "deleted_rows": 0,
-                    "updated_rows": 1,
-                    "total_changed_rows": 2,
-                    "total_changed_cells": 3,
-                },
-            }
-        },
-    )
+    model_config = ConfigDict(extra="forbid")
 
     identity_mode: Literal["key", "position"] = Field(
         description="How rows were matched across versions. `key` uses `key_columns`; `position` compares rows by zero-based index."
@@ -161,14 +113,20 @@ class DataFrameDiff(BaseModel):
     )
     row_changes: list[RowChange] = Field(
         description=(
-            "Detailed row-level updates for matched rows with changed cells. "
-            "Inserted and deleted row counts are reflected in `summary`; unchanged rows are omitted. "
-            "For large diffs this list may be truncated, while `summary` still reflects full counts."
+            "Detailed row-level changes. Unchanged rows are omitted. "
+            "For large diffs this list may be truncated, while `summary` still reflects the full diff."
         )
     )
     summary: DiffSummary = Field(
         description="Compact counts summarizing the diff result."
     )
+
+
+@dataclass(frozen=True)
+class _IndexedRow:
+    position: int
+    row: pd.Series
+    signature: tuple[Any, ...]
 
 
 def diff_dataframes(
@@ -182,19 +140,27 @@ def diff_dataframes(
 
     Modes:
     - keyed mode: if key_columns is provided
-    - positional mode: if key_columns is None or empty
+    - schema-compatible no-key mode: if key_columns is None or empty
 
     Rules:
     - older_df is the baseline / source of truth
     - unchanged rows are omitted
     - equal nulls are treated as unchanged
     - in keyed mode, changed keys are treated as delete + insert
+    - in no-key mode, exact full-row matches are cancelled first before update inference
     """
+    if max_detailed_row_changes is not None and max_detailed_row_changes < 0:
+        raise ValueError("max_detailed_row_changes must be >= 0 or None.")
 
     old = older_df.copy()
     new = newer_df.copy()
 
+    _assert_unique_columns(old, "older_df")
+    _assert_unique_columns(new, "newer_df")
+
     resolved_key_columns = list(key_columns or [])
+    _assert_unique_key_columns(resolved_key_columns)
+
     identity_mode: Literal["key", "position"] = (
         "key" if resolved_key_columns else "position"
     )
@@ -206,19 +172,17 @@ def diff_dataframes(
             old=old,
             new=new,
             key_columns=resolved_key_columns,
-            schema_diff=schema_diff,
         )
     else:
-        row_changes = _diff_by_position(
+        row_changes = _diff_without_keys(
             old=old,
             new=new,
-            schema_diff=schema_diff,
         )
 
-    inserted_rows = sum(1 for r in row_changes if r.op == "inserted")
-    deleted_rows = sum(1 for r in row_changes if r.op == "deleted")
-    updated_rows = sum(1 for r in row_changes if r.op == "updated")
-    total_changed_cells = sum(len(r.cell_changes) for r in row_changes)
+    inserted_rows = sum(1 for row_change in row_changes if row_change.op == "inserted")
+    deleted_rows = sum(1 for row_change in row_changes if row_change.op == "deleted")
+    updated_rows = sum(1 for row_change in row_changes if row_change.op == "updated")
+    total_changed_cells = sum(len(row_change.cell_changes) for row_change in row_changes)
 
     summary = DiffSummary(
         old_row_count=len(old),
@@ -231,7 +195,7 @@ def diff_dataframes(
     )
 
     detailed_row_changes = _compact_row_changes(
-        row_changes,
+        row_changes=row_changes,
         max_items=max_detailed_row_changes,
     )
 
@@ -244,6 +208,28 @@ def diff_dataframes(
     )
 
 
+def _assert_unique_columns(df: pd.DataFrame, df_name: str) -> None:
+    if df.columns.has_duplicates:
+        duplicate_columns = list(df.columns[df.columns.duplicated(keep=False)])
+        raise ValueError(
+            f"{df_name} contains duplicate column names, which are not supported by this diff model. "
+            f"Duplicate columns: {duplicate_columns}"
+        )
+
+
+def _assert_unique_key_columns(key_columns: Sequence[str]) -> None:
+    seen: set[str] = set()
+    duplicates: list[str] = []
+
+    for column in key_columns:
+        if column in seen:
+            duplicates.append(column)
+        seen.add(column)
+
+    if duplicates:
+        raise ValueError(f"key_columns contains duplicates: {duplicates}")
+
+
 def _build_schema_diff(old: pd.DataFrame, new: pd.DataFrame) -> SchemaDiff:
     old_cols = list(old.columns)
     new_cols = list(new.columns)
@@ -251,19 +237,19 @@ def _build_schema_diff(old: pd.DataFrame, new: pd.DataFrame) -> SchemaDiff:
     old_set = set(old_cols)
     new_set = set(new_cols)
 
-    columns_added = [c for c in new_cols if c not in old_set]
-    columns_removed = [c for c in old_cols if c not in new_set]
+    columns_added = [str(column) for column in new_cols if column not in old_set]
+    columns_removed = [str(column) for column in old_cols if column not in new_set]
 
-    shared = [c for c in old_cols if c in new_set]
+    shared_columns = [column for column in old_cols if column in new_set]
     column_type_changes: list[ColumnTypeChange] = []
 
-    for col in shared:
-        old_dtype = str(old[col].dtype)
-        new_dtype = str(new[col].dtype)
+    for column in shared_columns:
+        old_dtype = str(old[column].dtype)
+        new_dtype = str(new[column].dtype)
         if old_dtype != new_dtype:
             column_type_changes.append(
                 ColumnTypeChange(
-                    column=col,
+                    column=str(column),
                     old_dtype=old_dtype,
                     new_dtype=new_dtype,
                 )
@@ -280,13 +266,12 @@ def _diff_keyed(
     old: pd.DataFrame,
     new: pd.DataFrame,
     key_columns: list[str],
-    schema_diff: SchemaDiff,
 ) -> list[RowChange]:
     if not key_columns:
         raise ValueError("key_columns must be non-empty in keyed mode.")
 
-    missing_in_old = [c for c in key_columns if c not in old.columns]
-    missing_in_new = [c for c in key_columns if c not in new.columns]
+    missing_in_old = [column for column in key_columns if column not in old.columns]
+    missing_in_new = [column for column in key_columns if column not in new.columns]
 
     if missing_in_old:
         raise ValueError(f"Missing key columns in older_df: {missing_in_old}")
@@ -301,16 +286,16 @@ def _diff_keyed(
     old_map = _build_key_to_row_map(old, key_columns)
     new_map = _build_key_to_row_map(new, key_columns)
 
-    old_keys = set(old_map.keys())
-    new_keys = set(new_map.keys())
+    old_key_set = set(old_map.keys())
+    new_key_set = set(new_map.keys())
 
-    inserted_keys = new_keys - old_keys
-    deleted_keys = old_keys - new_keys
-    shared_keys = old_keys & new_keys
+    deleted_keys = [key for key in old_map.keys() if key not in new_key_set]
+    inserted_keys = [key for key in new_map.keys() if key not in old_key_set]
+    shared_keys = [key for key in new_map.keys() if key in old_key_set]
 
     row_changes: list[RowChange] = []
 
-    for key in sorted(deleted_keys):
+    for key in deleted_keys:
         old_row = old_map[key]
         row_changes.append(
             RowChange(
@@ -320,7 +305,7 @@ def _diff_keyed(
             )
         )
 
-    for key in sorted(inserted_keys):
+    for key in inserted_keys:
         new_row = new_map[key]
         row_changes.append(
             RowChange(
@@ -330,14 +315,13 @@ def _diff_keyed(
             )
         )
 
-    for key in sorted(shared_keys):
+    for key in shared_keys:
         old_row = old_map[key]
         new_row = new_map[key]
 
         cell_changes = _build_cell_changes_for_matched_rows(
             old_row=old_row,
             new_row=new_row,
-            schema_diff=schema_diff,
         )
 
         if cell_changes:
@@ -352,62 +336,355 @@ def _diff_keyed(
     return row_changes
 
 
-def _diff_by_position(
+def _diff_without_keys(
     old: pd.DataFrame,
     new: pd.DataFrame,
-    schema_diff: SchemaDiff,
 ) -> list[RowChange]:
+    """
+    No-key diff algorithm.
+
+    Important:
+    - Public schema still uses `identity_mode="position"` for compatibility.
+    - Internally, position is NOT treated as row identity.
+    - Exact full-row matches are cancelled first.
+    - Leftover unmatched rows are aligned conservatively to infer updates.
+    """
     old_reset = old.reset_index(drop=True)
     new_reset = new.reset_index(drop=True)
 
-    row_changes: list[RowChange] = []
-    max_len = max(len(old_reset), len(new_reset))
+    canonical_columns = _ordered_union_columns(old_reset.columns, new_reset.columns)
 
-    for pos in range(max_len):
-        has_old = pos < len(old_reset)
-        has_new = pos < len(new_reset)
+    old_rows = _build_indexed_rows(old_reset, canonical_columns)
+    new_rows = _build_indexed_rows(new_reset, canonical_columns)
 
-        if has_old and not has_new:
-            old_row = old_reset.iloc[pos]
-            row_changes.append(
-                RowChange(
-                    row_ref=RowRef(mode="position", position=pos),
-                    op="deleted",
-                    cell_changes=_build_deleted_row_cell_changes(old_row),
-                )
+    matched_old_positions, matched_new_positions = _match_exact_rows_by_signature(
+        old_rows=old_rows,
+        new_rows=new_rows,
+    )
+
+    remaining_old = [
+        indexed_row
+        for indexed_row in old_rows
+        if indexed_row.position not in matched_old_positions
+    ]
+    remaining_new = [
+        indexed_row
+        for indexed_row in new_rows
+        if indexed_row.position not in matched_new_positions
+    ]
+
+    return _align_unmatched_rows_without_keys(
+        remaining_old=remaining_old,
+        remaining_new=remaining_new,
+        canonical_columns=canonical_columns,
+    )
+
+
+def _ordered_union_columns(
+    old_columns: Sequence[Any],
+    new_columns: Sequence[Any],
+) -> list[Any]:
+    result: list[Any] = list(old_columns)
+    old_set = set(old_columns)
+
+    for column in new_columns:
+        if column not in old_set:
+            result.append(column)
+
+    return result
+
+
+def _build_indexed_rows(
+    df: pd.DataFrame,
+    canonical_columns: Sequence[Any],
+) -> list[_IndexedRow]:
+    indexed_rows: list[_IndexedRow] = []
+
+    for position, (_, row) in enumerate(df.iterrows()):
+        indexed_rows.append(
+            _IndexedRow(
+                position=position,
+                row=row,
+                signature=_build_row_signature(row, canonical_columns),
             )
-            continue
-
-        if has_new and not has_old:
-            new_row = new_reset.iloc[pos]
-            row_changes.append(
-                RowChange(
-                    row_ref=RowRef(mode="position", position=pos),
-                    op="inserted",
-                    cell_changes=_build_inserted_row_cell_changes(new_row),
-                )
-            )
-            continue
-
-        old_row = old_reset.iloc[pos]
-        new_row = new_reset.iloc[pos]
-
-        cell_changes = _build_cell_changes_for_matched_rows(
-            old_row=old_row,
-            new_row=new_row,
-            schema_diff=schema_diff,
         )
 
-        if cell_changes:
+    return indexed_rows
+
+
+def _build_row_signature(
+    row: pd.Series,
+    canonical_columns: Sequence[Any],
+) -> tuple[Any, ...]:
+    return tuple(
+        _freeze_for_signature(_get_row_value_or_none(row, column))
+        for column in canonical_columns
+    )
+
+
+def _freeze_for_signature(value: Any) -> Any:
+    normalized = _normalize_scalar(value)
+
+    if isinstance(normalized, list):
+        return tuple(_freeze_for_signature(item) for item in normalized)
+
+    if isinstance(normalized, tuple):
+        return tuple(_freeze_for_signature(item) for item in normalized)
+
+    if isinstance(normalized, dict):
+        return tuple(
+            (str(key), _freeze_for_signature(val))
+            for key, val in sorted(normalized.items(), key=lambda item: str(item[0]))
+        )
+
+    if isinstance(normalized, set):
+        return tuple(sorted(_freeze_for_signature(item) for item in normalized))
+
+    try:
+        hash(normalized)
+        return normalized
+    except Exception:
+        return repr(normalized)
+
+
+def _match_exact_rows_by_signature(
+    old_rows: Sequence[_IndexedRow],
+    new_rows: Sequence[_IndexedRow],
+) -> tuple[set[int], set[int]]:
+    old_buckets: dict[tuple[Any, ...], deque[_IndexedRow]] = defaultdict(deque)
+    new_buckets: dict[tuple[Any, ...], deque[_IndexedRow]] = defaultdict(deque)
+
+    for indexed_row in old_rows:
+        old_buckets[indexed_row.signature].append(indexed_row)
+
+    for indexed_row in new_rows:
+        new_buckets[indexed_row.signature].append(indexed_row)
+
+    matched_old_positions: set[int] = set()
+    matched_new_positions: set[int] = set()
+
+    shared_signatures = set(old_buckets.keys()) & set(new_buckets.keys())
+
+    for signature in shared_signatures:
+        old_queue = old_buckets[signature]
+        new_queue = new_buckets[signature]
+
+        while old_queue and new_queue:
+            old_item = old_queue.popleft()
+            new_item = new_queue.popleft()
+            matched_old_positions.add(old_item.position)
+            matched_new_positions.add(new_item.position)
+
+    return matched_old_positions, matched_new_positions
+
+
+def _align_unmatched_rows_without_keys(
+    remaining_old: Sequence[_IndexedRow],
+    remaining_new: Sequence[_IndexedRow],
+    canonical_columns: Sequence[Any],
+) -> list[RowChange]:
+    if not remaining_old and not remaining_new:
+        return []
+
+    pair_matrix_cells = len(remaining_old) * len(remaining_new)
+    if pair_matrix_cells > MAX_UNKEYED_ALIGNMENT_MATRIX_CELLS:
+        return _emit_strict_unmatched_changes(
+            remaining_old=remaining_old,
+            remaining_new=remaining_new,
+        )
+
+    update_eligibility_cache: dict[tuple[int, int], bool] = {}
+
+    def can_update(i: int, j: int) -> bool:
+        cache_key = (i, j)
+        if cache_key not in update_eligibility_cache:
+            update_eligibility_cache[cache_key] = _rows_can_be_treated_as_update(
+                old_row=remaining_old[i].row,
+                new_row=remaining_new[j].row,
+                canonical_columns=canonical_columns,
+            )
+        return update_eligibility_cache[cache_key]
+
+    old_count = len(remaining_old)
+    new_count = len(remaining_new)
+
+    dp: list[list[int]] = [[0] * (new_count + 1) for _ in range(old_count + 1)]
+    choice: list[list[str | None]] = [[None] * (new_count + 1) for _ in range(old_count + 1)]
+
+    for i in range(old_count, -1, -1):
+        for j in range(new_count, -1, -1):
+            if i == old_count and j == new_count:
+                dp[i][j] = 0
+                continue
+
+            if i == old_count:
+                dp[i][j] = new_count - j
+                choice[i][j] = "insert"
+                continue
+
+            if j == new_count:
+                dp[i][j] = old_count - i
+                choice[i][j] = "delete"
+                continue
+
+            best_cost = 1 + dp[i + 1][j]
+            best_choice = "delete"
+
+            insert_cost = 1 + dp[i][j + 1]
+            if insert_cost < best_cost:
+                best_cost = insert_cost
+                best_choice = "insert"
+
+            if can_update(i, j):
+                update_cost = 1 + dp[i + 1][j + 1]
+                if update_cost < best_cost or (update_cost == best_cost and best_choice != "update"):
+                    best_cost = update_cost
+                    best_choice = "update"
+
+            dp[i][j] = best_cost
+            choice[i][j] = best_choice
+
+    row_changes: list[RowChange] = []
+    i = 0
+    j = 0
+
+    while i < old_count or j < new_count:
+        if i == old_count:
+            new_item = remaining_new[j]
             row_changes.append(
                 RowChange(
-                    row_ref=RowRef(mode="position", position=pos),
-                    op="updated",
-                    cell_changes=cell_changes,
+                    row_ref=RowRef(mode="position", position=new_item.position),
+                    op="inserted",
+                    cell_changes=_build_inserted_row_cell_changes(new_item.row),
                 )
             )
+            j += 1
+            continue
+
+        if j == new_count:
+            old_item = remaining_old[i]
+            row_changes.append(
+                RowChange(
+                    row_ref=RowRef(mode="position", position=old_item.position),
+                    op="deleted",
+                    cell_changes=_build_deleted_row_cell_changes(old_item.row),
+                )
+            )
+            i += 1
+            continue
+
+        step = choice[i][j]
+
+        if step == "update":
+            old_item = remaining_old[i]
+            new_item = remaining_new[j]
+
+            cell_changes = _build_cell_changes_for_matched_rows(
+                old_row=old_item.row,
+                new_row=new_item.row,
+            )
+
+            if cell_changes:
+                row_changes.append(
+                    RowChange(
+                        row_ref=RowRef(mode="position", position=old_item.position),
+                        op="updated",
+                        cell_changes=cell_changes,
+                    )
+                )
+
+            i += 1
+            j += 1
+            continue
+
+        if step == "insert":
+            new_item = remaining_new[j]
+            row_changes.append(
+                RowChange(
+                    row_ref=RowRef(mode="position", position=new_item.position),
+                    op="inserted",
+                    cell_changes=_build_inserted_row_cell_changes(new_item.row),
+                )
+            )
+            j += 1
+            continue
+
+        old_item = remaining_old[i]
+        row_changes.append(
+            RowChange(
+                row_ref=RowRef(mode="position", position=old_item.position),
+                op="deleted",
+                cell_changes=_build_deleted_row_cell_changes(old_item.row),
+            )
+        )
+        i += 1
 
     return row_changes
+
+
+def _emit_strict_unmatched_changes(
+    remaining_old: Sequence[_IndexedRow],
+    remaining_new: Sequence[_IndexedRow],
+) -> list[RowChange]:
+    row_changes: list[RowChange] = []
+
+    for old_item in remaining_old:
+        row_changes.append(
+            RowChange(
+                row_ref=RowRef(mode="position", position=old_item.position),
+                op="deleted",
+                cell_changes=_build_deleted_row_cell_changes(old_item.row),
+            )
+        )
+
+    for new_item in remaining_new:
+        row_changes.append(
+            RowChange(
+                row_ref=RowRef(mode="position", position=new_item.position),
+                op="inserted",
+                cell_changes=_build_inserted_row_cell_changes(new_item.row),
+            )
+        )
+
+    return row_changes
+
+
+def _rows_can_be_treated_as_update(
+    old_row: pd.Series,
+    new_row: pd.Series,
+    canonical_columns: Sequence[Any],
+) -> bool:
+    """
+    Conservative heuristic for no-key update inference.
+
+    Exact full-row matches were already removed.
+    We only infer an update when there is enough shared evidence between rows.
+    """
+    matches = 0
+    compared = 0
+
+    for column in canonical_columns:
+        old_value = _get_row_value_or_none(old_row, column)
+        new_value = _get_row_value_or_none(new_row, column)
+
+        if _is_null_like(old_value) and _is_null_like(new_value):
+            continue
+
+        compared += 1
+        if _values_equal(old_value, new_value):
+            matches += 1
+
+    if compared <= 1:
+        return False
+
+    if matches == 0:
+        return False
+
+    if compared == 2:
+        return matches >= 1
+
+    similarity = matches / compared
+    return matches >= 2 and similarity >= 0.5
 
 
 def _build_key_to_row_map(
@@ -415,9 +692,11 @@ def _build_key_to_row_map(
     key_columns: Sequence[str],
 ) -> dict[tuple[Any, ...], pd.Series]:
     result: dict[tuple[Any, ...], pd.Series] = {}
+
     for _, row in df.iterrows():
-        key = tuple(row[col] for col in key_columns)
+        key = tuple(row[column] for column in key_columns)
         result[key] = row
+
     return result
 
 
@@ -426,8 +705,8 @@ def _key_tuple_to_dict(
     key_tuple: tuple[Any, ...],
 ) -> dict[str, Any]:
     return {
-        col: _normalize_scalar(value)
-        for col, value in zip(key_columns, key_tuple, strict=True)
+        column: _normalize_scalar(value)
+        for column, value in zip(key_columns, key_tuple, strict=True)
     }
 
 
@@ -436,12 +715,12 @@ def _assert_no_duplicate_keys(
     key_columns: Sequence[str],
     df_name: str,
 ) -> None:
-    dup_mask = df.duplicated(subset=list(key_columns), keep=False)
-    if dup_mask.any():
-        duplicate_examples = df.loc[dup_mask, list(key_columns)].head(5).to_dict("records")
+    duplicate_mask = df.duplicated(subset=list(key_columns), keep=False)
+    if duplicate_mask.any():
+        examples = df.loc[duplicate_mask, list(key_columns)].head(5).to_dict("records")
         raise ValueError(
             f"{df_name} contains duplicate keys for columns {list(key_columns)}. "
-            f"Examples: {duplicate_examples}"
+            f"Examples: {examples}"
         )
 
 
@@ -461,97 +740,97 @@ def _assert_no_null_keys(
 
 def _build_deleted_row_cell_changes(old_row: pd.Series) -> list[CellChange]:
     changes: list[CellChange] = []
-    for col in old_row.index:
-        old_value = old_row[col]
+
+    for column in old_row.index:
+        old_value = old_row[column]
         if _is_null_like(old_value):
             continue
+
         changes.append(
             CellChange(
-                column=str(col),
+                column=str(column),
                 op="removed",
                 old_value=_normalize_scalar(old_value),
                 new_value=None,
             )
         )
+
     return changes
 
 
 def _build_inserted_row_cell_changes(new_row: pd.Series) -> list[CellChange]:
     changes: list[CellChange] = []
-    for col in new_row.index:
-        new_value = new_row[col]
+
+    for column in new_row.index:
+        new_value = new_row[column]
         if _is_null_like(new_value):
             continue
+
         changes.append(
             CellChange(
-                column=str(col),
+                column=str(column),
                 op="added",
                 old_value=None,
                 new_value=_normalize_scalar(new_value),
             )
         )
+
     return changes
 
 
 def _build_cell_changes_for_matched_rows(
     old_row: pd.Series,
     new_row: pd.Series,
-    schema_diff: SchemaDiff,
 ) -> list[CellChange]:
     changes: list[CellChange] = []
 
-    old_cols = set(map(str, old_row.index))
-    new_cols = set(map(str, new_row.index))
+    old_columns = list(old_row.index)
+    new_columns = list(new_row.index)
 
-    shared_cols = sorted(old_cols & new_cols)
-    added_cols = schema_diff.columns_added
-    removed_cols = schema_diff.columns_removed
+    old_column_set = set(old_columns)
+    new_column_set = set(new_columns)
 
-    for col in shared_cols:
-        old_value = old_row[col]
-        new_value = new_row[col]
+    shared_columns = [column for column in old_columns if column in new_column_set]
+    added_columns = [column for column in new_columns if column not in old_column_set]
+    removed_columns = [column for column in old_columns if column not in new_column_set]
+
+    for column in shared_columns:
+        old_value = old_row[column]
+        new_value = new_row[column]
 
         if not _values_equal(old_value, new_value):
             changes.append(
                 CellChange(
-                    column=col,
+                    column=str(column),
                     op="modified",
                     old_value=_normalize_scalar(old_value),
                     new_value=_normalize_scalar(new_value),
                 )
             )
 
-    for col in added_cols:
-        if col in new_cols:
-            new_value = new_row[col]
-            if not _is_null_like(new_value):
-                changes.append(
-                    CellChange(
-                        column=col,
-                        op="added",
-                        old_value=None,
-                        new_value=_normalize_scalar(new_value),
-                    )
+    for column in added_columns:
+        new_value = new_row[column]
+        if not _is_null_like(new_value):
+            changes.append(
+                CellChange(
+                    column=str(column),
+                    op="added",
+                    old_value=None,
+                    new_value=_normalize_scalar(new_value),
                 )
-            else:
-                # if you want every added column emitted even when null, remove this condition
-                pass
+            )
 
-    for col in removed_cols:
-        if col in old_cols:
-            old_value = old_row[col]
-            if not _is_null_like(old_value):
-                changes.append(
-                    CellChange(
-                        column=col,
-                        op="removed",
-                        old_value=_normalize_scalar(old_value),
-                        new_value=None,
-                    )
+    for column in removed_columns:
+        old_value = old_row[column]
+        if not _is_null_like(old_value):
+            changes.append(
+                CellChange(
+                    column=str(column),
+                    op="removed",
+                    old_value=_normalize_scalar(old_value),
+                    new_value=None,
                 )
-            else:
-                # if you want every removed column emitted even when null, remove this condition
-                pass
+            )
 
     return changes
 
@@ -564,28 +843,29 @@ def _compact_row_changes(
     compacted: list[RowChange] = []
 
     for row_change in row_changes:
-        if row_change.op != "updated":
-            continue
+        normalized_row_change = row_change
 
-        compact_cell_changes: list[CellChange] = []
-        for cell_change in row_change.cell_changes:
-            if cell_change.op == "modified" and _values_equal(
-                cell_change.old_value,
-                cell_change.new_value,
-            ):
+        if row_change.op == "updated":
+            compact_cell_changes: list[CellChange] = []
+
+            for cell_change in row_change.cell_changes:
+                if cell_change.op == "modified" and _values_equal(
+                    cell_change.old_value,
+                    cell_change.new_value,
+                ):
+                    continue
+                compact_cell_changes.append(cell_change)
+
+            if not compact_cell_changes:
                 continue
-            compact_cell_changes.append(cell_change)
 
-        if not compact_cell_changes:
-            continue
-
-        compacted.append(
-            RowChange(
+            normalized_row_change = RowChange(
                 row_ref=row_change.row_ref,
                 op=row_change.op,
                 cell_changes=compact_cell_changes,
             )
-        )
+
+        compacted.append(normalized_row_change)
 
         if max_items is not None and len(compacted) >= max_items:
             break
@@ -593,22 +873,51 @@ def _compact_row_changes(
     return compacted
 
 
+def _get_row_value_or_none(row: pd.Series, column: Any) -> Any:
+    if column in row.index:
+        return row[column]
+    return None
+
+
 def _values_equal(a: Any, b: Any) -> bool:
     if _is_null_like(a) and _is_null_like(b):
         return True
-    return a == b
+
+    if _is_null_like(a) or _is_null_like(b):
+        return False
+
+    try:
+        return _freeze_for_signature(a) == _freeze_for_signature(b)
+    except Exception:
+        return False
 
 
 def _is_null_like(value: Any) -> bool:
-    return pd.isna(value)
+    try:
+        result = pd.isna(value)
+    except Exception:
+        return False
+
+    if isinstance(result, bool):
+        return result
+
+    if hasattr(result, "item"):
+        try:
+            return bool(result.item())
+        except Exception:
+            return False
+
+    return False
 
 
 def _normalize_scalar(value: Any) -> Any:
     if _is_null_like(value):
         return None
+
     if hasattr(value, "item"):
         try:
             return value.item()
         except Exception:
             return value
-    return value    
+
+    return value
