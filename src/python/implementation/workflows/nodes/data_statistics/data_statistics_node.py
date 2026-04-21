@@ -471,7 +471,7 @@ class DataStatisticsNode(Node):
                 user_id=user_id,
                 conversation_id=conversation_id,
                 dataset_id=saved_id,
-                json_data=json.dumps(spec, ensure_ascii=False),
+                json_data=json.dumps(spec, ensure_ascii=False, allow_nan=False),
                 overwrite=True,
             )
             saved_refs.append(
@@ -540,7 +540,7 @@ class DataStatisticsNode(Node):
                     user_id=user_id,
                     conversation_id=conversation_id,
                     dataset_id=saved_id,
-                    json_data=json.dumps(spec, ensure_ascii=False),
+                    json_data=json.dumps(spec, ensure_ascii=False, allow_nan=False),
                     overwrite=True,
                 )
                 chart_refs.append(

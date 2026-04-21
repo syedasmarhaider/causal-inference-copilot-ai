@@ -869,7 +869,7 @@ class CausalInferenceNode(Node):
                 user_id=user_id,
                 conversation_id=conversation_id,
                 dataset_id=artifact_id,
-                json_data=json.dumps(spec, ensure_ascii=False),
+                json_data=json.dumps(spec, ensure_ascii=False, allow_nan=False),
                 overwrite=True,
             )
             artifact_refs.append(

@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -527,6 +528,47 @@ def test_generate_specs_warns_threshold_but_injects_all_values() -> None:
     )
 
     assert specs[0]["data"]["values"] == [{"x": 1}, {"x": 2}]
+
+
+def test_generate_specs_sanitizes_non_finite_values_for_strict_json() -> None:
+    llm = _FakeLLMService(
+        plans=[
+            _plan_payload(
+                charts=[
+                    {
+                        "spec": {
+                            "mark": "point",
+                            "encoding": {
+                                "x": {"field": "value", "type": "quantitative"},
+                                "color": {"field": "label", "type": "nominal"},
+                            },
+                        }
+                    }
+                ]
+            )
+        ]
+    )
+    tool = PlotTool(llm=llm)
+
+    df = pd.DataFrame(
+        {
+            "value": [1.0, np.nan, np.inf, -np.inf],
+            "label": ["ok", pd.NA, "high", "low"],
+        }
+    )
+    specs = tool.generate_specs(
+        dataframe=df,
+        data_summary=_summary_model(_numeric_profile("value"), _categorical_profile("label")),
+        user_intent="plot value by label",
+    )
+
+    assert specs[0]["data"]["values"] == [
+        {"value": 1.0, "label": "ok"},
+        {"value": None, "label": None},
+        {"value": None, "label": "high"},
+        {"value": None, "label": "low"},
+    ]
+    assert json.dumps(specs[0], ensure_ascii=False, allow_nan=False)
 
 
 def test_generate_specs_rejects_quantitative_encoding_when_values_are_not_numeric() -> None:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, ClassVar
 
+import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -339,8 +341,8 @@ class PlotTool(Tool):
             if pd.api.types.is_datetime64_any_dtype(selected_df[col]):
                 selected_df[col] = selected_df[col].dt.strftime("%Y-%m-%dT%H:%M:%S")
 
-        selected_df = selected_df.where(pd.notnull(selected_df), None)
-        return selected_df.to_dict(orient="records")
+        values = selected_df.to_dict(orient="records")
+        return [{key: _json_safe_value(value) for key, value in row.items()} for row in values]
 
 
 def _validate_template_spec(*, spec: dict[str, Any], chart_index: int) -> None:
@@ -437,3 +439,20 @@ def _validate_summary_headers_against_dataframe(
     ]
     if missing:
         raise ValueError(f"data_summary references unknown dataframe headers: {missing}")
+
+
+def _json_safe_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, np.generic):
+        return _json_safe_value(value.item())
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    return value
