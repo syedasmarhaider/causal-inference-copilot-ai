@@ -87,6 +87,6 @@ register_exception_handlers(app)
 
 
 if __name__ == "__main__":
-    import uvicorn
+    from python.adapters.api.server import main
 
-    uvicorn.run("python.adapters.api.app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+    main()

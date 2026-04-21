@@ -131,7 +131,7 @@ run-api-local: venv
 
 .PHONY: run-api-prod
 run-api-prod: venv
-	@$(PYBIN)/uvicorn $(API_APP) --host $(API_HOST) --port $(API_PORT)
+	@API_HOST="$(API_HOST)" API_PORT="$(API_PORT)" $(PYTHON) -m python.adapters.api.server
 
 .PHONY: docker-image
 docker-image:

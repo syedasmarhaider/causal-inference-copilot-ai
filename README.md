@@ -268,10 +268,16 @@ Defined in `.env.example`:
 - `GCS_MODELS_UPLOAD_TIMEOUT_SECONDS`
 - `GCS_MODELS_UPLOAD_RETRY_TIMEOUT_SECONDS`
 - `GCS_MODELS_UPLOAD_CHUNK_SIZE_BYTES`
+- `API_HOST`
+- `API_PORT`
+- `WEB_CONCURRENCY`
 
 ## Docker and Release
 
 - Container listens on `PORT` (default `8080`)
+- Production startup uses a dedicated Python bootstrap module instead of `sh -c ...`
+- Worker count defaults to the CPUs visible to the container and can be overridden with `WEB_CONCURRENCY`
+- Current Terraform default for Cloud Run CPU is `1`, so you must raise `cloud_run_cpu` above `1` to actually use multiple cores
 - Build locally with `make docker-build`
 - Push with `make docker-push`
 - CI release pipeline file: `.github/workflows/release-image.yml`

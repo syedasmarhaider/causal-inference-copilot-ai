@@ -373,6 +373,7 @@ class ModelSelectionNode(Node):
                 "assistant_message": (
                     f"Confirmed model selection: {selected_recommendation.display_label}. "
                     f"{decision.assistant_message}"
+                    f" Training will take some time so be with me I will let you know once it\'s done.",
                 ),
                 "system_message": None,
                 "error_message": None,
