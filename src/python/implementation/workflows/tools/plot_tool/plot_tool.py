@@ -51,6 +51,7 @@ class PlotSpecsPlan(BaseModel):
             raise ValueError("charts must contain at least one chart spec")
 
         allowed_field_names = type(self).ALLOWED_FIELD_NAMES
+        field_kinds = type(self).FIELD_KINDS
         if allowed_field_names is None:
             return self
 
@@ -64,6 +65,11 @@ class PlotSpecsPlan(BaseModel):
             _validate_fields_exist(
                 used_fields=_collect_field_names(chart.spec),
                 dataframe_columns=allowed_field_names,
+                chart_index=idx,
+            )
+            _validate_field_types_against_summary(
+                spec=chart.spec,
+                field_kinds=field_kinds,
                 chart_index=idx,
             )
         return self
@@ -277,19 +283,17 @@ class PlotTool(Tool):
 
         if normalized_type == "quantitative":
             if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in observed):
-                log.warning(
-                    "chart field declared quantitative but values are not all numeric — chart may still render",
-                    field=field_name,
-                    chart_index=chart_index,
+                raise ValueError(
+                    f"chart {chart_index} field '{field_name}' declared quantitative but "
+                    "values are not all numeric"
                 )
             return
 
         if normalized_type == "temporal":
             if not all(self._is_temporal_value(v) for v in observed):
-                log.warning(
-                    "chart field declared temporal but values are not all datetime-like — chart may still render",
-                    field=field_name,
-                    chart_index=chart_index,
+                raise ValueError(
+                    f"chart {chart_index} field '{field_name}' declared temporal but "
+                    "values are not all datetime-like"
                 )
             return
 
@@ -333,7 +337,9 @@ class PlotTool(Tool):
                     "chart spec references fields not found in dataframe — falling back to all columns",
                     missing_fields=missing_fields,
                 )
-            selected_df = records_df[existing_fields].copy() if existing_fields else records_df.copy()
+            selected_df = (
+                records_df[existing_fields].copy() if existing_fields else records_df.copy()
+            )
         else:
             selected_df = records_df.copy()
 
@@ -395,6 +401,34 @@ def _validate_fields_exist(
     missing = [field for field in used_fields if field not in columns_set]
     if missing:
         raise ValueError(f"chart {chart_index} references unknown data_summary fields: {missing}")
+
+
+def _validate_field_types_against_summary(
+    *,
+    spec: dict[str, Any],
+    field_kinds: dict[str, str] | None,
+    chart_index: int,
+) -> None:
+    if not field_kinds:
+        return
+
+    for encoding in PlotTool._collect_encoding_nodes(spec):
+        field_name = encoding.get("field")
+        field_type = encoding.get("type")
+        if not isinstance(field_name, str) or not isinstance(field_type, str):
+            continue
+
+        inferred_kind = field_kinds.get(field_name)
+        if inferred_kind is None:
+            continue
+
+        expected_type = _KIND_TO_VEGA_TYPE.get(inferred_kind, "nominal")
+        normalized_type = field_type.strip().lower()
+        if normalized_type != expected_type:
+            raise ValueError(
+                f"chart {chart_index} field '{field_name}' declared {normalized_type} "
+                f"but data_summary inferred kind is {inferred_kind}"
+            )
 
 
 def _build_field_guide(summary: DatasetSummaryModel) -> str:

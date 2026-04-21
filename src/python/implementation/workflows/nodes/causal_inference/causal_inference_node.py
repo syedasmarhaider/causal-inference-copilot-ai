@@ -790,9 +790,7 @@ class CausalInferenceNode(Node):
                     "request_summary": request_summary,
                     "identifier_column": identifier_column,
                     "requested_filter_columns": list(requested_filter_columns),
-                    "non_effect_modifier_filter_columns": list(
-                        non_effect_modifier_filter_columns
-                    ),
+                    "non_effect_modifier_filter_columns": list(non_effect_modifier_filter_columns),
                     "effect_modifier_columns": list(effect_modifier_columns),
                     "errors": cohort_errors,
                 }, None
