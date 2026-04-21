@@ -35,6 +35,12 @@ Independent two-sample t-test comparing a numeric column across two groups.
 
 ## Rules
 - Map columns EXACTLY as they appear in the field guide (case-sensitive).
+- The field guide includes an inferred type and distinct count. For `logistic_regression` and
+  `propensity_score`, prefer BOOLEAN columns or columns with `distinct=2`.
+- For `propensity_score`, pick exactly one binary treatment column and treat the remaining named
+  columns as covariates.
+- If the user phrasing is ambiguous, do not guess a treatment column unless one binary candidate is
+  clearly identifiable from the request and field guide.
 - Only the analysis types listed above are available. Do NOT output "descriptive" or "correlation" — those are handled by a separate DuckDB SQL tool.
 - If the request does not clearly match one of the listed tests, raise an error rather than guessing.
 - Output strict JSON matching the required schema. No extra keys.

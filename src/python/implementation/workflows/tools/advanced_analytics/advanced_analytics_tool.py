@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats as sp_stats
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
 from python.domain.service.llm_service import AvailableModelsKey, LLMConfig, LLMService
@@ -33,22 +34,31 @@ _KIND_TO_GUIDE: dict[str, str] = {
     "OTHER": "nominal",
 }
 
+_BINARY_FALSE_TOKENS = frozenset(
+    {"0", "false", "f", "no", "n", "control", "untreated", "unexposed", "absent"}
+)
+_BINARY_TRUE_TOKENS = frozenset(
+    {"1", "true", "t", "yes", "y", "treated", "exposed", "present", "case"}
+)
+
 
 def _build_field_guide(summary: DatasetSummaryModel) -> str:
     lines: list[str] = []
     for p in summary.profiles:
         name = str(p.name).strip()
         if name:
-            lines.append(f'- "{name}": {_KIND_TO_GUIDE.get(str(p.inferred_kind), "nominal")}')
+            field_kind = _KIND_TO_GUIDE.get(str(p.inferred_kind), "nominal")
+            distinct = f", distinct={int(p.distinct_count)}" if p.distinct_count is not None else ""
+            lines.append(f'- "{name}": {field_kind}{distinct}')
     return "\n".join(lines) if lines else "(no fields)"
 
 
 def _safe(v: Any) -> Any:
     """Make a value JSON-safe (NaN/Inf → None)."""
+    if isinstance(v, np.generic):
+        return _safe(v.item())
     if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
         return None
-    if isinstance(v, np.generic):
-        return v.item()
     return v
 
 
@@ -56,9 +66,80 @@ def _safe_dict(d: dict[str, Any]) -> dict[str, Any]:
     return {k: _safe(v) for k, v in d.items()}
 
 
+def _format_stat(v: Any, *, digits: int = 4) -> str:
+    safe_value = _safe(v)
+    if safe_value is None:
+        return "n/a"
+    if isinstance(safe_value, bool):
+        return str(safe_value)
+    if isinstance(safe_value, (int, float)):
+        return f"{float(safe_value):.{digits}f}"
+    return str(safe_value)
+
+
+def _binary_label(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def _binary_order_key(value: Any) -> tuple[int, Any]:
+    if isinstance(value, bool):
+        return (0, int(value))
+
+    numeric_value: float | None = None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        numeric_value = None
+
+    if numeric_value is not None:
+        return (1, numeric_value)
+
+    token = _binary_label(value).casefold()
+    if token in _BINARY_FALSE_TOKENS:
+        return (2, 0)
+    if token in _BINARY_TRUE_TOKENS:
+        return (2, 1)
+    return (3, token)
+
+
+def _encode_binary_series(
+    series: pd.Series,
+    *,
+    column_name: str,
+    role: str,
+) -> tuple[pd.Series, dict[str, str]]:
+    non_null = series.dropna()
+    unique_values = list(non_null.unique())
+    if len(unique_values) != 2:
+        raise ValueError(
+            f"{role.capitalize()} column '{column_name}' must be binary after dropping missing "
+            f"values, but found {len(unique_values)} distinct values."
+        )
+
+    ordered_values = sorted(unique_values, key=_binary_order_key)
+    mapping = {ordered_values[0]: 0, ordered_values[1]: 1}
+    encoded = series.map(mapping)
+    if encoded.isna().any():
+        raise ValueError(
+            f"Could not consistently encode binary values for {role} column '{column_name}'."
+        )
+
+    return (
+        encoded.astype(int),
+        {
+            "0": _binary_label(ordered_values[0]),
+            "1": _binary_label(ordered_values[1]),
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Individual analysis runners — thin wrappers around library APIs
-# ---------------------------------------------------------------------------    
+# ---------------------------------------------------------------------------
 def _run_linear_regression(df: pd.DataFrame, plan: AnalyticsPlanModel) -> AnalyticsResultModel:
     import statsmodels.api as sm
 
@@ -68,6 +149,10 @@ def _run_linear_regression(df: pd.DataFrame, plan: AnalyticsPlanModel) -> Analyt
         raise ValueError("Target or predictors not found in dataframe")
 
     work = df[[target, *predictors]].dropna()
+    if work.empty:
+        raise ValueError(
+            "No complete cases remain for linear regression after dropping missing values."
+        )
     y = work[target].astype(float)
     X = pd.get_dummies(work[predictors], drop_first=True, dtype=float)
     X = sm.add_constant(X)
@@ -81,8 +166,8 @@ def _run_linear_regression(df: pd.DataFrame, plan: AnalyticsPlanModel) -> Analyt
         analysis_type="linear_regression",
         summary=(
             f"OLS regression: {target} ~ {' + '.join(predictors)}. "
-            f"R²={_safe(model.rsquared)}, Adj-R²={_safe(model.rsquared_adj)}, "
-            f"F={_safe(model.fvalue)}, p(F)={_safe(model.f_pvalue)}."
+            f"R²={_format_stat(model.rsquared)}, Adj-R²={_format_stat(model.rsquared_adj)}, "
+            f"F={_format_stat(model.fvalue)}, p(F)={_format_stat(model.f_pvalue)}."
         ),
         tables={"coefficients": params, "p_values": pvalues, "conf_int_95": conf},
         metrics={
@@ -104,8 +189,16 @@ def _run_logistic_regression(df: pd.DataFrame, plan: AnalyticsPlanModel) -> Anal
         raise ValueError("Target or predictors not found in dataframe")
 
     work = df[[target, *predictors]].dropna()
-    y = work[target].astype(float)
+    if work.empty:
+        raise ValueError(
+            "No complete cases remain for logistic regression after dropping missing values."
+        )
+    y, target_levels = _encode_binary_series(work[target], column_name=target, role="target")
     X = pd.get_dummies(work[predictors], drop_first=True, dtype=float)
+    if X.shape[1] == 0:
+        raise ValueError(
+            "The selected predictors do not produce any usable encoded features for logistic regression."
+        )
     X = sm.add_constant(X)
 
     model = sm.Logit(y, X).fit(disp=False, maxiter=100)
@@ -117,18 +210,21 @@ def _run_logistic_regression(df: pd.DataFrame, plan: AnalyticsPlanModel) -> Anal
         analysis_type="logistic_regression",
         summary=(
             f"Logistic regression: {target} ~ {' + '.join(predictors)}. "
-            f"Pseudo-R²={_safe(model.prsquared)}, AIC={_safe(model.aic)}."
+            f"Positive class='{target_levels['1']}'. "
+            f"Pseudo-R²={_format_stat(model.prsquared)}, AIC={_format_stat(model.aic)}."
         ),
         tables={
             "coefficients": params,
             "p_values": pvalues,
             "odds_ratios": odds_ratios,
+            "target_levels": target_levels,
         },
         metrics={
             "pseudo_r_squared": _safe(model.prsquared),
             "aic": _safe(model.aic),
             "bic": _safe(model.bic),
             "n_obs": int(model.nobs),
+            "target_levels": target_levels,
         },
     )
 
@@ -140,8 +236,19 @@ def _run_propensity_score(df: pd.DataFrame, plan: AnalyticsPlanModel) -> Analyti
         raise ValueError("Treatment or covariates not found in dataframe")
 
     work = df[[treatment, *covariates]].dropna()
-    y = work[treatment].astype(int)
+    if work.empty:
+        raise ValueError(
+            "No complete cases remain for propensity score estimation after dropping missing values."
+        )
+    y, treatment_levels = _encode_binary_series(
+        work[treatment], column_name=treatment, role="treatment"
+    )
     X = pd.get_dummies(work[covariates], drop_first=True, dtype=float)
+    if X.shape[1] == 0:
+        raise ValueError(
+            "The selected covariates do not produce any usable encoded features for propensity "
+            "score estimation."
+        )
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
@@ -157,20 +264,22 @@ def _run_propensity_score(df: pd.DataFrame, plan: AnalyticsPlanModel) -> Analyti
     return AnalyticsResultModel(
         analysis_type="propensity_score",
         summary=(
-            f"Propensity scores estimated for treatment='{treatment}' using "
-            f"{len(covariates)} covariate(s). "
-            f"Treated mean={_safe(treated.mean()):.4f}, Control mean={_safe(control.mean()):.4f}."
+            f"Propensity scores estimated for treatment='{treatment}' "
+            f"(positive class='{treatment_levels['1']}') using {len(covariates)} covariate(s). "
+            f"Treated mean={_format_stat(treated.mean())}, Control mean={_format_stat(control.mean())}."
         ),
         tables={
             "distribution": {
                 "treated": _safe_dict(treated.describe().to_dict()),
                 "control": _safe_dict(control.describe().to_dict()),
             },
+            "treatment_levels": treatment_levels,
         },
         metrics={
-            "auc": _safe(float(clf.score(X_scaled, y))),
+            "auc": _safe(float(roc_auc_score(y, p_scores))),
             "n_treated": int(treated.shape[0]),
             "n_control": int(control.shape[0]),
+            "treatment_levels": treatment_levels,
         },
     )
 
@@ -187,7 +296,7 @@ def _run_chi_squared(df: pd.DataFrame, plan: AnalyticsPlanModel) -> AnalyticsRes
         analysis_type="chi_squared",
         summary=(
             f"Chi-squared test: {col_a} × {col_b}. "
-            f"χ²={_safe(chi2):.4f}, df={dof}, p={_safe(p):.6f}."
+            f"χ²={_format_stat(chi2)}, df={dof}, p={_format_stat(p, digits=6)}."
         ),
         tables={
             "contingency": {str(k): _safe_dict(v) for k, v in ct.to_dict().items()},
@@ -209,14 +318,18 @@ def _run_ttest(df: pd.DataFrame, plan: AnalyticsPlanModel) -> AnalyticsResultMod
 
     a = work.loc[work[grp_col] == groups[0], num_col].astype(float)
     b = work.loc[work[grp_col] == groups[1], num_col].astype(float)
+    if len(a) < 2 or len(b) < 2:
+        raise ValueError(
+            "t-test requires at least 2 observations in each group after dropping missing values."
+        )
     t_stat, p_val = sp_stats.ttest_ind(a, b, equal_var=False)
 
     return AnalyticsResultModel(
         analysis_type="ttest",
         summary=(
             f"Welch's t-test: {num_col} by {grp_col} ({groups[0]} vs {groups[1]}). "
-            f"t={_safe(t_stat):.4f}, p={_safe(p_val):.6f}. "
-            f"Means: {_safe(a.mean()):.4f} vs {_safe(b.mean()):.4f}."
+            f"t={_format_stat(t_stat)}, p={_format_stat(p_val, digits=6)}. "
+            f"Means: {_format_stat(a.mean())} vs {_format_stat(b.mean())}."
         ),
         tables={
             "group_stats": {
@@ -298,7 +411,9 @@ class AdvancedAnalyticsTool(Tool):
 
         log.info("executing analysis", analysis_type=plan.analysis_type)
         result = runner(dataframe, plan)
-        log.info("analysis complete", analysis_type=plan.analysis_type, summary=result.summary[:200])
+        log.info(
+            "analysis complete", analysis_type=plan.analysis_type, summary=result.summary[:200]
+        )
         return result
 
 

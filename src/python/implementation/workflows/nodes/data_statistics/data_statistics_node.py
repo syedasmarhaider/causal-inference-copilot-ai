@@ -102,11 +102,7 @@ class DataStatisticsIntentModel(BaseModel):
         return self
 
     def has_any_intent(self) -> bool:
-        return (
-            self.intent_analytics
-            or self.intent_chart
-            or self.intent_advanced_analytics
-        )
+        return self.intent_analytics or self.intent_chart or self.intent_advanced_analytics
 
 
 class DataStatisticsNode(Node):
@@ -247,9 +243,7 @@ class DataStatisticsNode(Node):
                     summary_model=working_summary,
                     summary_json=working_summary_json,
                     instructions=intent.intent_analytics_brief or latest_user_message,
-                    prepare_followup_data=(
-                        intent.intent_chart or intent.intent_advanced_analytics
-                    ),
+                    prepare_followup_data=(intent.intent_chart or intent.intent_advanced_analytics),
                 )
             except Exception as exc:
                 log.exception("analytics query failed", error=safe_err(exc))
@@ -303,9 +297,10 @@ class DataStatisticsNode(Node):
                 chart_artifact_refs.extend(adv_chart_refs)
             except Exception as exc:
                 log.exception("advanced analytics failed", error=safe_err(exc))
+                detail = str(exc).strip() if isinstance(exc, ValueError) else ""
                 advanced_analytics_result = {
                     "status": "error",
-                    "detail": "I could not complete the requested statistical analysis.",
+                    "detail": detail or "I could not complete the requested statistical analysis.",
                 }
 
         try:
@@ -321,9 +316,7 @@ class DataStatisticsNode(Node):
                         "advanced_analytics": intent.intent_advanced_analytics,
                     },
                     "analysis_dataset_rows": int(len(working_df)),
-                    "analysis_dataset_columns": [
-                        str(column) for column in working_df.columns
-                    ],
+                    "analysis_dataset_columns": [str(column) for column in working_df.columns],
                 },
             )
         except Exception as exc:
@@ -407,9 +400,7 @@ class DataStatisticsNode(Node):
             )
             next_dataframe = result_df
             next_summary = analytical_summary
-            next_summary_json = self._profiling_tool.dataset_summary_to_json(
-                analytical_summary
-            )
+            next_summary_json = self._profiling_tool.dataset_summary_to_json(analytical_summary)
         else:
             next_dataframe = dataframe
             next_summary = summary_model
@@ -450,8 +441,7 @@ class DataStatisticsNode(Node):
             kwargs["conversation_id"] = str(conversation_id)
         else:
             raise TypeError(
-                "data manipulation tool must accept either 'table_name' or "
-                "'conversation_id'"
+                "data manipulation tool must accept either 'table_name' or 'conversation_id'"
             )
         if "retry_attempts" in params:
             kwargs["retry_attempts"] = _ANALYTICAL_QUERY_RETRY_ATTEMPTS
@@ -577,8 +567,7 @@ class DataStatisticsNode(Node):
         profiles = list(summary.profiles)
         shown_profiles = profiles[:_INITIAL_SUMMARY_MAX_COLUMNS]
         preview = ", ".join(
-            f"{profile.name} ({profile.inferred_kind.lower()})"
-            for profile in shown_profiles
+            f"{profile.name} ({profile.inferred_kind.lower()})" for profile in shown_profiles
         )
         extra_columns = len(profiles) - len(shown_profiles)
         if extra_columns > 0:
@@ -651,13 +640,7 @@ class DataStatisticsNode(Node):
             if status == "analytics_complete":
                 parts.append("Ran the requested analytical query.")
             elif status == "error":
-                parts.append(
-                    str(
-                        analytics_result.get(
-                            "detail", "The analytical query failed."
-                        )
-                    )
-                )
+                parts.append(str(analytics_result.get("detail", "The analytical query failed.")))
 
         if advanced_analytics_result is not None:
             status = str(advanced_analytics_result.get("status", "")).strip()
@@ -677,14 +660,12 @@ class DataStatisticsNode(Node):
             if status == "charts_saved":
                 count = int(chart_result.get("saved_chart_count", 0) or 0)
                 noun = "chart" if count == 1 else "charts"
-                parts.append(f"Generated {count} {noun}." if count > 0 else "Generated chart output.")
+                parts.append(
+                    f"Generated {count} {noun}." if count > 0 else "Generated chart output."
+                )
             elif status in {"error", "skipped"}:
                 parts.append(
-                    str(
-                        chart_result.get(
-                            "detail", "The requested charts could not be generated."
-                        )
-                    )
+                    str(chart_result.get("detail", "The requested charts could not be generated."))
                 )
 
         return " ".join(part for part in parts if part) or "Completed the data statistics request."
