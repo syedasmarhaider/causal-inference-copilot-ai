@@ -370,11 +370,11 @@ class ModelSelectionNode(Node):
             update={
                 "confirmed_model_selection": confirmed_selection,
                 "phase": "CONFIRMED",
-                "assistant_message": (
-                    f"Confirmed model selection: {selected_recommendation.display_label}. "
-                    f"{decision.assistant_message}"
-                    "Training will take some time so meanwhile you can have some rest"
-                ),
+              "assistant_message": (
+                     f"Confirmed model selection: {selected_recommendation.display_label}. "
+                     f"{decision.assistant_message} "
+                     "Training will take some time, so meanwhile you can have some rest."
+                     ),
                 "system_message": None,
                 "error_message": None,
             }
