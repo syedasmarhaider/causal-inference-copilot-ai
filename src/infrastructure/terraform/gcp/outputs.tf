@@ -25,3 +25,7 @@ output "firebase_database_url" {
 output "runtime_service_account_email" {
   value = module.runtime_service_account.email
 }
+
+output "vertex_runtime_custom_role_name" {
+  value = google_project_iam_custom_role.vertex_runtime.name
+}

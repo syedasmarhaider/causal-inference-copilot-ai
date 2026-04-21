@@ -1,79 +1,81 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Any, ClassVar
-from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from python.domain.models.errors import NodeExecutionError
-from python.domain.workflows.state import State, StateMessage, Status
-from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import (
-    CausalInferenceDeps,
-)
+from python.domain.models.models import ArtifactRef
+from python.domain.workflows.node_state import NodeState
 
 
-class CausalInferencePayload(BaseModel):
+class CausalInferencePayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
+    source_signature: str | None = None
     ate_result_raw_json_str: str | None = None
-    error: str | None = None
-    
-    # workflow control
-    should_abort: bool | None = None
+    latest_cate_result_raw_json_str: str | None = None
+    latest_cate_request_summary: str | None = None
+    assistant_message: str | None = None
+    message_artifact_refs: list[ArtifactRef] = Field(default_factory=list)
+    error_message: str | None = None
 
-    # UI / node-local
-    message: str | None = None
-    artifacts: list[UUID] | None = None
+    @field_validator(
+        "source_signature",
+        "ate_result_raw_json_str",
+        "latest_cate_result_raw_json_str",
+        "latest_cate_request_summary",
+        "assistant_message",
+        "error_message",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        raise TypeError("text fields must be str|null")
+
+    def reset_for_signature(self, *, source_signature: str) -> CausalInferencePayloadModel:
+        return self.model_copy(
+            update={
+                "source_signature": source_signature,
+                "ate_result_raw_json_str": None,
+                "latest_cate_result_raw_json_str": None,
+                "latest_cate_request_summary": None,
+                "assistant_message": None,
+                "message_artifact_refs": [],
+                "error_message": None,
+            }
+        )
 
 
-@dataclass(frozen=True, slots=True)
-class CausalInferenceState(State):
+class CausalInferenceState(NodeState):
     NAME: ClassVar[str] = "CAUSAL_INFERENCE"
-    payload: CausalInferencePayload
-    current_artifact_ids: list[UUID] | None = None
 
-    @property
+    def __init__(self, payload: CausalInferencePayloadModel | None = None) -> None:
+        self.payload = payload or CausalInferencePayloadModel()
+
     def name(self) -> str:
         return self.NAME
 
-    @property
-    def error(self) -> NodeExecutionError | None:
-        if self.payload.error is not None:
-            return NodeExecutionError(state_name=self.NAME, error=self.payload.error)
-        return None
-
-    @property
-    def status(self) -> Status:
-        if self.payload.should_abort:
-            return "ABORTED"
-        return "PENDING"
-
-    @property
-    def message(self) -> StateMessage:
-        if self.payload.message is None:
-            raise ValueError(
-                "CausalInferenceState.message is required but missing. "
-                "Don't access .message outside the node/UI context where user_message is guaranteed."
-            )
-        return StateMessage(
-            txt_message=self.payload.message,
-            action="NONE" if self.status == "ABORTED" else "NEEDS_INPUT",
-            artifact_ids=[str(aid) for aid in self.current_artifact_ids] if self.current_artifact_ids else None,
-        )
-        
-    def pre_required_states_names(self) -> Sequence[str]:
-        return CausalInferenceDeps.pre_required_states_names()
+    def clear_state(self) -> None:
+        self.payload = CausalInferencePayloadModel()
 
     def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json", exclude_none=True)
 
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> CausalInferenceState:
-        model = CausalInferencePayload.model_validate(payload)
-        return cls(payload=model)
+        return cls(CausalInferencePayloadModel.model_validate(payload))
 
     @classmethod
     def init_empty(cls) -> CausalInferenceState:
-        return cls(payload=CausalInferencePayload())
+        return cls()
+
+
+__all__ = [
+    "CausalInferencePayloadModel",
+    "CausalInferenceState",
+]

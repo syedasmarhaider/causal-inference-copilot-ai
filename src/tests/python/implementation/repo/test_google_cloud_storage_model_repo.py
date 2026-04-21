@@ -213,8 +213,12 @@ def test_save_model_uploads_artifact_and_metadata(monkeypatch: pytest.MonkeyPatc
         metadata={"source": "unit-test"},
     )
 
-    artifact_name = repo._artifact_blob_name(user_id=user_id, conversation_id=conversation_id, model_id=model_id)  # noqa: SLF001
-    meta_name = repo._meta_blob_name(user_id=user_id, conversation_id=conversation_id, model_id=model_id)  # noqa: SLF001
+    artifact_name = repo._artifact_blob_name(
+        user_id=user_id, conversation_id=conversation_id, model_id=model_id
+    )  # noqa: SLF001
+    meta_name = repo._meta_blob_name(
+        user_id=user_id, conversation_id=conversation_id, model_id=model_id
+    )  # noqa: SLF001
 
     artifact_blob = bucket.blobs[artifact_name]
     meta_blob = bucket.blobs[meta_name]
@@ -254,7 +258,9 @@ def test_save_model_falls_back_for_invalid_chunk_size(monkeypatch: pytest.Monkey
         model={"x": 1},
     )
 
-    artifact_name = repo._artifact_blob_name(user_id=user_id, conversation_id=conversation_id, model_id=model_id)  # noqa: SLF001
+    artifact_name = repo._artifact_blob_name(
+        user_id=user_id, conversation_id=conversation_id, model_id=model_id
+    )  # noqa: SLF001
     assert bucket.blobs[artifact_name].chunk_size == DEFAULT_GCS_UPLOAD_CHUNK_SIZE_BYTES
 
 
@@ -262,15 +268,21 @@ def test_load_model_returns_none_when_artifact_missing() -> None:
     user_id, conversation_id, model_id = _ids()
     repo = GoogleCloudStorageModelsRepo(bucket=_FakeBucket(name="models"))
 
-    assert repo.load_model(user_id=user_id, conversation_id=conversation_id, model_id=model_id) is None
+    assert (
+        repo.load_model(user_id=user_id, conversation_id=conversation_id, model_id=model_id) is None
+    )
 
 
-def test_load_model_downloads_and_applies_metadata_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_model_downloads_and_applies_metadata_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     user_id, conversation_id, model_id = _ids()
     bucket = _FakeBucket(name="models")
     repo = GoogleCloudStorageModelsRepo(bucket=bucket)
 
-    artifact_name = repo._artifact_blob_name(user_id=user_id, conversation_id=conversation_id, model_id=model_id)  # noqa: SLF001
+    artifact_name = repo._artifact_blob_name(
+        user_id=user_id, conversation_id=conversation_id, model_id=model_id
+    )  # noqa: SLF001
     artifact_blob = bucket.blob(artifact_name)
     artifact_blob.present = True
     artifact_blob.bytes_data = b"serialized"
@@ -293,8 +305,12 @@ def test_model_exists_and_delete_model_are_best_effort() -> None:
     bucket = _FakeBucket(name="models")
     repo = GoogleCloudStorageModelsRepo(bucket=bucket)
 
-    artifact_name = repo._artifact_blob_name(user_id=user_id, conversation_id=conversation_id, model_id=model_id)  # noqa: SLF001
-    meta_name = repo._meta_blob_name(user_id=user_id, conversation_id=conversation_id, model_id=model_id)  # noqa: SLF001
+    artifact_name = repo._artifact_blob_name(
+        user_id=user_id, conversation_id=conversation_id, model_id=model_id
+    )  # noqa: SLF001
+    meta_name = repo._meta_blob_name(
+        user_id=user_id, conversation_id=conversation_id, model_id=model_id
+    )  # noqa: SLF001
 
     artifact_blob = bucket.blob(artifact_name)
     meta_blob = bucket.blob(meta_name)
@@ -302,7 +318,10 @@ def test_model_exists_and_delete_model_are_best_effort() -> None:
     artifact_blob.present = True
     meta_blob.present = True
 
-    assert repo.model_exists(user_id=user_id, conversation_id=conversation_id, model_id=model_id) is True
+    assert (
+        repo.model_exists(user_id=user_id, conversation_id=conversation_id, model_id=model_id)
+        is True
+    )
 
     meta_blob.next_delete_errors.append(RuntimeError("transient"))
     repo.delete_model(user_id=user_id, conversation_id=conversation_id, model_id=model_id)
@@ -310,17 +329,27 @@ def test_model_exists_and_delete_model_are_best_effort() -> None:
     assert artifact_blob.present is False
 
 
-def test_load_metadata_returns_empty_on_not_found_or_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_metadata_returns_empty_on_not_found_or_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     user_id, conversation_id, model_id = _ids()
     bucket = _FakeBucket(name="models")
     repo = GoogleCloudStorageModelsRepo(bucket=bucket)
 
-    meta_name = repo._meta_blob_name(user_id=user_id, conversation_id=conversation_id, model_id=model_id)  # noqa: SLF001
+    meta_name = repo._meta_blob_name(
+        user_id=user_id, conversation_id=conversation_id, model_id=model_id
+    )  # noqa: SLF001
     meta_blob = bucket.blob(meta_name)
     meta_blob.next_download_text_errors.append(NotFound("missing"))
 
-    assert repo._load_metadata(user_id=user_id, conversation_id=conversation_id, model_id=model_id) == {}  # noqa: SLF001
+    assert (
+        repo._load_metadata(user_id=user_id, conversation_id=conversation_id, model_id=model_id)
+        == {}
+    )  # noqa: SLF001
 
     meta_blob.present = True
     meta_blob.bytes_data = b"not-json"
-    assert repo._load_metadata(user_id=user_id, conversation_id=conversation_id, model_id=model_id) == {}  # noqa: SLF001
+    assert (
+        repo._load_metadata(user_id=user_id, conversation_id=conversation_id, model_id=model_id)
+        == {}
+    )  # noqa: SLF001

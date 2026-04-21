@@ -6,14 +6,22 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from python.adapters.api.dependencies import (
+    ARTIFACT_FORMAT_QUERY_PARAM,
     ARTIFACT_ID_PATH_PARAM,
+    ARTIFACT_KIND_QUERY_PARAM,
     AUTHENTICATED_USER_DEP,
     CONVERSATION_ID_PATH_PARAM,
+    CONVERSATION_TYPE_PATH_PARAM,
     CREDENTIALS_SECURITY,
+    DATAFLOW_APP_DEP,
+    DATASET_ID_PATH_PARAM,
+    DATASET_LIMIT_QUERY_PARAM,
+    DATASET_START_QUERY_PARAM,
     UPLOAD_DATASET_FILE_PARAM,
     WORKFLOW_APP_DEP,
     get_auth_service,
     get_authenticated_user,
+    get_dataflow_app,
     get_workflow_app,
 )
 from python.adapters.api.docs import (
@@ -35,10 +43,18 @@ __all__ = [
     "get_authenticated_user",
     "CREDENTIALS_SECURITY",
     "CONVERSATION_ID_PATH_PARAM",
+    "CONVERSATION_TYPE_PATH_PARAM",
+    "DATASET_ID_PATH_PARAM",
+    "DATASET_START_QUERY_PARAM",
+    "DATASET_LIMIT_QUERY_PARAM",
     "ARTIFACT_ID_PATH_PARAM",
+    "ARTIFACT_KIND_QUERY_PARAM",
+    "ARTIFACT_FORMAT_QUERY_PARAM",
     "UPLOAD_DATASET_FILE_PARAM",
     "AUTHENTICATED_USER_DEP",
     "WORKFLOW_APP_DEP",
+    "DATAFLOW_APP_DEP",
+    "get_dataflow_app",
 ]
 
 configure_default_logging(
@@ -71,6 +87,6 @@ register_exception_handlers(app)
 
 
 if __name__ == "__main__":
-    import uvicorn
+    from python.adapters.api.server import main
 
-    uvicorn.run("python.adapters.api.app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+    main()

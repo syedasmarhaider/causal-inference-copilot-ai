@@ -1,80 +1,160 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from python.domain.models.errors import NodeExecutionError
-from python.domain.workflows.state import State, StateMessage, Status
-from python.implementation.workflows.nodes.model_selection.model_selection_deps import (
-    ModelSelectionDeps,
-)
+from python.domain.models.validation import ValidationIssueModel, ValidationStatus
+from python.domain.workflows.node_state import NodeState
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.utils.utils import uuid_from_any
+
+ModelSelectionPhase = Literal["INIT", "REVIEW_READY", "CONFIRMED", "FAILED"]
+
+
+class ModelRecommendationModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    estimator_fqcn: str
+    display_label: str
+    best_when: str
+    why: str
+    tradeoffs: str | None = None
 
 
 class ConfirmedModelSelectionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     selected_model: str | None = None
+    selected_model_display_label: str | None = None
     reasoning: str | None = None
+
+    @field_validator(
+        "selected_model",
+        "selected_model_display_label",
+        "reasoning",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        raise TypeError("confirmed model selection fields must be str|null")
 
 
 class ModelSelectionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
+    source_dataset_id: UUID | None = None
+    source_causal_spec: CausalSpec | None = None
+    source_transformation_plan: TransformPlan | None = None
+    source_validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
+    source_validation_status: ValidationStatus | None = None
+    recommendations: list[ModelRecommendationModel] = Field(default_factory=list)
     confirmed_model_selection: ConfirmedModelSelectionPayload | None = None
-    message: str | None = None
-    error: str | None = None
-    system_choice_message: str | None = None
+    phase: ModelSelectionPhase = "INIT"
+    assistant_message: str | None = None
+    system_message: str | None = None
+    error_message: str | None = None
+
+    @field_validator("source_dataset_id", mode="before")
+    @classmethod
+    def _parse_dataset_id(cls, value: Any) -> UUID | None:
+        return uuid_from_any(value)
+
+    @field_validator(
+        "assistant_message",
+        "system_message",
+        "error_message",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_payload_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        raise TypeError("payload text fields must be str|null")
+
+    def bind_sources(
+        self,
+        *,
+        dataset_id: UUID | None,
+        causal_spec: CausalSpec,
+        transformation_plan: TransformPlan,
+        validation_issues: list[ValidationIssueModel],
+        validation_status: ValidationStatus,
+    ) -> ModelSelectionPayload:
+        return self.model_copy(
+            update={
+                "source_dataset_id": dataset_id,
+                "source_causal_spec": causal_spec,
+                "source_transformation_plan": transformation_plan,
+                "source_validation_issues": list(validation_issues),
+                "source_validation_status": validation_status,
+            }
+        )
+
+    def reset_for_reselection(
+        self,
+        *,
+        dataset_id: UUID | None,
+        causal_spec: CausalSpec,
+        transformation_plan: TransformPlan,
+        validation_issues: list[ValidationIssueModel],
+        validation_status: ValidationStatus,
+    ) -> ModelSelectionPayload:
+        return self.model_copy(
+            update={
+                "source_dataset_id": dataset_id,
+                "source_causal_spec": causal_spec,
+                "source_transformation_plan": transformation_plan,
+                "source_validation_issues": list(validation_issues),
+                "source_validation_status": validation_status,
+                "recommendations": [],
+                "confirmed_model_selection": None,
+                "phase": "INIT",
+                "assistant_message": None,
+                "system_message": None,
+                "error_message": None,
+            }
+        )
 
 
-@dataclass(frozen=True, slots=True)
-class ModelSelectionState(State):
+class ModelSelectionState(NodeState):
     NAME: ClassVar[str] = "MODEL_SELECTION"
-    payload: ModelSelectionPayload
 
-    @property
+    def __init__(self, payload: ModelSelectionPayload | None = None) -> None:
+        self.payload = payload or ModelSelectionPayload()
+
     def name(self) -> str:
         return self.NAME
 
-    @property
-    def error(self) -> NodeExecutionError | None:
-        if self.payload.error is not None:
-            return NodeExecutionError(state_name=self.NAME, error=self.payload.error)
-        return None
-
-    @property
-    def status(self) -> Status:
-        if self.error is not None:
-            return "ABORTED"
-
-        cms = self.payload.confirmed_model_selection
-        if cms is not None and cms.selected_model is not None and cms.reasoning is not None:
-            return "DONE"
-
-        return "PENDING"
-
-    @property
-    def message(self) -> StateMessage:
-        if self.payload.message is None:
-            raise ValueError(
-                "ModelSelectionState.message is required but missing. "
-                "Don't access .message outside a node context where message is guaranteed."
-            )
-        action = "NONE" if self.status in ("ABORTED", "DONE") else "NEEDS_INPUT"    
-        return StateMessage(txt_message=self.payload.message, action=action)
-
-    def pre_required_states_names(self) -> Sequence[str]:
-        return ModelSelectionDeps.pre_required_states_names()
+    def clear_state(self) -> None:
+        self.payload = ModelSelectionPayload()
 
     def to_json_dict(self) -> dict[str, Any]:
         return self.payload.model_dump(mode="json", exclude_none=True)
 
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> ModelSelectionState:
-        model = ModelSelectionPayload.model_validate(payload)
-        return cls(payload=model)
+        return cls(ModelSelectionPayload.model_validate(payload))
 
     @classmethod
     def init_empty(cls) -> ModelSelectionState:
-        return cls(payload=ModelSelectionPayload())
+        return cls()
+
+
+__all__ = [
+    "ConfirmedModelSelectionPayload",
+    "ModelRecommendationModel",
+    "ModelSelectionPayload",
+    "ModelSelectionPhase",
+    "ModelSelectionState",
+]

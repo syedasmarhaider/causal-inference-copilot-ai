@@ -1,65 +1,61 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TypeVar
 from uuid import UUID
 
-from python.domain.models.errors import StateDependencyError
-from python.domain.workflows.state import State
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import (
-    CleanProtocolState,
+from python.domain.workflows.node import NodeRequest
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.common.model.data_summary import (
+    DatasetSummaryModel,
 )
-from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
-    ModelSelectionState,
-)
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
-
-T = TypeVar("T", bound=State)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ModelTrainDeps:
-    causal_specs: CausalSpec
-    dataset_summary: DatasetSummaryModel
     dataset_id: UUID
-
+    dataset_summary: DatasetSummaryModel
+    causal_spec: CausalSpec
+    transformation_plan: TransformPlan
     selected_model: str
 
     @classmethod
-    def pre_required_states_names(cls) -> Sequence[str]:
-        return (
-            CleanProtocolState.NAME,
-            ModelSelectionState.NAME,
-        )
+    def from_request(cls, request: NodeRequest) -> ModelTrainDeps:
+        transformation_plan_raw = request.orchestrator_state.get("data_transformation_plan")
+        causal_spec_raw = request.orchestrator_state.get("causal_spec")
+        dataset_id_raw = request.orchestrator_state.get("working_dataset_id")
+        dataset_summary_raw = request.orchestrator_state.get("latest_dataset_summary")
+        selected_model_raw = request.orchestrator_state.get("selected_model")
 
-    @classmethod
-    def from_loaded(cls, loaded: Mapping[str, State]) -> ModelTrainDeps:
-        def _get(name: str, expected_type: type[T]) -> T:
-            st = loaded.get(name)
-            if st is None:
-                raise StateDependencyError(f"ModelTrainDeps: missing {name}", to_state="ModelTrainDeps", missing_dependencies=[
-                    name,
-                ])
-            if not isinstance(st, expected_type):
-                raise StateDependencyError(f"ModelTrainDeps: invalid {name} (expected {expected_type.__name__}, got {type(st).__name__})", to_state="ModelTrainDeps", missing_dependencies=[name])
-            return st
-        cl = _get(CleanProtocolState.NAME, CleanProtocolState)
-        ms = _get(ModelSelectionState.NAME, ModelSelectionState)
-        
-        if cl.payload.summary is None:
-            raise StateDependencyError(f"ModelTrainDeps: {CleanProtocolState.NAME} is not DONE yet (missing clean dataset summary)", to_state="ModelTrainDeps", missing_dependencies=[CleanProtocolState.NAME])
-        if cl.payload.compiled_causal_spec is None:
-            raise StateDependencyError(f"ModelTrainDeps: {CleanProtocolState.NAME} is not DONE yet (missing compiled causal spec)", to_state="ModelTrainDeps", missing_dependencies=[CleanProtocolState.NAME])
-        if ms.payload.confirmed_model_selection is None or ms.payload.confirmed_model_selection.selected_model is None:
-            raise StateDependencyError(f"ModelTrainDeps: {ModelSelectionState.NAME} is not DONE yet (missing confirmed model selection)", to_state="ModelTrainDeps", missing_dependencies=[ModelSelectionState.NAME])
-        if cl.payload.clean_dataset_id is None:
-            raise StateDependencyError(f"ModelTrainDeps: {CleanProtocolState.NAME} is not DONE yet (missing dataset id)", to_state="ModelTrainDeps", missing_dependencies=[CleanProtocolState.NAME])
+        if dataset_id_raw is None:
+            raise ValueError("ModelTrainDeps: dataset_id is required but was not found in compilation state")
+        if dataset_summary_raw is None:
+            raise ValueError("ModelTrainDeps: dataset_summary is required but was not found in compilation state")
+        if causal_spec_raw is None:
+            raise ValueError("ModelTrainDeps: causal_spec is required but was not found in compilation state")
+        if transformation_plan_raw is None:
+            raise ValueError("ModelTrainDeps: transformation_plan is required but was not found in compilation state")
+        if selected_model_raw is None:
+            raise ValueError("ModelTrainDeps: selected_model is required but was not found in compilation state")
+
+        if not isinstance(dataset_id_raw, UUID):
+            raise TypeError("ModelSelectionDeps: dataset_id must be a UUID")
+        if not isinstance(dataset_summary_raw, DatasetSummaryModel):
+            raise TypeError("ModelSelectionDeps: dataset_summary must be of type DatasetSummaryModel")
+        if not isinstance(causal_spec_raw, CausalSpec):
+            raise TypeError("ModelSelectionDeps: causal_spec must be of type CausalSpec")
+        if not isinstance(transformation_plan_raw, TransformPlan):
+            raise TypeError("ModelSelectionDeps: transformation_plan must be of type TransformPlan")
+        if not isinstance(selected_model_raw, str):
+            raise TypeError("ModelTrainDeps: selected_model must be a string")
         
         return cls(
-            causal_specs=cl.payload.compiled_causal_spec,
-            dataset_summary=cl.payload.summary,
-            dataset_id=cl.payload.clean_dataset_id,
-            selected_model=ms.payload.confirmed_model_selection.selected_model,
+            dataset_id=dataset_id_raw,
+            dataset_summary=dataset_summary_raw,
+            causal_spec=causal_spec_raw,
+            transformation_plan=transformation_plan_raw,
+            selected_model=selected_model_raw,
         )
+
+
+__all__ = ["ModelTrainDeps"]

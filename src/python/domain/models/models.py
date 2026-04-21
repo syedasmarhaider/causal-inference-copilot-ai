@@ -1,5 +1,68 @@
-from typing import Annotated
+from datetime import timezone, datetime
+import json
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from pydantic import StringConstraints
+from typing_extensions import TypedDict
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+MessageRole = Literal["user", "assistant", "system"]
+
+ArtifactKind = Literal["graph", "data"]
+ArtifactFormat = Literal["json", "csv"]
+
+
+class _ArtifactRefBase(TypedDict):
+    id: UUID
+    kind: ArtifactKind
+    format: ArtifactFormat
+
+
+class ArtifactRef(_ArtifactRefBase, total=False):
+    artifact_meta: dict[str, str] | None
+
+
+class ArtifactPayload(TypedDict, total=False):
+    id: UUID
+    content: Any
+    kind: ArtifactKind
+    format: ArtifactFormat
+    artifact_meta: dict[str, str] | None
+
+
+@dataclass(frozen=True, slots=True)
+class ChatMessage:
+    role: MessageRole
+    content: str
+    artifact_refs: Sequence[ArtifactRef] | None = None
+    artifacts: Sequence[ArtifactPayload] | None = None
+    id: str | None = None
+
+    @property
+    def message(self) -> str:
+        return self.content
+
+
+def get_chat_message_role_and_message_json(message: ChatMessage) -> str:
+    payload = {
+        "role": message.role,
+        "message": message.content,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def get_chat_messages_role_and_message_json(messages: Sequence[ChatMessage]) -> str:
+    return "\n".join(get_chat_message_role_and_message_json(msg) for msg in messages)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkingDatasetInfo:
+    dataset_id: UUID
+    is_freezed: bool
+
+def utc_now():
+    return datetime.now(timezone.utc).timestamp()

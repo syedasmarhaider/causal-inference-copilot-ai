@@ -16,6 +16,7 @@ class DataRepo(ABC):
         user_id: UUID,
         conversation_id: UUID,
         dataset_id: UUID,
+        start: int = 0,
         limit: int | None = None,
     ) -> pd.DataFrame:
         """
@@ -24,7 +25,8 @@ class DataRepo(ABC):
         :param user_id: User UUID.
         :param conversation_id: Conversation UUID.
         :param dataset_id: Dataset UUID.
-        :param limit: Optional row limit (head).
+        :param start: Zero-based row offset, excluding the header row.
+        :param limit: Optional row limit after applying ``start``.
         """
 
     @abstractmethod
@@ -50,6 +52,42 @@ class DataRepo(ABC):
         """
 
     @abstractmethod
+    def get_json_data(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+    ) -> str:
+        """
+        Retrieve data for a dataset_id as a pandas DataFrame.
+
+        :param user_id: User UUID.
+        :param conversation_id: Conversation UUID.
+        :param dataset_id: Dataset UUID.
+        :param limit: Optional row limit (head).
+        """
+
+    @abstractmethod
+    def save_json_data(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+        json_data: str,
+        *,
+        overwrite: bool = True,
+    ) -> None:
+        """
+        Persist data for a dataset_id to durable storage.
+
+        :param user_id: User UUID.
+        :param conversation_id: Conversation UUID.
+        :param dataset_id: Dataset UUID.
+        :param json_data: JSON string to persist.
+        :param overwrite: If False, raise if the target already exists.
+        """
+
+    @abstractmethod
     def save_artifact(
         self,
         user_id: UUID,
@@ -61,10 +99,18 @@ class DataRepo(ABC):
         overwrite: bool = True,
     ) -> None:
         """
-        Persist an image artifact to durable storage.
+        Persist a binary artifact for a conversation.
+        """
 
-        :param mime: MUST match content encoding (repo does not transcode).
-        :param overwrite: If False, raise if target exists.
+    @abstractmethod
+    def get_artifact_mime(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        artifact_id: UUID,
+    ) -> ImageMime:
+        """
+        Resolve the stored mime type for an artifact.
         """
 
     @abstractmethod
@@ -77,16 +123,5 @@ class DataRepo(ABC):
         expected_mime: ImageMime | None = None,
     ) -> bytes:
         """
-        Return artifact bytes. If expected_mime is provided and mismatched, raise.
-        """
-
-    @abstractmethod
-    def get_artifact_mime(
-        self,
-        user_id: UUID,
-        conversation_id: UUID,
-        artifact_id: UUID,
-    ) -> ImageMime:
-        """
-        Return the artifact MIME type.
+        Retrieve artifact content, optionally validating the expected mime type.
         """

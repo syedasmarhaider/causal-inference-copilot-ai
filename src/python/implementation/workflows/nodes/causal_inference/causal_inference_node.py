@@ -1,871 +1,1443 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
-from python.implementation.service.logging.default_logging import get_logger
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, ClassVar, Literal, cast
 from uuid import UUID, uuid4
 
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
+from python.domain.models.models import ArtifactRef
 from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
-from python.domain.workflows.node import Node
-from python.domain.workflows.state import State
+from python.domain.workflows.node import Node, NodeExecutionResult, NodeRequest
 from python.domain.workflows.tool_factory import ToolFactory
+from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.causal_inference.causal_inference_deps import (
     CausalInferenceDeps,
 )
 from python.implementation.workflows.nodes.causal_inference.causal_inference_prompts import (
-    CATE_GENERAL_PROMPT,
-    CATE_INCLUSION_PROMPT,
-    CATE_SUMMARY_PROMPT,
+    CATE_SUMMARY_SYSTEM_PROMPT,
+    CATE_SUMMARY_USER_PROMPT_TEMPLATE,
     CAUSAL_INFERENCE_ATE_SUMMARY_SYSTEM_PROMPT,
     CAUSAL_INFERENCE_ATE_SUMMARY_USER_PROMPT_TEMPLATE,
-    INVALID_PLAN_MESSAGE_PROMPT,
+    CAUSAL_INFERENCE_ROUTE_SYSTEM_PROMPT,
+    CAUSAL_INFERENCE_ROUTE_USER_PROMPT_TEMPLATE,
+    INVALID_CATE_PLAN_SYSTEM_PROMPT,
+    INVALID_CATE_PLAN_USER_PROMPT_TEMPLATE,
+    get_causal_inference_node_info,
+    get_model_failure_summary_prompt,
 )
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
+    CausalInferencePayloadModel,
     CausalInferenceState,
 )
-from python.implementation.workflows.tools.causal.causal_command import (
+from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
+    InferenceReadyCausalSpec,
+)
+from python.implementation.workflows.tools.causal.inference.causal_command import (
     ATECommand,
     ATEInputsModel,
-    ATEResult,
     ATESuccess,
     CATECommand,
     CATEInputs,
-    CATEModelResult,
-    CATEResult,
     CATESuccess,
     CommandFailure,
 )
-from python.implementation.workflows.tools.causal.causal_model import CausalModel
-from python.implementation.workflows.tools.causal.causal_model_factory_tool import (
+from python.implementation.workflows.tools.causal.inference.causal_model import CausalModel
+from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
 )
-from python.implementation.workflows.tools.causal.causal_spec import (
-    BinaryOutcomeSpecModel,
-    CausalSpec,
-    ContinuousOutcomeSpecModel,
+from python.implementation.workflows.tools.common.model.data_summary import (
+    DatasetSummaryModel,
 )
-from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
-from python.implementation.workflows.tools.data_processing.data_processing_tool import (
-    DuckDBInMemorySQLTool,
-    SQLStatements,
+from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import (
+    DataManipulationTool,
 )
-from python.implementation.workflows.tools.data_profiling.causal_data_profiling_tool import (
-    CausalDataProfilingTool,
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
+    DatasetProfilingTool,
 )
-from python.implementation.workflows.tools.data_profiling.plots.model import CohortCate, GraphImage
-from python.implementation.workflows.utils.validation import ValidationIssueModel
+from python.implementation.workflows.tools.plot_tool.plot_tool import PlotTool
+from python.implementation.workflows.utils.utils import safe_err
 
-app_log = get_logger(__name__)
+log = get_app_logger(__name__, component="causal_inference_node", log_type="node")
 
-# ============================================================
-# Node
-# ============================================================
+_WORKING_TABLE_PREFIX = "df_"
+_WORKING_TABLE_HASH_HEX_LEN = 16
+_ARTIFACT_KIND_CHART_SPEC = "chart_spec"
+_GROUP_KEY_COLUMN = "group_key"
+_CATE_COLUMN = "cate"
+_CATE_LOWER_COLUMN = "cate_lower"
+_CATE_UPPER_COLUMN = "cate_upper"
+_DATA_MANIPULATION_RETRY_ATTEMPTS = 3
 
-@dataclass(frozen=True, slots=True)
+
+class _InferenceRouteDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    action: Literal[
+        "answer_from_context",
+        "compute_cate",
+        "generate_ate_graph",
+        "generate_cate_graph",
+        "clarify",
+    ]
+    assistant_message: str | None = None
+    cate_request_summary: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_contract(self) -> _InferenceRouteDecision:
+        if self.action in ("answer_from_context", "clarify") and not self.assistant_message:
+            raise ValueError(f"{self.action} requires assistant_message")
+        if self.action in ("compute_cate", "generate_cate_graph") and not self.cate_request_summary:
+            raise ValueError(f"{self.action} requires cate_request_summary")
+        return self
+
+
+@dataclass(frozen=True)
+class _ResolvedInferenceContext:
+    dataset_id: UUID
+    dataset_summary: DatasetSummaryModel
+    selected_model: str
+    trained_model_id: UUID
+    inference_ready_spec: InferenceReadyCausalSpec
+
+
 class CausalInferenceNode(Node):
-    llm: LLMService
-    data_repo: DataRepo
+    NAME: ClassVar[str] = CausalInferenceState.NAME
+
+    def __init__(
+        self,
+        *,
+        llm: LLMService,
+        data_repo: DataRepo,
+        tools_factory: ToolFactory,
+    ) -> None:
+        self._llm = llm
+        self._data_repo = data_repo
+        self._model_factory = cast(
+            CausalModelFactoryTool,
+            tools_factory.get_tool(CausalModelFactoryTool.NAME),
+        )
+        self._data_manipulation_tool = cast(
+            DataManipulationTool,
+            tools_factory.get_tool(DataManipulationTool.NAME),
+        )
+        self._plot_tool = cast(
+            PlotTool,
+            tools_factory.get_tool(PlotTool.NAME),
+        )
+        self._profiling_tool = cast(
+            DatasetProfilingTool,
+            tools_factory.get_tool(DatasetProfilingTool.NAME),
+        )
 
     @property
     def name(self) -> str:
-        return CausalInferenceState.NAME
+        return self.NAME
 
     @classmethod
     def get_info(cls) -> str:
-        return "Computes ATE from the trained causal model and answers clinician questions (ATE + CATE)."
+        return get_causal_inference_node_info()
 
     def run(
         self,
         *,
-        user_id: UUID,
-        conversation_id: UUID,
-        state: State,
-        tool_factory: ToolFactory,
-        previous_state_dependencies: Any,
-        messages_history: Sequence[ChatMessage] | None,
-    ) -> State:
-        if not isinstance(state, CausalInferenceState):
-            raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")
+        request: NodeRequest,
+    ) -> NodeExecutionResult:
+        if not isinstance(request.node_state, CausalInferenceState):
+            raise TypeError(
+                f"{self.name}: expected CausalInferenceState, got "
+                f"{type(request.node_state).__name__}"
+            )
 
-        deps = CausalInferenceDeps.from_loaded(previous_state_dependencies)
-        causal_specs = deps.causal_specs
-        trained_model_id = deps.trained_model_id
-        clean_dataset_id =deps.dataset_id
-        selected_model_fqcn = deps.selected_model
-        data_summary = deps.dataset_summary
-        col_transformation_plan = deps.column_transformation_plan
-        order_effect_modifiers = deps.order_effect_modifiers or []
-        order_covariates = deps.order_covariates or  []
-        
-        if len(order_effect_modifiers) < 1 and len(causal_specs.effect_modifiers) > 0:
-            raise ValueError("ModelTrainState is missing order_effect_modifiers, which are required for CausalInferenceNode.")
-        if len(order_covariates) < 1 and len(causal_specs.covariates) > 0:
-            raise ValueError("ModelTrainState is missing order_covariates, which are required for CausalInferenceNode.")
+        payload = request.node_state.payload.model_copy(deep=True)
+        deps = CausalInferenceDeps.from_request(request)
 
-        # Resolve model
-        mf_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
-        model_factory = cast(CausalModelFactoryTool, mf_raw)
-        model = model_factory.resolve(selected_model_fqcn)
-        assert model is not None, f"Model factory could not resolve model for fqcn: {selected_model_fqcn}"
+        try:
+            dataframe = self._data_repo.get_csv_data(
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                dataset_id=deps.dataset_id,
+                limit=None,
+            )
+        except Exception as exc:
+            log.exception("CAUSAL_INFERENCE failed to load dataset", error=exc)
+            return self._needs_data_result(
+                request=request,
+                user_message=(
+                    "I could not load the compiled dataset needed for causal inference. "
+                    "Please retry after the dataset is available."
+                ),
+            )
 
-        # Tools
-        dp_raw = tool_factory.get_tool(DuckDBInMemorySQLTool.NAME)
-        data_processing_tool = cast(DuckDBInMemorySQLTool, dp_raw)
+        if dataframe.empty:
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=(
+                    "The compiled dataset is empty, so causal effect estimation cannot proceed."
+                ),
+                error_message="compiled dataset is empty",
+            )
 
-        # Optional tool (kept for parity with your existing wiring)
-        _prof_raw = tool_factory.get_tool(CausalDataProfilingTool.NAME)
-        _data_profiling_tool = cast(CausalDataProfilingTool, _prof_raw)  # currently unused here
+        dataset_summary = deps.dataset_summary
+        try:
+            inference_ready_spec = InferenceReadyCausalSpec(
+                causal_spec=deps.causal_spec,
+                transformation_plan=deps.transformation_plan,
+                data_summary=dataset_summary,
+            )
+        except Exception as exc:
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=(
+                    "The compiled dataset, causal specification, and transformation plan are "
+                    "not consistent enough for causal inference yet. Please revise the "
+                    "upstream setup."
+                ),
+                error_message=f"inference-ready spec invalid: {safe_err(exc)}",
+            )
 
-        # Context for ATE summarizer prompt
-        context: dict[str, Any] = {
-            "selected_model": selected_model_fqcn,
-            "causal_specs": causal_specs.model_dump(mode="json"),
-            "dataset_summary": data_summary.model_dump(mode="json"),
+        model = self._model_factory.resolve(deps.selected_model)
+        if model is None:
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=(
+                    "The confirmed causal model is not available in the current model catalog."
+                ),
+                error_message=f"unsupported model: {deps.selected_model}",
+            )
+
+        resolved = _ResolvedInferenceContext(
+            dataset_id=deps.dataset_id,
+            dataset_summary=dataset_summary,
+            selected_model=deps.selected_model,
+            trained_model_id=deps.trained_model_id,
+            inference_ready_spec=inference_ready_spec,
+        )
+        source_signature = _source_signature(resolved=resolved)
+        if payload.source_signature != source_signature:
+            payload = payload.reset_for_signature(source_signature=source_signature)
+
+        history = (
+            list(request.read_only_messages_history[-6:])
+            if request.read_only_messages_history
+            else []
+        )
+
+        if payload.ate_result_raw_json_str is None:
+            return self._compute_initial_ate(
+                request=request,
+                dataframe=dataframe,
+                resolved=resolved,
+                payload=payload,
+                model=model,
+                history=history,
+            )
+
+        latest_user_message = _latest_user_message(history)
+        if latest_user_message is None:
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=payload.assistant_message
+                or "Ask a follow-up question about the causal effect estimate or request a subgroup analysis.",
+                artifact_refs=payload.message_artifact_refs,
+            )
+
+        return self._handle_follow_up(
+            request=request,
+            dataframe=dataframe,
+            resolved=resolved,
+            payload=payload,
+            model=model,
+            history=history,
+            latest_user_message=latest_user_message,
+        )
+
+    def _compute_initial_ate(
+        self,
+        *,
+        request: NodeRequest,
+        dataframe: pd.DataFrame,
+        resolved: _ResolvedInferenceContext,
+        payload: CausalInferencePayloadModel,
+        model: CausalModel,
+        history: Sequence[ChatMessage],
+    ) -> NodeExecutionResult:
+        command = ATECommand(
+            model_name=resolved.selected_model,
+            df=dataframe,
+            run_id=uuid4(),
+            inference_ready_spec=resolved.inference_ready_spec,
+            fitted_model_id=resolved.trained_model_id,
+            inputs=ATEInputsModel(),
+        )
+
+        try:
+            result = model.execute(
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                command=command,
+            )
+        except Exception as exc:
+            log.exception("CAUSAL_INFERENCE ATE execution crashed", error=exc)
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=_summarize_model_failure_for_user(
+                    llm=self._llm,
+                    operation="overall treatment-effect estimation",
+                    model_name=resolved.selected_model,
+                    error_message=safe_err(exc),
+                    error_details={"exception": repr(exc)},
+                    warnings=[],
+                    fallback_message=(
+                        "The global treatment effect could not be computed because the estimator failed."
+                    ),
+                ),
+                error_message=f"ate execution failed: {safe_err(exc)}",
+            )
+
+        if isinstance(result, CommandFailure):
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=_summarize_model_failure_for_user(
+                    llm=self._llm,
+                    operation="overall treatment-effect estimation",
+                    model_name=resolved.selected_model,
+                    error_message=result.error.message,
+                    error_details=result.error.details,
+                    warnings=result.warnings,
+                    fallback_message=(
+                        "I could not compute the overall treatment effect from the trained model."
+                    ),
+                ),
+                error_message=result.error.message,
+            )
+
+        if not isinstance(result, ATESuccess):
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=(
+                    "The treatment-effect computation returned an unexpected result type."
+                ),
+                error_message=f"unexpected ate result type: {type(result).__name__}",
+            )
+
+        ate_payload = _normalize_ate_result(result)
+        ate_payload_json = _dumps(ate_payload)
+        assistant_message = _summarize_ate(
+            llm=self._llm,
+            selected_model=resolved.selected_model,
+            causal_spec=resolved.inference_ready_spec.causal_spec,
+            ate_payload_json=ate_payload_json,
+            history=history,
+        )
+        next_payload = payload.model_copy(
+            update={
+                "ate_result_raw_json_str": ate_payload_json,
+                "error_message": None,
+            }
+        )
+        return self._needs_input_result(
+            request=request,
+            payload=next_payload,
+            user_message=assistant_message,
+        )
+
+    def _handle_follow_up(
+        self,
+        *,
+        request: NodeRequest,
+        dataframe: pd.DataFrame,
+        resolved: _ResolvedInferenceContext,
+        payload: CausalInferencePayloadModel,
+        model: CausalModel,
+        history: Sequence[ChatMessage],
+        latest_user_message: str,
+    ) -> NodeExecutionResult:
+        cached_context = {
+            "ate_result": _loads_or_none(payload.ate_result_raw_json_str),
+            "latest_cate_result": _loads_or_none(payload.latest_cate_result_raw_json_str),
+            "latest_cate_request_summary": payload.latest_cate_request_summary,
+            "queryable_columns": _dataset_summary_column_names(resolved.dataset_summary),
+            "identifier_column": str(resolved.inference_ready_spec.causal_spec.id_col).strip(),
+            "effect_modifiers": resolved.inference_ready_spec.get_effect_modifiers_order(),
+            "selected_model": resolved.selected_model,
         }
 
-        last_6_messages = messages_history[-6:] if messages_history else None
-
-        # ---------------------------
-        # ATE: compute once (idempotent)
-        # ---------------------------
-        if state.payload.ate_result_raw_json_str is None:
-
-            cmd = ATECommand(
-                model_name=selected_model_fqcn,
-                dataset_id=clean_dataset_id,
-                run_id=uuid4(),
-                data_summary=data_summary,
-                transformation_plan=col_transformation_plan,
-                causal_specs=causal_specs,
-                fitted_model_id=trained_model_id,
-                order_effect_modifiers=list(order_effect_modifiers),
-                order_covariates=list(order_covariates),
-                inputs=ATEInputsModel(),
-                options={},
+        try:
+            decision = self._llm.generate_json(
+                schema=_InferenceRouteDecision,
+                system_prompt=CAUSAL_INFERENCE_ROUTE_SYSTEM_PROMPT,
+                user_prompt=CAUSAL_INFERENCE_ROUTE_USER_PROMPT_TEMPLATE.format(
+                    cached_context_json=_dumps(cached_context),
+                    messages_json=_dumps(_messages_payload(history)),
+                ),
+                config=LLMConfig(model="basic", temperature=0.2),
+                history=history,
+                max_attempts=3,
+            )
+        except Exception as exc:
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=(
+                    "I could not interpret that follow-up request from the cached inference "
+                    "context. Please restate the question more directly."
+                ),
+                error_message=f"inference route generation failed: {safe_err(exc)}",
             )
 
-            app_log.warning(
-                f"Executing ATECommand: model={selected_model_fqcn} dataset_id={clean_dataset_id} fitted_model_id={trained_model_id}"
+        if decision.action in ("answer_from_context", "clarify"):
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=cast(str, decision.assistant_message),
             )
-            res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)
-            app_log.warning(f"ATECommand executed with result: {res}")
 
-            if not isinstance(res, ATEResult):
-                raise TypeError(f"Expected ATEResult from model.execute, got {type(res).__name__}")
+        if decision.action == "generate_ate_graph":
+            ate_payload = _loads_or_none(payload.ate_result_raw_json_str)
+            if not isinstance(ate_payload, dict):
+                return self._needs_input_result(
+                    request=request,
+                    payload=payload,
+                    user_message="The cached ATE result is missing or invalid.",
+                    error_message="cached ate result missing",
+                )
+            try:
+                artifact_refs = self._generate_plot_artifacts(
+                    user_id=request.user_id,
+                    conversation_id=request.conversation_id,
+                    dataframe=_build_ate_plot_dataframe(ate_payload),
+                    user_intent=_build_ate_graph_user_intent(latest_user_message),
+                )
+            except Exception as exc:
+                return self._needs_input_result(
+                    request=request,
+                    payload=payload,
+                    user_message=(
+                        "I could not render the overall treatment-effect graph right now."
+                    ),
+                    error_message=f"ate graph generation failed: {safe_err(exc)}",
+                )
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message="Here is the causal effect graph for the overall treatment effect.",
+                artifact_refs=artifact_refs,
+            )
 
-            match res:
-                case ATESuccess():
-                    ate_json = _serialize_result_to_json_str(res.ate)
-                    warnings = res.warnings if hasattr(res, "warnings") else []
-                    summary_out = self.llm.generate(
-                        system_prompt=CAUSAL_INFERENCE_ATE_SUMMARY_SYSTEM_PROMPT,
-                        user_prompt=CAUSAL_INFERENCE_ATE_SUMMARY_USER_PROMPT_TEMPLATE.format(
-                            context_json=_dumps(context),
-                            ate_result_json=ate_json,
-                            warnings_json=_dumps(warnings),
-                        ),
-                        config=LLMConfig(temperature=0.2, model="basic"),
-                        history=last_6_messages,
-                    ).content.strip()
+        if decision.action in ("compute_cate", "generate_cate_graph"):
+            return self._compute_or_reuse_cate(
+                request=request,
+                dataframe=dataframe,
+                resolved=resolved,
+                payload=payload,
+                model=model,
+                history=history,
+                user_request=latest_user_message,
+                request_summary=cast(str, decision.cate_request_summary),
+                produce_graph=decision.action == "generate_cate_graph",
+            )
 
-                    return CausalInferenceState(
-                        payload=state.payload.model_copy(
-                            update={
-                                "ate_result_raw_json_str": ate_json,
-                                "ate_inference_error": None,
-                                "should_abort": False,
-                                "abort_error_message": None,
-                                "message": summary_out,
-                            }
-                        )
-                    )
+        return self._needs_input_result(
+            request=request,
+            payload=payload,
+            user_message="The inference router returned an unsupported action.",
+            error_message=f"unsupported route action: {decision.action}",
+        )
 
-                case CommandFailure():
-                    msg = f"ATE computation failed: {res.error.message}"
-                    return CausalInferenceState(
-                        payload=state.payload.model_copy(
-                            update={
-                                "ate_result_raw_json_str": None,
-                                "error": res.error.message,
-                                "should_abort": True,
-                                "message": msg,
-                            }
-                        )
-                    )
+    def _compute_or_reuse_cate(
+        self,
+        *,
+        request: NodeRequest,
+        dataframe: pd.DataFrame,
+        resolved: _ResolvedInferenceContext,
+        payload: CausalInferencePayloadModel,
+        model: CausalModel,
+        history: Sequence[ChatMessage],
+        user_request: str,
+        request_summary: str,
+        produce_graph: bool,
+    ) -> NodeExecutionResult:
+        cached_cate_payload = _loads_or_none(payload.latest_cate_result_raw_json_str)
+        if (
+            not produce_graph
+            and _should_reuse_latest_cate(payload=payload, request_summary=request_summary)
+            and isinstance(cached_cate_payload, dict)
+        ):
+            assistant_message = _summarize_cate(
+                llm=self._llm,
+                selected_model=resolved.selected_model,
+                causal_spec=resolved.inference_ready_spec.causal_spec,
+                cate_payload=cached_cate_payload,
+                history=history,
+            )
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=assistant_message,
+            )
 
-                case _:
-                    raise TypeError(f"Unhandled ATEResult type: {type(res).__name__}")
+        effect_modifier_columns = resolved.inference_ready_spec.get_effect_modifiers_order()
+        if not effect_modifier_columns:
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=(
+                    "CATE is not available because the confirmed protocol has no effect modifiers."
+                ),
+            )
 
-        # ---------------------------
-        # If ATE already exists, interpret user request: answer-from-context OR compute CATE
-        # ---------------------------
-        return _process_cate_question(
-            llm=self.llm,
-            data_repo=self.data_repo,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            ate_model_output_json_str=state.payload.ate_result_raw_json_str,
-            messages_history=messages_history,
-            current_state= state,
-            causal_specs=causal_specs,
-            clean_dataset_id=clean_dataset_id,
-            data_summary=data_summary,
-            transformation_plan=col_transformation_plan,
-            selected_model_fqcn=selected_model_fqcn,
-            trained_model_id=trained_model_id,
-            order_effect_modifiers=order_effect_modifiers,
-            order_covariates=order_covariates,
+        queryable_columns = _dataset_summary_column_names(resolved.dataset_summary)
+        identifier_column = str(resolved.inference_ready_spec.causal_spec.id_col).strip()
+        requested_filter_columns = _extract_explicit_column_mentions(
+            texts=[user_request, request_summary],
+            available_columns=queryable_columns,
+        )
+        effect_modifier_set = {str(column).strip() for column in effect_modifier_columns}
+        non_effect_modifier_filter_columns = [
+            column
+            for column in requested_filter_columns
+            if str(column).strip() not in effect_modifier_set
+        ]
+
+        try:
+            selection_df = self._run_data_manipulation_tool(
+                dataframe=dataframe.copy(),
+                conversation_id=request.conversation_id,
+                summary_json=self._profiling_tool.dataset_summary_to_json(resolved.dataset_summary),
+                instructions=_build_cate_selection_instructions(
+                    request_summary=request_summary,
+                    effect_modifier_columns=effect_modifier_columns,
+                    identifier_column=identifier_column,
+                ),
+            )
+        except Exception as exc:
+            return self._invalid_cate_plan_result(
+                request=request,
+                payload=payload,
+                dataset_summary=resolved.dataset_summary,
+                queryable_columns=queryable_columns,
+                effect_modifier_columns=effect_modifier_columns,
+                user_request=user_request,
+                issue_text=f"Subgroup cohort selection failed: {safe_err(exc)}",
+                history=history,
+            )
+
+        issue_text = _validate_cate_selection_dataframe(
+            selection_df=selection_df,
+            effect_modifiers=effect_modifier_columns,
+            request_summary=request_summary,
+        )
+        if issue_text is not None:
+            return self._invalid_cate_plan_result(
+                request=request,
+                payload=payload,
+                dataset_summary=resolved.dataset_summary,
+                queryable_columns=queryable_columns,
+                effect_modifier_columns=effect_modifier_columns,
+                user_request=user_request,
+                issue_text=issue_text,
+                history=history,
+            )
+
+        cate_payload, cate_plot_df = self._execute_cate_selection(
+            request=request,
+            dataframe=dataframe,
+            resolved=resolved,
             model=model,
-            data_processing_tool=data_processing_tool,
-            data_profiling_tool=_data_profiling_tool,
+            selection_df=selection_df,
+            request_summary=request_summary,
+            effect_modifier_columns=effect_modifier_columns,
+            identifier_column=identifier_column,
+            requested_filter_columns=requested_filter_columns,
+            non_effect_modifier_filter_columns=non_effect_modifier_filter_columns,
+        )
+        if isinstance(cate_payload, dict) and cate_plot_df is None and cate_payload.get("errors"):
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=_summarize_model_failure_for_user(
+                    llm=self._llm,
+                    operation="subgroup effect estimation",
+                    model_name=resolved.selected_model,
+                    error_message="CATE computation failed for all requested cohorts.",
+                    error_details={"cohort_errors": cate_payload.get("errors")},
+                    warnings=[],
+                    fallback_message=(
+                        "I could not compute the requested subgroup effects from the trained model."
+                    ),
+                ),
+                error_message=_format_cohort_error_details(cate_payload["errors"]),
+            )
+        if cate_payload is None or cate_plot_df is None or cate_plot_df.empty:
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=(
+                    "No subgroup rows matched the requested CATE analysis. Please broaden "
+                    "the subgroup definition and try again."
+                ),
+            )
+
+        assistant_message = _summarize_cate(
+            llm=self._llm,
+            selected_model=resolved.selected_model,
+            causal_spec=resolved.inference_ready_spec.causal_spec,
+            cate_payload=cate_payload,
+            history=history,
         )
 
-
-
-
-
-# ============================================================
-# Small utilities
-# ============================================================
-
-def _dumps(obj: Any) -> str:
-    return json.dumps(obj, default=str, ensure_ascii=False)
-
-
-def _serialize_result_to_json_str(res: Any) -> str:
-    if hasattr(res, "model_dump"):
-        return _dumps(res.model_dump(mode="json"))
-    if isinstance(res, dict):
-        return _dumps(res)
-    try:
-        import dataclasses
-        if dataclasses.is_dataclass(res) and not isinstance(res, type):
-            return _dumps(dataclasses.asdict(res))
-    except Exception:
-        pass
-    return _dumps({"repr": repr(res)})
-
-
-def _last_user_text(history: Sequence[ChatMessage] | None) -> str:
-    if not history:
-        return ""
-    for msg in reversed(history):
-        if msg.role == "user" and msg.content.strip():
-            return msg.content.strip()
-    return ""
-
-
-def _extract_cols_data(df: pd.DataFrame, cols: Sequence[str]) -> pd.DataFrame:
-    cols_list = [str(c) for c in cols]
-    missing = [c for c in cols_list if c not in df.columns]
-    if missing:
-        raise KeyError(
-            f"Requested columns not found in df: {missing}. Available columns: {list(df.columns)}"
-        )
-    return df.loc[:, cols_list].copy()
-
-
-# ============================================================
-# Intent router payload (tight + reliable)
-# ============================================================
-
-class _CateIntentPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    prev_context_relevant: bool
-    answer: str = ""
-
-    @model_validator(mode="after")
-    def _normalize(self) -> _CateIntentPayload:
-        if not self.prev_context_relevant:
-            self.answer = ""
-        return self
-
-
-# ============================================================
-# Inclusion plan semantic validation (DuckDB SQL plan)
-# ============================================================
-
-
-class _CohortSQLPlanItem(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    group_key: str
-    is_counterfactual: bool = False
-    sql_request: SQLStatements
-
-
-class InclusionPlanModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    rules: list[_CohortSQLPlanItem] = Field(default_factory=list) # pyright: ignore[reportUnknownVariableType]
-
-
-def _validate_inclusion_plan_semantic(
-    *,
-    plan: InclusionPlanModel,
-    effect_modifiers: Sequence[str],
-) -> list[ValidationIssueModel]:
-    issues: list[ValidationIssueModel] = []
-    _ = effect_modifiers
-
-    if not plan.rules:
-        issues.append(
-            ValidationIssueModel(
-                severity="FAIL",
-                message="No cohort SQL rules were generated.",
-                evidence={},
-                fix_hint="Provide at least one cohort with sql_request.",
-            )
-        )
-        return issues
-
-    for i, cohort in enumerate(plan.rules):
-        if not str(cohort.group_key).strip():
-            issues.append(
-                ValidationIssueModel(
-                    severity="FAIL",
-                    message=f"Cohort at index {i} has empty group_key.",
-                    evidence={"index": i},
-                    fix_hint="Set a non-empty group_key.",
-                )
-            )
-        if len(cohort.sql_request.statements) < 1:
-            issues.append(
-                ValidationIssueModel(
-                    severity="FAIL",
-                    message=f"Cohort '{cohort.group_key}' has empty SQL statements.",
-                    evidence={"index": i},
-                    fix_hint="Set at least one SQL statement in sql_request.",
-                )
-            )
-    return issues
-
-
-# ============================================================
-# CATE post-processing: raw if n<=5 else stats (cate + intervals + inference)
-# ============================================================
-
-def _to_1d_float(arr: Any) -> np.ndarray | None:
-    if arr is None:
-        return None
-    if isinstance(arr, np.ndarray):
-        a = arr # pyright: ignore[reportUnknownVariableType]
-    elif isinstance(arr, (list, tuple)):
-        try:
-            a = np.asarray(arr, dtype=float)
-        except Exception:
-            return None
-    else:
-        return None
-    if a.ndim == 0:
-        a = a.reshape(1) # pyright: ignore[reportUnknownVariableType]
-    return a.astype(float, copy=False).ravel()
-
-
-def _stats(arr: np.ndarray) -> dict[str, Any]:
-    a = arr[np.isfinite(arr)]
-    if a.size == 0:
-        return {"n": 0}
-    q = np.percentile(a, [10, 25, 50, 75, 90])
-    return {
-        "n": int(a.size),
-        "mean": float(np.mean(a)),
-        "median": float(q[2]),
-        "std": float(np.std(a, ddof=1)) if a.size >= 2 else 0.0,
-        "min": float(np.min(a)),
-        "max": float(np.max(a)),
-        "p10": float(q[0]),
-        "p25": float(q[1]),
-        "p75": float(q[3]),
-        "p90": float(q[4]),
-        "frac_positive": float(np.mean(a > 0.0)),
-        "frac_negative": float(np.mean(a < 0.0)),
-    }
-
-
-def _interval_stats(lower: np.ndarray | None, upper: np.ndarray | None) -> dict[str, Any]:
-    if lower is None or upper is None:
-        return {"available": False}
-    if lower.shape != upper.shape:
-        return {"available": False, "reason": "shape_mismatch"}
-    width = upper - lower
-    mask = np.isfinite(lower) & np.isfinite(upper)
-    if not np.any(mask):
-        return {"available": False, "reason": "no_finite"}
-    lower_f = lower[mask]
-    upper_f = upper[mask]
-    width_f = width[mask]
-    crosses0 = (lower_f <= 0.0) & (upper_f >= 0.0)
-    return {
-        "available": True,
-        "n": int(lower_f.size),
-        "mean_width": float(np.mean(width_f)),
-        "median_width": float(np.median(width_f)),
-        "frac_crosses_zero": float(np.mean(crosses0)),
-        "mean_lower": float(np.mean(lower_f)),
-        "mean_upper": float(np.mean(upper_f)),
-    }
-
-
-def _extract_effect_fields(effect_obj: dict[CATEModelResult, Any]) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, Any]:
-    """
-    Supports dict-like payloads with keys:
-      - "cate"
-      - "cate_interval" (tuple/list of (lower, upper) or dict {"lower":..., "upper":...})
-      - "cate_inference"
-    """
-    cate = None
-    lo = None
-    hi = None
-    inf = None
-    app_log.info("effect_obj type=%s", type(effect_obj))
-    app_log.info("effect_obj class=%s", type(effect_obj).__name__)
-    cate_raw = effect_obj["cate"]
-    cate = _to_1d_float(cate_raw)
-    
-    if effect_obj["cate_interval"] is not None:
-        interval_raw = effect_obj["cate_interval"]
-        lo = _to_1d_float(interval_raw[0])
-        hi = _to_1d_float(interval_raw[1])
-    if effect_obj["cate_inference"] is not None:
-        inf = effect_obj["cate_inference"]
-        
-    return cate, lo, hi, inf
-
-
-def _make_llm_cate_payload_for_group(
-    *,
-    group_key: str,
-    sql_request: SQLStatements,
-    is_counterfactual: bool,
-    outcome_kind: str,
-    effect_obj: dict[CATEModelResult, Any],
-) -> dict[str, Any]:
-    cate, lo, hi, inf = _extract_effect_fields(effect_obj)
-
-    out: dict[str, Any] = {
-        "group_key": group_key,
-        "is_counterfactual": bool(is_counterfactual),
-        "outcome_kind": outcome_kind,
-        "cohort_sql": sql_request.model_dump(mode="json"),
-        "cate": None,
-        "cate_interval": None,
-        "cate_inference": None,
-    }
-
-    if cate is None:
-        out["cate"] = {"available": False}
-        if inf is not None:
-            out["cate_inference"] = inf
-        return out
-
-    n = int(cate.size)
-    if n <= 5:
-        out["cate"] = {"available": True, "n": n, "values": [float(x) for x in cate.tolist()]}
-        if lo is not None and hi is not None and lo.size == n and hi.size == n:
-            out["cate_interval"] = {
-                "available": True,
-                "pairs": [{"lower": float(a), "upper": float(b)} for a, b in zip(lo.tolist(), hi.tolist(), strict=False)],
+        next_payload = payload.model_copy(
+            update={
+                "latest_cate_result_raw_json_str": _dumps(cate_payload),
+                "latest_cate_request_summary": request_summary,
             }
-        else:
-            out["cate_interval"] = _interval_stats(lo, hi)
-    else:
-        out["cate"] = {"available": True, "summary": _stats(cate)}
-        out["cate_interval"] = _interval_stats(lo, hi)
-
-    if inf is not None:
-        out["cate_inference"] = inf
-
-    return out
-
-
-# ============================================================
-# CATE processing (DuckDB SQL filtering)
-# ============================================================
-
-def _apply_rules_with_tool(
-    *,
-    tool: DuckDBInMemorySQLTool,
-    df: pd.DataFrame,
-    sql_request: SQLStatements,
-) -> pd.DataFrame:
-    req = sql_request.model_copy(update={"table_name": "cohort_df"})
-    result = tool.execute(dataframe=df, sql_request=req)
-    if not result.has_result_set:
-        raise ValueError("Cohort SQL did not return a result set.")
-    return result.dataframe.copy()
-
-def _process_cate_question(
-    *,
-    llm: LLMService,
-    data_repo: DataRepo,
-    user_id: UUID,
-    conversation_id: UUID,
-    ate_model_output_json_str: str,
-    messages_history: Sequence[ChatMessage] | None,
-    current_state: CausalInferenceState,
-    causal_specs: CausalSpec,
-    clean_dataset_id: UUID,
-    data_summary: DatasetSummaryModel,
-    transformation_plan: TransformPlan | None,
-    selected_model_fqcn: str,
-    trained_model_id: UUID,
-    order_effect_modifiers: Sequence[str],
-    order_covariates: Sequence[str],
-    model: CausalModel,
-    data_processing_tool: DuckDBInMemorySQLTool,
-    data_profiling_tool: CausalDataProfilingTool,
-) -> CausalInferenceState:
-    last_8 = messages_history[-8:] if messages_history else None
-    last_4_messages = messages_history[-4:] if messages_history else None
-    
-    if len(order_effect_modifiers) < 1:
-        return CausalInferenceState(
-            payload=current_state.payload.model_copy(
-                update={
-                    "message": "Cannot compute CATE because order_effect_modifiers is empty. Please retrain the model with at least one effect modifier (X) to enable CATE analysis.",
-                }
-            )
         )
 
-    # ---------------------------
-    # 1) Context router (answer from history/ATE if possible)
-    # ---------------------------
-    intent = llm.generate_json(
-        schema=_CateIntentPayload,
-        user_prompt=CATE_GENERAL_PROMPT+
-            f"\n ATESummary:\n{ate_model_output_json_str}\n",
-        system_prompt=None,
-        config=LLMConfig(temperature=0.2, model="basic"),
-        history=last_8,
-        max_attempts=3,
-    )
+        artifact_refs: list[ArtifactRef] = []
+        error_message: str | None = None
+        if produce_graph:
+            try:
+                artifact_refs = self._generate_plot_artifacts(
+                    user_id=request.user_id,
+                    conversation_id=request.conversation_id,
+                    dataframe=cate_plot_df,
+                    user_intent=_build_cate_graph_user_intent(
+                        user_request=user_request,
+                        request_summary=request_summary,
+                    ),
+                )
+            except Exception as exc:
+                error_message = f"cate graph generation failed: {safe_err(exc)}"
+                assistant_message = (
+                    f"{assistant_message} I computed the subgroup effects, but I could not "
+                    "render the requested graph right now."
+                )
 
-    if intent.prev_context_relevant and intent.answer.strip():
-        return CausalInferenceState(
-            payload=current_state.payload.model_copy(update={"message": intent.answer.strip()})
+        return self._needs_input_result(
+            request=request,
+            payload=next_payload,
+            user_message=assistant_message,
+            artifact_refs=artifact_refs,
+            error_message=error_message,
         )
 
-    # ---------------------------
-    # 2) Build inclusion plan (multi-cohort, X-only)
-    # ---------------------------
-    user_q = _last_user_text(messages_history)
-    error_message: str | None = None
-    plan: InclusionPlanModel | None = None
-    
-    effect_modifiers_summary = _filter_dataset_summary_to_effect_modifiers(summary=data_summary, effect_modifiers=causal_specs.effect_modifiers)
-    app_log.info(f"Effect modifiers summary for prompt: {effect_modifiers_summary.model_dump_json()}")
-    plot_cohorts: list[CohortCate] = [] 
-    for attempt in range(3):
-        plan = llm.generate_json(
-            schema=InclusionPlanModel,
-            system_prompt=None,
-            user_prompt=(
-                CATE_INCLUSION_PROMPT
-                +f"\n\nEffect modifiers summary (only these columns can be used for cohort definitions):\n{effect_modifiers_summary.model_dump_json()}\n"
-                +f"Effect modifiers columns: {', '.join(causal_specs.effect_modifiers)}\n"
-                +f"\n\nUSER_QUESTION:\n{user_q}\n"
-                + (f"\nPrevious error message:\n{error_message}\n" if error_message else "")
-            ),
-            config=LLMConfig(temperature=0.1, model="pro"),
-            history=last_4_messages,
-            max_attempts=3,
-        )
-
-        issues = _validate_inclusion_plan_semantic(plan=plan, effect_modifiers=causal_specs.effect_modifiers)
-        if not issues or (len(issues) == 0 and len(plan.rules) > 0):
-            break
-
-        app_log.info(f"Invalid inclusion plan (attempt {attempt + 1}): {plan}")
-        error_message = (
-            "Your inclusion plan has the following issues or plan rules are empty:\n"
-            + "\n".join(f"- {i.message}" for i in issues)
-            + "\nFix them and output JSON only in the required schema."
-        )  
-    
-    app_log.info(f"Inclusion plan after validation attempts: {plan}")
-    is_valid, validation_log = _validate_inclusion_plan(plan, effect_modifiers=causal_specs.effect_modifiers)
-    if not is_valid:
-        app_log.info(f"Final inclusion plan is invalid: {validation_log}")
-        invalid_plan_message = _invalid_plan_message(
-            llm=llm,
-            model_name="basic",
-            effect_modifiers_summary=effect_modifiers_summary,
-            effect_modifiers=causal_specs.effect_modifiers
-        )
-                                                     
-        return CausalInferenceState(
-            payload=current_state.payload.model_copy(
-                update={
-                    "message": invalid_plan_message, 
-                }
-            )
-        )
-        
-    # ---------------------------
-    # 3) Load X dataframe and compute CATE per cohort
-    # ---------------------------
-    df = data_repo.get_csv_data(
-        user_id=user_id,
-        conversation_id=conversation_id,
-        dataset_id=clean_dataset_id,
-    )
-    df_x = _extract_cols_data(df=df, cols=order_effect_modifiers)
-
-    outcome_kind = "unknown"
-    if isinstance(causal_specs.outcome_spec, BinaryOutcomeSpecModel):
-        outcome_kind = "binary"
-    elif isinstance(causal_specs.outcome_spec, ContinuousOutcomeSpecModel): # pyright: ignore[reportUnnecessaryIsInstance]
-        outcome_kind = "continuous"
-
-    group_payloads: list[dict[str, Any]] = []
-    non_empty_any = False
-
-    for cohort in plan.rules: # pyright: ignore[reportOptionalMemberAccess]
-        gk = str(cohort.group_key)
+    def _invalid_cate_plan_result(
+        self,
+        *,
+        request: NodeRequest,
+        payload: CausalInferencePayloadModel,
+        dataset_summary: DatasetSummaryModel,
+        queryable_columns: Sequence[str],
+        effect_modifier_columns: Sequence[str],
+        user_request: str,
+        issue_text: str,
+        history: Sequence[ChatMessage],
+    ) -> NodeExecutionResult:
         try:
-            cohort_df = _apply_rules_with_tool(
-                tool=data_processing_tool,
-                df=df_x,
-                sql_request=cohort.sql_request,
+            assistant_message = self._llm.generate(
+                system_prompt=INVALID_CATE_PLAN_SYSTEM_PROMPT,
+                user_prompt=INVALID_CATE_PLAN_USER_PROMPT_TEMPLATE.format(
+                    dataset_summary_json=dataset_summary.model_dump_json(),
+                    queryable_columns_json=_dumps(list(queryable_columns)),
+                    effect_modifier_columns_json=_dumps(list(effect_modifier_columns)),
+                    user_request=user_request,
+                    issue_text=issue_text,
+                ),
+                config=LLMConfig(model="basic", temperature=0.2),
+                history=history,
+            ).content.strip()
+        except Exception:
+            assistant_message = (
+                "I could not prepare that subgroup analysis yet. You can define the cohort "
+                "with any compiled column, but the final cohort output must contain only "
+                "group_key plus the confirmed effect modifiers used for effect estimation."
             )
-        except Exception as e:
-            group_payloads.append(
-                {
-                    "group_key": gk,
-                    "is_counterfactual": bool(cohort.is_counterfactual),
-                    "cohort_sql": cohort.sql_request.model_dump(mode="json"),
-                    "error": f"Cohort SQL execution failed: {e!r}",
-                }
-            )
-            continue
 
-        if cohort_df.empty:
-            group_payloads.append(
-                {
-                    "group_key": gk,
-                    "is_counterfactual": bool(cohort.is_counterfactual),
-                    "cohort_sql": cohort.sql_request.model_dump(mode="json"),
-                    "empty": True,
-                    "message": "No rows matched this cohort SQL query.",
-                }
-            )
-            continue
-
-        non_empty_any = True
-
-    
-        cate_inputs = CATEInputs(x_rows=cohort_df, counterfactual=cohort.is_counterfactual)  
-
-        cmd = CATECommand(
-            model_name=selected_model_fqcn,
-            dataset_id=clean_dataset_id,
-            run_id=uuid4(),
-            data_summary=data_summary,
-            transformation_plan=transformation_plan,
-            causal_specs=causal_specs,
-            fitted_model_id=trained_model_id,
-            order_effect_modifiers=list(order_effect_modifiers),
-            order_covariates=list(order_covariates),
-            inputs=cate_inputs,
-            options={},
+        return self._needs_input_result(
+            request=request,
+            payload=payload,
+            user_message=assistant_message,
+            error_message=issue_text,
         )
 
-        res = model.execute(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            command=cmd,
-        )
+    def _execute_cate_selection(
+        self,
+        *,
+        request: NodeRequest,
+        dataframe: pd.DataFrame,
+        resolved: _ResolvedInferenceContext,
+        model: CausalModel,
+        selection_df: pd.DataFrame,
+        request_summary: str,
+        effect_modifier_columns: Sequence[str],
+        identifier_column: str,
+        requested_filter_columns: Sequence[str],
+        non_effect_modifier_filter_columns: Sequence[str],
+    ) -> tuple[dict[str, Any] | None, pd.DataFrame | None]:
+        plot_frames: list[pd.DataFrame] = []
+        cohort_summaries: list[dict[str, Any]] = []
+        cohort_errors: list[dict[str, Any]] = []
 
-        if not isinstance(res, CATEResult):
-            raise TypeError(f"Expected CATEResult from model.execute, got {type(res).__name__}")
-        
-        match res:
-            case CATESuccess():           
-                group_payloads.append(
-                    _make_llm_cate_payload_for_group(
-                        group_key=gk,
-                        sql_request=cohort.sql_request,
-                        is_counterfactual=bool(cohort.is_counterfactual),
-                        outcome_kind=outcome_kind,
-                        effect_obj=res.effects,
-                    )
-                )
-                cate_arr, lo_arr, hi_arr, _ = _extract_effect_fields(res.effects)
-                if cate_arr is not None and cate_arr.size > 0:
-                    plot_cohorts.append(
-                        CohortCate(
-                            group_key=gk,
-                            cate=cate_arr,
-                            lower=lo_arr,
-                            upper=hi_arr,
-                        )
-                )
+        grouped = selection_df.groupby(_GROUP_KEY_COLUMN, sort=False, dropna=False)
+        for group_key, group_df in grouped:
+            normalized_group_key = str(group_key).strip()
+            x_rows = group_df.loc[:, list(effect_modifier_columns)].reset_index(drop=True).copy()
 
-            case CommandFailure():
-                group_payloads.append(
+            command = CATECommand(
+                model_name=resolved.selected_model,
+                df=dataframe,
+                run_id=uuid4(),
+                inference_ready_spec=resolved.inference_ready_spec,
+                fitted_model_id=resolved.trained_model_id,
+                inputs=CATEInputs(x_rows=x_rows),
+            )
+
+            try:
+                result = model.execute(
+                    user_id=request.user_id,
+                    conversation_id=request.conversation_id,
+                    command=command,
+                )
+            except Exception as exc:
+                cohort_errors.append(
                     {
-                        "group_key": gk,
-                        "is_counterfactual": bool(cohort.is_counterfactual),
-                        "cohort_sql": cohort.sql_request.model_dump(mode="json"),
-                        "error": f"CATE computation failed: {res.error.message}",
+                        "group_key": normalized_group_key,
+                        "error": f"cate execution failed: {safe_err(exc)}",
                     }
                 )
+                continue
 
-            case _:
-                raise TypeError(f"Unhandled CATEResult type: {type(res).__name__}")
+            if isinstance(result, CommandFailure):
+                cohort_errors.append(
+                    {
+                        "group_key": normalized_group_key,
+                        "error": result.error.message,
+                    }
+                )
+                continue
 
-    if not non_empty_any:
-        return CausalInferenceState(
-            payload=current_state.payload.model_copy(
-                update={
-                    "message": (
-                        "After running your cohort SQL queries, I found **0 rows** for all cohorts.\n"
-                        "Please broaden your cohort SQL conditions and try again."
-                    )
+            if not isinstance(result, CATESuccess):
+                cohort_errors.append(
+                    {
+                        "group_key": normalized_group_key,
+                        "error": f"unexpected cate result type: {type(result).__name__}",
+                    }
+                )
+                continue
+
+            cate_values, lower_values, upper_values = _extract_cate_effect_arrays(result.effects)
+            if cate_values is None or cate_values.size == 0:
+                cohort_errors.append(
+                    {
+                        "group_key": normalized_group_key,
+                        "error": "cate result did not contain usable effect values",
+                    }
+                )
+                continue
+
+            if cate_values.size != len(x_rows):
+                cohort_errors.append(
+                    {
+                        "group_key": normalized_group_key,
+                        "error": (
+                            "cate result size did not match the number of requested subgroup rows"
+                        ),
+                    }
+                )
+                continue
+
+            cohort_plot_df = x_rows.copy()
+            cohort_plot_df[_GROUP_KEY_COLUMN] = normalized_group_key
+            cohort_plot_df[_CATE_COLUMN] = cate_values.astype(float, copy=False)
+            cohort_plot_df[_CATE_LOWER_COLUMN] = _aligned_interval_column(
+                interval_values=lower_values,
+                length=len(x_rows),
+            )
+            cohort_plot_df[_CATE_UPPER_COLUMN] = _aligned_interval_column(
+                interval_values=upper_values,
+                length=len(x_rows),
+            )
+            plot_frames.append(cohort_plot_df)
+
+            cohort_summaries.append(
+                {
+                    "group_key": normalized_group_key,
+                    "row_count": int(len(x_rows)),
+                    "estimate_summary": _summarize_numeric_array(cate_values),
+                    "interval_summary": _summarize_interval_arrays(lower_values, upper_values),
                 }
             )
-        )
-    
-    graphs: list[GraphImage] = []
-    artifacts: list[UUID] | None = []
-    if len(plot_cohorts) > 0:
-        graphs.append(data_profiling_tool.plot_cate_distribution(plot_cohorts, causal_specs))
-    if len(plot_cohorts) == 1:
-        graphs.append(data_profiling_tool.plot_cate_sorted_curve(plot_cohorts, causal_specs))
-    else:
-        graphs.append(data_profiling_tool.plot_cate_forest_mean_ci(plot_cohorts, causal_specs))
 
-    # Persist artifacts (you said you'll wire return processing)
-    for g in graphs:
-        aid = uuid4()
-        artifacts.append(aid)
-        data_repo.save_artifact(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            artifact_id=aid,
-            content=g.content,
-            mime=g.mime,
+        if not plot_frames:
+            if cohort_errors:
+                return {
+                    "request_summary": request_summary,
+                    "identifier_column": identifier_column,
+                    "requested_filter_columns": list(requested_filter_columns),
+                    "non_effect_modifier_filter_columns": list(non_effect_modifier_filter_columns),
+                    "effect_modifier_columns": list(effect_modifier_columns),
+                    "errors": cohort_errors,
+                }, None
+            return None, None
+
+        plot_df = pd.concat(plot_frames, ignore_index=True)
+        cate_payload = {
+            "request_summary": request_summary,
+            "outcome_kind": str(resolved.inference_ready_spec.causal_spec.outcome_spec.kind),
+            "experiment_type": str(resolved.inference_ready_spec.causal_spec.experiment_type),
+            "identifier_column": identifier_column,
+            "requested_filter_columns": list(requested_filter_columns),
+            "non_effect_modifier_filter_columns": list(non_effect_modifier_filter_columns),
+            "effect_modifier_columns": list(effect_modifier_columns),
+            "cohorts": cohort_summaries,
+            "errors": cohort_errors,
+        }
+        return cate_payload, plot_df
+
+    def _run_data_manipulation_tool(
+        self,
+        *,
+        dataframe: pd.DataFrame,
+        conversation_id: UUID,
+        summary_json: str,
+        instructions: str,
+    ) -> pd.DataFrame:
+        manipulate = self._data_manipulation_tool.manipulate
+        params = inspect.signature(manipulate).parameters
+
+        kwargs: dict[str, Any] = {
+            "dataframe": dataframe,
+            "data_summary": summary_json,
+            "instructions": instructions,
+        }
+        if "table_name" in params:
+            kwargs["table_name"] = _conversation_id_to_table_name(conversation_id)
+        elif "conversation_id" in params:
+            kwargs["conversation_id"] = str(conversation_id)
+        else:
+            raise TypeError(
+                "data manipulation tool must accept either 'table_name' or 'conversation_id'"
+            )
+        if "retry_attempts" in params:
+            kwargs["retry_attempts"] = _DATA_MANIPULATION_RETRY_ATTEMPTS
+
+        return manipulate(**kwargs)
+
+    def _generate_plot_artifacts(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataframe: pd.DataFrame,
+        user_intent: str,
+    ) -> list[ArtifactRef]:
+        summary = self._profiling_tool.extract_dataset_summary(
+            dataframe,
+            max_categories=200,
+            sample_distinct=200,
+            compute_quantiles=False,
+            strict=True,
         )
-    # ---------------------------
-    # 4) LLM summarization (clinician-friendly)
-    #    - For n<=5 we included raw values
-    #    - For n>5 we included robust stats
-    # ---------------------------
-    llm_payload = { # pyright: ignore[reportUnknownVariableType]
-        "selected_model": selected_model_fqcn,
-        "experiment_type": causal_specs.experiment_type,
-        "outcome_kind": outcome_kind,
-        "treatment_column": getattr(causal_specs.treatment_spec, "column", None),
-        "cohorts": group_payloads,
-        # Optional: useful for context, but not huge
-        "ate_summary_raw": ate_model_output_json_str,
+        specs = self._plot_tool.generate_specs(
+            dataframe=dataframe,
+            data_summary=summary,
+            user_intent=user_intent,
+        )
+
+        artifact_refs: list[ArtifactRef] = []
+        for spec in specs:
+            artifact_id = uuid4()
+            self._data_repo.save_json_data(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                dataset_id=artifact_id,
+                json_data=json.dumps(spec, ensure_ascii=False, allow_nan=False),
+                overwrite=True,
+            )
+            artifact_refs.append(
+                _build_data_artifact_ref(
+                    artifact_id=artifact_id,
+                    artifact_format="json",
+                    artifact_kind=_ARTIFACT_KIND_CHART_SPEC,
+                )
+            )
+        return artifact_refs
+
+    def _needs_input_result(
+        self,
+        *,
+        request: NodeRequest,
+        payload: CausalInferencePayloadModel,
+        user_message: str,
+        artifact_refs: Sequence[ArtifactRef] | None = None,
+        error_message: str | None = None,
+    ) -> NodeExecutionResult:
+        updated_payload = payload.model_copy(
+            update={
+                "assistant_message": user_message,
+                "message_artifact_refs": list(artifact_refs or []),
+                "error_message": error_message,
+            }
+        )
+        return NodeExecutionResult(
+            new_node_state=CausalInferenceState(updated_payload),
+            new_orchestrator_state=request.orchestrator_state,
+            status="PENDING",
+            action="NEEDS_INPUT",
+            response_messages=[
+                ChatMessage(
+                    role="assistant",
+                    content=user_message,
+                    artifact_refs=list(artifact_refs or []) or None,
+                )
+            ],
+        )
+
+    def _needs_data_result(
+        self,
+        *,
+        request: NodeRequest,
+        user_message: str,
+    ) -> NodeExecutionResult:
+        return NodeExecutionResult(
+            new_node_state=CausalInferenceState.init_empty(),
+            new_orchestrator_state=request.orchestrator_state,
+            status="PENDING",
+            action="NEEDS_DATA",
+            response_messages=[ChatMessage(role="assistant", content=user_message)],
+        )
+
+
+def _source_signature(*, resolved: _ResolvedInferenceContext) -> str:
+    signature_payload = {
+        "dataset_id": str(resolved.dataset_id),
+        "dataset_summary": resolved.dataset_summary.model_dump(mode="json", exclude_none=True),
+        "causal_spec": resolved.inference_ready_spec.causal_spec.model_dump(
+            mode="json",
+            exclude_none=True,
+        ),
+        "transformation_plan": resolved.inference_ready_spec.transformation_plan.model_dump(
+            mode="json",
+            exclude_none=True,
+        ),
+        "selected_model": resolved.selected_model,
+        "trained_model_id": str(resolved.trained_model_id),
+    }
+    signature_json = json.dumps(
+        signature_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(signature_json.encode("utf-8")).hexdigest()
+
+
+def _loads_or_none(value: str | None) -> Any:
+    if value is None or not value.strip():
+        return None
+    return json.loads(value)
+
+
+def _dumps(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, default=str)
+
+
+def _messages_payload(messages: Sequence[ChatMessage]) -> list[dict[str, str]]:
+    return [{"role": msg.role, "content": msg.content} for msg in messages]
+
+
+def _latest_user_message(messages: Sequence[ChatMessage]) -> str | None:
+    for msg in reversed(messages):
+        if msg.role == "user" and msg.content.strip():
+            return msg.content.strip()
+    return None
+
+
+def _normalize_ate_result(result: ATESuccess) -> dict[str, Any]:
+    item = result.ate[0] if result.ate else {}
+    estimate = _scalar_from_any(item.get("ate"))
+    lower, upper = _interval_from_any(item.get("ate_interval"))
+    return {
+        "contrast": dict(result.contrast),
+        "estimate": estimate,
+        "interval": (
+            {"lower": lower, "upper": upper} if lower is not None and upper is not None else None
+        ),
+        "warnings": list(result.warnings or []),
+        "meta": dict(result.meta or {}),
     }
 
-    answer = llm.generate(
-        system_prompt=CATE_SUMMARY_PROMPT,
-        user_prompt=_dumps(llm_payload),
-        config=LLMConfig(temperature=0.2, model="basic"),
-        history=last_8,
-    ).content.strip()
 
-    return CausalInferenceState(
-        payload=current_state.payload.model_copy(update={"message": answer,
-                                                         "artifacts": (current_state.payload.artifacts or []) + (artifacts if artifacts else [])
-                                                         }),
-        current_artifact_ids=artifacts
+def _scalar_from_any(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float, np.generic)):
+        return float(value)
+    if isinstance(value, (list, tuple, np.ndarray)):
+        arr = np.asarray(value, dtype=float).ravel()
+        if arr.size == 0:
+            return None
+        return float(arr[0])
+    return None
+
+
+def _interval_from_any(value: Any) -> tuple[float | None, float | None]:
+    if value is None:
+        return None, None
+    if isinstance(value, dict):
+        return _scalar_from_any(value.get("lower")), _scalar_from_any(value.get("upper"))
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return _scalar_from_any(value[0]), _scalar_from_any(value[1])
+    if isinstance(value, np.ndarray) and value.size >= 2:
+        arr = np.asarray(value, dtype=float).ravel()
+        return float(arr[0]), float(arr[1])
+    return None, None
+
+
+def _extract_cate_effect_arrays(
+    effects: Mapping[str, Any],
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    cate_values = _to_1d_float_array(effects.get("cate"))
+    lower_values: np.ndarray | None = None
+    upper_values: np.ndarray | None = None
+
+    interval = effects.get("cate_interval")
+    if isinstance(interval, (list, tuple)) and len(interval) >= 2:
+        lower_values = _to_1d_float_array(interval[0])
+        upper_values = _to_1d_float_array(interval[1])
+    elif isinstance(interval, dict):
+        lower_values = _to_1d_float_array(interval.get("lower"))
+        upper_values = _to_1d_float_array(interval.get("upper"))
+
+    return cate_values, lower_values, upper_values
+
+
+def _to_1d_float_array(value: Any) -> np.ndarray | None:
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        arr = value
+    elif isinstance(value, (list, tuple)):
+        arr = np.asarray(value, dtype=float)
+    else:
+        return None
+    if arr.ndim == 0:
+        arr = arr.reshape(1)
+    return arr.astype(float, copy=False).ravel()
+
+
+def _aligned_interval_column(
+    *,
+    interval_values: np.ndarray | None,
+    length: int,
+) -> np.ndarray:
+    if interval_values is None or interval_values.size != length:
+        return np.full(length, np.nan, dtype=float)
+    return interval_values.astype(float, copy=False)
+
+
+def _summarize_numeric_array(values: np.ndarray) -> dict[str, Any]:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return {"n": 0}
+    return {
+        "n": int(finite.size),
+        "mean": float(np.mean(finite)),
+        "median": float(np.median(finite)),
+        "min": float(np.min(finite)),
+        "max": float(np.max(finite)),
+    }
+
+
+def _summarize_interval_arrays(
+    lower: np.ndarray | None,
+    upper: np.ndarray | None,
+) -> dict[str, Any]:
+    if lower is None or upper is None or lower.shape != upper.shape:
+        return {"available": False}
+    mask = np.isfinite(lower) & np.isfinite(upper)
+    if not np.any(mask):
+        return {"available": False}
+    lower_f = lower[mask]
+    upper_f = upper[mask]
+    return {
+        "available": True,
+        "mean_lower": float(np.mean(lower_f)),
+        "mean_upper": float(np.mean(upper_f)),
+        "frac_crosses_zero": float(np.mean((lower_f <= 0.0) & (upper_f >= 0.0))),
+    }
+
+
+def _summarize_ate(
+    *,
+    llm: LLMService,
+    selected_model: str,
+    causal_spec: Any,
+    ate_payload_json: str,
+    history: Sequence[ChatMessage],
+) -> str:
+    context = {
+        "selected_model": selected_model,
+        "causal_spec": causal_spec.model_dump(mode="json"),
+    }
+    try:
+        return llm.generate(
+            system_prompt=CAUSAL_INFERENCE_ATE_SUMMARY_SYSTEM_PROMPT,
+            user_prompt=CAUSAL_INFERENCE_ATE_SUMMARY_USER_PROMPT_TEMPLATE.format(
+                context_json=_dumps(context),
+                ate_result_json=ate_payload_json,
+            ),
+            config=LLMConfig(model="basic", temperature=0.2),
+            history=history,
+        ).content.strip()
+    except Exception:
+        ate_payload = _loads_or_none(ate_payload_json) or {}
+        estimate = ate_payload.get("estimate")
+        return (
+            "I computed the overall treatment effect successfully. "
+            f"The estimated effect is {estimate} on the model outcome scale."
+        )
+
+
+def _summarize_model_failure_for_user(
+    *,
+    llm: LLMService,
+    operation: str,
+    model_name: str,
+    error_message: str,
+    error_details: Mapping[str, Any] | None,
+    warnings: Sequence[str],
+    fallback_message: str,
+) -> str:
+    payload = {
+        "operation": operation,
+        "model_name": model_name,
+        "error_message": error_message,
+        "error_details": dict(error_details or {}),
+        "warnings": [str(item).strip() for item in warnings if str(item).strip()],
+    }
+    try:
+        return llm.generate(
+            system_prompt=get_model_failure_summary_prompt(),
+            user_prompt=_dumps(payload),
+            config=LLMConfig(model="basic", temperature=0.1),
+            history=None,
+        ).content.strip()
+    except Exception:
+        return fallback_message
+
+
+def _format_cohort_error_details(errors: Sequence[Mapping[str, Any]]) -> str:
+    parts: list[str] = []
+    for item in errors[:5]:
+        group_key = str(item.get("group_key", "")).strip() or "unknown"
+        error_text = str(item.get("error", "")).strip() or "unknown error"
+        parts.append(f"{group_key}: {error_text}")
+    return " | ".join(parts) if parts else "cate computation failed"
+
+
+def _summarize_cate(
+    *,
+    llm: LLMService,
+    selected_model: str,
+    causal_spec: Any,
+    cate_payload: dict[str, Any],
+    history: Sequence[ChatMessage],
+) -> str:
+    context = {
+        "selected_model": selected_model,
+        "causal_spec": causal_spec.model_dump(mode="json"),
+    }
+    try:
+        summary = llm.generate(
+            system_prompt=CATE_SUMMARY_SYSTEM_PROMPT,
+            user_prompt=CATE_SUMMARY_USER_PROMPT_TEMPLATE.format(
+                context_json=_dumps(context),
+                cate_payload_json=_dumps(cate_payload),
+            ),
+            config=LLMConfig(model="basic", temperature=0.2),
+            history=history,
+        ).content.strip()
+    except Exception:
+        cohorts = cate_payload.get("cohorts") or []
+        summary = (
+            f"I computed subgroup effect estimates for {len(cohorts)} cohort(s). "
+            "Please review the effect graph or ask a follow-up question about the heterogeneity."
+        )
+    return _append_cate_filter_disclaimer(summary=summary, cate_payload=cate_payload)
+
+
+def _should_reuse_latest_cate(
+    *,
+    payload: CausalInferencePayloadModel,
+    request_summary: str,
+) -> bool:
+    return (
+        payload.latest_cate_result_raw_json_str is not None
+        and payload.latest_cate_request_summary is not None
+        and payload.latest_cate_request_summary.casefold() == request_summary.casefold()
     )
 
 
+def _dataset_summary_column_names(summary: DatasetSummaryModel) -> list[str]:
+    columns: list[str] = []
+    seen: set[str] = set()
+    for profile in summary.profiles:
+        column = str(profile.name).strip()
+        if not column or column in seen:
+            continue
+        seen.add(column)
+        columns.append(column)
+    return columns
 
-def _validate_inclusion_plan(
-    plan: InclusionPlanModel | None,
+
+def _extract_explicit_column_mentions(
     *,
-    effect_modifiers: Sequence[str],
-    require_rules_per_cohort: bool = True,   # comparisons should be True
-) -> tuple[bool, str]:
-    if plan is None:
-        return False, "plan is None"
-    if not plan.rules:
-        return False, "plan.rules is empty"
+    texts: Sequence[str],
+    available_columns: Sequence[str],
+) -> list[str]:
+    normalized_columns: list[str] = []
+    seen_columns: set[str] = set()
+    for column in available_columns:
+        normalized = str(column).strip()
+        if not normalized or normalized.casefold() in seen_columns:
+            continue
+        seen_columns.add(normalized.casefold())
+        normalized_columns.append(normalized)
 
-    _ = effect_modifiers
+    normalized_texts = [str(text) for text in texts if str(text).strip()]
+    if not normalized_columns or not normalized_texts:
+        return []
 
-    for cohort in plan.rules:
-        gk = str(cohort.group_key).strip()
-        if not gk:
-            return False, "missing/empty group_key"
+    matches: list[tuple[int, int, int, int, str]] = []
+    for column_index, column in enumerate(normalized_columns):
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])",
+            re.IGNORECASE,
+        )
+        for text_index, text in enumerate(normalized_texts):
+            for match in pattern.finditer(text):
+                matches.append(
+                    (
+                        text_index,
+                        match.start(),
+                        -(match.end() - match.start()),
+                        column_index,
+                        column,
+                    )
+                )
 
-        statements = cohort.sql_request.statements or []
-        if require_rules_per_cohort and len(statements) == 0:
-            return False, f"group '{gk}': sql_request.statements is empty"
+    selected_columns: list[str] = []
+    seen_selected: set[str] = set()
+    occupied_ranges: dict[int, list[tuple[int, int]]] = {}
+    for text_index, start, negative_length, _column_index, column in sorted(matches):
+        end = start - negative_length
+        ranges = occupied_ranges.setdefault(text_index, [])
+        if any(not (end <= range_start or start >= range_end) for range_start, range_end in ranges):
+            continue
+        if column.casefold() in seen_selected:
+            continue
+        ranges.append((start, end))
+        seen_selected.add(column.casefold())
+        selected_columns.append(column)
 
-    return True, ""
+    return selected_columns
 
 
-def _filter_dataset_summary_to_effect_modifiers(
-    summary: DatasetSummaryModel,
-    effect_modifiers: Sequence[str],
+def _normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, str):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item).strip()
+        if not text or text.casefold() in seen:
+            continue
+        seen.add(text.casefold())
+        normalized.append(text)
+    return normalized
+
+
+def _build_cate_filter_disclaimer(*, cate_payload: Mapping[str, Any]) -> str:
+    non_effect_modifier_filter_columns = _normalize_string_list(
+        cate_payload.get("non_effect_modifier_filter_columns")
+    )
+    if not non_effect_modifier_filter_columns:
+        return ""
+
+    effect_modifier_columns = _normalize_string_list(cate_payload.get("effect_modifier_columns"))
+    quoted_filter_columns = ", ".join(non_effect_modifier_filter_columns)
+    quoted_effect_modifier_columns = ", ".join(effect_modifier_columns) or "none"
+    return (
+        f"Note: the subgroup was filtered using {quoted_filter_columns}, but the effect "
+        "estimate was still calculated using only the confirmed effect modifiers: "
+        f"{quoted_effect_modifier_columns}."
+    )
+
+
+def _append_cate_filter_disclaimer(*, summary: str, cate_payload: Mapping[str, Any]) -> str:
+    disclaimer = _build_cate_filter_disclaimer(cate_payload=cate_payload)
+    if not disclaimer:
+        return summary
+    if disclaimer.casefold() in summary.casefold():
+        return summary
+    return f"{summary} {disclaimer}".strip()
+
+
+def _build_cate_selection_instructions(
     *,
-    strict: bool = True,
-) -> DatasetSummaryModel:
-    """
-    Return a DatasetSummaryModel containing only column profiles whose names are in `effect_modifiers`.
-
-    - Preserves original profile order (df.columns order).
-    - Updates n_rows consistently (keeps original summary.n_rows).
-    - strict=True raises if any requested effect modifier is missing from summary.profiles.
-    """
-    wanted = [str(c) for c in effect_modifiers]
-    wanted_set = set(wanted)
-
-    # Keep deterministic order: follow summary.profiles order
-    kept = [p for p in summary.profiles if str(p.name) in wanted_set]
-
-    if strict:
-        present = {str(p.name) for p in summary.profiles}
-        missing = [c for c in wanted if c not in present]
-        if missing:
-            raise KeyError(
-                f"Effect modifier columns missing from DatasetSummaryModel.profiles: {missing}. "
-                f"Available: {sorted(present)}"
-            )
-
-    # Rebuild via model_dump to avoid any mutation / union quirks
-    return DatasetSummaryModel.model_validate(
-        {
-            "n_rows": int(summary.n_rows),
-            "profiles": [p.model_dump(mode="python") for p in kept],
-        }
-    )   
-
-
-def _invalid_plan_message(
-    *,
-    llm: LLMService,
-    model_name: str,
-    effect_modifiers: Sequence[str],
-    effect_modifiers_summary: DatasetSummaryModel,
-    history: Sequence[ChatMessage] | None = None,
+    request_summary: str,
+    effect_modifier_columns: Sequence[str],
+    identifier_column: str,
 ) -> str:
-    last_user_message = _last_user_text(history)
-    cols = [str(c) for c in effect_modifiers]
-    return llm.generate(
-        system_prompt=None,
-        user_prompt=INVALID_PLAN_MESSAGE_PROMPT +
-            f"\nEffect modifiers summary (only these columns can be used for cohort definitions):\n{effect_modifiers_summary.model_dump_json()}\n"
-            +f"Effect modifiers columns: {', '.join(cols)}\n"
-            +f"\nUser question that led to invalid plan:\n{last_user_message}\n",
-        config=LLMConfig(temperature=0.7, model="basic"),
-        history=None,
- 
-    ).content.strip()        
+    quoted_columns = ", ".join(effect_modifier_columns)
+    return (
+        "Prepare a read-only analytical result set for CATE cohort selection. "
+        "You may use any compiled column in the provided dataframe to define the cohort, "
+        "including identifier, treatment, outcome, covariates, effect modifiers, and other "
+        "compiled columns. "
+        f"The identifier column is `{identifier_column}`. "
+        "The CATE effect itself will still be calculated using only these confirmed effect "
+        f"modifiers: {quoted_columns}. "
+        "Return one row per matched individual and do not aggregate. "
+        f"The final result set must contain exactly these columns: {_GROUP_KEY_COLUMN}, {quoted_columns}. "
+        f"`{_GROUP_KEY_COLUMN}` must be a non-empty text label describing the requested cohort. "
+        "If the request implies a comparison, return all requested cohorts in the same result set "
+        f"with distinct `{_GROUP_KEY_COLUMN}` values. "
+        "If the request implies a single subgroup, still return a single cohort with a constant "
+        f"`{_GROUP_KEY_COLUMN}` value. "
+        "Non-effect-modifier columns may be used for filtering only and must not appear in the "
+        "final returned dataframe. Do not return invented columns. "
+        f"Clinical subgroup request: {request_summary}"
+    )
+
+
+def _validate_cate_selection_dataframe(
+    *,
+    selection_df: pd.DataFrame,
+    effect_modifiers: Sequence[str],
+    request_summary: str,
+) -> str | None:
+    if selection_df.empty:
+        return "No cohort rows matched the requested subgroup definition."
+
+    columns = [str(column) for column in selection_df.columns]
+    expected_columns = {_GROUP_KEY_COLUMN, *[str(column) for column in effect_modifiers]}
+    missing_columns = sorted(expected_columns - set(columns))
+    if missing_columns:
+        return f"The cohort-selection result is missing required columns: {missing_columns}."
+
+    extra_columns = sorted(set(columns) - expected_columns)
+    if extra_columns:
+        return (
+            "The cohort-selection result returned extra columns: "
+            f"{extra_columns}. Non-effect-modifier columns may be used for filtering only, "
+            "and the final returned dataframe must contain only group_key plus the confirmed "
+            "effect modifiers."
+        )
+
+    group_series = selection_df[_GROUP_KEY_COLUMN].astype(str).str.strip()
+    if group_series.eq("").any():
+        return "Every selected subgroup row must have a non-empty group_key label."
+
+    if _looks_like_comparison_request(request_summary) and group_series.nunique(dropna=True) < 2:
+        return "The request implies a subgroup comparison, but only one cohort was returned."
+
+    return None
+
+
+def _looks_like_comparison_request(text: str) -> bool:
+    lowered = text.casefold()
+    return any(
+        marker in lowered
+        for marker in (
+            "compare",
+            "comparison",
+            "versus",
+            " vs ",
+            "difference between",
+            "between ",
+        )
+    )
+
+
+def _build_ate_plot_dataframe(ate_payload: Mapping[str, Any]) -> pd.DataFrame:
+    interval = ate_payload.get("interval") or {}
+    return pd.DataFrame(
+        [
+            {
+                "label": "ATE",
+                "estimate": ate_payload.get("estimate"),
+                "lower": interval.get("lower"),
+                "upper": interval.get("upper"),
+            }
+        ]
+    )
+
+
+def _build_ate_graph_user_intent(user_request: str) -> str:
+    latest_request = user_request.strip() or "Show the overall treatment effect."
+    return (
+        "Create a causal effect graph for the overall average treatment effect. "
+        "This dataframe is already an effect-summary table, not raw patient data. "
+        "Use `estimate` as the point estimate and `lower`/`upper` as the confidence interval. "
+        f"Latest user request: {latest_request}"
+    )
+
+
+def _build_cate_graph_user_intent(
+    *,
+    user_request: str,
+    request_summary: str,
+) -> str:
+    latest_request = user_request.strip() or "Show the subgroup treatment-effect graph."
+    return (
+        "Create a causal graph for conditional treatment effects. "
+        "Each row in the dataframe is an individual-level CATE estimate. "
+        f"`{_GROUP_KEY_COLUMN}` identifies requested cohorts when multiple groups are present. "
+        f"`{_CATE_COLUMN}` is the estimated effect and `{_CATE_LOWER_COLUMN}`/`{_CATE_UPPER_COLUMN}` "
+        "are interval bounds when available. "
+        "Use an appropriate causal-effect visualization for the request: a distribution for a "
+        "single cohort, a cohort comparison when multiple group_key values exist, or a trend "
+        "against a continuous effect modifier when clinically requested. "
+        f"Subgroup intent: {request_summary}. Latest user request: {latest_request}"
+    )
+
+
+def _conversation_id_to_table_name(conversation_id: UUID) -> str:
+    digest = hashlib.sha256(str(conversation_id).encode("ascii")).hexdigest()
+    return f"{_WORKING_TABLE_PREFIX}{digest[:_WORKING_TABLE_HASH_HEX_LEN]}"
+
+
+def _build_data_artifact_ref(
+    *,
+    artifact_id: UUID,
+    artifact_format: str,
+    artifact_kind: str,
+) -> ArtifactRef:
+    return {
+        "id": artifact_id,
+        "kind": "data",
+        "format": cast(Any, artifact_format),
+        "artifact_meta": {"kind": artifact_kind},
+    }
+
+
+__all__ = ["CausalInferenceNode"]

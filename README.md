@@ -77,6 +77,7 @@ Use `make help` to print the full list. Core commands:
 - `make install`: create `.venv` and install `requirements.txt`
 - `make lint`: run Ruff checks
 - `make test`: run pytest (`pytest.ini`)
+- `make test-deepeval`: run opt-in DeepEval prompt evals against the configured LLM provider
 - `make run-api`: start API with auto-reload on `0.0.0.0:8080`
 - `make run-api-local`: start API with env values loaded from `.env`
 - `make run-api-prod`: start API without reload
@@ -93,19 +94,162 @@ Public:
 
 Authenticated (`Authorization: Bearer <firebase_id_token>`):
 
+- `GET /v1/conversations`
 - `POST /v1/conversations`
-- `POST /v1/conversations/{conversation_id}/datasets` (CSV upload)
-- `POST /v1/conversations/{conversation_id}/invoke`
-- `GET /v1/conversations/{conversation_id}/lateststate`
-- `POST /v1/conversations/{conversation_id}/revert`
-- `GET /v1/conversations/{conversation_id}/artifacts/{artifact_id}`
+- `GET /v1/conversations/{conversation_id}/types/{conversation_type}`
+- `POST /v1/conversations/{conversation_id}/types/{conversation_type}/messages`
+- `POST /v1/conversations/{conversation_id}/types/{conversation_type}/state-reversions`
+- `POST /v1/conversations/{conversation_id}/types/{conversation_type}/datasets` (CSV upload)
+- `POST /v1/conversations/{conversation_id}/types/{conversation_type}/dataset-diffs`
+- `GET /v1/conversations/{conversation_id}/types/{conversation_type}/artifacts/{artifact_id}`
+
+Conversation type enum:
+
+- `causal`
+- `data`
+
+Conversation metadata:
+
+- `POST /v1/conversations` accepts optional `conversation_name`
+- `GET /v1/conversations` returns `conversation_name` and `last_updated_at_utc`
+- `last_updated_at_utc` is a UTC Unix timestamp in seconds
 
 ## Typical API Flow
 
-1. Create conversation.
-2. Upload CSV dataset.
-3. Call `invoke` repeatedly until stage completion or user input is requested.
-4. Download artifacts by ID when returned in `artifact_ids`.
+1. Create a conversation with `POST /v1/conversations` and a body such as `{ "conversation_type": "causal", "conversation_name": "Hypertension cohort review" }`.
+2. Build the scoped base path: `/v1/conversations/{conversation_id}/types/{conversation_type}`.
+3. Upload a CSV dataset with `POST {scope}/datasets` when the workflow is ready for data.
+4. Optionally inspect the last data change with `POST {scope}/dataset-diffs`.
+5. Send user input with `POST {scope}/messages` until the workflow reaches the next decision point.
+6. Read the current snapshot with `GET {scope}` when the frontend needs the latest messages, states, and working dataset metadata.
+7. Revert a workflow stage with `POST {scope}/state-reversions` when needed.
+8. Download artifacts with `GET {scope}/artifacts/{artifact_id}`.
+
+Example conversation summary returned by `GET /v1/conversations`:
+
+```json
+{
+  "conversation_id": "22222222-2222-2222-2222-222222222222",
+  "conversation_type": "causal",
+  "conversation_name": "Hypertension cohort review",
+  "last_updated_at_utc": 1712345678.123
+}
+```
+
+Dataset-history revert inside the workflow is triggered through the messages endpoint by sending:
+
+```json
+{
+  "user_text": "revert_data_changes"
+}
+```
+
+## Dataset Diff API
+
+Use the dataset diff endpoint to compare the previous working dataset version with the current one for the same conversation:
+
+- Endpoint: `POST /v1/conversations/{conversation_id}/types/{conversation_type}/dataset-diffs`
+- Auth: required with `Authorization: Bearer <firebase_id_token>`
+- Body: optional
+
+Positional comparison with no request body:
+
+```http
+POST /v1/conversations/{conversation_id}/types/{conversation_type}/dataset-diffs
+Authorization: Bearer <firebase_id_token>
+```
+
+Keyed comparison using business keys:
+
+```json
+{
+  "key_columns": ["patient_id"]
+}
+```
+
+### What It Returns
+
+The response always identifies the two dataset versions that were compared and then returns a structured `diff` object:
+
+- `previous_dataset_id`: the older working dataset version
+- `current_dataset_id`: the latest working dataset version
+- `diff.identity_mode`: `position` if no keys were supplied, otherwise `key`
+- `diff.key_columns`: the effective key columns used for matching rows
+- `diff.schema_diff`: column additions, removals, and dtype changes
+- `diff.row_changes`: only changed rows; unchanged rows are omitted
+- `diff.summary`: aggregate counts for changed rows and changed cells
+
+Example response:
+
+```json
+{
+  "conversation_id": "22222222-2222-2222-2222-222222222222",
+  "conversation_type": "data",
+  "previous_dataset_id": "33333333-3333-3333-3333-333333333333",
+  "current_dataset_id": "44444444-4444-4444-4444-444444444444",
+  "diff": {
+    "identity_mode": "key",
+    "key_columns": ["patient_id"],
+    "schema_diff": {
+      "columns_added": ["bmi"],
+      "columns_removed": [],
+      "column_type_changes": [
+        {
+          "column": "age",
+          "old_dtype": "int64",
+          "new_dtype": "float64"
+        }
+      ]
+    },
+    "row_changes": [
+      {
+        "row_ref": {
+          "mode": "key",
+          "key": {
+            "patient_id": 101
+          },
+          "position": null
+        },
+        "op": "updated",
+        "cell_changes": [
+          {
+            "column": "age",
+            "op": "modified",
+            "old_value": 44,
+            "new_value": 45
+          },
+          {
+            "column": "bmi",
+            "op": "added",
+            "old_value": null,
+            "new_value": 27.1
+          }
+        ]
+      }
+    ],
+    "summary": {
+      "old_row_count": 100,
+      "new_row_count": 101,
+      "inserted_rows": 1,
+      "deleted_rows": 0,
+      "updated_rows": 1,
+      "total_changed_rows": 2,
+      "total_changed_cells": 3
+    }
+  }
+}
+```
+
+Validation behavior:
+
+- Returns `422` if the conversation does not yet have at least two working dataset versions.
+- Returns `422` if `key_columns` is invalid, missing from one dataset version, contains duplicates, or resolves to null/duplicate keys in keyed mode.
+
+## LLM Evals
+
+- DeepEval prompt-eval tests are opt-in and require working LLM credentials plus network access.
+- Run them with `make test-deepeval`.
+- These tests are marked `deepeval` and `integration`, so they do not run in the default `make test` loop.
 
 ## Environment Variables
 
@@ -124,10 +268,16 @@ Defined in `.env.example`:
 - `GCS_MODELS_UPLOAD_TIMEOUT_SECONDS`
 - `GCS_MODELS_UPLOAD_RETRY_TIMEOUT_SECONDS`
 - `GCS_MODELS_UPLOAD_CHUNK_SIZE_BYTES`
+- `API_HOST`
+- `API_PORT`
+- `WEB_CONCURRENCY`
 
 ## Docker and Release
 
 - Container listens on `PORT` (default `8080`)
+- Production startup uses a dedicated Python bootstrap module instead of `sh -c ...`
+- Worker count defaults to the CPUs visible to the container and can be overridden with `WEB_CONCURRENCY`
+- Current Terraform default for Cloud Run CPU is `1`, so you must raise `cloud_run_cpu` above `1` to actually use multiple cores
 - Build locally with `make docker-build`
 - Push with `make docker-push`
 - CI release pipeline file: `.github/workflows/release-image.yml`

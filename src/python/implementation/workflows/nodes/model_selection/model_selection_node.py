@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Any, cast
-from uuid import UUID
+from collections.abc import Mapping, Sequence
+from typing import Any, ClassVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from python.domain.models.validation import ValidationIssueModel
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
-from python.domain.workflows.node import Node
-from python.domain.workflows.state import State
+from python.domain.workflows.node import Node, NodeExecutionResult, NodeRequest
 from python.domain.workflows.tool_factory import ToolFactory
+from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
     ConfirmedModelSelectionPayload,
+    ModelRecommendationModel,
     ModelSelectionPayload,
     ModelSelectionState,
 )
@@ -21,27 +21,29 @@ from python.implementation.workflows.nodes.model_selection.model_selection_deps 
     ModelSelectionDeps,
 )
 from python.implementation.workflows.nodes.model_selection.model_selection_prompts import (
-    MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
-    MODEL_SELECTION_NEGOTIATOR_USER_PROMPT_TEMPLATE,
-    MODEL_SELECTION_RECOMMENDER_SYSTEM_PROMPT,
-    MODEL_SELECTION_RECOMMENDER_USER_PROMPT_TEMPLATE,
-    get_model_selection_node_info,
+    model_selection_node_info,
+    model_selection_recommender_system_prompt,
+    model_selection_recommender_user_prompt,
+    model_selection_review_decision_prompt,
+    model_selection_review_decision_user_prompt,
 )
-from python.implementation.workflows.tools.causal.causal_model_factory_tool import (
+from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
 )
+from python.implementation.workflows.tools.causal.inference.econml.models_meta import (
+    get_model_display_labels,
+)
+from python.implementation.workflows.utils.utils import safe_err
+
+log = get_app_logger(__name__, component="model_selection_node", log_type="node")
 
 
-# ----------------------------
-# LLM schema for call 1
-# ----------------------------
 class _RecommendationItem(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     estimator_fqcn: str
-    title: str
-    best_when: str
-    why: str
+    best_when: str = Field(..., min_length=1)
+    why: str = Field(..., min_length=1)
     tradeoffs: str | None = None
 
 
@@ -49,198 +51,538 @@ class _ModelShortlist(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     recommendations: list[_RecommendationItem] = Field(..., min_length=3, max_length=3)
-    clinician_message: str
+    user_message: str = Field(..., min_length=1)
+
+
+class _ReviewDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    selected_model: str | None = None
+    assistant_message: str = Field(..., min_length=1)
+
+
+class ModelSelectionNode(Node):
+    NAME: ClassVar[str] = ModelSelectionState.NAME
+
+    def __init__(
+        self,
+        *,
+        llm: LLMService,
+        tools_factory: ToolFactory,
+    ) -> None:
+        self._llm = llm
+        factory_raw = tools_factory.get_tool(CausalModelFactoryTool.NAME)
+        self._model_factory = cast(CausalModelFactoryTool, factory_raw)
+
+    @property
+    def name(self) -> str:
+        return self.NAME
+
+    @classmethod
+    def get_info(cls) -> str:
+        return model_selection_node_info()
+
+    def run(
+        self,
+        *,
+        request: NodeRequest,
+    ) -> NodeExecutionResult:
+        if not isinstance(request.node_state, ModelSelectionState):
+            raise TypeError(
+                f"{self.name}: expected ModelSelectionState, got "
+                f"{type(request.node_state).__name__}"
+            )
+
+        payload = request.node_state.payload.model_copy(deep=True)
+        deps = ModelSelectionDeps.from_request(request)
+
+        payload, sources_changed = self._bind_payload_to_sources(
+            payload=payload,
+            deps=deps,
+        )
+
+        if deps.validation_status == "FAIL":
+            return self._failed_result(
+                request=request,
+                payload=payload,
+                user_message=_build_validation_blocked_message(deps.validation_issues),
+                error_message="validation failed; model selection blocked",
+            )
+
+        latest_user_message = _latest_user_message(request.read_only_messages_history)
+
+        if payload.phase == "REVIEW_READY":
+            if not payload.recommendations:
+                log.warning(
+                    "model selection review payload missing recommendations; regenerating",
+                    conversation_id=str(request.conversation_id),
+                )
+            else:
+                if latest_user_message is None:
+                    return self._needs_input_result(
+                        request=request,
+                        payload=payload,
+                        user_message=payload.assistant_message
+                        or "Please confirm one of the shortlisted models.",
+                    )
+                return self._handle_review_response(
+                    request=request,
+                    payload=payload,
+                    deps=deps,
+                    latest_user_message=latest_user_message,
+                )
+
+        if payload.phase == "CONFIRMED" and not sources_changed:
+            return self._done_result(
+                request=request,
+                payload=payload,
+                user_message=payload.assistant_message or "The model selection is already confirmed.",
+            )
+
+        if payload.phase == "FAILED" and not sources_changed:
+            return self._aborted_result(
+                request=request,
+                payload=payload,
+                user_message=payload.assistant_message
+                or "Model selection is blocked until the upstream setup changes.",
+            )
+
+        return self._generate_shortlist(
+            request=request,
+            payload=payload,
+            deps=deps,
+            sources_changed=sources_changed,
+        )
+
+    def _bind_payload_to_sources(
+        self,
+        *,
+        payload: ModelSelectionPayload,
+        deps: ModelSelectionDeps,
+    ) -> tuple[ModelSelectionPayload, bool]:
+        if (
+            payload.source_dataset_id == deps.dataset_id
+            and _model_json_equal(payload.source_causal_spec, deps.causal_spec)
+            and _model_json_equal(
+                payload.source_transformation_plan,
+                deps.transformation_plan,
+            )
+            and _issues_json_equal(payload.source_validation_issues, deps.validation_issues)
+            and payload.source_validation_status == deps.validation_status
+        ):
+            return payload, False
+
+        if (
+            payload.source_dataset_id is None
+            and payload.source_causal_spec is None
+            and payload.source_transformation_plan is None
+            and not payload.source_validation_issues
+            and payload.source_validation_status is None
+            and payload.phase == "INIT"
+        ):
+            return payload.bind_sources(
+                dataset_id=deps.dataset_id,
+                causal_spec=deps.causal_spec,
+                transformation_plan=deps.transformation_plan,
+                validation_issues=deps.validation_issues,
+                validation_status=deps.validation_status,
+            ), False
+
+        return payload.reset_for_reselection(
+            dataset_id=deps.dataset_id,
+            causal_spec=deps.causal_spec,
+            transformation_plan=deps.transformation_plan,
+            validation_issues=deps.validation_issues,
+            validation_status=deps.validation_status,
+        ), True
+
+    def _generate_shortlist(
+        self,
+        *,
+        request: NodeRequest,
+        payload: ModelSelectionPayload,
+        deps: ModelSelectionDeps,
+        sources_changed: bool,
+    ) -> NodeExecutionResult:
+        history = (
+            list(request.read_only_messages_history[-5:])
+            if request.read_only_messages_history
+            else None
+        )
+        model_catalog = _build_supported_model_catalog(
+            supported_estimators=self._model_factory.supported_estimators(),
+            estimators_info=self._model_factory.get_all_esimators_info(),
+        )
+        selection_context = _build_selection_context(deps=deps)
+
+        try:
+            shortlist = self._llm.generate_json(
+                schema=_ModelShortlist,
+                system_prompt=model_selection_recommender_system_prompt(),
+                user_prompt=model_selection_recommender_user_prompt(
+                    supported_models_json=_dumps(model_catalog),
+                    selection_context_json=_dumps(selection_context),
+                ),
+                config=LLMConfig(model="pro", temperature=0.4),
+                history=history,
+                max_attempts=3,
+            )
+        except Exception as exc:
+            log.exception("model selection shortlist generation failed", error=safe_err(exc))
+            return self._needs_input_result(
+                request=request,
+                payload=payload.reset_for_reselection(
+                    dataset_id=deps.dataset_id,
+                    causal_spec=deps.causal_spec,
+                    transformation_plan=deps.transformation_plan,
+                    validation_issues=deps.validation_issues,
+                    validation_status=deps.validation_status,
+                ),
+                user_message=(
+                    "I could not generate a valid shortlist of supported models from the "
+                    "current setup. Please try again."
+                ),
+            )
+
+        recommendations = _build_structured_recommendations(
+            shortlist=shortlist,
+            model_catalog=model_catalog,
+        )
+        if recommendations is None:
+            return self._needs_input_result(
+                request=request,
+                payload=payload.reset_for_reselection(
+                    dataset_id=deps.dataset_id,
+                    causal_spec=deps.causal_spec,
+                    transformation_plan=deps.transformation_plan,
+                    validation_issues=deps.validation_issues,
+                    validation_status=deps.validation_status,
+                ),
+                user_message=(
+                    "I could not turn the shortlist into supported model options. Please try again."
+                ),
+            )
+
+        review_message = _format_shortlist_message(
+            recommendations=recommendations,
+            user_message=shortlist.user_message,
+        )
+        if sources_changed:
+            review_message = (
+                "The compiled setup or validation result changed, so I refreshed the model "
+                f"recommendations. {review_message}"
+            )
+
+        review_payload = payload.model_copy(
+            update={
+                "source_dataset_id": deps.dataset_id,
+                "source_causal_spec": deps.causal_spec,
+                "source_transformation_plan": deps.transformation_plan,
+                "source_validation_issues": list(deps.validation_issues),
+                "source_validation_status": deps.validation_status,
+                "recommendations": recommendations,
+                "confirmed_model_selection": None,
+                "phase": "REVIEW_READY",
+                "assistant_message": review_message,
+                "system_message": None,
+                "error_message": None,
+            }
+        )
+        return self._needs_input_result(
+            request=request,
+            payload=review_payload,
+            user_message=review_message,
+        )
+
+    def _handle_review_response(
+        self,
+        *,
+        request: NodeRequest,
+        payload: ModelSelectionPayload,
+        deps: ModelSelectionDeps,
+        latest_user_message: str,
+    ) -> NodeExecutionResult:
+        selection_context = _build_selection_context(deps=deps)
+        decision = self._llm.generate_json(
+            schema=_ReviewDecision,
+            system_prompt=model_selection_review_decision_prompt(),
+            user_prompt=model_selection_review_decision_user_prompt(
+                recommended_options_json=_dumps(
+                    [
+                        recommendation.model_dump(mode="json")
+                        for recommendation in payload.recommendations
+                    ]
+                ),
+                selection_context_json=_dumps(selection_context),
+                latest_user_message=latest_user_message,
+            ),
+            config=LLMConfig(model="basic", temperature=0.1),
+            history=None,
+            max_attempts=3,
+        )
+
+        if decision.selected_model is None:
+            review_payload = payload.model_copy(
+                update={
+                    "assistant_message": decision.assistant_message,
+                    "system_message": None,
+                    "error_message": None,
+                }
+            )
+            return self._needs_input_result(
+                request=request,
+                payload=review_payload,
+                user_message=decision.assistant_message,
+            )
+
+        selected_recommendation = next(
+            (
+                recommendation
+                for recommendation in payload.recommendations
+                if recommendation.estimator_fqcn == decision.selected_model
+            ),
+            None,
+        )
+        if selected_recommendation is None:
+            return self._needs_input_result(
+                request=request,
+                payload=payload,
+                user_message=(
+                    "That choice does not match the shortlisted supported models. Please pick "
+                    "one of the presented options."
+                ),
+            )
+
+        confirmed_selection = ConfirmedModelSelectionPayload(
+            selected_model=selected_recommendation.estimator_fqcn,
+            selected_model_display_label=selected_recommendation.display_label,
+            reasoning=decision.assistant_message,
+        )
+        request.orchestrator_state.set(
+            request.node_state.name(),
+            {
+                "selected_model": confirmed_selection.selected_model,
+                "selection_reasoning": confirmed_selection.reasoning,
+            },
+        )
+
+        confirmed_payload = payload.model_copy(
+            update={
+                "confirmed_model_selection": confirmed_selection,
+                "phase": "CONFIRMED",
+              "assistant_message": (
+                     f"Confirmed model selection: {selected_recommendation.display_label}. "
+                     f"{decision.assistant_message} "
+                     "Training will take some time, so meanwhile you can have some rest."
+                     ),
+                "system_message": None,
+                "error_message": None,
+            }
+        )
+        return self._done_result(
+            request=request,
+            payload=confirmed_payload,
+            user_message=confirmed_payload.assistant_message or selected_recommendation.display_label,
+        )
+
+    def _needs_input_result(
+        self,
+        *,
+        request: NodeRequest,
+        payload: ModelSelectionPayload,
+        user_message: str,
+    ) -> NodeExecutionResult:
+        return NodeExecutionResult(
+            new_node_state=ModelSelectionState(payload),
+            new_orchestrator_state=request.orchestrator_state,
+            status="PENDING",
+            action="NEEDS_INPUT",
+            response_messages=[ChatMessage(role="assistant", content=user_message)],
+        )
+
+    def _done_result(
+        self,
+        *,
+        request: NodeRequest,
+        payload: ModelSelectionPayload,
+        user_message: str,
+    ) -> NodeExecutionResult:
+        return NodeExecutionResult(
+            new_node_state=ModelSelectionState(payload),
+            new_orchestrator_state=request.orchestrator_state,
+            status="DONE",
+            action="NONE",
+            response_messages=[ChatMessage(role="assistant", content=user_message)],
+        )
+
+    def _aborted_result(
+        self,
+        *,
+        request: NodeRequest,
+        payload: ModelSelectionPayload,
+        user_message: str,
+    ) -> NodeExecutionResult:
+        return NodeExecutionResult(
+            new_node_state=ModelSelectionState(payload),
+            new_orchestrator_state=request.orchestrator_state,
+            status="ABORTED",
+            action="NONE",
+            response_messages=[ChatMessage(role="assistant", content=user_message)],
+        )
+
+    def _failed_result(
+        self,
+        *,
+        request: NodeRequest,
+        payload: ModelSelectionPayload,
+        user_message: str,
+        error_message: str,
+    ) -> NodeExecutionResult:
+        failed_payload = payload.model_copy(
+            update={
+                "phase": "FAILED",
+                "assistant_message": user_message,
+                "system_message": "MODEL_SELECTION_BLOCKED",
+                "error_message": error_message,
+            }
+        )
+        return self._aborted_result(
+            request=request,
+            payload=failed_payload,
+            user_message=user_message,
+        )
 
 
 def _dumps(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True, default=str)
 
 
-def _safe_model_dump(x: Any) -> Any:
-    if x is None:
+def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
+    if not messages_history:
         return None
-    if hasattr(x, "model_dump"):
-        return x.model_dump(mode="json")
-    return x
+    for message in reversed(messages_history):
+        if message.role != "user":
+            continue
+        content = message.content.strip()
+        if content:
+            return content
+    return None
 
-def _build_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
-    causal_specs = deps.compiled_causal_spec
-    validation_issues = deps.validation_errors
-    summary = deps.clean_dataset_summary
-    
-    treatment_spec = causal_specs.treatment_spec
-    outcome_spec = causal_specs.outcome_spec
-    covariates = causal_specs.covariates
-    effect_modifiers = causal_specs.effect_modifiers
-    experiment_type = causal_specs.experiment_type
 
+def _build_selection_context(*, deps: ModelSelectionDeps) -> dict[str, Any]:
     return {
-    
-        "treatment_spec": _safe_model_dump(treatment_spec),
-        "outcome_spec": _safe_model_dump(outcome_spec),
-        "covariates": _safe_model_dump(covariates),
-        "effect_modifiers": _safe_model_dump(effect_modifiers),
-        "experiment_type": _safe_model_dump(experiment_type),
-        "summary": _safe_model_dump(summary),
-        "validate_clean_protocol": {
-            "issues": [_safe_model_dump(issue) for issue in validation_issues],
-        },
+        "compiled_dataset_summary": deps.dataset_summary.model_dump(mode="json", exclude_none=True),
+        "causal_spec": deps.causal_spec.model_dump(mode="json", exclude_none=True),
+        "transformation_plan": deps.transformation_plan.model_dump(
+            mode="json",
+            exclude_none=True,
+        ),
+        "validation_status": deps.validation_status,
+        "validation_issues": [
+            issue.model_dump(mode="json", exclude_none=True)
+            for issue in deps.validation_issues
+        ],
     }
 
 
-def _format_shortlist_message(shortlist: _ModelShortlist) -> str:
-    lines: list[str] = []
-    lines.append("")
-    for i, rec in enumerate(shortlist.recommendations, start=1):
-        lines.append(f"Option {i}: {rec.title}")
-        lines.append(f"- Best when: {rec.best_when}")
-        lines.append(f"- Why: {rec.why}")
-        if rec.tradeoffs:
-            lines.append(f"- Trade-offs: {rec.tradeoffs}")
-        lines.append(f"- Internal model id: {rec.estimator_fqcn}")
+def _build_supported_model_catalog(
+    *,
+    supported_estimators: Sequence[str],
+    estimators_info: Mapping[str, str],
+) -> list[dict[str, str]]:
+    catalog: list[dict[str, str]] = []
+    for fqcn in supported_estimators:
+        display_name, family_label = get_model_display_labels(fqcn)
+        catalog.append(
+            {
+                "estimator_fqcn": fqcn,
+                "display_label": f"{display_name} ({family_label})",
+                "display_name": display_name,
+                "family_label": family_label,
+                "model_info": estimators_info.get(fqcn, ""),
+            }
+        )
+    return catalog
+
+
+def _build_structured_recommendations(
+    *,
+    shortlist: _ModelShortlist,
+    model_catalog: Sequence[Mapping[str, str]],
+) -> list[ModelRecommendationModel] | None:
+    by_fqcn = {
+        str(entry["estimator_fqcn"]): str(entry["display_label"]) for entry in model_catalog
+    }
+    recommendations: list[ModelRecommendationModel] = []
+    for item in shortlist.recommendations:
+        display_label = by_fqcn.get(item.estimator_fqcn)
+        if display_label is None:
+            return None
+        recommendations.append(
+            ModelRecommendationModel(
+                estimator_fqcn=item.estimator_fqcn,
+                display_label=display_label,
+                best_when=item.best_when,
+                why=item.why,
+                tradeoffs=item.tradeoffs,
+            )
+        )
+
+    if len({item.estimator_fqcn for item in recommendations}) != 3:
+        return None
+    return recommendations
+
+
+def _format_shortlist_message(
+    *,
+    recommendations: Sequence[ModelRecommendationModel],
+    user_message: str,
+) -> str:
+    lines = [user_message.strip(), ""]
+    for index, recommendation in enumerate(recommendations, start=1):
+        lines.append(f"Option {index}: {recommendation.display_label}")
+        lines.append(f"- Best when: {recommendation.best_when}")
+        lines.append(f"- Why: {recommendation.why}")
+        if recommendation.tradeoffs:
+            lines.append(f"- Trade-offs: {recommendation.tradeoffs}")
         lines.append("")
+    lines.append(
+        "Tell me which option you want to confirm, or tell me what tradeoff matters most."
+    )
     return "\n".join(lines).strip()
 
 
-@dataclass(frozen=True, slots=True)
-class ModelSelectionNode(Node):
-    llm: LLMService
-
-
-    @property
-    def name(self) -> str:
-        return ModelSelectionState.NAME
-
-    @classmethod
-    def get_info(cls) -> str:
-        return get_model_selection_node_info()
-
-    def run(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-        state: State,
-        tool_factory: ToolFactory,
-        previous_state_dependencies: Any,  # Mapping[str, State] (kept Any to match your ABC signature)
-        messages_history: Sequence[ChatMessage] | None
-    ) -> State:
-        if not isinstance(state, ModelSelectionState):
-            raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")
-
-        # deps
-        deps = ModelSelectionDeps.from_loaded(previous_state_dependencies)
-        context = _build_context(deps=deps)
-        last_5_messages = messages_history[-5:] if messages_history else None
-        
-        ci_tool_factory_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
-        ci_tool_factory = cast(CausalModelFactoryTool, ci_tool_factory_raw)
-        supported_estimators = ci_tool_factory.supported_estimators()
-        supported_estimators_info = ci_tool_factory.get_all_esimators_info()
-        
-        
-        # ============================================================
-        # CALL 1: generate shortlist if missing (skip if already exists)
-        # ============================================================
-        if not state.payload.system_choice_message:
-            user_prompt = MODEL_SELECTION_RECOMMENDER_USER_PROMPT_TEMPLATE.format(
-                supported_estimators_json=_dumps(  supported_estimators),
-                estimators_info_json=_dumps(  supported_estimators_info),
-                context_json=_dumps(context))
-
-            shortlist = self.llm.generate_json(
-                    schema=_ModelShortlist,
-                    system_prompt=MODEL_SELECTION_RECOMMENDER_SYSTEM_PROMPT,
-                    user_prompt=user_prompt,
-                    config= LLMConfig(temperature=1.0, model="pro"),
-                    history=last_5_messages,
-                    max_attempts=3,
-                )
-
-            if len(shortlist.recommendations) != 3:
-                    return ModelSelectionState(
-                         ModelSelectionPayload(
-                            error=f"LLM returned {len(shortlist.recommendations)} recommendations, but exactly 3 are required.",
-                            system_choice_message=None,
-                            confirmed_model_selection=None,
-                            message="Selection error: LLM returned an incorrect number of recommendations. I will retry. Please wait a moment..."
-                       )
-                    )
-                
-            for rec in shortlist.recommendations:
-                    if rec.estimator_fqcn not in supported_estimators:
-                        return ModelSelectionState(
-                            ModelSelectionPayload(
-                                error=f"LLM recommended model '{rec.estimator_fqcn}' which is not supported by the system.",
-                                system_choice_message=None,
-                                confirmed_model_selection=None,
-                                message="Selection error: LLM recommended an unsupported model. I will retry. Please wait a moment..."
-                            )
-                        )
-
-            return ModelSelectionState(
-                ModelSelectionPayload(
-                    error=None,
-                    system_choice_message=_format_shortlist_message(shortlist),
-                    confirmed_model_selection=None,
-                    message=shortlist.clinician_message,
-                )
-            )
-
-        # ============================================================
-        # CALL 2: negotiate/confirm using user's reply (if present)
-        # ============================================================
-      
-        negotiator_user_prompt = MODEL_SELECTION_NEGOTIATOR_USER_PROMPT_TEMPLATE.format(
-            recommended_message=state.payload.system_choice_message or "",
-            supported_estimators_json=_dumps(supported_estimators),
-            estimators_info_json=_dumps(supported_estimators_info),
-            context_json=_dumps(context),
+def _build_validation_blocked_message(
+    issues: Sequence[ValidationIssueModel],
+) -> str:
+    fail_lines = [issue.message for issue in issues if issue.severity == "FAIL"]
+    if fail_lines:
+        return (
+            "Model selection cannot proceed because validation still has blocking issues: "
+            + "; ".join(fail_lines)
         )
-        
-        decision = self.llm.generate_json(
-                schema=ConfirmedModelSelectionPayload,
-                system_prompt=MODEL_SELECTION_NEGOTIATOR_SYSTEM_PROMPT,
-                user_prompt=negotiator_user_prompt,
-                config= LLMConfig(temperature=0.2, model="basic"),
-                history=last_5_messages,
-                max_attempts=3,
-            )
-      
- 
+    return (
+        "Model selection cannot proceed because the latest validation result is marked as failed."
+    )
 
-        # Not final: selected_model is null -> ask follow-up (stored in system_choice_message)
-        if not decision.selected_model:
-            payload = state.payload.model_copy(
-                update={
-                    "confirmed_model_selection": None,
-                    "error": None,
-                    "message": decision.reasoning 
-                }
-            )
-            return ModelSelectionState(payload=payload)
 
-        # Final selection: confirm via tool
-        selected = decision.selected_model.strip()
-        if not ci_tool_factory.has_estimator(selected):
-            payload = state.payload.model_copy(
-                update={
-                    "confirmed_model_selection": None,
-                    "message": "Sorry but the selected model is not recognized. Please choose one of the recommended options.",
-                }
-            )
-            return ModelSelectionState(payload=payload)
+def _model_json_equal(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    if hasattr(left, "model_dump") and hasattr(right, "model_dump"):
+        return left.model_dump(mode="json") == right.model_dump(mode="json")
+    return left == right
 
-        final_msg = (
-            f"Confirmed model selection: {selected}\n"
-            "Next, I will fit this model and estimate the treatment effect."
-        ).strip()
 
-        payload = state.payload.model_copy(
-            update={
-                "confirmed_model_selection": decision,
-                "error": None,
-                "message": final_msg,
-            }
-        )
-        return ModelSelectionState(payload=payload)
+def _issues_json_equal(
+    left: Sequence[ValidationIssueModel],
+    right: Sequence[ValidationIssueModel],
+) -> bool:
+    return [
+        issue.model_dump(mode="json", exclude_none=True) for issue in left
+    ] == [
+        issue.model_dump(mode="json", exclude_none=True) for issue in right
+    ]
+
+
+__all__ = ["ModelSelectionNode"]

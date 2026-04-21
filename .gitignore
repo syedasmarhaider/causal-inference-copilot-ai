@@ -235,3 +235,6 @@ typings/**/*.pyi
 .docker.env
 !.docker.env.example
 
+#local files
+*.local_storage
+

@@ -3,11 +3,11 @@ from __future__ import annotations
 
 def get_protocol_discussion_get_node_info() -> str:
     return (
-        "Node for protocol discussion and readiness gating. It updates the protocol discussion, "
-        "confirms user causal question, confounders, effect modifiers, time zero, and treatment/outcome definitions. "
-        "If the user wants to change protocol, this node is used, and it "
-        "decides READY/PENDING/ABORT, and returns a user-facing message grounded in user chat "
-        "and dataset metadata."
+        "Node for target-trial style protocol discussion grounded in the active dataset. "
+        "It updates the protocol discussion, decides whether the discussion should continue, "
+        "or be confirmed, captures grounded upstream data-preparation decisions, and on "
+        "confirmation stores grounded protocol-cleaning instructions for the downstream "
+        "compilation stage."
     )
 
 
@@ -19,104 +19,178 @@ Grounding and safety rules:
 - Binary treatment only.
 - Outcome must be binary or continuous only.
 - Do not reference internal question numbers in user-facing text.
+- Keep the protocol text explicit, stable, and careful because this is target-trial style protocol work.
 """.strip()
 
 
 _PROTOCOL_EDIT_RULES = """
 Protocol edit rules:
 - Edit ONLY A-lines in PROTOCOL_DISCUSSION.
-- Do not reorder/rename/delete questions.
+- Do not reorder, rename, or delete the canonical protocol questions.
 - Preserve correct prior answers unless new grounded evidence supersedes them.
-- If missing/ambiguous/contradictory, write UNCLEAR for the relevant answer.
-- Keep terminology consistent: treatment/exposure (X), comparator, outcome (Y), time zero (t0), population.
-- Lists remain lists for covariates/effect modifiers; do not infer causal roles beyond provided evidence.
+- If missing, ambiguous, or contradictory, write UNCLEAR for the relevant answer.
+- Keep terminology consistent: treatment/exposure, comparator/control, outcome, time zero (t0), population.
+- Lists remain lists for covariates and effect modifiers; do not infer causal roles beyond grounded evidence.
+- If the user mixes up covariates and effect modifiers, explain the distinction in plain language: covariates are baseline variables used to control or adjust, while effect modifiers are baseline variables that can change the size or direction of the treatment effect across subgroups.
+""".strip()
+
+
+_IDENTIFIER_RULES = """
+Identifier column policy:
+- Identifier column handling is optional and non-blocking.
+- Use exact dataset column names only.
+- If the user names a real patient/unit identifier column, record it exactly in answer 16.
+- If suggested_identifier_column is present and the identifier choice is still unresolved, write that suggestion into answer 16 and ask the user to confirm or correct it.
+- If no obvious identifier candidate exists, or the user says there is no real identifier column, set answer 16 to __auto_id__.
+- Never invent an identifier column.
 """.strip()
 
 
 _FEASIBILITY_RULES = """
 Feasibility and design checks:
-- If no time support exists, treat as snapshot mode and avoid time-to-event claims that require event/censor times.
+- If no time support exists, treat as snapshot mode and avoid time-to-event claims that require event or censor times.
 - In snapshot mode, treatment must be defensibly before outcome in real-world semantics.
-- If study is claimed RCT, treatment must be a randomized assignment variable; otherwise clarify or keep pending.
+- If study is claimed RCT, treatment must be a randomized assignment variable; otherwise clarify or keep discussion going.
 - Ask at most 2 targeted follow-up questions when essentials are missing.
-- If covariates and effect modifiers overlap, request separation; overlap is not allowed in this tool.
+- If covariates and effect modifiers overlap, require separation; overlap is not allowed in this workflow.
 """.strip()
 
 
-_ABORT_CONDITIONS = """
-ABORT conditions (any one):
-- User requires time-to-event/survival estimand without required time support.
-- Treatment or outcome cannot be operationalized from available columns.
-- Snapshot mode is required but treatment-outcome ordering cannot be defended.
-- Inclusion/filtering is inherently post-treatment and cannot be reformulated.
-- User insists on unsupported protocol after alternatives are offered.
+_BLOCKER_RULES = """
+Upstream blocker policy:
+- Surface only blockers that would prevent safe compilation, transformation, or validation for the chosen treatment, outcome, covariates, and effect modifiers.
+- Focus on clinically meaningful blockers such as treatment/outcome mapping ambiguity, treatment or outcome missing/invalid values, baseline covariate/effect-modifier missingness, coded categorical variables with unclear meaning, and suspected post-treatment variable misuse.
+- Ask at most 2 blocker questions in one turn, and prefer the most important unresolved blockers first.
+- Do not enumerate non-blocking profiling trivia or generic dataset observations.
 """.strip()
 
 
-_READINESS_RULES = """
-Readiness decision:
-- READY only if latest user message explicitly confirms current protocol summary, essentials are complete,
-  there are no contradictions, and no feasibility blockers.
-- PENDING if essentials are missing/unclear, user is correcting/asking, or confirmation is not explicit.
-- ABORT if infeasible under current data/question.
+_CONFIRM_RULES = """
+Confirmation rules:
+- next_action="confirm" only if the latest user message clearly confirms the current protocol discussion and the essentials are complete, coherent, and feasible.
+- next_action="continue" if details are still missing, unclear, contradictory, the user is still correcting the protocol, or the protocol is currently infeasible and needs changes before it can proceed.
 """.strip()
 
 
-def get_protocol_discussion_update_and_gate_prompt() -> str:
+def get_protocol_discussion_update_prompt() -> str:
     return f"""
-You are a Causal ML Copilot.
+You are a Causal ML Copilot conducting a target-trial style protocol discussion.
 
 Inputs:
-- PROTOCOL_DISCUSSION (Q/A document)
+- PROTOCOL_DISCUSSION: the current canonical protocol Q/A document
 - recent chat context
 - dataset metadata summary (authoritative)
+- identifier_column_candidates: optional suggestion-only list of likely patient/unit identifier columns from dataset metadata
+- suggested_identifier_column: optional single best identifier-column suggestion from dataset metadata
 
-Task:
-1) Update PROTOCOL_DISCUSSION.
-2) Decide readiness gate: READY, PENDING, or ABORT.
+Tasks:
+1) Update PROTOCOL_DISCUSSION using grounded user evidence.
+2) Decide the single best next_action.
+3) Produce the assistant_message for this turn.
+4) If next_action is confirm, produce dataset_change_request for the downstream compilation stage.
 
 {_SHARED_GUARDRAILS}
 
 {_PROTOCOL_EDIT_RULES}
 
+{_IDENTIFIER_RULES}
+
 {_FEASIBILITY_RULES}
 
-{_READINESS_RULES}
+{_BLOCKER_RULES}
 
-{_ABORT_CONDITIONS}
+{_CONFIRM_RULES}
+
+Assistant message policy:
+- The user prefers comprehensive, specific responses.
+- For next_action="continue", answer the latest user point first and then ask the most important unresolved blocker question if one is still needed.
+- For next_action="confirm", acknowledge that the protocol discussion is now confirmed and explain that the compilation stage will clean, compile, transform, and validate next.
+- If the protocol cannot proceed under the current assumptions or data, keep next_action="continue" and explain clearly what is not possible, apologize briefly, and state what would need to change.
+
+dataset_change_request policy when next_action="confirm":
+- The request is for the downstream compilation stage that still performs data-changing preparation.
+- Make it self-contained, operational, and grounded.
+- State explicitly that this is a data-changing request.
+- Specify the confirmed treatment, outcome, covariates, effect modifiers, and any time-zero relevant columns that must be preserved.
+- Carry forward the confirmed upstream data-preparation decisions from the protocol, especially treatment/outcome value handling and baseline covariate/effect-modifier preparation decisions.
+- End the request with one exact line in this format: `Final protocol-scope columns to keep exactly: col_a, col_b, col_c`
+- Specify row filters or cohort eligibility restrictions only when they are grounded in the discussion.
+- Specify columns to remove only when grounded; otherwise explicitly say not to drop columns beyond the confirmed protocol scope.
+- If treatment is binary, instruct normalization to exactly two canonical values and removal or mapping of unexpected values as grounded by the discussion.
+- If outcome is binary, instruct normalization to exactly two canonical values and handling of unexpected labels as grounded by the discussion.
+- If the protocol approved baseline missingness handling, state the approved imputation or unknown-category handling explicitly and preserve the locked baseline columns.
+- If a coded categorical baseline feature needs normalization, state the approved normalization explicitly.
+- If post-treatment variables were identified, instruct that they must not be used as baseline adjustment features.
+- Do not invent filters, drops, mappings, imputations, or normalization rules that are not grounded.
 
 Output format:
 Return ONLY JSON with exactly:
 {{
-  "protocol_discussion": "<updated discussion text>",
-  "readiness": "READY" | "PENDING" | "ABORT"
+  "discussion": "<updated protocol discussion text>",
+  "next_action": "continue" | "confirm",
+  "assistant_message": "<user-facing assistant message>",
+  "dataset_change_request": "<downstream compilation instruction or null>"
 }}
 """.strip()
 
-def get_protocol_discussion_user_message_prompt() -> str:
-    return f"""
-You are a helpful, precise, clinically-oriented Causal ML Copilot.
+
+def get_protocol_discussion_review_summary_prompt() -> str:
+    return """
+You are preparing a protocol review step before confirmation.
 
 Inputs:
-- fixed readiness token (READY, PENDING, ABORT)
-- updated PROTOCOL_DISCUSSION
-- recent chat context
-- dataset metadata summary (authoritative)
+- proposed protocol discussion text
+- authoritative dataset metadata summary
+- suggested_identifier_column: optional single best identifier-column suggestion from dataset metadata
 
 Task:
-- Produce ONLY the user-facing message.
-- Readiness is fixed; do not change it.
+- Write a concise but specific review summary of the proposed final protocol.
+- This is not the final confirmation yet.
+- Explicitly ask the user to confirm or name what should change.
 
-{_SHARED_GUARDRAILS}
+Rules:
+- Do not say the protocol is already confirmed.
+- Do not mention internal phases, JSON, or workflow implementation.
+- Summarize the proposed treatment, outcome, study type, target population, time-zero approach, covariates, and effect modifiers when grounded.
+- Describe covariates as baseline adjustment or control variables.
+- Describe effect modifiers as baseline variables that enable heterogeneous treatment effects across subgroups.
+- Summarize the identifier column choice when grounded.
+- If the proposed protocol currently uses suggested_identifier_column as the likely identifier, say that confirming this review will accept that identifier choice unless the user corrects it.
+- If no real identifier column exists, say that __auto_id__ will be used.
+- Summarize the approved upstream data-preparation decisions when grounded, especially treatment/outcome value handling and baseline feature preparation decisions.
+- Mention important outcome-mapping or snapshot assumptions when grounded.
+- End with a direct confirmation question.
 
-Message policy by readiness:
-- READY: provide a compact protocol summary and clearly state you will proceed to cleaning the data and validation.
-- PENDING: answer latest user point first in detail, and then ask follow up question which is missing/unclear
-- ABORT: explain briefly why infeasible and the minimum change needed to continue.
-
-Output format:
-Return ONLY plain text user message (no JSON, no markdown, no commentary).
+Output JSON exactly:
+{
+  "assistant_message": "<review summary that asks for explicit confirmation>"
+}
 """.strip()
+
+
+def get_protocol_discussion_review_decision_prompt() -> str:
+    return """
+You are interpreting the user's reply to a protocol review summary.
+
+Goal:
+- Allow final confirmation only when the user clearly confirms the reviewed protocol.
+
+Rules:
+- action="confirm" only if the latest user message is an explicit approval of the reviewed protocol.
+- action="revise" if the user asks to change, correct, add, remove, or reconsider protocol details.
+- action="clarify" if the reply is ambiguous or not enough to confirm or revise safely.
+- Keep the assistant_message direct and user-facing.
+- For confirm, briefly acknowledge the confirmation and say that the compilation stage will now prepare the modeling dataset and baseline transformations and always ask user to sit back and relax in a funny way.
+- For clarify, ask one focused follow-up question.
+- For revise, acknowledge that the protocol is not yet confirmed and that the requested changes will be incorporated.
+
+Output JSON exactly:
+{
+  "action": "confirm" | "revise" | "clarify",
+  "assistant_message": "<user-facing message>"
+}
+""".strip()
+
 
 def get_questions() -> list[str]:
     return [
@@ -135,9 +209,49 @@ def get_questions() -> list[str]:
         "Define horizon relative to t0.",
         "9) Censoring & missingness: Any dropouts, missing outcomes, or selection filters? "
         "If none, write: None / complete outcome capture.",
-        "10) Baseline adjustment covariates (W): variables measured at/before t0 that affect both T and Y.",
-        "11) Effect modifiers / heterogeneity features (X, optional): baseline variables for subgroup effects.",
+        "10) Baseline adjustment covariates (W): baseline variables measured at/before t0 that are used to control or adjust for confounding or prognostic differences affecting T and Y.",
+        "11) Effect modifiers / heterogeneity features (X, optional): baseline variables measured at/before t0 that may change the size or direction of the treatment effect across subgroups.",
         "12) Suspected post-treatment variables (optional): variables measured after t0 or after treatment starts.",
         "13) If Q4=No: acknowledge snapshot assumptions (Yes/No): shared baseline, T before Y, positivity, consistency, "
         "no post-treatment adjustment.",
+        "14) Treatment/outcome data-quality decisions: If treatment or outcome has missing, unexpected, or coded values, "
+        "how should they be handled before modeling? State the exact mapping, exclusion rule, or keep-as-is decision.",
+        "15) Baseline feature preparation decisions: For selected covariates/effect modifiers with missingness, unknown "
+        "categories, or coded categorical values, how should they be prepared before modeling? State the approved "
+        "imputation, category handling, or normalization decisions.",
+        "16) Identifier column (optional): If the dataset has a real patient/unit identifier column, name it exactly. "
+        "If a likely identifier exists in the dataset metadata, confirm or correct it. If no real identifier column exists, "
+        "use __auto_id__.",
     ]
+
+
+def initial_user_message() -> str:
+    return (
+        "Let’s define the protocol carefully from the current dataset. "
+        "Please state the causal question, treatment, outcome, study type, target population, "
+        "how you want to define time zero, which identifier column should represent the patient or unit if one exists, "
+        "and any upstream data-handling decisions you already want for treatment, outcome, or baseline features."
+    )
+
+def get_llm_blocker_message_prompt() -> str:
+    return '''
+You are a Causal ML Copilot. Your job is to explain to the user, in a clear and actionable way, any blockers or issues that prevent compiling the protocol draft into a valid causal specification.
+
+Inputs:
+- blockers: a list of blocker objects, each with a column, role, issue, and user_question
+- protocol_discussion: the current protocol discussion text
+- dataset_summary: the authoritative dataset metadata summary
+
+Task:
+- Write a comprehensive, specific, and user-friendly message that:
+  - Explains each blocker in context
+  - Asks the user to explicitly clarify or confirm how to resolve each issue
+  - Avoids technical jargon, but is precise about what is needed
+  - Groups similar issues for clarity if possible
+- Do not invent or guess solutions—require explicit user input for each blocker.
+- If there are multiple blockers, prioritize the most critical and ask about those first (max 2 per message).
+- If there are no blockers, say so clearly.
+
+Output:
+Return only a string with the user-facing message.
+'''

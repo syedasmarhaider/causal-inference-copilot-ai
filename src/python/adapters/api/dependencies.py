@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from python.implementation.service.logging.default_logging import get_logger
+import inspect
+import os
 from functools import lru_cache
 
-from fastapi import Depends, File, Header, HTTPException, Path, Security
+from fastapi import Depends, File, Header, HTTPException, Path, Query, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from python.domain.service.auth_service import AuthenticatedUser, AuthService
@@ -13,7 +14,9 @@ from python.implementation.service.firebsae_auth_service import (
     FirebaseAuthService,
     InvalidTokenError,
 )
-from python.implementation.workflows.depinit import make_workflow_app
+from python.implementation.service.logging.default_logging import get_logger
+from python.implementation.workflows.dataflow_app import DataflowApp
+from python.implementation.workflows.depinit import make_apps
 from python.implementation.workflows.workflow_app import WorkflowApp
 
 log = get_logger(__name__)
@@ -26,7 +29,36 @@ CREDENTIALS_SECURITY = Security(bearer_scheme)
 
 
 CONVERSATION_ID_PATH_PARAM = Path(description="Conversation UUID.")
+CONVERSATION_TYPE_PATH_PARAM = Path(
+    ...,
+    description="Conversation type. Allowed values: `causal` or `data`.",
+)
+DATASET_ID_PATH_PARAM = Path(description="Dataset UUID to retrieve.")
 ARTIFACT_ID_PATH_PARAM = Path(description="Artifact UUID to download.")
+DATASET_START_QUERY_PARAM = Query(
+    default=0,
+    ge=0,
+    description="Zero-based row offset, excluding the CSV header row.",
+)
+DATASET_LIMIT_QUERY_PARAM = Query(
+    default=None,
+    ge=0,
+    description=(
+        "Maximum number of rows to return after applying `start`. "
+        "Use `0` to return only column metadata."
+    ),
+)
+ARTIFACT_KIND_QUERY_PARAM = Query(
+    ...,
+    description="Artifact kind enum. Allowed values: `graph` or `data`.",
+)
+ARTIFACT_FORMAT_QUERY_PARAM = Query(
+    ...,
+    description=(
+        "Artifact format enum. Allowed values: `json` or `csv`. "
+        "Valid combinations: `graph -> json`, `data -> json|csv`."
+    ),
+)
 UPLOAD_DATASET_FILE_PARAM = File(
     ...,
     description="CSV file to upload for this conversation.",
@@ -42,8 +74,20 @@ def _unauthorized(detail: str) -> HTTPException:
 
 
 @lru_cache(maxsize=1)
+def get_apps() -> tuple[WorkflowApp, DataflowApp]:
+    if "use_local_files" in inspect.signature(make_apps).parameters:
+        return make_apps(use_local_files=_use_local_files_from_env())
+    return make_apps()
+
+
+@lru_cache(maxsize=1)
 def get_workflow_app() -> WorkflowApp:
-    return make_workflow_app()
+    return get_apps()[0]
+
+
+@lru_cache(maxsize=1)
+def get_dataflow_app() -> DataflowApp:
+    return get_apps()[1]
 
 
 @lru_cache(maxsize=1)
@@ -83,3 +127,10 @@ async def get_authenticated_user(
 
 AUTHENTICATED_USER_DEP = Depends(get_authenticated_user)
 WORKFLOW_APP_DEP = Depends(get_workflow_app)
+DATAFLOW_APP_DEP = Depends(get_dataflow_app)
+
+
+def _use_local_files_from_env() -> bool:
+    value = os.getenv("USE_LOCAL_FILES", "")
+    normalized = value.strip().strip('"').strip("'").lower()
+    return normalized in {"true", "yes"}

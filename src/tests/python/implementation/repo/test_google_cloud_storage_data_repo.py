@@ -100,7 +100,7 @@ def _png_bytes() -> bytes:
 
 
 def _jpeg_bytes() -> bytes:
-    return b"\xFF\xD8" + b"payload"
+    return b"\xff\xd8" + b"payload"
 
 
 def _webp_bytes() -> bytes:
@@ -141,28 +141,31 @@ def test_constructor_rejects_bucket_with_empty_name() -> None:
         GoogleCloudStorageDataRepo(bucket=_FakeBucket(name=""))
 
 
-def test_get_csv_data_reads_dataframe_and_applies_limit() -> None:
+def test_get_csv_data_reads_dataframe_and_applies_start_and_limit() -> None:
     user_id, conversation_id, dataset_id = _ids()
     bucket = _FakeBucket(name="bucket")
     repo = GoogleCloudStorageDataRepo(bucket=bucket)
 
     blob_name = repo._dataset_blob_name(user_id, conversation_id, dataset_id)  # noqa: SLF001
     blob = bucket.blob(blob_name)
-    blob.data = b"a,b\n1,2\n3,4\n"
+    blob.data = b"a,b\n1,2\n3,4\n5,6\n"
     blob.present = True
 
-    frame = repo.get_csv_data(user_id, conversation_id, dataset_id, limit=1)
+    frame = repo.get_csv_data(user_id, conversation_id, dataset_id, start=1, limit=1)
 
-    assert frame.to_dict(orient="records") == [{"a": 1, "b": 2}]
+    assert frame.to_dict(orient="records") == [{"a": 3, "b": 4}]
     assert blob.exists_calls == [DEFAULT_GCS_TIMEOUT_SECONDS]
 
 
-def test_get_csv_data_validates_limit_and_missing_blob() -> None:
+def test_get_csv_data_validates_pagination_and_missing_blob() -> None:
     user_id, conversation_id, dataset_id = _ids()
     repo = GoogleCloudStorageDataRepo(bucket=_FakeBucket(name="bucket"))
 
-    with pytest.raises(ValueError, match=r"limit must be a positive int"):
-        repo.get_csv_data(user_id, conversation_id, dataset_id, limit=0)
+    with pytest.raises(ValueError, match=r"start must be >= 0"):
+        repo.get_csv_data(user_id, conversation_id, dataset_id, start=-1)
+
+    with pytest.raises(ValueError, match=r"limit must be >= 0"):
+        repo.get_csv_data(user_id, conversation_id, dataset_id, limit=-1)
 
     with pytest.raises(FileNotFoundError, match=r"CSV not found"):
         repo.get_csv_data(user_id, conversation_id, dataset_id)
@@ -198,6 +201,41 @@ def test_save_csv_data_maps_precondition_failed_to_file_exists() -> None:
 
     with pytest.raises(FileExistsError, match=r"Refusing to overwrite existing CSV"):
         repo.save_csv_data(user_id, conversation_id, dataset_id, pd.DataFrame([{"x": 1}]))
+
+
+def test_get_and_save_json_data_roundtrip_and_respect_overwrite_flag() -> None:
+    user_id, conversation_id, dataset_id = _ids()
+    bucket = _FakeBucket(name="bucket")
+    repo = GoogleCloudStorageDataRepo(bucket=bucket)
+
+    repo.save_json_data(
+        user_id,
+        conversation_id,
+        dataset_id,
+        json.dumps({"chart": "ok"}),
+        overwrite=False,
+    )
+
+    blob_name = repo._json_blob_name(user_id, conversation_id, dataset_id)  # noqa: SLF001
+    call = bucket.blobs[blob_name].upload_calls[0]
+    assert call["content_type"] == "application/json; charset=utf-8"
+    assert call["if_generation_match"] == 0
+    assert repo.get_json_data(user_id, conversation_id, dataset_id) == '{"chart": "ok"}'
+
+
+def test_get_and_save_json_data_map_missing_and_precondition_errors() -> None:
+    user_id, conversation_id, dataset_id = _ids()
+    bucket = _FakeBucket(name="bucket")
+    repo = GoogleCloudStorageDataRepo(bucket=bucket)
+
+    with pytest.raises(FileNotFoundError, match=r"JSON not found"):
+        repo.get_json_data(user_id, conversation_id, dataset_id)
+
+    blob_name = repo._json_blob_name(user_id, conversation_id, dataset_id)  # noqa: SLF001
+    bucket.blob(blob_name).next_upload_errors.append(PreconditionFailed("exists"))
+
+    with pytest.raises(FileExistsError, match=r"Refusing to overwrite existing JSON"):
+        repo.save_json_data(user_id, conversation_id, dataset_id, "{}")
 
 
 @pytest.mark.parametrize(
@@ -264,7 +302,9 @@ def test_save_artifact_rolls_back_binary_when_meta_upload_fails_with_no_overwrit
         artifact_id,
         mime="image/png",
     )
-    meta_blob_name = repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id)  # noqa: SLF001
+    meta_blob_name = repo._artifact_meta_blob_name(
+        user_id, conversation_id, artifact_id
+    )  # noqa: SLF001
 
     bucket.blob(meta_blob_name).next_upload_errors.append(RuntimeError("meta write failed"))
 
@@ -312,12 +352,16 @@ def test_get_artifact_mime_uses_metadata_when_valid() -> None:
     bucket = _FakeBucket(name="bucket")
     repo = GoogleCloudStorageDataRepo(bucket=bucket)
 
-    meta_blob = bucket.blob(repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id))  # noqa: SLF001
+    meta_blob = bucket.blob(
+        repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id)
+    )  # noqa: SLF001
     meta_blob.present = True
     meta_blob.data = b'{"mime":"image/webp"}'
 
     webp_blob = bucket.blob(
-        repo._artifact_blob_name(user_id, conversation_id, artifact_id, mime="image/webp")  # noqa: SLF001
+        repo._artifact_blob_name(
+            user_id, conversation_id, artifact_id, mime="image/webp"
+        )  # noqa: SLF001
     )
     webp_blob.present = True
 
@@ -329,12 +373,16 @@ def test_get_artifact_mime_falls_back_to_probe_on_bad_meta() -> None:
     bucket = _FakeBucket(name="bucket")
     repo = GoogleCloudStorageDataRepo(bucket=bucket)
 
-    meta_blob = bucket.blob(repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id))  # noqa: SLF001
+    meta_blob = bucket.blob(
+        repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id)
+    )  # noqa: SLF001
     meta_blob.present = True
     meta_blob.data = b"not-json"
 
     png_blob = bucket.blob(
-        repo._artifact_blob_name(user_id, conversation_id, artifact_id, mime="image/png")  # noqa: SLF001
+        repo._artifact_blob_name(
+            user_id, conversation_id, artifact_id, mime="image/png"
+        )  # noqa: SLF001
     )
     png_blob.present = True
 
@@ -350,7 +398,9 @@ def test_get_artifact_mime_rejects_ambiguous_probe() -> None:
         ("image/png", _png_bytes()),
         ("image/jpeg", _jpeg_bytes()),
     ):
-        blob = bucket.blob(repo._artifact_blob_name(user_id, conversation_id, artifact_id, mime=mime))  # noqa: SLF001
+        blob = bucket.blob(
+            repo._artifact_blob_name(user_id, conversation_id, artifact_id, mime=mime)
+        )  # noqa: SLF001
         blob.present = True
         blob.data = content
 
@@ -363,12 +413,16 @@ def test_get_artifact_bytes_checks_expected_mime_and_maps_not_found() -> None:
     bucket = _FakeBucket(name="bucket")
     repo = GoogleCloudStorageDataRepo(bucket=bucket)
 
-    meta_blob = bucket.blob(repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id))  # noqa: SLF001
+    meta_blob = bucket.blob(
+        repo._artifact_meta_blob_name(user_id, conversation_id, artifact_id)
+    )  # noqa: SLF001
     meta_blob.present = True
     meta_blob.data = b'{"mime":"image/png"}'
 
     png_blob = bucket.blob(
-        repo._artifact_blob_name(user_id, conversation_id, artifact_id, mime="image/png")  # noqa: SLF001
+        repo._artifact_blob_name(
+            user_id, conversation_id, artifact_id, mime="image/png"
+        )  # noqa: SLF001
     )
     png_blob.present = True
     png_blob.data = _png_bytes()

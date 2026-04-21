@@ -29,13 +29,6 @@ from python.implementation.workflows.tools.common.model.data_summary import (
     OtherColumnProfileModel,
     OtherSummaryModel,
 )
-from python.implementation.workflows.tools.data_profiling.plots.data_missingness import (
-    generate_data_completeness_graph,
-)
-from python.implementation.workflows.tools.data_profiling.plots.measure_relationships import (
-    generate_measure_relationships_graph,
-)
-from python.implementation.workflows.tools.data_profiling.plots.model import GraphImage
 
 InferredKind = Literal["NUMERIC", "DATETIME", "BOOLEAN", "CATEGORICAL", "OTHER"]
 
@@ -69,30 +62,15 @@ class DatasetProfilingError(RuntimeError):
 # =============================================================================
 class DatasetProfilingTool(Tool):
     NAME: ClassVar[str] = "DATA_PROFILING"
-    """
-    "State tool" API:
-      - extract_dataset_summary(df, ...) -> DatasetSummaryModel
-      - dataset_summary_to_json(summary, ...) -> strict JSON (no NaN/Inf)
-      - dataset_summary_from_json(payload) -> DatasetSummaryModel
-    """
-    
 
     def get_tool_name(self) -> str:
         return self.NAME
-    
+
     def get_tool_info(self) -> str:
-        return "Tool for profiling datasets for summary statistics and data quality insights."
-    
-    
-    def generate_basic_stats_graphs(
-        self,
-        *,
-        df: pd.DataFrame,
-    ) -> list[GraphImage]:  
-        return [
-             generate_data_completeness_graph(df),
-             generate_measure_relationships_graph(df),
-         ]
+        return (
+            "Tool for profiling tabular datasets. Analyzes each column to determine data types, missingness, distinct counts, and provides summaries such as numeric stats, category frequencies, and sample distinct values. "
+            "Designed to handle a variety of DataFrame-like inputs with robust error handling and informative reporting."
+        )
 
     def extract_dataset_summary(
         self,
@@ -212,7 +190,8 @@ class DatasetProfilingTool(Tool):
 
         return DatasetSummaryModel(n_rows=n_rows, profiles=profiles)
 
-    def dataset_summary_to_json(self,
+    def dataset_summary_to_json(
+        self,
         summary: DatasetSummaryModel,
         *,
         indent: int | None = None,
@@ -227,6 +206,7 @@ class DatasetProfilingTool(Tool):
 # =============================================================================
 # Internals (logic preserved from your reference)
 # =============================================================================
+
 
 def _validate_params(*, max_categories: int, sample_distinct: int) -> None:
     if max_categories <= 0:
@@ -491,7 +471,9 @@ def _categorical_summary(series: Any, *, max_categories: int) -> CategoricalSumm
             items = sorted(freq.items(), key=lambda kv: kv[1], reverse=True)
 
         top_items = items[:max_categories]
-        other_count = sum(int(v) for _, v in items[max_categories:]) if len(items) > max_categories else 0
+        other_count = (
+            sum(int(v) for _, v in items[max_categories:]) if len(items) > max_categories else 0
+        )
 
         top = [CategoryCountModel(value=str(k), count=int(v)) for k, v in top_items]
         return CategoricalSummaryModel(top_categories=top, other_count=int(other_count))
@@ -508,11 +490,27 @@ def _categorical_summary(series: Any, *, max_categories: int) -> CategoricalSumm
 
 def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummaryModel:
     try:
-        s = series.dropna() if hasattr(series, "dropna") else [x for x in list(series) if x is not None]
+        s = (
+            series.dropna()
+            if hasattr(series, "dropna")
+            else [x for x in list(series) if x is not None]
+        )
 
         if hasattr(s, "unique"):
-            uniq: list[Any] = list(s.unique()) # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownArgumentType]
-            distinct = [str(x) for x in uniq[:sample_distinct]]
+            try:
+                uniq: list[Any] = list(
+                    s.unique()
+                )  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownArgumentType]
+                distinct = [str(x) for x in uniq[:sample_distinct]]
+            except Exception:
+                seen: list[str] = []
+                for x in list(s):
+                    sx = str(x)
+                    if sx not in seen:
+                        seen.append(sx)
+                    if len(seen) >= sample_distinct:
+                        break
+                distinct = seen
         else:
             seen: list[str] = []
             for x in list(s):
@@ -533,7 +531,8 @@ def _other_summary(series: Any, *, sample_distinct: int) -> OtherSummaryModel:
                 evidence={"error": repr(e)},
             )
         ) from e
-        
+
+
 def _infer_kind(
     series: pd.Series,
     *,
@@ -573,7 +572,7 @@ def _infer_kind(
         return "NUMERIC"
 
     # 6) Datetime-like strings
-    dt = pd.to_datetime(s, errors="coerce")
+    dt = pd.to_datetime(s, errors="coerce", format="mixed")
     if float(dt.notna().mean()) >= datetime_coerce_threshold:
         return "DATETIME"
 

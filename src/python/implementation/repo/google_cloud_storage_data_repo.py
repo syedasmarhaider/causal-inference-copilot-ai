@@ -18,6 +18,7 @@ DEFAULT_GCS_DATA_PREFIX: Final[str] = "data"
 DEFAULT_GCS_TIMEOUT_SECONDS: Final[float] = 60.0
 
 CSV_FILENAME: Final[str] = "data.csv"
+JSON_FILENAME: Final[str] = "data.json"
 DATASETS_DIRNAME: Final[str] = "datasets"
 ARTIFACTS_DIRNAME: Final[str] = "artifacts"
 ARTIFACT_META_FILENAME: Final[str] = "meta.json"
@@ -40,7 +41,7 @@ def _validate_image_bytes(mime: ImageMime, content: bytes) -> None:
         return
 
     if mime == "image/jpeg":
-        if not content.startswith(b"\xFF\xD8"):
+        if not content.startswith(b"\xff\xd8"):
             raise ValueError("content does not look like a JPEG (bad signature)")
         return
 
@@ -62,7 +63,9 @@ class GoogleCloudStorageDataRepo(DataRepo):
         client = storage.Client(project=project_id)
         bucket_name = os.getenv("GCS_DATA_BUCKET_NAME", "").strip()
         if not bucket_name:
-            raise ValueError("GCS_DATA_BUCKET_NAME must be configured for GoogleCloudStorageDataRepo")
+            raise ValueError(
+                "GCS_DATA_BUCKET_NAME must be configured for GoogleCloudStorageDataRepo"
+            )
         return client.bucket(bucket_name)
 
     def __post_init__(self) -> None:
@@ -74,6 +77,29 @@ class GoogleCloudStorageDataRepo(DataRepo):
         return "/".join(part.strip("/") for part in parts if part and part.strip("/"))
 
     def _dataset_blob_name(self, user_id: UUID, conversation_id: UUID, dataset_id: UUID) -> str:
+        return self._dataset_file_blob_name(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            dataset_id=dataset_id,
+            filename=CSV_FILENAME,
+        )
+
+    def _json_blob_name(self, user_id: UUID, conversation_id: UUID, dataset_id: UUID) -> str:
+        return self._dataset_file_blob_name(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            dataset_id=dataset_id,
+            filename=JSON_FILENAME,
+        )
+
+    def _dataset_file_blob_name(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+        filename: str,
+    ) -> str:
         return self._join(
             DEFAULT_GCS_DATA_PREFIX,
             "users",
@@ -82,7 +108,7 @@ class GoogleCloudStorageDataRepo(DataRepo):
             str(conversation_id),
             DATASETS_DIRNAME,
             str(dataset_id),
-            CSV_FILENAME,
+            filename,
         )
 
     def _artifact_dir_prefix(self, user_id: UUID, conversation_id: UUID, artifact_id: UUID) -> str:
@@ -109,7 +135,9 @@ class GoogleCloudStorageDataRepo(DataRepo):
             f"{ARTIFACT_BASENAME}{_MIME_TO_EXT[mime]}",
         )
 
-    def _artifact_meta_blob_name(self, user_id: UUID, conversation_id: UUID, artifact_id: UUID) -> str:
+    def _artifact_meta_blob_name(
+        self, user_id: UUID, conversation_id: UUID, artifact_id: UUID
+    ) -> str:
         return self._join(
             self._artifact_dir_prefix(user_id, conversation_id, artifact_id),
             ARTIFACT_META_FILENAME,
@@ -139,10 +167,13 @@ class GoogleCloudStorageDataRepo(DataRepo):
         user_id: UUID,
         conversation_id: UUID,
         dataset_id: UUID,
+        start: int = 0,
         limit: int | None = None,
     ) -> pd.DataFrame:
-        if limit is not None and limit <= 0:
-            raise ValueError(f"limit must be a positive int or None, got: {limit!r}")
+        if start < 0:
+            raise ValueError(f"start must be >= 0, got: {start!r}")
+        if limit is not None and limit < 0:
+            raise ValueError(f"limit must be >= 0 or None, got: {limit!r}")
 
         blob = self._blob(self._dataset_blob_name(user_id, conversation_id, dataset_id))
         if not blob.exists(timeout=DEFAULT_GCS_TIMEOUT_SECONDS):
@@ -150,7 +181,13 @@ class GoogleCloudStorageDataRepo(DataRepo):
 
         try:
             csv_bytes = blob.download_as_bytes(timeout=DEFAULT_GCS_TIMEOUT_SECONDS)
-            return pd.read_csv(io.BytesIO(csv_bytes), nrows=limit, low_memory=False)
+            skiprows = range(1, start + 1) if start > 0 else None
+            return pd.read_csv(
+                io.BytesIO(csv_bytes),
+                skiprows=skiprows,
+                nrows=limit,
+                low_memory=False,
+            )
         except FileNotFoundError:
             raise
         except Exception as exc:
@@ -184,9 +221,68 @@ class GoogleCloudStorageDataRepo(DataRepo):
         try:
             blob.upload_from_string(**upload_kwargs)
         except PreconditionFailed as exc:
-            raise FileExistsError(f"Refusing to overwrite existing CSV for dataset_id={dataset_id}") from exc
+            raise FileExistsError(
+                f"Refusing to overwrite existing CSV for dataset_id={dataset_id}"
+            ) from exc
         except Exception as exc:
             raise ValueError(f"Failed to write CSV for dataset_id={dataset_id}: {exc}") from exc
+
+    def get_json_data(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+    ) -> str:
+        blob = self._blob(
+            self._json_blob_name(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                dataset_id=dataset_id,
+            )
+        )
+        if not blob.exists(timeout=DEFAULT_GCS_TIMEOUT_SECONDS):
+            raise FileNotFoundError(f"JSON not found for dataset_id={dataset_id}")
+
+        try:
+            return blob.download_as_bytes(timeout=DEFAULT_GCS_TIMEOUT_SECONDS).decode("utf-8")
+        except FileNotFoundError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"Failed to read JSON for dataset_id={dataset_id}: {exc}") from exc
+
+    def save_json_data(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+        json_data: str,
+        *,
+        overwrite: bool = True,
+    ) -> None:
+        blob = self._blob(
+            self._json_blob_name(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                dataset_id=dataset_id,
+            )
+        )
+
+        upload_kwargs: dict[str, object] = {
+            "data": json_data,
+            "content_type": "application/json; charset=utf-8",
+            "timeout": DEFAULT_GCS_TIMEOUT_SECONDS,
+        }
+        if not overwrite:
+            upload_kwargs["if_generation_match"] = 0
+
+        try:
+            blob.upload_from_string(**upload_kwargs)
+        except PreconditionFailed as exc:
+            raise FileExistsError(
+                f"Refusing to overwrite existing JSON for dataset_id={dataset_id}"
+            ) from exc
+        except Exception as exc:
+            raise ValueError(f"Failed to write JSON for dataset_id={dataset_id}: {exc}") from exc
 
     def save_artifact(
         self,
@@ -331,7 +427,9 @@ class GoogleCloudStorageDataRepo(DataRepo):
         except ValueError:
             raise
         except Exception as exc:
-            raise ValueError(f"Failed to resolve artifact mime for artifact_id={artifact_id}: {exc}") from exc
+            raise ValueError(
+                f"Failed to resolve artifact mime for artifact_id={artifact_id}: {exc}"
+            ) from exc
 
     def get_artifact_bytes(
         self,

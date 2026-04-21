@@ -23,7 +23,9 @@ class ConversationNotFoundError(WorkflowError):
     def __init__(self, user_id: UUID, conversation_id: UUID):
         self.user_id = user_id
         self.conversation_id = conversation_id
-        super().__init__(f"No active conversation found for user_id={user_id} and conversation_id={conversation_id}")
+        super().__init__(
+            f"No active conversation found for user_id={user_id} and conversation_id={conversation_id}"
+        )
 
 
 class StateNotFoundError(WorkflowError):

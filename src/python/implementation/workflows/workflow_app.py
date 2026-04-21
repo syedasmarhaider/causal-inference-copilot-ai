@@ -1,51 +1,45 @@
 from __future__ import annotations
 
-import io
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
 from uuid import UUID, uuid4
 
-import pandas as pd
-
-from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError
-from python.domain.repo.data_repo import DataRepo
-from python.domain.repo.workflow_state_repo import WorkflowStateRepo
-from python.domain.service.llm_service import ChatMessage
-from python.domain.workflows.node import Node
-from python.domain.workflows.route import Router
-from python.domain.workflows.state import State, Status
-from python.domain.workflows.tool_factory import ToolFactory
+from python.domain.models.errors import ConversationNotFoundError, StateNotFoundError, ValidationError
+from python.domain.models.models import ArtifactRef, ChatMessage, utc_now
+from python.domain.repo.workflow_state_repo import Conversation, WorkflowStateRepo
+from python.domain.workflows.node import Action, Status
 from python.implementation.service.logging.default_logging import get_app_logger
-from python.implementation.workflows.nodes.load_dataset.load_dataset_state import (
-    LoadDatasetState,
-)
-
-Stage = str
-
-_MESSAGES_HISTORY_LIMIT = 30
-
-@dataclass(frozen=True)
-class WorkflowRequest:
-    user_id: UUID
-    conversation_id: UUID
-    user_message: str | None  # raw user text
+from python.implementation.workflows.dataflow_app import DataflowArtifactResponse
+from python.implementation.workflows.ochestrator.ochestraotor import Ochestrator
+from python.implementation.workflows.ochestrator.causal_ochestrator_state import CausalOchestratorState
 
 
 @dataclass(frozen=True)
 class WorkflowResponse:
-    node_message: str
-    needs_input: bool
-    current_stage: Stage
+    messages: Sequence[ChatMessage]
+    current_stage_name: str
     current_stage_status: Status
-    needs_data: bool = False
-    artifact_ids: Sequence[str] | None = None
+    action: Action
+    current_data_id: UUID | None = None
+    is_dataset_frozen: bool | None = None
+
+    @property
+    def artifact_refs(self) -> Sequence[ArtifactRef] | None:
+        refs: list[ArtifactRef] = []
+        for message in self.messages:
+            refs.extend(list(message.artifact_refs or ()))
+        return refs or None
 
 
 @dataclass(frozen=True)
-class ArtifactResponse:
-    mime: str
-    content: bytes
+class ConversationResponse:
+    messages: Sequence[ChatMessage]
+    states: list[str]
+    current_data_id: UUID | None = None
+    is_dataset_frozen: bool | None = None
+
+
+ArtifactResponse = DataflowArtifactResponse
 
 
 class WorkflowApp:
@@ -53,454 +47,227 @@ class WorkflowApp:
         self,
         *,
         repo: WorkflowStateRepo,
-        data_repo: DataRepo,
-        router: Router,
-        nodes_by_state_name: Mapping[str, Node],
-        state_classes_by_name: Mapping[str, type[State]],
-        tool_factory: ToolFactory,
-        history_limit: int = _MESSAGES_HISTORY_LIMIT,
-        max_steps_per_call: int = 1,
+        ochestrator: Ochestrator,
     ) -> None:
-        if max_steps_per_call <= 0:
-            raise ValueError("max_steps_per_call must be >= 1")
-
         self._repo = repo
-        self._data_repo = data_repo
-        self._router = router
-        self._nodes = dict(nodes_by_state_name)
-        self._state_classes = dict(state_classes_by_name)
-        self._tool_factory = tool_factory
-        self._history_limit = history_limit
-        self._max_steps_per_call = max_steps_per_call
+        self._ochestrator = ochestrator
         self._log = get_app_logger(
             __name__,
             component=self.__class__.__name__,
             log_type="workflow_service",
         )
-        self._log.info(
-            "workflow app initialized",
-            nodes_count=len(self._nodes),
-            state_classes_count=len(self._state_classes),
-            history_limit=self._history_limit,
-            max_steps_per_call=self._max_steps_per_call,
-        )
-    
-    
-    def raise_if_userid_not_relates_to_conversation_id(self, *, user_id: UUID, conversation_id: UUID) -> None:
-        if not self._repo.is_conversation_id_for_user_id_exists(user_id=user_id, conversation_id=conversation_id):
-            self._log.info(
-                "conversation ownership check failed",
-                user_id=user_id,
-                conversation_id=conversation_id,
-            )
-            raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation_id)
-    
-    def create_conversation(self, user_id: UUID) -> UUID:
+
+    # ------------------------------------------------------------------
+    # Conversation management
+    # ------------------------------------------------------------------
+
+    def _raise_if_userid_not_relates_to_conversation_id(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        conversation_type: str,
+    ) -> None:
+        if conversation_type not in ["causal", "data"]:
+            raise ValidationError("conversation_type", f"Invalid conversation type: {conversation_type}")
+        
+        conversation = Conversation(conversation_id=conversation_id, conversation_type=conversation_type, last_updated_at_utc=utc_now())
+        if not self._repo.is_conversation_id_for_user_id_exists(
+            user_id=user_id,
+            conversation=conversation,
+        ):
+            raise ConversationNotFoundError(user_id=user_id, conversation_id=conversation.conversation_id)
+
+    def create_conversation(
+        self,
+        user_id: UUID,
+        conversation_type: str,
+        conversation_name: str | None = None,
+    ) -> Conversation:
         conversation_id = uuid4()
-        self._repo.save_conversation_id(user_id=user_id, conversation_id=conversation_id)
+        if conversation_type not in ["causal", "data"]:
+            raise ValidationError("conversation_type", f"Invalid conversation type: {conversation_type}")
+        
+        conversation = Conversation(
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+            name=conversation_name,
+            last_updated_at_utc=utc_now(),
+        )
+                
+        self._repo.save_conversation(user_id=user_id, conversation=conversation)
         self._log.info(
             "conversation created",
             user_id=user_id,
             conversation_id=conversation_id,
         )
-        return conversation_id    
+        return conversation
+
+    def list_conversations(self, user_id: UUID) -> Sequence[Conversation]:
+        return self._repo.get_conversations(user_id=user_id)
     
-    def list_conversations(self, user_id: UUID) -> Sequence[UUID]:
-        conversation_ids = self._repo.get_conversation_ids_for_user(user_id=user_id)
-        return conversation_ids  
-    
-    def get_last_conversation_state(self, *, user_id: UUID, conversation_id: UUID) -> WorkflowResponse | None:
-        active_name = self._repo.load_active_state_name(
+    def get_current_conversation_info(
+        self,
+        *,  
+        user_id: UUID,
+        conversation_id: UUID,
+        conversation_type: str,
+    ) -> ConversationResponse:
+        self._raise_if_userid_not_relates_to_conversation_id(
             user_id=user_id,
             conversation_id=conversation_id,
+            conversation_type=conversation_type,
         )
-        if not active_name:
-            self._log.debug(
-                "latest conversation state not found because active state is missing",
-                user_id=user_id,
-                conversation_id=conversation_id,
-            )
-            return None
+        conversation = Conversation(
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+            last_updated_at_utc=utc_now(),
+        )
         
-        state = self._repo.load_state(
+        messages = self._repo.load_message_history(
             user_id=user_id,
             conversation_id=conversation_id,
-            state_name=active_name,
+            limit=30,
         )
-        if state is None:
-            self._log.info(
-                "active state name exists but state payload is missing",
-                user_id=user_id,
-                conversation_id=conversation_id,
-                active_state_name=active_name,
-            )
-            return None
+        state = self._ochestrator.get_current_ochestrator_state(
+            user_id=user_id,
+            conversation=conversation,
+        )
+        
+        state_info = state.get_completed_and_last_pending_nodes()
+        dataset_id, is_frozen = state.get_working_dataset_id_and_frozen_status()
+        return ConversationResponse(
+            messages=messages,
+            states=state_info,
+            current_data_id=dataset_id,
+            is_dataset_frozen=is_frozen,
+        )
+
+
+    # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
+
+    def handle(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        conversation_type: str,
+        user_message: str | None,
+    ) -> WorkflowResponse:
+        self._raise_if_userid_not_relates_to_conversation_id(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+        )
+        conversation = Conversation(
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+            last_updated_at_utc=utc_now(),
+        )
         self._log.debug(
-            "loaded latest conversation state",
+            "workflow handle requested",
             user_id=user_id,
             conversation_id=conversation_id,
-            current_stage=state.name,
-            current_stage_status=state.status,
         )
         
+        user_message = user_message or ""
+
+        response = self._ochestrator.answer(
+            conversation=  conversation,
+            user_id=user_id,
+            user_message=ChatMessage(role="user", content=user_message),
+        )
+        
+        self._repo.save_conversation(user_id=user_id, conversation=conversation)
+
         return WorkflowResponse(
-            node_message=state.message.txt_message,
-            needs_input=(state.message.action == "NEEDS_INPUT"),
-            needs_data=(state.message.action == "NEEDS_DATA"),
-            current_stage=state.name,
-            current_stage_status=state.status,
-            artifact_ids=state.message.artifact_ids,
-        )      
+            messages=response.messages,
+            current_stage_name=response.current_state,
+            current_stage_status=response.current_status,
+            current_data_id=response.current_data_id,
+            action=response.action,
+            is_dataset_frozen=response.is_dataset_frozen,
+        )
 
-    def upload_csv_data(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-        csv_bytes: bytes,
-    ) -> UUID:
-        try:
-            df = pd.read_csv(io.BytesIO(csv_bytes), low_memory=False) # pyright: ignore[reportUnknownMemberType]
-        except Exception as exc:
-            self._log.info(
-                "csv upload rejected due to invalid payload",
-                user_id=user_id,
-                conversation_id=conversation_id,
-                csv_size_bytes=len(csv_bytes),
-            )
-            raise ValueError(f"Uploaded file is not a valid CSV: {exc}") from exc
+    # ------------------------------------------------------------------
+    # Revert
+    # ------------------------------------------------------------------
 
-        active_name = self._repo.load_active_state_name(
-            user_id=user_id,
-            conversation_id=conversation_id,
-        )
-        if not active_name or active_name != LoadDatasetState.NAME:
-            self._log.info(
-                "csv upload rejected because conversation is not at load dataset state",
-                user_id=user_id,
-                conversation_id=conversation_id,
-                active_state_name=active_name,
-                required_state_name=LoadDatasetState.NAME,
-            )
-            raise ValueError(f"No active conversation found for user_id={user_id} and conversation_id={conversation_id} or state is not at load data set")
-        
-        dataset_id = LoadDatasetState.INIT_DATA_ID
-        self._data_repo.save_csv_data(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            dataset_id=dataset_id,
-            df=df,
-            overwrite=True,
-        )
-        self._log.info(
-            "csv dataset uploaded",
-            user_id=user_id,
-            conversation_id=conversation_id,
-            dataset_id=dataset_id,
-            rows_count=len(df),
-            columns_count=len(df.columns),
-        )
-         
-        return dataset_id
-
-    def get_artifact(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-        artifact_id: UUID,
-    ) -> ArtifactResponse:
-        mime = self._data_repo.get_artifact_mime(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            artifact_id=artifact_id,
-        )
-        content = self._data_repo.get_artifact_bytes(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            artifact_id=artifact_id,
-            expected_mime=mime,
-        )
-        self._log.debug(
-            "artifact fetched",
-            user_id=user_id,
-            conversation_id=conversation_id,
-            artifact_id=artifact_id,
-            artifact_mime=mime,
-            content_size_bytes=len(content),
-        )
-        return ArtifactResponse(mime=mime, content=content)
-    
     def revert_to_state(
         self,
         *,
         user_id: UUID,
         conversation_id: UUID,
+        conversation_type: str,
         state_name: str,
-    ) -> None:
-        state = self._repo.load_state(
+    ) -> ConversationResponse:
+        self._raise_if_userid_not_relates_to_conversation_id(
             user_id=user_id,
             conversation_id=conversation_id,
-            state_name=state_name,
+            conversation_type=conversation_type,
         )
-        if state is None:
-            self._log.info(
-                "revert requested for missing state",
+        conversation = Conversation(
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+            last_updated_at_utc=utc_now(),
+        )
+        
+        if conversation_type != "causal":
+            raise ValidationError("conversation_type", f"Revert is only supported for 'causal' conversation type, got: {conversation_type}")
+        ochestrator_state = self._repo.load_ochestrator_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if not isinstance(ochestrator_state, CausalOchestratorState):
+            raise StateNotFoundError(state_name=state_name)
+
+        ochestrator_state.roll_back_to_state(state_name)
+
+        for name_to_delete in ochestrator_state.get_forward_states_after_node(state_name):
+            self._repo.delete_state(
                 user_id=user_id,
                 conversation_id=conversation_id,
-                state_name=state_name,
+                state_name=name_to_delete,
             )
-            raise StateNotFoundError(state_name=state_name)
         
-        state_names = self._router.get_next_state_names(state_name)
         self._repo.delete_state(
             user_id=user_id,
             conversation_id=conversation_id,
             state_name=state_name,
-        )
-        for name in state_names:
-            self._repo.delete_state(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                state_name=name,
-            )
-        
-        self._repo.store_active_state_name(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                state_name=state_name,
         )    
-        
-        self._repo.append_message(
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    message=ChatMessage(role="system", content=f"User reverted to state {state_name}. and fresh start of this state. Deleted states: {', '.join(state_names)}"),
+            
+        self._repo.store_ochestrator_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state=ochestrator_state,
         )
+        
         self._log.info(
-            "conversation reverted to state",
+            "conversation reverted",
             user_id=user_id,
             conversation_id=conversation_id,
             state_name=state_name,
-            deleted_states_count=len(state_names),
-        )
-             
-             
-    def handle(self, req: WorkflowRequest) -> WorkflowResponse:
-        self._log.debug(
-            "workflow handle requested",
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
-            has_user_message=bool(req.user_message and req.user_message.strip()),
-        )
-        if req.user_message is not None and req.user_message.strip():
-            self._repo.append_message(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                message=ChatMessage(role="user", content=req.user_message),
-            )
-
-        active_name = self._repo.load_active_state_name(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
-        )
-        
-        if not active_name:
-            active_name = self._router.get_initial_state_name()
-            self._repo.store_active_state_name(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                state_name=active_name,
-            )
-            self._log.debug(
-                "initialized active state name",
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                state_name=active_name,
-            )
-
-        # 2) load current state payload (or init empty)
-        current_state = self._repo.load_state(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
-            state_name=active_name,
-        )
-        
-        if current_state is None:
-            current_state = self._init_empty_state(active_name)
-            self._repo.store_state(user_id=req.user_id, conversation_id=req.conversation_id, state=current_state)
-            self._log.debug(
-                "initialized missing current state payload",
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                state_name=current_state.name,
-            )
-
-        history: list[ChatMessage] = list(self._repo.load_message_history(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
-            limit=self._history_limit,
-        ))
-        
-        decision = self._router.decide_next(
-                current_state=current_state,
-                messages_history=history,
-           )
-    
-        last_router_message = decision.router_message_for_node
-        
-        if last_router_message:
-            history.append(ChatMessage(role="system", content=last_router_message))
-            self._repo.append_message(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                message=ChatMessage(role="system", content=last_router_message),
-            )
-            self._log.debug(
-                "router message appended to history",
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                decision_state_name=decision.state_name,
-            )
-        
-        #TODO: Temp sol delete later
-        # this will not work sometimes on errors and exceptions
-        if decision.delete_next_states_names:
-            for state_name in decision.delete_next_states_names:
-                self._repo.delete_state(
-                    user_id=req.user_id,
-                    conversation_id=req.conversation_id,
-                    state_name=state_name,
-                )
-            self._log.debug(
-                "deleted downstream states due to router decision",
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                decision_state_name=decision.state_name,
-                deleted_states_count=len(decision.delete_next_states_names),
-            )
-                    
-
-        state_name_to_run = decision.state_name 
-        state_to_run = self._repo.load_state(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                state_name=state_name_to_run,
-            )
-        if current_state.status == "ABORTED" or state_to_run is None:
-            state_to_run = self._init_empty_state(state_name_to_run)
-            self._log.debug(
-                "state reset before node run",
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                state_name=state_name_to_run,
-                reason="aborted_or_missing",
-            )
-        
-        deps = self._load_deps(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
-            required=state_to_run.pre_required_states_names(),
         )
 
-        node = self._nodes.get(state_name_to_run)
-        if node is None:
-            self._log.error(
-                "workflow node is not registered for state",
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                state_name=state_name_to_run,
-            )
-            raise KeyError(f"WorkflowApp: no node registered for state_name={state_name_to_run!r}")
-
-        new_state = node.run(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
-            state=state_to_run,
-            tool_factory=self._tool_factory,
-            previous_state_dependencies=deps,
-            messages_history=history,
-            )
+        # Load updated state and messages to return a ConversationResponse
+        messages = self._repo.load_message_history(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            limit=30,
+        )
+        state = self._ochestrator.get_current_ochestrator_state(
+            user_id=user_id,
+            conversation=conversation,
+        )
+        last_nodes = state.get_completed_and_last_pending_nodes()
+        dataset_id, is_frozen = state.get_working_dataset_id_and_frozen_status()
         
-        self._repo.store_state(user_id=req.user_id, conversation_id=req.conversation_id, state=new_state)
-        self._repo.store_active_state_name(
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                state_name=new_state.name,
+        self._repo.save_conversation(user_id=user_id, conversation=conversation)
+
+        return ConversationResponse(
+            messages=messages,
+            states=last_nodes,
+            current_data_id=dataset_id,
+            is_dataset_frozen=is_frozen,
         )
-        
-
-        self._repo.append_message(
-                    user_id=req.user_id,
-                    conversation_id=req.conversation_id,
-                    message=ChatMessage(role="assistant", content=new_state.message.txt_message),
-            
-        )
-        
-        if new_state.error:
-            self._repo.append_message(
-                    user_id=req.user_id,
-                    conversation_id=req.conversation_id,
-                    message=ChatMessage(role="system", content=f"Error returned from node {new_state.error.error}"),
-        )
-            self._log.error(
-                "node returned workflow error",
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                state_name=new_state.name,
-                state_status=new_state.status,
-                node_error=new_state.error.error,
-            )
-        else:
-            self._log.debug(
-                "workflow node completed",
-                user_id=req.user_id,
-                conversation_id=req.conversation_id,
-                state_name=new_state.name,
-                state_status=new_state.status,
-                needs_input=(new_state.message.action == "NEEDS_INPUT"),
-                needs_data=(new_state.message.action == "NEEDS_DATA"),
-            )
-            
-        return WorkflowResponse(
-            node_message=new_state.message.txt_message,
-            needs_input=(new_state.message.action == "NEEDS_INPUT"),
-            needs_data=(new_state.message.action == "NEEDS_DATA"),
-            current_stage=new_state.name,
-            current_stage_status=new_state.status,
-            artifact_ids=new_state.message.artifact_ids,
-        )
-
-    # ------------------------
-    # helpers
-    # ------------------------
-
-    def _require_state_class(self, state_name: str) -> None:
-        if state_name not in self._state_classes:
-            raise KeyError(f"WorkflowApp: missing State class for state_name={state_name!r}")
-
-    def _init_empty_state(self, state_name: str) -> State:
-        cls = self._state_classes.get(state_name)
-        if cls is None:
-            raise KeyError(f"WorkflowApp: no State class registered for state_name={state_name!r}")
-        st = cls.init_empty()
-        if st.name != state_name:
-            raise ValueError(f"init_empty() returned name={st.name!r}, expected={state_name!r}")
-        return st
-
-    def _load_deps(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-        required: Sequence[str],
-    ) -> Mapping[str, Any]:
-        deps: dict[str, Any] = {}
-        for dep_name in required:
-            dep_state = self._repo.load_state(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                state_name=dep_name,
-            )
-            if dep_state is not None:
-                deps[dep_name] = dep_state
-        return deps

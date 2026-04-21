@@ -27,3 +27,8 @@ variable "project_roles" {
   type    = set(string)
   default = []
 }
+
+variable "service_account_user_members" {
+  type    = set(string)
+  default = []
+}

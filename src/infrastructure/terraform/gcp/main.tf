@@ -12,12 +12,17 @@ locals {
     ? var.project_id
     : "${var.project_id}-${local.env_suffix}"
   )
+  vertex_ai_project_id       = coalesce(var.vertex_ai_project_id, var.project_id)
+  vertex_ai_location         = coalesce(var.vertex_ai_location, var.region)
   service_name               = "${local.resource_prefix}-backend"
   data_bucket_name           = "${local.project_env_prefix}-data"
   models_bucket_name         = "${local.project_env_prefix}-models"
   runtime_sa_id_base         = trim(replace(local.resource_prefix, "/[^a-z0-9-]/", "-"), "-")
   runtime_service_account_id = "${substr(local.runtime_sa_id_base, 0, 27)}-sa"
+  vertex_runtime_role_id     = trim(replace(var.vertex_runtime_custom_role_id, "/[^A-Za-z0-9_]/", ""), "_")
+  vertex_runtime_role_name   = "projects/${var.project_id}/roles/${local.vertex_runtime_role_id}"
   effective_labels           = merge(var.labels, { env = local.env_suffix })
+  runtime_project_roles      = toset(concat(var.runtime_extra_project_roles, [local.vertex_runtime_role_name]))
 
   buckets_location = coalesce(var.buckets_location, var.region)
 
@@ -28,6 +33,7 @@ locals {
 
   required_services = toset([
     "run.googleapis.com",
+    "aiplatform.googleapis.com",
     "secretmanager.googleapis.com",
     "iam.googleapis.com",
     "serviceusage.googleapis.com",
@@ -36,6 +42,15 @@ locals {
     "firebase.googleapis.com",
     "firebasedatabase.googleapis.com",
   ])
+}
+
+resource "google_project_iam_custom_role" "vertex_runtime" {
+  project     = var.project_id
+  role_id     = local.vertex_runtime_role_id
+  title       = var.vertex_runtime_custom_role_title
+  description = "Least-privilege Vertex AI runtime role for the Cloud Run backend."
+  permissions = sort(tolist(var.vertex_runtime_custom_role_permissions))
+  stage       = "GA"
 }
 
 module "project_services" {
@@ -96,21 +111,26 @@ module "runtime_service_account" {
     }
   }
 
-  project_roles = toset(var.runtime_extra_project_roles)
+  project_roles                = local.runtime_project_roles
+  service_account_user_members = var.runtime_service_account_user_members
 
   depends_on = [
     module.project_services,
-    module.storage_buckets
+    module.storage_buckets,
+    google_project_iam_custom_role.vertex_runtime,
   ]
 }
 
 locals {
   plain_env_vars = merge(
     {
+      LITELLM_PROVIDER                        = "vertex_ai"
       LANGFUSE_BASE_URL                       = var.langfuse_base_url
       LANGFUSE_DEBUG                          = var.langfuse_debug
       LANGFUSE_PUBLIC_KEY                     = var.langfuse_public_key
       GOOGLE_CLOUD_PROJECT_ID                 = var.project_id
+      VERTEXAI_PROJECT                        = local.vertex_ai_project_id
+      VERTEXAI_LOCATION                       = local.vertex_ai_location
       FIREBASE_DATABASE_URL                   = module.firebase_rtdb.database_url
       GCS_MODELS_BUCKET_NAME                  = module.storage_buckets.models_bucket_name
       GCS_DATA_BUCKET_NAME                    = module.storage_buckets.data_bucket_name
@@ -119,7 +139,12 @@ locals {
       GCS_MODELS_UPLOAD_RETRY_TIMEOUT_SECONDS = tostring(var.gcs_models_upload_retry_timeout_seconds)
       GCS_MODELS_UPLOAD_CHUNK_SIZE_BYTES      = tostring(var.gcs_models_upload_chunk_size_bytes)
     },
-    var.extra_plain_env_vars
+    var.extra_plain_env_vars,
+    {
+      LITELLM_PROVIDER  = "vertex_ai"
+      VERTEXAI_PROJECT  = local.vertex_ai_project_id
+      VERTEXAI_LOCATION = local.vertex_ai_location
+    }
   )
 }
 

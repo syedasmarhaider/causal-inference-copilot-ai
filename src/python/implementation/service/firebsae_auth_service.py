@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from python.implementation.service.logging.default_logging import get_logger
 import os
 from uuid import UUID, uuid5
 
@@ -8,6 +7,7 @@ import firebase_admin
 from firebase_admin import auth, credentials
 
 from python.domain.service.auth_service import AuthenticatedUser, AuthService
+from python.implementation.service.logging.default_logging import get_logger
 
 _FIREBASE_USER_ID_NAMESPACE = UUID("2d5c4b6d-7f6b-4d8e-9a2d-1f5e9d9d8c11")
 log = get_logger(__name__)
@@ -39,7 +39,7 @@ class FirebaseAuthService(AuthService):
         except Exception as exc:
             log.warning("Failed to verify Firebase token", error=exc)
             raise InvalidTokenError("failed to verify Firebase token") from exc
-        
+
         raw_uid = decoded.get("uid")
         if not isinstance(raw_uid, str) or not raw_uid.strip():
             raise InvalidTokenError("verified Firebase token is missing uid")
@@ -48,7 +48,6 @@ class FirebaseAuthService(AuthService):
         if email is not None and not isinstance(email, str):
             email = None
 
-   
         return AuthenticatedUser(
             uid=uuid5(_FIREBASE_USER_ID_NAMESPACE, raw_uid),
             email=email,

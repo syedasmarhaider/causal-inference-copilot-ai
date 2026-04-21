@@ -23,4 +23,4 @@ USER app
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "uvicorn python.adapters.api.app:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["python", "-m", "python.adapters.api.server"]

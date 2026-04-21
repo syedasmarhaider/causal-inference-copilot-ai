@@ -1,59 +1,83 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TypeVar
+from uuid import UUID
 
-from python.domain.models.errors import StateDependencyError
-from python.domain.workflows.state import State
-from python.implementation.workflows.nodes.clean_protocol.clean_protocol_state import (
-    CleanProtocolState,
+from python.domain.models.validation import ValidationIssueModel, ValidationStatus
+from python.domain.workflows.node import NodeRequest
+from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.common.model.data_summary import (
+    DatasetSummaryModel,
 )
-from python.implementation.workflows.nodes.load_dataset.load_dataset_state import LoadDatasetState
-from python.implementation.workflows.nodes.validate_cleaned_protocol.validate_cleaned_protocol_state import (
-    ValidateCleanProtocolState,
-)
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
-from python.implementation.workflows.utils.validation import ValidationIssueModel
-
-T = TypeVar("T", bound=State)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ModelSelectionDeps:
-    clean_dataset_summary: DatasetSummaryModel
-    compiled_causal_spec: CausalSpec
-    validation_errors: list[ValidationIssueModel]
+    dataset_id: UUID
+    dataset_summary: DatasetSummaryModel
+    causal_spec: CausalSpec
+    transformation_plan: TransformPlan
+    validation_issues: list[ValidationIssueModel]
+    validation_status: ValidationStatus
 
     @classmethod
-    def pre_required_states_names(cls) -> Sequence[str]:
-        return (
-            LoadDatasetState.NAME,
-            CleanProtocolState.NAME,
-            ValidateCleanProtocolState.NAME,
+    def from_request(cls, request: NodeRequest) -> ModelSelectionDeps:
+        transformation_plan_raw = request.orchestrator_state.get("data_transformation_plan")
+        causal_spec_raw = request.orchestrator_state.get("causal_spec")
+        dataset_id_raw = request.orchestrator_state.get("working_dataset_id")
+        dataset_summary_raw = request.orchestrator_state.get("latest_dataset_summary")
+        validation_issues_raw = request.orchestrator_state.get("validation_issues")
+
+        if dataset_id_raw is None:
+            raise ValueError("ModelSelectionDeps: dataset_id is required but was not found in compilation state")
+        if dataset_summary_raw is None:
+            raise ValueError("ModelSelectionDeps: dataset_summary is required but was not found in compilation state")
+        if causal_spec_raw is None:
+            raise ValueError("ModelSelectionDeps: causal_spec is required but was not found in compilation state")
+        if transformation_plan_raw is None:
+            raise ValueError("ModelSelectionDeps: transformation_plan is required but was not found in compilation state")
+        
+        if not isinstance(dataset_id_raw, UUID):
+            raise TypeError("ModelSelectionDeps: dataset_id must be a UUID")
+        if not isinstance(dataset_summary_raw, DatasetSummaryModel):
+            raise TypeError("ModelSelectionDeps: dataset_summary must be of type DatasetSummaryModel")
+        if not isinstance(causal_spec_raw, CausalSpec):
+            raise TypeError("ModelSelectionDeps: causal_spec must be of type CausalSpec")
+        if not isinstance(transformation_plan_raw, TransformPlan):
+            raise TypeError("ModelSelectionDeps: transformation_plan must be of type TransformPlan")
+        if validation_issues_raw is not None and not isinstance(validation_issues_raw, list):
+            raise TypeError("ModelSelectionDeps: validation_issues must be a list of ValidationIssueModel")
+        if validation_issues_raw is None:
+            validation_issues_raw = []
+        else:
+            validated_issues: list[ValidationIssueModel] = []
+            for issue in validation_issues_raw:
+                if isinstance(issue, dict):
+                    validated_issues.append(ValidationIssueModel(**issue))
+                elif isinstance(issue, ValidationIssueModel):
+                    validated_issues.append(issue)
+                else:
+                    raise TypeError("ModelSelectionDeps: each item in validation_issues must be a dict or ValidationIssueModel")
+            validation_issues_raw = validated_issues
+        
+
+        validation_status = "PASS"
+        for issue in validation_issues_raw:
+            if issue.severity == "WARN":
+                validation_status = "WARN"
+                break
+            elif issue.severity == "FAIL":
+                raise Exception(f"Validation failed: {issue}")
+            
+        return cls(
+            dataset_id=dataset_id_raw,
+            dataset_summary=dataset_summary_raw,
+            causal_spec=causal_spec_raw,
+            transformation_plan=transformation_plan_raw,
+            validation_issues=validation_issues_raw,
+            validation_status=validation_status,
         )
 
-    @classmethod
-    def from_loaded(cls, loaded: Mapping[str, State]) -> ModelSelectionDeps:
-        def _get(name: str, expected_type: type[T]) -> T:
-            st = loaded.get(name)
-            if st is None:
-                raise StateDependencyError(f"ModelSelectionDeps: missing {name}", to_state="ModelSelectionDeps", missing_dependencies=[
-                    name,
-                ])
-            if not isinstance(st, expected_type):
-                raise StateDependencyError(f"ModelSelectionDeps: invalid {name} (expected {expected_type.__name__}, got {type(st).__name__})", to_state="ModelSelectionDeps", missing_dependencies=[name])      
-            return st
 
-        cl = _get(CleanProtocolState.NAME, CleanProtocolState)
-        vc = _get(ValidateCleanProtocolState.NAME, ValidateCleanProtocolState)
-
-        clean_ds_summary = cl.payload.summary
-        if clean_ds_summary is None:
-            raise StateDependencyError(f"ModelSelectionDeps: {CleanProtocolState.NAME} is not DONE yet (missing clean dataset summary)", to_state="ModelSelectionDeps", missing_dependencies=[CleanProtocolState.NAME])
-        compiled_causal_spec = cl.payload.compiled_causal_spec
-        if compiled_causal_spec is None:
-            raise StateDependencyError(f"ModelSelectionDeps: {CleanProtocolState.NAME} is not DONE yet (missing compiled causal spec)", to_state="ModelSelectionDeps", missing_dependencies=[CleanProtocolState.NAME])
-        validation_errors = vc.payload.issues
-        return cls(clean_dataset_summary=clean_ds_summary, compiled_causal_spec=compiled_causal_spec, validation_errors=validation_errors)
+__all__ = ["ModelSelectionDeps"]

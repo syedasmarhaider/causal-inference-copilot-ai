@@ -1,0 +1,1149 @@
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Any
+from uuid import UUID, uuid4
+
+import pandas as pd
+import pytest
+
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMResponse
+from python.implementation.workflows.nodes.dataset.dataset_node import (
+    DatasetIntentModel,
+    DatasetNode,
+)
+from python.implementation.workflows.nodes.dataset.dataset_prompts import (
+    prev_state_revert_message,
+)
+from python.implementation.workflows.nodes.dataset.dataset_state import (
+    DatasetIterationModel,
+    DatasetPayloadModel,
+    DatasetState,
+)
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
+    DatasetProfilingTool,
+    DatasetSummaryModel,
+)
+
+
+@dataclass
+class _FakeDataRepo:
+    dataframe: pd.DataFrame | None = None
+    get_csv_error: Exception | None = None
+    saved_csv_calls: list[dict[str, object]] = field(default_factory=list)
+    saved_json_calls: list[dict[str, object]] = field(default_factory=list)
+
+    def get_csv_data(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+        start: int = 0,
+        limit: int | None = None,
+    ) -> pd.DataFrame:
+        del user_id, conversation_id, dataset_id
+        if self.get_csv_error is not None:
+            raise self.get_csv_error
+        assert self.dataframe is not None
+        dataframe = self.dataframe.iloc[start:].copy()
+        if limit is None:
+            return dataframe
+        return dataframe.head(limit).copy()
+
+    def save_csv_data(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+        df: pd.DataFrame,
+        *,
+        overwrite: bool = True,
+        include_index: bool = False,
+    ) -> None:
+        self.saved_csv_calls.append(
+            {
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "dataset_id": dataset_id,
+                "df": df.copy(),
+                "overwrite": overwrite,
+                "include_index": include_index,
+            }
+        )
+
+    def save_json_data(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        dataset_id: UUID,
+        json_data: str,
+        *,
+        overwrite: bool = True,
+    ) -> None:
+        self.saved_json_calls.append(
+            {
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "dataset_id": dataset_id,
+                "json_data": json_data,
+                "overwrite": overwrite,
+            }
+        )
+
+
+@dataclass
+class _FakeLLM:
+    json_outputs: list[object] = field(default_factory=list)
+    generate_outputs: list[object] = field(default_factory=list)
+    generate_calls: list[dict[str, object]] = field(default_factory=list)
+    generate_json_calls: list[dict[str, object]] = field(default_factory=list)
+
+    def generate(
+        self,
+        *,
+        system_prompt: str | None,
+        user_prompt: str,
+        config: LLMConfig,
+        history: list[ChatMessage] | None,
+    ) -> LLMResponse:
+        self.generate_calls.append(
+            {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "config": config,
+                "history": history,
+            }
+        )
+        if not self.generate_outputs:
+            raise AssertionError("unexpected generate call")
+        next_output = self.generate_outputs.pop(0)
+        if isinstance(next_output, Exception):
+            raise next_output
+        if isinstance(next_output, LLMResponse):
+            return next_output
+        return LLMResponse(content=str(next_output))
+
+    def generate_json(
+        self,
+        *,
+        schema: type[DatasetIntentModel],
+        system_prompt: str | None,
+        user_prompt: str,
+        config: LLMConfig,
+        history: list[ChatMessage] | None,
+        max_attempts: int = 3,
+    ) -> DatasetIntentModel:
+        self.generate_json_calls.append(
+            {
+                "schema": schema,
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "config": config,
+                "history": history,
+                "max_attempts": max_attempts,
+            }
+        )
+        if not self.json_outputs:
+            raise AssertionError("unexpected generate_json call")
+        next_output = self.json_outputs.pop(0)
+        if isinstance(next_output, Exception):
+            raise next_output
+        assert isinstance(next_output, DatasetIntentModel)
+        return next_output
+
+
+@dataclass
+class _FakeDataManipulationTool:
+    result_dataframe: pd.DataFrame
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    def manipulate(
+        self,
+        *,
+        dataframe: pd.DataFrame,
+        table_name: str,
+        data_summary: str,
+        instructions: str | None = None,
+        retry_attempts: int | None = None,
+    ) -> pd.DataFrame:
+        self.calls.append(
+            {
+                "dataframe": dataframe.copy(),
+                "table_name": table_name,
+                "data_summary": data_summary,
+                "instructions": instructions,
+                "retry_attempts": retry_attempts,
+            }
+        )
+        return self.result_dataframe.copy()
+
+
+@dataclass
+class _FakePlotTool:
+    specs: list[dict[str, object]]
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    def generate_specs(
+        self,
+        *,
+        dataframe: pd.DataFrame,
+        data_summary: DatasetSummaryModel,
+        user_intent: str,
+    ) -> list[dict[str, object]]:
+        self.calls.append(
+            {
+                "dataframe": dataframe.copy(),
+                "data_summary": data_summary.model_dump(mode="python"),
+                "user_intent": user_intent,
+            }
+        )
+        return [dict(spec) for spec in self.specs]
+
+
+@dataclass
+class _FakeToolFactory:
+    profiling_tool: object
+    data_manipulation_tool: object
+    plot_tool: object
+    calls: list[str] = field(default_factory=list)
+
+    def get_tool(self, name: str) -> object:
+        self.calls.append(name)
+        if name == "DATA_PROFILING":
+            return self.profiling_tool
+        if name == "DATA_MANIPULATION":
+            return self.data_manipulation_tool
+        if name == "PLOT_TOOL":
+            return self.plot_tool
+        raise KeyError(name)
+
+    def get_tool_names(self) -> list[str]:
+        return ["DATA_PROFILING", "DATA_MANIPULATION", "PLOT_TOOL"]
+
+    def get_tool_info(self, name: str) -> str:
+        del name
+        return "info"
+
+    def get_tools_info(self) -> dict[str, str]:
+        return {name: "info" for name in self.get_tool_names()}
+
+    def has_tool(self, name: str) -> bool:
+        return name in set(self.get_tool_names())
+
+
+def _make_node_and_tools(
+    *,
+    dataframe: pd.DataFrame | None = None,
+    get_csv_error: Exception | None = None,
+    json_outputs: list[object] | None = None,
+    generate_outputs: list[object] | None = None,
+    manipulation_df: pd.DataFrame | None = None,
+    plot_specs: list[dict[str, object]] | None = None,
+) -> tuple[
+    DatasetNode, _FakeDataRepo, _FakeLLM, _FakeDataManipulationTool, _FakePlotTool, _FakeToolFactory
+]:
+    data_repo = _FakeDataRepo(dataframe=dataframe, get_csv_error=get_csv_error)
+    llm = _FakeLLM(
+        json_outputs=list(json_outputs or []),
+        generate_outputs=list(generate_outputs or []),
+    )
+    manipulation_tool = _FakeDataManipulationTool(
+        result_dataframe=(
+            manipulation_df.copy() if manipulation_df is not None else pd.DataFrame([{"x": 1}])
+        )
+    )
+    plot_tool = _FakePlotTool(specs=list(plot_specs or []))
+    tool_factory = _FakeToolFactory(
+        profiling_tool=DatasetProfilingTool(),
+        data_manipulation_tool=manipulation_tool,
+        plot_tool=plot_tool,
+    )
+    node = DatasetNode(data_repo=data_repo, llm=llm, tools_factory=tool_factory)
+    return node, data_repo, llm, manipulation_tool, plot_tool, tool_factory
+
+
+def _base_dataset_state(
+    *,
+    iterations: list[DatasetIterationModel] | None = None,
+    freezed: bool = False,
+) -> DatasetState:
+    return DatasetState(
+        DatasetPayloadModel(
+            dataset_iterations=[item.model_copy(deep=True) for item in (iterations or [])],
+            freezed=freezed,
+        )
+    )
+
+
+def _message(state: DatasetState) -> ChatMessage:
+    return list(state.messages())[0]
+
+
+def _status(state: DatasetState) -> str:
+    return state.status()
+
+
+def test_dataset_state_init_empty_and_roundtrip_does_not_persist_response_artifact_refs() -> None:
+    chart_id = uuid4()
+    state = DatasetState(
+        DatasetPayloadModel(
+            dataset_iterations=[
+                DatasetIterationModel(
+                    dataset_id=DatasetState.INIT_DATA_ID,
+                )
+            ],
+            user_message="Charts saved.",
+        ),
+        response_message_artifact_refs=[
+            {
+                "id": chart_id,
+                "kind": "data",
+                "format": "json",
+                "artifact_meta": {"kind": "chart_spec"},
+            }
+        ],
+    )
+
+    empty_state = DatasetState.init_empty()
+    assert isinstance(empty_state, DatasetState)
+
+    restored = DatasetState.from_json_dict(state.to_json_dict())
+    message = _message(restored)
+
+    assert message.content == "Charts saved."
+    assert message.artifact_refs is None
+
+
+def test_dataset_state_action_is_none_when_freezed() -> None:
+    state = DatasetState(
+        DatasetPayloadModel(
+            dataset_iterations=[DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)],
+            freezed=True,
+            user_message="Frozen dataset ready.",
+        )
+    )
+
+    assert state.status() == "FREEZED"
+    assert state.action() == "NONE"
+
+
+def test_dataset_intent_model_allows_all_false_with_empty_briefs() -> None:
+    intent = DatasetIntentModel(
+        intent_data_question=False,
+        intent_data_question_brief="",
+        intent_manupulation_question=False,
+        intent_manupulation_question_brief="",
+        intent_manupulation_is_analytical_query=False,
+        intent_chart=False,
+        intent_chart_brief="",
+    )
+
+    assert intent.has_any_intent() is False
+
+
+@pytest.mark.parametrize(
+    ("payload", "error_pattern"),
+    [
+        (
+            {
+                "intent_data_question": True,
+                "intent_data_question_brief": "",
+                "intent_manupulation_question": False,
+                "intent_manupulation_question_brief": "",
+                "intent_manupulation_is_analytical_query": False,
+                "intent_chart": False,
+                "intent_chart_brief": "",
+            },
+            r"intent_data_question_brief is required",
+        ),
+        (
+            {
+                "intent_data_question": False,
+                "intent_data_question_brief": "",
+                "intent_manupulation_question": False,
+                "intent_manupulation_question_brief": "",
+                "intent_manupulation_is_analytical_query": True,
+                "intent_chart": False,
+                "intent_chart_brief": "",
+            },
+            r"intent_manupulation_is_analytical_query requires intent_manupulation_question",
+        ),
+        (
+            {
+                "intent_data_question": False,
+                "intent_data_question_brief": "",
+                "intent_manupulation_question": False,
+                "intent_manupulation_question_brief": "",
+                "intent_manupulation_is_analytical_query": False,
+                "intent_chart": True,
+                "intent_chart_brief": "",
+            },
+            r"intent_chart_brief is required",
+        ),
+    ],
+)
+def test_dataset_intent_model_validates_required_briefs(
+    payload: dict[str, Any],
+    error_pattern: str,
+) -> None:
+    with pytest.raises(ValueError, match=error_pattern):
+        DatasetIntentModel.model_validate(payload)
+
+
+def test_dataset_node_constructor_resolves_required_tools() -> None:
+    node, _, _, _, _, tool_factory = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}]),
+    )
+
+    assert isinstance(node, DatasetNode)
+    assert tool_factory.calls == ["DATA_MANIPULATION", "PLOT_TOOL", "DATA_PROFILING"]
+
+
+def test_dataset_node_returns_missing_data_message_when_dataset_is_unavailable() -> None:
+    node, _, llm, _, _, _ = _make_node_and_tools(
+        get_csv_error=FileNotFoundError("missing"),
+        generate_outputs=["Please upload a CSV first."],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="what can you do?")],
+        state=DatasetState.init_empty(),
+    )
+
+    assert _status(state) == "PENDING"
+    assert _message(state).content == "Please upload a CSV first."
+    assert len(llm.generate_calls) == 1
+
+
+def test_dataset_node_returns_loaded_summary_message_when_dataset_loaded_and_no_user_message() -> None:
+    node, _, _, _, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}]),
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=None,
+        state=DatasetState.init_empty(),
+    )
+
+    assert "dataset loaded successfully" in _message(state).content.lower()
+    assert "1 rows and 2 columns" in _message(state).content.lower()
+    assert "age (numeric)" in _message(state).content.lower()
+    assert state.latest_iteration is not None
+    assert state.latest_iteration.dataset_id == DatasetState.INIT_DATA_ID
+
+
+def test_dataset_node_returns_freezed_ready_message_when_no_user_message() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, _, _, _, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}]),
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=None,
+        state=_base_dataset_state(iterations=[init_iteration], freezed=True),
+    )
+
+    assert _status(state) == "FREEZED"
+    assert "dataset is freezed" in _message(state).content.lower()
+    assert "cannot modify or revert" in _message(state).content.lower()
+
+
+def test_dataset_node_returns_loaded_summary_message_for_downstream_request_on_first_load() -> None:
+    node, _, llm, _, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=False,
+                intent_manupulation_question_brief="",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=False,
+                intent_chart_brief="",
+            )
+        ],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="train a model on this dataset")],
+        state=DatasetState.init_empty(),
+    )
+
+    assert _status(state) == "PENDING"
+    assert "dataset loaded successfully" in _message(state).content.lower()
+    assert "2 rows and 2 columns" in _message(state).content.lower()
+    assert "treatment, outcome, study type, and time zero" in _message(state).content.lower()
+    assert len(llm.generate_json_calls) == 1
+
+
+def test_dataset_node_returns_off_topic_message_for_model_training_request_after_dataset_loaded() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, _, llm, _, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=False,
+                intent_manupulation_question_brief="",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=False,
+                intent_chart_brief="",
+            )
+        ],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="train a model on this dataset")],
+        state=_base_dataset_state(iterations=[init_iteration]),
+    )
+
+    assert _status(state) == "PENDING"
+    assert "outside the dataset stage" in _message(state).content.lower()
+    assert "protocol discussion" in _message(state).content.lower()
+    assert len(llm.generate_json_calls) == 1
+
+
+def test_dataset_node_explains_scope_on_clarification_after_off_topic_reply() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, _, llm, _, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=False,
+                intent_manupulation_question_brief="",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=False,
+                intent_chart_brief="",
+            )
+        ],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[
+            ChatMessage(role="user", content="train a model on this dataset"),
+            ChatMessage(
+                role="assistant",
+                content=(
+                    "That request is outside the dataset stage. Here I can inspect the current "
+                    "data, answer dataset questions, run analytical queries, clean or reshape "
+                    "the dataset, and generate charts. I cannot do model training or causal "
+                    "estimation from here. If you want to move forward with causal analysis, "
+                    "tell me the treatment, outcome, study type, and time zero so I can switch "
+                    "to protocol discussion."
+                ),
+            ),
+            ChatMessage(role="user", content="what do you mean"),
+        ],
+        state=_base_dataset_state(iterations=[init_iteration]),
+    )
+
+    assert _status(state) == "PENDING"
+    assert "current dataset itself" in _message(state).content.lower()
+    assert "protocol discussion" in _message(state).content.lower()
+    assert "i cannot help with that" not in _message(state).content.lower()
+    assert len(llm.generate_json_calls) == 1
+    assert llm.generate_calls == []
+
+
+def test_dataset_node_reverts_to_previous_dataset_iteration() -> None:
+    first_id = uuid4()
+    second_id = uuid4()
+    node, _, _, _, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"x": 1}]),
+    )
+    state = _base_dataset_state(
+        iterations=[
+            DatasetIterationModel(dataset_id=first_id),
+            DatasetIterationModel(dataset_id=second_id),
+        ]
+    )
+
+    reverted_state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content=prev_state_revert_message)],
+        state=state,
+    )
+
+    assert reverted_state.latest_iteration is not None
+    assert reverted_state.latest_iteration.dataset_id == first_id
+    assert "reverted" in _message(reverted_state).content.lower()
+
+
+def test_dataset_node_blocks_revert_when_dataset_is_freezed() -> None:
+    first_id = uuid4()
+    second_id = uuid4()
+    node, data_repo, llm, manipulation_tool, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"x": 1}]),
+    )
+
+    blocked_state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content=prev_state_revert_message)],
+        state=_base_dataset_state(
+            iterations=[
+                DatasetIterationModel(dataset_id=first_id),
+                DatasetIterationModel(dataset_id=second_id),
+            ],
+            freezed=True,
+        ),
+    )
+
+    assert _status(blocked_state) == "FREEZED"
+    assert blocked_state.latest_iteration is not None
+    assert blocked_state.latest_iteration.dataset_id == second_id
+    assert "dataset is freezed" in _message(blocked_state).content.lower()
+    assert llm.generate_json_calls == []
+    assert manipulation_tool.calls == []
+    assert plot_tool.calls == []
+    assert data_repo.saved_csv_calls == []
+    assert data_repo.saved_json_calls == []
+
+
+def test_dataset_node_answers_summary_question_and_uses_final_llm_message() -> None:
+    node, data_repo, llm, manipulation_tool, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=True,
+                intent_data_question_brief="summarize the outcome column",
+                intent_manupulation_question=False,
+                intent_manupulation_question_brief="",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=False,
+                intent_chart_brief="",
+            )
+        ],
+        generate_outputs=["Outcome looks balanced.", "Final dataset response."],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="summarize outcome")],
+        state=DatasetState.init_empty(),
+    )
+
+    assert _message(state).content == "Final dataset response."
+    assert len(llm.generate_calls) == 2
+    assert manipulation_tool.calls == []
+    assert plot_tool.calls == []
+    assert data_repo.saved_csv_calls == []
+    assert data_repo.saved_json_calls == []
+
+
+def test_dataset_node_runs_analytical_manipulation_without_saving_new_dataset() -> None:
+    conversation_id = uuid4()
+    node, data_repo, llm, manipulation_tool, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
+        manipulation_df=pd.DataFrame([{"outcome": 1, "count": 1}, {"outcome": 0, "count": 1}]),
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=True,
+                intent_manupulation_question_brief="count outcome values",
+                intent_manupulation_is_analytical_query=True,
+                intent_chart=False,
+                intent_chart_brief="",
+            )
+        ],
+        generate_outputs=["Query complete."],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=conversation_id,
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="count outcome values")],
+        state=DatasetState.init_empty(),
+    )
+
+    assert _message(state).content == "Query complete."
+    assert len(manipulation_tool.calls) == 1
+    assert manipulation_tool.calls[0]["retry_attempts"] == 3
+    assert manipulation_tool.calls[0]["table_name"].startswith("df_")
+    assert re.fullmatch(r"df_[0-9a-f]{16}", str(manipulation_tool.calls[0]["table_name"]))
+    assert len(data_repo.saved_csv_calls) == 1
+    assert state.latest_iteration is not None
+    assert state.latest_iteration.dataset_id == DatasetState.INIT_DATA_ID
+    assert _message(state).artifact_refs == [
+        {
+            "id": data_repo.saved_csv_calls[0]["dataset_id"],
+            "kind": "data",
+            "format": "csv",
+            "artifact_meta": {"kind": "analytical_result"},
+        }
+    ]
+
+
+def test_dataset_node_saves_new_dataset_for_mutating_manipulation() -> None:
+    node, data_repo, _, manipulation_tool, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
+        manipulation_df=pd.DataFrame([{"age": 65}, {"age": 70}]),
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=True,
+                intent_manupulation_question_brief="drop outcome column",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=False,
+                intent_chart_brief="",
+            )
+        ],
+        generate_outputs=["Updated dataset saved."],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="drop outcome column")],
+        state=DatasetState.init_empty(),
+    )
+
+    assert len(manipulation_tool.calls) == 1
+    assert len(data_repo.saved_csv_calls) == 1
+    assert data_repo.saved_csv_calls[0]["include_index"] is False
+    assert state.latest_iteration is not None
+    assert state.latest_iteration.dataset_id != DatasetState.INIT_DATA_ID
+    assert list(data_repo.saved_csv_calls[0]["df"].columns) == ["age"]
+    assert _message(state).artifact_refs is None
+
+
+def test_dataset_node_blocks_mutating_manipulation_when_dataset_is_freezed() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, data_repo, llm, manipulation_tool, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}]),
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=True,
+                intent_manupulation_question_brief="drop outcome column",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=False,
+                intent_chart_brief="",
+            )
+        ],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="drop outcome column")],
+        state=_base_dataset_state(iterations=[init_iteration], freezed=True),
+    )
+
+    assert _status(state) == "FREEZED"
+    assert "cannot modify the data or revert" in _message(state).content.lower()
+    assert manipulation_tool.calls == []
+    assert plot_tool.calls == []
+    assert data_repo.saved_csv_calls == []
+    assert data_repo.saved_json_calls == []
+    assert len(llm.generate_json_calls) == 1
+    assert len(llm.generate_calls) == 0
+
+
+def test_dataset_node_allows_analytical_manipulation_when_dataset_is_freezed() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, data_repo, llm, manipulation_tool, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
+        manipulation_df=pd.DataFrame([{"outcome": 1, "count": 1}, {"outcome": 0, "count": 1}]),
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=True,
+                intent_manupulation_question_brief="count outcome values",
+                intent_manupulation_is_analytical_query=True,
+                intent_chart=False,
+                intent_chart_brief="",
+            )
+        ],
+        generate_outputs=["Analytical query complete on frozen dataset."],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="count outcome values")],
+        state=_base_dataset_state(iterations=[init_iteration], freezed=True),
+    )
+
+    assert _status(state) == "FREEZED"
+    assert _message(state).content == "Analytical query complete on frozen dataset."
+    assert len(manipulation_tool.calls) == 1
+    assert len(data_repo.saved_csv_calls) == 1
+    assert _message(state).artifact_refs == [
+        {
+            "id": data_repo.saved_csv_calls[0]["dataset_id"],
+            "kind": "data",
+            "format": "csv",
+            "artifact_meta": {"kind": "analytical_result"},
+        }
+    ]
+
+
+def test_dataset_node_saves_chart_specs_and_adds_artifact_ids() -> None:
+    node, data_repo, _, _, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}]),
+        plot_specs=[
+            {"mark": "bar", "data": {"values": [{"age": 65}]}, "encoding": {"x": {"field": "age"}}},
+            {
+                "mark": "line",
+                "data": {"values": [{"outcome": 1}]},
+                "encoding": {"y": {"field": "outcome"}},
+            },
+        ],
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=False,
+                intent_manupulation_question_brief="",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=True,
+                intent_chart_brief="plot age and outcome",
+            )
+        ],
+        generate_outputs=["Charts saved."],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="plot age and outcome")],
+        state=DatasetState.init_empty(),
+    )
+
+    assert len(plot_tool.calls) == 1
+    assert len(data_repo.saved_json_calls) == 2
+    assert state.latest_iteration is not None
+    assert "saved_vega_lite_specs_file_ids" not in state.latest_iteration.model_dump()
+    assert _message(state).artifact_refs is not None
+    assert len(_message(state).artifact_refs or []) == 2
+    assert _message(state).artifact_refs == [
+        {
+            "id": data_repo.saved_json_calls[0]["dataset_id"],
+            "kind": "data",
+            "format": "json",
+            "artifact_meta": {"kind": "chart_spec"},
+        },
+        {
+            "id": data_repo.saved_json_calls[1]["dataset_id"],
+            "kind": "data",
+            "format": "json",
+            "artifact_meta": {"kind": "chart_spec"},
+        },
+    ]
+
+
+def test_dataset_node_allows_chart_generation_when_dataset_is_freezed() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, data_repo, _, _, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}]),
+        plot_specs=[
+            {"mark": "bar", "data": {"values": [{"age": 65}]}, "encoding": {"x": {"field": "age"}}},
+        ],
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=False,
+                intent_manupulation_question_brief="",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=True,
+                intent_chart_brief="plot age",
+            )
+        ],
+        generate_outputs=["Frozen chart saved."],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="plot age")],
+        state=_base_dataset_state(iterations=[init_iteration], freezed=True),
+    )
+
+    assert _status(state) == "FREEZED"
+    assert _message(state).content == "Frozen chart saved."
+    assert len(plot_tool.calls) == 1
+    assert len(data_repo.saved_json_calls) == 1
+    assert _message(state).artifact_refs == [
+        {
+            "id": data_repo.saved_json_calls[0]["dataset_id"],
+            "kind": "data",
+            "format": "json",
+            "artifact_meta": {"kind": "chart_spec"},
+        }
+    ]
+
+
+def test_dataset_node_uses_analytical_query_result_as_chart_input_without_new_iteration() -> None:
+    conversation_id = uuid4()
+    analytical_df = pd.DataFrame([{"outcome": 1, "count": 2}, {"outcome": 0, "count": 1}])
+    node, data_repo, _, manipulation_tool, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame(
+            [{"age": 65, "outcome": 1}, {"age": 70, "outcome": 0}, {"age": 72, "outcome": 1}]
+        ),
+        manipulation_df=analytical_df,
+        plot_specs=[
+            {
+                "mark": "bar",
+                "data": {"values": [{"outcome": 1, "count": 2}]},
+                "encoding": {"x": {"field": "outcome"}, "y": {"field": "count"}},
+            },
+        ],
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=True,
+                intent_manupulation_question_brief="aggregate outcome counts for charting",
+                intent_manupulation_is_analytical_query=True,
+                intent_chart=True,
+                intent_chart_brief="plot the aggregated outcome counts",
+            )
+        ],
+        generate_outputs=["Chart-ready analytics complete."],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=conversation_id,
+        previous_state_dependencies={},
+        messages_history=[
+            ChatMessage(role="user", content="aggregate outcome counts and plot them")
+        ],
+        state=DatasetState.init_empty(),
+    )
+
+    assert len(manipulation_tool.calls) == 1
+    assert len(plot_tool.calls) == 1
+    assert plot_tool.calls[0]["dataframe"].to_dict(orient="records") == analytical_df.to_dict(
+        orient="records"
+    )
+    assert len(data_repo.saved_csv_calls) == 1
+    assert len(data_repo.saved_json_calls) == 1
+    assert state.latest_iteration is not None
+    assert state.latest_iteration.dataset_id == DatasetState.INIT_DATA_ID
+    assert len(state.payload.dataset_iterations) == 1
+    assert _message(state).artifact_refs == [
+        {
+            "id": data_repo.saved_csv_calls[0]["dataset_id"],
+            "kind": "data",
+            "format": "csv",
+            "artifact_meta": {"kind": "analytical_result"},
+        },
+        {
+            "id": data_repo.saved_json_calls[0]["dataset_id"],
+            "kind": "data",
+            "format": "json",
+            "artifact_meta": {"kind": "chart_spec"},
+        },
+    ]
+
+
+def test_dataset_node_falls_back_when_final_response_llm_fails() -> None:
+    node, data_repo, _, _, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}]),
+        plot_specs=[
+            {"mark": "bar", "data": {"values": [{"age": 65}]}, "encoding": {"x": {"field": "age"}}},
+        ],
+        json_outputs=[
+            DatasetIntentModel(
+                intent_data_question=False,
+                intent_data_question_brief="",
+                intent_manupulation_question=False,
+                intent_manupulation_question_brief="",
+                intent_manupulation_is_analytical_query=False,
+                intent_chart=True,
+                intent_chart_brief="plot age",
+            )
+        ],
+        generate_outputs=[RuntimeError("final llm failed")],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="plot age")],
+        state=DatasetState.init_empty(),
+    )
+
+    assert len(plot_tool.calls) == 1
+    assert "generated 1 chart" in _message(state).content.lower()
+    assert _message(state).artifact_refs == [
+        {
+            "id": data_repo.saved_json_calls[0]["dataset_id"],
+            "kind": "data",
+            "format": "json",
+            "artifact_meta": {"kind": "chart_spec"},
+        }
+    ]
+
+
+def test_dataset_node_returns_classification_failure_message_when_intent_call_raises() -> None:
+    node, _, _, _, _, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1}]),
+        json_outputs=[RuntimeError("classification failed")],
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[ChatMessage(role="user", content="do something")],
+        state=DatasetState.init_empty(),
+    )
+
+    assert "could not classify" in _message(state).content.lower()
+
+
+def test_dataset_node_applies_protocol_cleaning_request_and_freezes_dataset() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, data_repo, llm, manipulation_tool, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame([{"age": 65, "outcome": 1, "extra": "x"}]),
+        manipulation_df=pd.DataFrame([{"age": 65, "outcome_status": 1}]),
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[
+            ChatMessage(
+                role="assistant",
+                content=(
+                    "The protocol discussion is now confirmed. I will hand off the required "
+                    "data cleaning and normalization steps next."
+                ),
+            ),
+            ChatMessage(
+                role="system",
+                content=(
+                    "PROTOCOL_DISCUSSION_CONFIRMED\n"
+                    "This is a data-changing request for the downstream data cleaning stage.\n\n"
+                    "Map istatus into outcome_status and drop the extra column."
+                ),
+            ),
+        ],
+        state=_base_dataset_state(iterations=[init_iteration]),
+    )
+
+    assert _status(state) == "FREEZED"
+    assert state.action() == "NONE"
+    assert "applied the confirmed protocol cleaning request" in _message(state).content.lower()
+    assert "1 rows and 2 columns" in _message(state).content.lower()
+    assert len(manipulation_tool.calls) == 1
+    assert manipulation_tool.calls[0]["instructions"] == (
+        "Map istatus into outcome_status and drop the extra column."
+    )
+    assert len(data_repo.saved_csv_calls) == 1
+    assert state.latest_iteration is not None
+    assert state.latest_iteration.dataset_id == data_repo.saved_csv_calls[0]["dataset_id"]
+    assert llm.generate_json_calls == []
+    assert llm.generate_calls == []
+    assert plot_tool.calls == []
+
+
+def test_dataset_node_protocol_cleaning_manually_keeps_only_protocol_scope_columns() -> None:
+    init_iteration = DatasetIterationModel(dataset_id=DatasetState.INIT_DATA_ID)
+    node, data_repo, llm, manipulation_tool, plot_tool, _ = _make_node_and_tools(
+        dataframe=pd.DataFrame(
+            [
+                {
+                    "btransf": 1,
+                    "istatus": 2,
+                    "iage": 65,
+                    "isex": 1,
+                    "ncell": 4,
+                }
+            ]
+        ),
+        manipulation_df=pd.DataFrame(
+            [
+                {
+                    "btransf": 1,
+                    "outcome_status": 2,
+                    "iage": 65,
+                    "isex": 1,
+                    "ncell": 4,
+                    "nplasma": 2,
+                    "ndaysicu": 7,
+                }
+            ]
+        ),
+    )
+
+    state = node.run(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        previous_state_dependencies={},
+        messages_history=[
+            ChatMessage(
+                role="assistant",
+                content=(
+                    "The protocol discussion is now confirmed. I will hand off the required "
+                    "data cleaning and normalization steps next."
+                ),
+            ),
+            ChatMessage(
+                role="system",
+                content=(
+                    "PROTOCOL_DISCUSSION_CONFIRMED\n"
+                    "This is a data-changing request for the downstream data cleaning stage.\n\n"
+                    "This is a data-changing request. Preserve btransf, outcome_status, iage, "
+                    "and isex. Exclude post-treatment blood product volumes from the final "
+                    "working dataset."
+                ),
+            ),
+        ],
+        state=_base_dataset_state(iterations=[init_iteration]),
+    )
+
+    assert _status(state) == "FREEZED"
+    assert state.action() == "NONE"
+    assert len(data_repo.saved_csv_calls) == 1
+    saved_df = data_repo.saved_csv_calls[0]["df"]
+    assert isinstance(saved_df, pd.DataFrame)
+    assert list(saved_df.columns) == ["btransf", "outcome_status", "iage", "isex"]
+    assert "1 rows and 4 columns" in _message(state).content.lower()
+    assert len(manipulation_tool.calls) == 1
+    assert llm.generate_json_calls == []
+    assert llm.generate_calls == []
+    assert plot_tool.calls == []

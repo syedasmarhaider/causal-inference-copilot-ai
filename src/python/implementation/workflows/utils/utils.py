@@ -23,6 +23,7 @@ def uuid_from_any(v: Any) -> UUID | None:
 def uuid_to_str(v: UUID | None) -> str | None:
     return str(v) if v is not None else None
 
+
 def safe_err(e: Exception, limit: int = 500) -> str:
     s = str(e).strip()
     return s[:limit] if s else e.__class__.__name__

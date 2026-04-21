@@ -1,23 +1,17 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, TypedDict, TypeVar
+from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel
+from typing_extensions import TypedDict
+
+from python.domain.models.models import ChatMessage
 
 T = TypeVar("T", bound=BaseModel)
-
-Role = Literal["user", "assistant","system"]
-AvailableModelsKey = Literal["mini","basic", "pro","thinking"]
-
-
-@dataclass(frozen=True)
-class ChatMessage:
-    role: Role
-    content: str
-
-
+AvailableModelsKey = Literal["mini", "basic", "pro", "thinking"]
 ProviderExtra = dict[str, Any]
 
 
@@ -29,6 +23,7 @@ class LLMConfig:
     max_tokens: int | None = 60000
     stop: list[str] | None = None
     extra: ProviderExtra | None = None
+
 
 class ToolCall(TypedDict, total=False):
     id: str
@@ -44,7 +39,8 @@ class LLMResponse:
     raw: Any = None
 
 
-class LLMService(Protocol):
+class LLMService(ABC):
+    @abstractmethod
     def generate(
         self,
         *,
@@ -54,6 +50,7 @@ class LLMService(Protocol):
         history: Sequence[ChatMessage] | None,
     ) -> LLMResponse: ...
 
+    @abstractmethod
     def generate_json(
         self,
         *,

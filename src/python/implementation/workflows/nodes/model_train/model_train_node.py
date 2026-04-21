@@ -1,427 +1,65 @@
 from __future__ import annotations
 
+import hashlib
 import json
-from python.implementation.service.logging.default_logging import get_logger
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any, ClassVar, cast
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
-
+from python.domain.repo.data_repo import DataRepo
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
-from python.domain.workflows.node import Node
-from python.domain.workflows.state import State
+from python.domain.workflows.node import Node, NodeExecutionResult, NodeRequest
 from python.domain.workflows.tool_factory import ToolFactory
+from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.model_train.model_train_deps import ModelTrainDeps
 from python.implementation.workflows.nodes.model_train.model_train_prompts import (
-    ENCODING_PLAN_PLAN_USER_PROMPT_TEMPLATE,
-    ENCODING_PLAN_TRIAGE_USER_PROMPT_TEMPLATE,
-    FIT_SUCCESS_FAILURE_SYSTEM_PROMPT,
+    get_model_failure_summary_prompt,
     get_model_train_node_info,
 )
 from python.implementation.workflows.nodes.model_train.model_train_state import (
+    ModelTrainPayloadModel,
     ModelTrainState,
 )
-from python.implementation.workflows.tools.causal.causal_command import (
+from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
+    InferenceReadyCausalSpec,
+)
+from python.implementation.workflows.tools.causal.inference.causal_command import (
     CommandFailure,
     FitCommand,
     FitInputs,
-    FitResult,
     FitSuccess,
 )
-from python.implementation.workflows.tools.causal.causal_model_factory_tool import (
+from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
 )
-from python.implementation.workflows.tools.causal.causal_spec import CausalSpec
-from python.implementation.workflows.tools.causal.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
-    DatasetSummaryModel,
+from python.implementation.workflows.tools.causal.inference.econml.models_meta import (
+    get_model_training_label,
 )
-from python.implementation.workflows.utils.validation import ValidationIssueModel
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
+    DatasetProfilingTool,
+)
+from python.implementation.workflows.utils.utils import safe_err
 
-log = get_logger(__name__)
-
-_ROLE_COVARIATE = "covariate"
-_ROLE_EFFECT_MODIFIER = "effect_modifier"
-
-
-# ---------------------------------------------------------------------
-# LLM output schema
-# ---------------------------------------------------------------------
-class UserPlanInput(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    message: str = Field(..., min_length=1)
-    needs_user_input: bool
+log = get_app_logger(__name__, component="model_train_node", log_type="node")
+_MAX_TRAINING_ATTEMPTS = 2
 
 
-def _dumps(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True, default=str)
-
-
-def _safe_model_dump(x: Any) -> Any:
-    if x is None:
-        return None
-    if hasattr(x, "model_dump"):
-        return x.model_dump(mode="json")
-    return x
-
-# ---------------------------------------------------------------------
-# Role-assignment helpers
-# ---------------------------------------------------------------------
-def _build_role_map_from_causal_specs(causal_specs: CausalSpec) -> dict[str, str]:
-    """
-    Deterministically assign roles from causal specs only.
-    LLM is NOT allowed to decide whether a column is covariate or effect_modifier.
-    """
-    treatment_col = str(causal_specs.treatment_spec.column)
-    outcome_col = str(causal_specs.outcome_spec.column)
-    forbidden = {treatment_col, outcome_col}
-
-    role_map: dict[str, str] = {}
-
-    for col in (causal_specs.covariates or []):
-        c = str(col)
-        if c not in forbidden:
-            role_map[c] = _ROLE_COVARIATE
-
-    for col in (causal_specs.effect_modifiers or []):
-        c = str(col)
-        if c not in forbidden:
-            role_map[c] = _ROLE_EFFECT_MODIFIER
-
-    return role_map
-
-
-def _force_plan_roles_from_causal_specs (
-    *,
-    plan: TransformPlan,
-    causal_specs: CausalSpec,
-) -> TransformPlan:
-    """
-    Keep the LLM's encoding choices, but overwrite each column role using the
-    deterministic role from the causal specs.
-    """
-    role_map = _build_role_map_from_causal_specs(causal_specs)
-
-    fixed_columns = []
-    for col_plan in plan.columns:
-        expected_role = role_map.get(str(col_plan.column))
-        if expected_role is None:
-            fixed_columns.append(col_plan) # pyright: ignore[reportUnknownMemberType]
-            continue
-
-        if col_plan.role != expected_role:
-            log.warning(
-                "Overriding LLM-assigned role for column '%s': got=%s expected=%s",
-                col_plan.column,
-                col_plan.role,
-                expected_role,
-            )
-
-        fixed_columns.append(col_plan.model_copy(update={"role": expected_role})) # pyright: ignore[reportUnknownMemberType]
-
-    return plan.model_copy(update={"columns": fixed_columns})
-
-def _validate_plan_against_constraints(
-    *,
-    plan: TransformPlan,
-    dataset_summary: DatasetSummaryModel,
-    eligible_cols: set[str],
-    expected_covariate_cols: set[str],
-    expected_effect_modifier_cols: set[str],
-    treatment_col: str | None,
-    outcome_col: str | None,
-) -> list[ValidationIssueModel]:
-
-    log.info(
-        "Validating encoding plan against constraints. Eligible cols: %s, expected covariates: %s, expected effect modifiers: %s, treatment_col: %s, outcome_col: %s. Plan columns: %s",
-        eligible_cols,
-        expected_covariate_cols,
-        expected_effect_modifier_cols,
-        treatment_col,
-        outcome_col,
-        [c.column for c in plan.columns],
-    )
-    log.info("Plan details: %s", plan.model_dump_json(indent=2))
-
-    validation_issues: list[ValidationIssueModel] = []
-    cols = [c.column for c in plan.columns]
-    if len(cols) != len(set(cols)):
-        validation_issues.append(
-            ValidationIssueModel(
-                severity="FAIL",
-                message="Encoding plan contains duplicate columns.",
-                evidence={"duplicate_columns": [c for c in set(cols) if cols.count(c) > 1]},
-                fix_hint="Ensure each column appears at most once in the encoding plan."
-            )
-        )
-
-    forbidden = {c for c in (treatment_col, outcome_col) if c}
-    illegal = sorted(set(cols) & forbidden)
-    if illegal:
-        validation_issues.append(
-            ValidationIssueModel(
-                severity="FAIL",
-                message="Encoding plan must not include treatment/outcome columns.",
-                evidence={"illegal_columns": illegal},
-                fix_hint="Remove treatment/outcome columns from the encoding plan."
-            )
-        )
-
-    plan_set = set(cols)
-    missing = sorted(eligible_cols - plan_set)
-    extra = sorted(plan_set - eligible_cols)
-    if missing:
-        validation_issues.append(
-            ValidationIssueModel(
-                severity="FAIL",
-                message="Encoding plan is missing eligible columns.",
-                evidence={"missing_columns": missing},
-                fix_hint="Ensure all eligible columns are included in the encoding plan."
-            )
-        )
-    if extra:
-        validation_issues.append(
-            ValidationIssueModel(
-                severity="FAIL",
-                message="Encoding plan contains non-eligible columns.",
-                evidence={"extra_columns": extra},
-                fix_hint="Remove non-eligible columns from the encoding plan."
-            )
-        )
-
-    role_by_col = {c.column: c.role for c in plan.columns}
-
-    wrong_covariate = sorted(
-        c for c in expected_covariate_cols if role_by_col.get(c) != _ROLE_COVARIATE
-    )
-    wrong_effect_modifier = sorted(
-        c
-        for c in expected_effect_modifier_cols
-        if role_by_col.get(c) != _ROLE_EFFECT_MODIFIER
-    )
-
-    if wrong_covariate:
-        validation_issues.append(
-            ValidationIssueModel(
-                severity="FAIL",
-                message="Encoding plan assigned wrong role for covariate columns.",
-                evidence={"wrong_covariate_columns": wrong_covariate},
-                fix_hint="Ensure all covariate columns are assigned role 'covariate'."
-            )
-        )
-    if wrong_effect_modifier:
-        validation_issues.append(
-            ValidationIssueModel(
-                severity="FAIL",
-                message="Encoding plan assigned wrong role for effect_modifier columns.",
-                evidence={"wrong_effect_modifier_columns": wrong_effect_modifier},
-                fix_hint="Ensure all effect_modifier columns are assigned role 'effect_modifier'."
-            )
-        )
-
-    profile_kind_by_col = {
-        str(profile.name): str(getattr(profile, "inferred_kind", "OTHER"))
-        for profile in dataset_summary.profiles
-    }
-    incompatible_presets: list[dict[str, str]] = []
-    missing_profile_columns: list[str] = []
-
-    for col_plan in plan.columns:
-        col_name = str(col_plan.column)
-        inferred_kind = profile_kind_by_col.get(col_name)
-        if inferred_kind is None:
-            missing_profile_columns.append(col_name)
-            continue
-
-        preset = str(col_plan.encoding.preset)
-        if not _is_encoding_preset_compatible_with_kind(
-            inferred_kind=inferred_kind,
-            preset=preset,
-        ):
-            incompatible_presets.append(
-                {
-                    "column": col_name,
-                    "inferred_kind": inferred_kind,
-                    "preset": preset,
-                }
-            )
-
-    if missing_profile_columns:
-        validation_issues.append(
-            ValidationIssueModel(
-                severity="FAIL",
-                message="Encoding plan includes columns not present in dataset summary.",
-                evidence={"columns": sorted(set(missing_profile_columns))},
-                fix_hint="Regenerate the encoding plan using the latest dataset summary columns.",
-            )
-        )
-
-    if incompatible_presets:
-        validation_issues.append(
-            ValidationIssueModel(
-                severity="FAIL",
-                message="Encoding plan has column type and preset incompatibilities.",
-                evidence={"incompatibilities": incompatible_presets},
-                fix_hint=(
-                    "Use numeric presets for NUMERIC columns and categorical/datetime presets "
-                    "for non-numeric columns."
-                ),
-            )
-        )
-
-    return validation_issues
-
-
-def _is_encoding_preset_compatible_with_kind(
-    *,
-    inferred_kind: str,
-    preset: str,
-) -> bool:
-    if preset in {"drop", "passthrough"}:
-        return True
-    if inferred_kind == "NUMERIC":
-        return preset in {"num_standard", "num_minmax", "num_log1p"}
-    if inferred_kind == "CATEGORICAL":
-        return preset in {"cat_onehot", "map_binary", "map_ordinal"}
-    if inferred_kind == "BOOLEAN":
-        return preset in {
-            "cat_onehot",
-            "map_binary",
-            "map_ordinal",
-            "num_standard",
-            "num_minmax",
-            "num_log1p",
-        }
-    if inferred_kind == "DATETIME":
-        return preset == "datetime_epoch_seconds"
-    # OTHER: do not allow complex preset inference; keep this explicit.
-    return False
-
-
-def _generate_encoding_plan(
-    *,
-    llm: LLMService,
-    causal_specs: CausalSpec,
-    selected_model: Any,
-    dataset_summary: DatasetSummaryModel,
-    prev_training_error: str | None = None,
-    documentation: str | None = None,
-    history: Sequence[ChatMessage] | None,
-) -> tuple[UserPlanInput, TransformPlan | None]:
-
-    for _, _ in enumerate(range(2)):
-        covariate_cols = set(causal_specs.covariates or [])
-        effect_modifier_cols = set(causal_specs.effect_modifiers or [])
-
-        treatment_col = str(causal_specs.treatment_spec.column)
-        outcome_col = str(causal_specs.outcome_spec.column)
-
-        eligible = (covariate_cols | effect_modifier_cols) - {treatment_col, outcome_col}
-
-        if not eligible:
-            raise ValueError(
-                "No eligible columns for encoding plan "
-                "(no covariates/effect modifiers besides treatment/outcome)."
-            )
-
-        prev_training_error_str = prev_training_error or ""
-        documentation_str = documentation or ""
-
-        user_prompt_discussion = ENCODING_PLAN_TRIAGE_USER_PROMPT_TEMPLATE.format(
-            selected_model_json=_dumps(_safe_model_dump(selected_model)),
-            causal_specs_json=_dumps(_safe_model_dump(causal_specs)),
-            dataset_summary_json=_dumps(_safe_model_dump(dataset_summary)),
-            prev_training_errors_string=prev_training_error_str,
-            documentation_string=documentation_str,
-        )
-
-        last_4_messages = list(history[-4:]) if history else None
-
-        out = llm.generate_json(
-            schema=UserPlanInput,
-            system_prompt=None,
-            user_prompt=user_prompt_discussion,
-            config=LLMConfig(model="basic", temperature=0.5),
-            history=last_4_messages,
-            max_attempts=2,
-        )
-
-        if out.needs_user_input:
-            return out, None
-
-        log.info(
-            "causal specs and dataset summary for plan generation: causal_specs=%s dataset_summary=%s",
-            causal_specs.model_dump_json(),
-            dataset_summary.model_dump_json() if hasattr(dataset_summary, "model_dump_json") else _dumps(_safe_model_dump(dataset_summary)),
-        )
-
-        user_prompt_plan = ENCODING_PLAN_PLAN_USER_PROMPT_TEMPLATE.format(
-            selected_model_json=_dumps(_safe_model_dump(selected_model)),
-            causal_specs_json=_dumps(_safe_model_dump(causal_specs)),
-            dataset_summary_json=_dumps(_safe_model_dump(dataset_summary)),
-            prev_training_errors_string=prev_training_error_str,
-            documentation_string=documentation_str,
-        )
-
-        plan = llm.generate_json(
-            schema=TransformPlan,
-            system_prompt=None,
-            user_prompt=user_prompt_plan,
-            config=LLMConfig(model="basic", temperature=0.1),
-            history=last_4_messages,
-            max_attempts=3,
-        )
-
-        # -------------------------------------------------------------
-        # SURGICAL FIX:
-        # Keep LLM-generated encodings, but force roles from causal specs.
-        # -------------------------------------------------------------
-        plan = _force_plan_roles_from_causal_specs(
-            plan=plan,
-            causal_specs=causal_specs,
-        )
-
-        validation_issues = _validate_plan_against_constraints(
-            plan=plan,
-            dataset_summary=dataset_summary,
-            eligible_cols=eligible,
-            expected_covariate_cols=covariate_cols - {treatment_col, outcome_col},
-            expected_effect_modifier_cols=effect_modifier_cols - {treatment_col, outcome_col},
-            treatment_col=treatment_col,
-            outcome_col=outcome_col,
-        )
-
-        if validation_issues:
-            log.info(
-                "Encoding plan validation issues found: %s",
-                [i.model_dump_json() for i in validation_issues],
-            )
-            prev_training_error = (
-                "The encoding plan generated by the model had the following issues:\n"
-                + "\n".join(
-                    f"- {i.severity}: {i.message} (evidence: {i.evidence})"
-                    for i in validation_issues
-                )
-                + "\nPlease review the issues and adjust the encoding plan accordingly."
-            )
-            continue
-
-        return out, plan
-
-    raise ValueError(
-        "Failed to generate encoding plan after multiple attempts. "
-        "LLM output did not meet expected format or constraints."
-    )
-
-
-@dataclass(frozen=True, slots=True)
 class ModelTrainNode(Node):
-    llm: LLMService
-
     NAME: ClassVar[str] = ModelTrainState.NAME
+
+    def __init__(
+        self,
+        *,
+        llm: LLMService,
+        data_repo: DataRepo,
+        tools_factory: ToolFactory,
+    ) -> None:
+        self._llm = llm
+        self._data_repo = data_repo
+        factory_raw = tools_factory.get_tool(CausalModelFactoryTool.NAME)
+        self._model_factory = cast(CausalModelFactoryTool, factory_raw)
+        profiling_raw = tools_factory.get_tool(DatasetProfilingTool.NAME)
+        self._profiling_tool = cast(DatasetProfilingTool, profiling_raw)
 
     @property
     def name(self) -> str:
@@ -434,237 +72,412 @@ class ModelTrainNode(Node):
     def run(
         self,
         *,
-        user_id: UUID,
-        conversation_id: UUID,
-        state: State,
-        tool_factory: ToolFactory,
-        previous_state_dependencies: Mapping[str, State],
-        messages_history: Sequence[ChatMessage] | None
-    ) -> State:
-        if not isinstance(state, ModelTrainState):
-            raise ValueError(f"{self.name}: invalid state (got {type(state).__name__})")
+        request: NodeRequest,
+    ) -> NodeExecutionResult:
+        if not isinstance(request.node_state, ModelTrainState):
+            raise TypeError(
+                f"{self.name}: expected ModelTrainState, got "
+                f"{type(request.node_state).__name__}"
+            )
 
-        deps = ModelTrainDeps.from_loaded(previous_state_dependencies)
-        causal_specs = deps.causal_specs
-        selected_estimator = deps.selected_model
-        clean_dataset_id = deps.dataset_id
+        payload = request.node_state.payload.model_copy(deep=True)
+        deps = ModelTrainDeps.from_request(request)
+
+
+        training_signature = _training_signature(deps=deps)
+        if payload.training_signature != training_signature:
+            payload = payload.reset_for_signature(training_signature=training_signature)
+
+        if payload.trained_model_id is not None and payload.error_message is None:
+            return self._done_result(
+                request=request,
+                payload=payload,
+                user_message=payload.assistant_message
+                or "The selected model has already been trained for the current setup.",
+            )
+
+        if payload.error_message is not None:
+            return self._aborted_result(
+                request=request,
+                payload=payload,
+                user_message=payload.assistant_message
+                or "Model training failed for the current setup.",
+            )
+
+        try:
+            df = self._data_repo.get_csv_data(
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                dataset_id=deps.dataset_id,
+            )
+        except Exception as exc:
+            log.exception("MODEL_TRAIN failed to load compiled dataset", error=exc)
+            return self._needs_data_result(
+                request=request,
+                user_message=(
+                    "I could not load the compiled dataset needed for model training. "
+                    "Please retry after the dataset is available."
+                ),
+            )
+
+        if df.empty:
+            return self._failed_result(
+                request=request,
+                payload=payload,
+                user_message=(
+                    "The compiled dataset is empty, so model training cannot proceed. "
+                    "Please review the compilation and filtering steps first."
+                ),
+                error_message="compiled dataset is empty",
+            )
+
         dataset_summary = deps.dataset_summary
-        
-        last_4_messages = messages_history[-4:] if messages_history else None
-        
+        try:
+            inference_ready_spec = InferenceReadyCausalSpec(
+                causal_spec=deps.causal_spec,
+                transformation_plan=deps.transformation_plan,
+                data_summary=dataset_summary,
+            )
+        except Exception as exc:
+            return self._failed_result(
+                request=request,
+                payload=payload,
+                user_message=(
+                    "The compiled dataset, causal specification, and transformation plan are "
+                    "not consistent enough for training yet. Please revise the upstream setup."
+                ),
+                error_message=f"inference-ready spec invalid: {safe_err(exc)}",
+            )
 
-        mf_raw = tool_factory.get_tool(CausalModelFactoryTool.NAME)
-        model_factory = cast(CausalModelFactoryTool, mf_raw)
-
-        assert selected_estimator is not None, (
-            "Selected model must include the fully qualified class name."
-        )
-
-        model = model_factory.resolve(selected_estimator)
+        model = self._model_factory.resolve(deps.selected_model)
         if model is None:
-            raise ValueError(
-                f"Selected model '{selected_estimator}' is not supported by the "
-                f"CausalModelFactoryTool."
+            return self._failed_result(
+                request=request,
+                payload=payload,
+                user_message=(
+                    "The selected causal model is not available in the current model catalog. "
+                    "Please reselect the model and try again."
+                ),
+                error_message=f"unsupported model: {deps.selected_model}",
             )
 
-        has_any_adjustment_cols = bool(causal_specs.covariates or []) or bool(causal_specs.effect_modifiers or [])
-        current_plan = state.payload.column_transformation_plan
+        last_error_message: str | None = None
+        last_user_message: str | None = None
+        last_warnings: list[str] = []
 
-        log.info(
-            "ModelTrainNode starting run. conversation_id=%s model=%s clean_dataset_id=%s has_existing_plan=%s has_adjustment_cols=%s",
-            conversation_id,
-            selected_estimator,
-            clean_dataset_id,
-            current_plan is not None,
-            has_any_adjustment_cols,
-        )
-
-        # -----------------------------------------------------------------
-        # Phase 1: prepare encoding plan if needed
-        # -----------------------------------------------------------------
-        if (
-            current_plan is None and has_any_adjustment_cols
-        ):
-            log.info(
-                "ModelTrainNode generating encoding plan before fit. conversation_id=%s model=%s",
-                conversation_id,
-                selected_estimator,
+        for attempt in range(1, _MAX_TRAINING_ATTEMPTS + 1):
+            command = FitCommand(
+                model_name=deps.selected_model,
+                df=df,
+                run_id=uuid4(),
+                inference_ready_spec=inference_ready_spec,
+                inputs=FitInputs(),
             )
 
-            user_discussion, plan = _generate_encoding_plan(
-                llm=self.llm,
-                causal_specs=causal_specs,
-                selected_model=selected_estimator,
-                dataset_summary=dataset_summary,
-                history=last_4_messages,
-                prev_training_error=state.payload.prev_training_errors,
-                documentation=model.get_command_info("FIT"),
-            )
-
-            if user_discussion.needs_user_input:
-                log.info(
-                    "ModelTrainNode: LLM indicated user input needed for encoding plan clarification."
+            try:
+                result = model.execute(
+                    user_id=request.user_id,
+                    conversation_id=request.conversation_id,
+                    command=command,
                 )
-                payload = state.payload.model_copy(
+            except Exception as exc:
+                log.exception(
+                    "MODEL_TRAIN fit execution crashed",
+                    error=exc,
+                    attempt=attempt,
+                    max_attempts=_MAX_TRAINING_ATTEMPTS,
+                )
+                last_error_message = f"fit execution failed: {safe_err(exc)}"
+                last_user_message = _summarize_model_failure_for_user(
+                    llm=self._llm,
+                    operation="model training",
+                    model_name=deps.selected_model,
+                    error_message=safe_err(exc),
+                    error_details={"exception": repr(exc)},
+                    warnings=[],
+                    fallback_message=(
+                        "Model training did not complete because the estimator failed during "
+                        "fitting. Please review the selected model and the compiled dataset."
+                    ),
+                )
+                last_warnings = []
+                if attempt < _MAX_TRAINING_ATTEMPTS:
+                    continue
+                return self._failed_result(
+                    request=request,
+                    payload=payload,
+                    user_message=_retry_failure_message(
+                        base_message=last_user_message,
+                        attempts=attempt,
+                    ),
+                    error_message=last_error_message,
+                )
+
+            if isinstance(result, FitSuccess):
+                warnings_list = list(result.warnings or [])
+                request.orchestrator_state.set(
+                    request.node_state.name(),
+                    {
+                        "trained_model_id": result.fitted_model_id,
+                        "training_warnings": warnings_list,
+                    },
+                )
+                success_payload = payload.model_copy(
                     update={
-                        "needs_user_input": True,
-                        "error": None,
-                        "user_message": user_discussion.message,
-                        "column_transformation_plan": None,
+                        "trained_model_id": result.fitted_model_id,
+                        "training_warnings": warnings_list,
+                        "assistant_message": _success_message(
+                            model_name=deps.selected_model,
+                            fitted_model_id=result.fitted_model_id,
+                            warnings=warnings_list,
+                            attempts=attempt,
+                        ),
+                        "error_message": None,
                     }
                 )
-                return ModelTrainState(payload=payload)
+                return self._done_result(
+                    request=request,
+                    payload=success_payload,
+                    user_message=success_payload.assistant_message
+                    or str(result.fitted_model_id),
+                )
 
-            if plan is None:
-                raise ValueError("LLM indicated no user input needed but did not return a plan.")
+            if isinstance(result, CommandFailure):
+                last_warnings = list(result.warnings or [])
+                last_error_message = result.error.message
+                last_user_message = _summarize_model_failure_for_user(
+                    llm=self._llm,
+                    operation="model training",
+                    model_name=deps.selected_model,
+                    error_message=result.error.message,
+                    error_details=result.error.details,
+                    warnings=last_warnings,
+                    fallback_message=_failure_message(
+                        model_name=deps.selected_model,
+                        error_message=result.error.message,
+                        warnings=last_warnings,
+                    ),
+                )
+                if attempt < _MAX_TRAINING_ATTEMPTS:
+                    continue
+                return self._failed_result(
+                    request=request,
+                    payload=payload.model_copy(update={"training_warnings": last_warnings}),
+                    user_message=_retry_failure_message(
+                        base_message=last_user_message,
+                        attempts=attempt,
+                    ),
+                    error_message=last_error_message,
+                )
 
-            current_plan = plan
-            log.info(
-                "ModelTrainNode generated encoding plan and will continue to fit in same run. conversation_id=%s model=%s",
-                conversation_id,
-                selected_estimator,
+            last_error_message = f"unexpected fit result type: {type(result).__name__}"
+            last_user_message = (
+                "Model training returned an unexpected result and could not be completed."
+            )
+            last_warnings = []
+            if attempt < _MAX_TRAINING_ATTEMPTS:
+                continue
+            return self._failed_result(
+                request=request,
+                payload=payload,
+                user_message=_retry_failure_message(
+                    base_message=last_user_message,
+                    attempts=attempt,
+                ),
+                error_message=last_error_message,
             )
 
-        # -----------------------------------------------------------------
-        # Phase 2: training
-        # -----------------------------------------------------------------
-        order_effect_modifiers: list[str] | None = None
-        order_covariates: list[str] | None = None
-
-        if current_plan is not None:
-            order_effect_modifiers = [
-                c.column
-                for c in current_plan.columns
-                if c.role == "effect_modifier"
-            ]
-            order_covariates = [
-                c.column
-                for c in current_plan.columns
-                if c.role == "covariate"
-            ]
-
-        run_id = uuid4()
-        cmd = FitCommand(
-            model_name=selected_estimator,
-            dataset_id=clean_dataset_id,
-            run_id=run_id,
-            causal_specs=causal_specs,
-            data_summary=dataset_summary,
-            order_effect_modifiers=order_effect_modifiers,
-            order_covariates=order_covariates,
-            transformation_plan=(
-                current_plan
-                if current_plan is not None
-                else None
+        return self._failed_result(
+            request=request,
+            payload=payload.model_copy(update={"training_warnings": last_warnings}),
+            user_message=_retry_failure_message(
+                base_message=(
+                    "Model training could not be completed because the estimator failed "
+                    "during fitting."
+                ),
+                attempts=_MAX_TRAINING_ATTEMPTS,
             ),
-            inputs=FitInputs(),
+            error_message=last_error_message or "training failed after retry",
         )
 
-        log.info(
-            "ModelTrainNode executing fit command. conversation_id=%s run_id=%s model=%s dataset_id=%s",
-            conversation_id,
-            run_id,
-            selected_estimator,
-            clean_dataset_id,
+    def _needs_input_result(
+        self,
+        *,
+        request: NodeRequest,
+        payload: ModelTrainPayloadModel,
+        user_message: str,
+    ) -> NodeExecutionResult:
+        return NodeExecutionResult(
+            new_node_state=ModelTrainState(payload),
+            new_orchestrator_state=request.orchestrator_state,
+            status="PENDING",
+            action="NEEDS_INPUT",
+            response_messages=[ChatMessage(role="assistant", content=user_message)],
         )
-        res = model.execute(user_id=user_id, conversation_id=conversation_id, command=cmd)
-        log.info("Model training command executed with result: %s", res)
 
-        if not isinstance(res, FitResult):
-            raise ValueError(f"Expected FitResult from model execution, got {type(res).__name__}")
+    def _needs_data_result(
+        self,
+        *,
+        request: NodeRequest,
+        user_message: str,
+    ) -> NodeExecutionResult:
+        return NodeExecutionResult(
+            new_node_state=ModelTrainState.init_empty(),
+            new_orchestrator_state=request.orchestrator_state,
+            status="PENDING",
+            action="NEEDS_DATA",
+            response_messages=[ChatMessage(role="assistant", content=user_message)],
+        )
 
-        match res:
-            case FitSuccess():
-                message = self.llm.generate(
-                    config=LLMConfig(temperature=0.2, model="basic"),
-                    system_prompt=FIT_SUCCESS_FAILURE_SYSTEM_PROMPT,
-                    user_prompt=(
-                        f"Model training succeeded with warnings: {res.warnings}. "
-                        f"Explain to the user in a clinician-friendly way."
-                    ),
-                    history=last_4_messages,
-                ).content
+    def _done_result(
+        self,
+        *,
+        request: NodeRequest,
+        payload: ModelTrainPayloadModel,
+        user_message: str,
+    ) -> NodeExecutionResult:
+        return NodeExecutionResult(
+            new_node_state=ModelTrainState(payload),
+            new_orchestrator_state=request.orchestrator_state,
+            status="DONE",
+            action="NONE",
+            response_messages=[ChatMessage(role="assistant", content=user_message)],
+        )
 
-                fitted_model_id = res.fitted_model_id
-                warnings_list = res.warnings or []
-                warnings_str = "\n".join([str(w) for w in warnings_list]) if warnings_list else None
+    def _aborted_result(
+        self,
+        *,
+        request: NodeRequest,
+        payload: ModelTrainPayloadModel,
+        user_message: str,
+    ) -> NodeExecutionResult:
+        return NodeExecutionResult(
+            new_node_state=ModelTrainState(payload),
+            new_orchestrator_state=request.orchestrator_state,
+            status="ABORTED",
+            action="NONE",
+            response_messages=[ChatMessage(role="assistant", content=user_message)],
+        )
 
-                payload = state.payload.model_copy(
-                    update={
-                        "trained_model_id": fitted_model_id,
-                        "training_warnings": warnings_str,
-                        "order_effect_modifiers": order_effect_modifiers,
-                        "order_covariates": order_covariates,
-                        "column_transformation_plan": current_plan,
-                        "needs_user_input": False,
-                        "no_of_times_trained": (state.payload.no_of_times_trained or 0) + 1,
-                        "prev_training_errors": None,
-                        "error": None,
-                        "user_message": message,
-                    }
-                )
-                return ModelTrainState(payload=payload)
+    def _failed_result(
+        self,
+        *,
+        request: NodeRequest,
+        payload: ModelTrainPayloadModel,
+        user_message: str,
+        error_message: str,
+    ) -> NodeExecutionResult:
+        failed_payload = payload.model_copy(
+            update={
+                "trained_model_id": None,
+                "assistant_message": user_message.strip(),
+                "error_message": error_message.strip(),
+            }
+        )
+        return self._aborted_result(
+            request=request,
+            payload=failed_payload,
+            user_message=failed_payload.assistant_message or user_message,
+        )
 
-            case CommandFailure():
-                err_obj = res.error
-                err_msg = (
-                    getattr(err_obj, "message", None)
-                    or str(err_obj)
-                    or "Training failed for an unknown reason."
-                )
-                log.info(
-                    "ModelTrainNode fit failed. conversation_id=%s run_id=%s model=%s error=%s",
-                    conversation_id,
-                    run_id,
-                    selected_estimator,
-                    err_msg,
-                )
 
-                message = self.llm.generate(
-                    config=LLMConfig(temperature=0.2, model="basic"),
-                    system_prompt=FIT_SUCCESS_FAILURE_SYSTEM_PROMPT,
-                    user_prompt=(
-                        f"Model training failed with error: {err_msg}. "
-                        f"Explain to the user in a clinician-friendly way and suggest next steps."
-                    ),
-                    history=last_4_messages,
-                ).content
+def _training_signature(*, deps: ModelTrainDeps) -> str:
+    signature_payload = {
+        "dataset_id": str(deps.dataset_id),
+        "dataset_summary": deps.dataset_summary.model_dump(mode="json", exclude_none=True),
+        "causal_spec": deps.causal_spec.model_dump(mode="json", exclude_none=True),
+        "transformation_plan": deps.transformation_plan.model_dump(mode="json", exclude_none=True),
+        "selected_model": deps.selected_model,
+    }
+    signature_json = json.dumps(
+        signature_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(signature_json.encode("utf-8")).hexdigest()
 
-                if (
-                    state.payload.no_of_times_trained is not None
-                    and state.payload.no_of_times_trained >= state.MaxNoOfInterationTrain
-                ):
-                    return ModelTrainState(
-                        payload=state.payload.model_copy(
-                            update={
-                                "trained_model_id": None,
-                                "training_warnings": None,
-                                "order_effect_modifiers": None,
-                                "order_covariates": None,
-                                "column_transformation_plan": None,
-                                "needs_user_input": False,
-                                "no_of_times_trained": state.payload.no_of_times_trained,
-                                "error": err_msg,
-                                "user_message": message,
-                            }
-                        )
-                    )
 
-                payload = state.payload.model_copy(
-                    update={
-                        "trained_model_id": None,
-                        "training_warnings": None,
-                        "order_effect_modifiers": None,
-                        "order_covariates": None,
-                        "needs_user_input": False,
-                        "error": None,
-                        "column_transformation_plan": None,
-                        "prev_training_errors": err_msg,
-                        "user_message": message,
-                        "no_of_times_trained": (state.payload.no_of_times_trained or 0) + 1,
-                    }
-                )
-                return ModelTrainState(payload=payload)
+def _success_message(
+    *,
+    model_name: str,
+    fitted_model_id: UUID,
+    warnings: Sequence[str],
+    attempts: int,
+) -> str:
+    label = get_model_training_label(model_name)
+    retry_text = ""
+    if attempts > 1:
+        retry_text = f" after {attempts} attempts"
+    if not warnings:
+        return (
+            f"Training completed successfully with {label}{retry_text}. "
+            f"The fitted model is saved under id {fitted_model_id} and is ready for effect estimation."
+        )
+    warning_text = " ".join(str(item).strip() for item in warnings if str(item).strip())
+    return (
+        f"Training completed successfully with {label}{retry_text}. "
+        f"The fitted model is saved under id {fitted_model_id}. "
+        f"Warnings reported during training: {warning_text}"
+    )
 
-            case _:
-                raise ValueError(f"Unexpected FitResult status: {getattr(res, 'status', None)}")
+
+def _failure_message(
+    *,
+    model_name: str,
+    error_message: str,
+    warnings: Sequence[str],
+) -> str:
+    label = get_model_training_label(model_name)
+    base = (
+        f"Training failed for {label}. "
+        f"The estimator reported: {error_message.strip() or 'unknown error'}."
+    )
+    if not warnings:
+        return base
+    warning_text = " ".join(str(item).strip() for item in warnings if str(item).strip())
+    return f"{base} Additional warnings: {warning_text}"
+
+
+def _retry_failure_message(*, base_message: str, attempts: int) -> str:
+    return f"{base_message.strip()} Training was attempted {attempts} times before stopping."
+
+
+def _summarize_model_failure_for_user(
+    *,
+    llm: LLMService | None,
+    operation: str,
+    model_name: str,
+    error_message: str,
+    error_details: Mapping[str, Any] | None,
+    warnings: Sequence[str],
+    fallback_message: str,
+) -> str:
+    if llm is None:
+        return fallback_message
+
+    payload = {
+        "operation": operation,
+        "model_name": model_name,
+        "error_message": error_message,
+        "error_details": dict(error_details or {}),
+        "warnings": [str(item).strip() for item in warnings if str(item).strip()],
+    }
+
+    try:
+        return self_or_llm_generate(llm=llm, payload=payload).strip()
+    except Exception:
+        return fallback_message
+
+
+def self_or_llm_generate(*, llm: LLMService, payload: dict[str, Any]) -> str:
+    return llm.generate(
+        system_prompt=get_model_failure_summary_prompt(),
+        user_prompt=json.dumps(payload, ensure_ascii=False),
+        config=LLMConfig(model="basic", temperature=0.1),
+        history=None,
+    ).content
+
+
+__all__ = ["ModelTrainNode"]

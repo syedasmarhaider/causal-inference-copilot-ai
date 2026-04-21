@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import TypeAlias
+from typing import Any, TypeAlias, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -53,9 +53,6 @@ def _safe_str(value: object) -> str:
     try:
         text = str(value)
     except Exception:
-        return type(value).__name__
-
-    if not isinstance(text, str):
         return type(value).__name__
 
     normalized = text.strip()
@@ -122,12 +119,17 @@ def _build_http_exception_response(exc: HTTPException) -> JSONResponse:
         )
         return _internal_server_error_response(exc)
 
-    phrase = HTTPStatus(exc.status_code).phrase if exc.status_code in HTTPStatus._value2member_map_ else "Request failed"
+    phrase = (
+        HTTPStatus(exc.status_code).phrase
+        if exc.status_code in HTTPStatus._value2member_map_
+        else "Request failed"
+    )
     spec = ErrorSpec(status_code=exc.status_code, message=phrase)
 
     detail_payload = exc.detail
     if isinstance(detail_payload, dict):
-        detail = _safe_str(detail_payload.get("detail", detail_payload))
+        d = cast(dict[str, Any], detail_payload)
+        detail = _safe_str(d.get("detail", detail_payload))
     else:
         detail = _safe_str(detail_payload)
 
