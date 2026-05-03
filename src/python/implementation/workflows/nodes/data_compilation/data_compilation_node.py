@@ -694,7 +694,7 @@ class DataCompilationNode(Node):
                 },
                 ensure_ascii=False,
             ),
-            config=LLMConfig(model="basic", temperature=0.0),
+            config=LLMConfig(model="basic", temperature=0.7),
             history=None,
             max_attempts=3,
         )
@@ -913,7 +913,7 @@ class DataCompilationNode(Node):
                 },
                 ensure_ascii=False,
             ),
-            config=LLMConfig(model="mini", temperature=0.2),
+            config=LLMConfig(model="mini", temperature=0.6),
             history=history,
             max_attempts=2,
         )
@@ -968,7 +968,7 @@ class DataCompilationNode(Node):
                 },
                 ensure_ascii=False,
             ),
-            config=LLMConfig(model="mini", temperature=0.2),
+            config=LLMConfig(model="mini", temperature=0.6),
             history=history,
             max_attempts=2,
         )

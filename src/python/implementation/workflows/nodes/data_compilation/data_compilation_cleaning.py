@@ -474,7 +474,7 @@ def _plan_simple_transformations(
         schema=_SimpleTransformPlanDraft,
         system_prompt=data_compilation_simple_transform_prompt(),
         user_prompt=json.dumps(payload, ensure_ascii=False),
-        config=LLMConfig(model="basic", temperature=0.0),
+        config=LLMConfig(model="basic", temperature=0.7),
         history=None,
         max_attempts=2,
     )
@@ -730,7 +730,7 @@ def _compile_causal_semantics_once(
         schema=_CausalSemanticsModel,
         system_prompt=data_compilation_causal_semantics_prompt(),
         user_prompt=json.dumps(context_payload, ensure_ascii=False),
-        config=LLMConfig(model="pro", temperature=0.1),
+        config=LLMConfig(model="pro", temperature=0.6),
         history=None,
         max_attempts=3,
     )
