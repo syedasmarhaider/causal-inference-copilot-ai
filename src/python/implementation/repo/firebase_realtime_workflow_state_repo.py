@@ -12,6 +12,7 @@ from uuid import UUID
 import firebase_admin
 from firebase_admin import credentials, db
 
+from python.domain.models.errors import StateConflictError
 from python.domain.models.models import ChatMessage
 from python.domain.repo.workflow_state_repo import Conversation, WorkflowStateRepo
 from python.domain.workflows.node_state import NodeState
@@ -292,13 +293,59 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         if not isinstance(state_name, str) or not state_name.strip():
             raise ValueError("ochestrator state name must be a non-empty string")
 
+        expected_counter = state.get_update_counter()
+        saved_counter = expected_counter + 1
+        payload_json = self._serialize_ochestrator_state(
+            state=state,
+            state_name=state_name,
+            update_counter=saved_counter,
+        )
+
+        def update_current(current_raw: Any) -> str:
+            current_counter = self._extract_ochestrator_update_counter(
+                current_raw,
+                conversation_id=conversation_id,
+            )
+            if current_counter is None:
+                if expected_counter != 0:
+                    raise StateConflictError(
+                        state_name=state_name,
+                        expected_counter=expected_counter,
+                        actual_counter=None,
+                    )
+                return payload_json
+
+            if current_counter != expected_counter:
+                raise StateConflictError(
+                    state_name=state_name,
+                    expected_counter=expected_counter,
+                    actual_counter=current_counter,
+                )
+            return payload_json
+
+        (
+            self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
+            .child("ochestrator_state")
+            .transaction(update_current)
+        )
+        state.set_update_counter(saved_counter)
+
+    def _serialize_ochestrator_state(
+        self,
+        *,
+        state: OchestratorState,
+        state_name: str,
+        update_counter: int,
+    ) -> str:
+        payload = dict(state.to_json_dict())
+        payload["update_counter"] = update_counter
         envelope = {
             "name": state_name,
-            "payload": state.to_json_dict(),
+            "payload": payload,
         }
 
         try:
-            payload_json = json.dumps(
+            return json.dumps(
                 envelope,
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -308,8 +355,50 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
                 f"OchestratorState '{state_name}' is not JSON-serializable: {exc}"
             ) from exc
 
-        path = self._conversation_path(user_id=user_id, conversation_id=conversation_id)
-        self._root_ref.update({f"{path}/ochestrator_state": payload_json})
+    def _extract_ochestrator_update_counter(
+        self,
+        current_raw: Any,
+        *,
+        conversation_id: UUID,
+    ) -> int | None:
+        if current_raw is None:
+            return None
+
+        if not isinstance(current_raw, str):
+            raise ValueError(
+                f"Stored ochestrator_state for conversation_id={conversation_id!r} "
+                f"must be a JSON string blob, got {type(current_raw).__name__}"
+            )
+
+        try:
+            envelope = json.loads(current_raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Stored ochestrator_state for conversation_id={conversation_id!r} "
+                f"is not valid JSON: {exc}"
+            ) from exc
+
+        if not isinstance(envelope, dict):
+            raise ValueError(
+                f"Decoded ochestrator_state for conversation_id={conversation_id!r} "
+                f"must be a dict, got {type(envelope).__name__}"
+            )
+
+        payload = envelope.get("payload")
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"Decoded ochestrator_state for conversation_id={conversation_id!r} "
+                f"must contain a dict 'payload', got {type(payload).__name__}"
+            )
+
+        counter = payload.get("update_counter", 0)
+        if isinstance(counter, bool) or not isinstance(counter, int) or counter < 0:
+            raise ValueError(
+                f"Decoded ochestrator_state for conversation_id={conversation_id!r} "
+                "must contain a non-negative integer 'payload.update_counter'"
+            )
+
+        return counter
 
     # ------------------------------------------------------------------
     # Per-state persistence

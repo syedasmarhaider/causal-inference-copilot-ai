@@ -80,6 +80,12 @@ class _FakeOrchestratorState(OchestratorState):
     def name(self) -> str:
         return "FAKE_ORCHESTRATOR"
 
+    def get_update_counter(self) -> int:
+        return int(self._values.get("update_counter", 0))
+
+    def set_update_counter(self, value: int) -> None:
+        self._values["update_counter"] = value
+
     def get(self, key: str) -> Any:
         if key == "working_dataset_id":
             dataset_ids = self._values.get("working_dataset_ids") or []
@@ -108,6 +114,25 @@ class _FakeOrchestratorState(OchestratorState):
     def get_current_node_companion_names(self, node_name: str) -> list[str]:
         assert node_name == self._current_node_name
         return list(self._companion_names)
+
+    def get_completed_and_last_pending_nodes(self) -> list[str]:
+        return []
+
+    def rocover_failure(self, current_failed_node: str) -> None:
+        del current_failed_node
+
+    def get_forward_states_after_node(self, node_name: str) -> list[str]:
+        del node_name
+        return []
+
+    def roll_back_to_state(self, state_name: str) -> None:
+        del state_name
+
+    def get_working_dataset_id_and_frozen_status(self) -> tuple[Any, bool]:
+        return self.get("working_dataset_id"), False
+
+    def get_ochestration_prompt(self) -> str:
+        return ""
 
 
 def _dataset_summary() -> _FakeDatasetSummary:

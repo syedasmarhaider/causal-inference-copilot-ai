@@ -35,6 +35,8 @@ log = get_logger(__name__)
 class GlobalStateModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
+    update_counter: int = Field(default=0, ge=0)
+
     # stage 1 — dataset
     working_dataset_ids: list[UUID] = Field(default_factory=list)
     latest_dataset_summary: DatasetSummaryModel | None = None
@@ -58,6 +60,15 @@ class GlobalStateModel(BaseModel):
     # stage 5 — training
     trained_model_id: UUID | None = None
     training_warnings: list[str] = Field(default_factory=list)
+
+    @field_validator("update_counter", mode="before")
+    @classmethod
+    def _parse_update_counter(cls, value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("update_counter must be a non-negative integer")
+        if value < 0:
+            raise ValueError("update_counter must be a non-negative integer")
+        return value
 
     @field_validator("working_dataset_ids", mode="before")
     @classmethod
@@ -109,6 +120,12 @@ class CausalOchestratorState(OchestratorState):
 
     def name(self) -> str:
         return self.NAME
+
+    def get_update_counter(self) -> int:
+        return self._model.update_counter
+
+    def set_update_counter(self, value: int) -> None:
+        self._model.update_counter = value
 
     def to_json_dict(self) -> dict[str, Any]:
         return self._model.model_dump(mode="json")
