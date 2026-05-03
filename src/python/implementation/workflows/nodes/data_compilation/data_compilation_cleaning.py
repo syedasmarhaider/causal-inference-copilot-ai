@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, Sequence
+from typing import Annotated, Any, Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -11,12 +12,13 @@ from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
     data_compilation_causal_semantics_prompt,
     data_compilation_cleaning_instructions_prompt,
+    data_compilation_simple_transform_prompt,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import (
+    BinaryOutcomeSpecModel,
     BinaryTreatmentSpecModel,
     CausalSpec,
     ContinuousOutcomeSpecModel,
-    BinaryOutcomeSpecModel,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec_draft import (
     ID_COL_AUTO_FILL,
@@ -25,10 +27,10 @@ from python.implementation.workflows.tools.causal.specs.causal_spec_draft import
 from python.implementation.workflows.tools.causal.specs.causal_specs_tool import (
     CausalSpecsTool,
 )
-from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.tools.common.model.data_summary import (
     BooleanColumnProfileModel,
     CategoricalColumnProfileModel,
+    DatasetSummaryModel,
     DatetimeColumnProfileModel,
     NumericColumnProfileModel,
     OtherColumnProfileModel,
@@ -36,7 +38,14 @@ from python.implementation.workflows.tools.common.model.data_summary import (
 from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import (
     DataManipulationTool,
 )
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import DatasetProfilingTool
+from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
+    DatasetProfilingTool,
+)
+from python.implementation.workflows.tools.simple_data_transformation_tool.simple_data_transformation_tool import (
+    ColumnTransformationSpec,
+    SimpleDataTransformationSpec,
+    SimpleDataTransformationTool,
+)
 
 
 @dataclass(frozen=True)
@@ -85,6 +94,25 @@ class _MissingnessPlanDraft(BaseModel):
     decisions: list[_MissingnessDecisionDraft] = Field(..., min_length=1)
 
 
+class _SimpleTransformPlanDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    columns: list[ColumnTransformationSpec] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_columns(self) -> _SimpleTransformPlanDraft:
+        columns = [str(column.column).strip() for column in self.columns]
+        duplicates = sorted({column for column in columns if columns.count(column) > 1})
+        if duplicates:
+            raise ValueError(f"simple transform plan contains duplicate columns: {duplicates}")
+        return self
+
+    def to_spec(self) -> SimpleDataTransformationSpec | None:
+        if not self.columns:
+            return None
+        return SimpleDataTransformationSpec(columns=self.columns)
+
+
 class _TreatmentSemanticsModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -92,7 +120,7 @@ class _TreatmentSemanticsModel(BaseModel):
     control: str = Field(..., min_length=1)
 
     @model_validator(mode="after")
-    def _validate_distinct_labels(self) -> "_TreatmentSemanticsModel":
+    def _validate_distinct_labels(self) -> _TreatmentSemanticsModel:
         if self.treated == self.control:
             raise ValueError("treated and control must be different")
         return self
@@ -106,7 +134,7 @@ class _BinaryOutcomeSemanticsModel(BaseModel):
     non_event: str = Field(..., min_length=1)
 
     @model_validator(mode="after")
-    def _validate_binary_outcome(self) -> "_BinaryOutcomeSemanticsModel":
+    def _validate_binary_outcome(self) -> _BinaryOutcomeSemanticsModel:
         if self.event == self.non_event:
             raise ValueError("event and non_event must be different")
         return self
@@ -121,7 +149,7 @@ class _ContinuousOutcomeSemanticsModel(BaseModel):
     clip_max: float | None = None
 
     @model_validator(mode="after")
-    def _validate_continuous_outcome(self) -> "_ContinuousOutcomeSemanticsModel":
+    def _validate_continuous_outcome(self) -> _ContinuousOutcomeSemanticsModel:
         if (
             self.clip_min is not None
             and self.clip_max is not None
@@ -154,6 +182,7 @@ def cleaning(
     data_summary: DatasetSummaryModel,
     to_clean_df: pd.DataFrame,
     datasetProfilingTool: DatasetProfilingTool,
+    simpleDataTransformationTool: SimpleDataTransformationTool,
     dataManipulationTool: DataManipulationTool,
     llm: LLMService,
 ) -> CleaningResult:
@@ -190,19 +219,42 @@ def cleaning(
         review_recompile_request=review_recompile_request,
     )
 
+    simple_transform_draft = _plan_simple_transformations(
+        llm=llm,
+        scoped_summary=scoped_summary,
+        draft_causal_spec=draft_causal_spec,
+        protocol_discussion=protocol_discussion,
+        cleaning_instructions=cleaning_instructions,
+        review_recompile_request=review_recompile_request,
+        missingness_plan=missingness_plan,
+    )
+    simple_transform_spec = simple_transform_draft.to_spec()
+    transformed_df = scoped_df.copy()
+    if simple_transform_spec is not None:
+        transformed_df = simpleDataTransformationTool.transform(
+            dataframe=scoped_df,
+            specification=simple_transform_spec,
+        )
+    transformed_summary = _profile_dataset(
+        dataset_profiling_tool=datasetProfilingTool,
+        dataframe=transformed_df,
+    )
+
     effective_instructions = _build_manipulation_instructions(
         protocol_discussion=protocol_discussion,
         cleaning_instructions=cleaning_instructions,
         review_recompile_request=review_recompile_request,
         draft_scope_columns=input_scope_columns,
         missingness_plan=missingness_plan,
+        current_df=transformed_df,
+        simple_transform_draft=simple_transform_draft,
     )
-    cleaned_candidate_df = scoped_df.copy()
+    cleaned_candidate_df = transformed_df.copy()
     if effective_instructions:
         cleaned_candidate_df = dataManipulationTool.manipulate(
-            dataframe=scoped_df,
+            dataframe=transformed_df,
             table_name="protocol_scope_df",
-            data_summary=datasetProfilingTool.dataset_summary_to_json(scoped_summary),
+            data_summary=datasetProfilingTool.dataset_summary_to_json(transformed_summary),
             instructions=effective_instructions,
             retry_attempts=3,
         )
@@ -328,12 +380,18 @@ def _build_manipulation_instructions(
     review_recompile_request: str | None,
     draft_scope_columns: Sequence[str],
     missingness_plan: Sequence[_MissingnessDecisionDraft],
+    current_df: pd.DataFrame,
+    simple_transform_draft: _SimpleTransformPlanDraft,
 ) -> str:
     normalized_cleaning_instructions = _normalize_text(cleaning_instructions)
     normalized_protocol_discussion = _normalize_text(protocol_discussion)
     normalized_review_recompile_request = _normalize_text(review_recompile_request)
     missingness_actions = [
-        draft for draft in missingness_plan if draft.resolution != "none_needed"
+        draft
+        for draft in missingness_plan
+        if draft.resolution != "none_needed"
+        and draft.column in current_df.columns
+        and int(current_df[draft.column].isna().sum()) > 0
     ]
     if (
         not normalized_cleaning_instructions
@@ -372,7 +430,7 @@ def _build_manipulation_instructions(
     if missingness_actions:
         if parts:
             parts.append("")
-        parts.append("Resolve protocol-scope missingness exactly as follows:")
+        parts.append("Resolve remaining protocol-scope missingness exactly as follows:")
         for draft in missingness_actions:
             parts.append(
                 f"- Column '{draft.column}' ({draft.role}): {draft.resolution}. "
@@ -380,15 +438,105 @@ def _build_manipulation_instructions(
             )
 
     if parts:
+        simple_transform_summary = _summarize_simple_transform_draft(simple_transform_draft)
+        if simple_transform_summary:
+            parts.extend(
+                [
+                    "",
+                    "Simple deterministic transformations already applied; do not repeat them:",
+                    simple_transform_summary,
+                ]
+            )
         parts.extend(
             [
                 "",
-                "Preserve exactly these columns and do not require or create any additional columns:",
+                "Use SQL only for residual complex cleaning and row filtering.",
+                "Do not perform final drop-column work; runtime will narrow to protocol-scope columns.",
+                "Keep these draft columns available in the cleaned dataframe:",
                 ", ".join(draft_scope_columns),
-                "The cleaned dataframe must keep all of these draft columns available.",
             ]
         )
     return "\n".join(parts).strip()
+
+
+def _plan_simple_transformations(
+    *,
+    llm: LLMService,
+    scoped_summary: DatasetSummaryModel,
+    draft_causal_spec: CausalSpecDraft,
+    protocol_discussion: str | None,
+    cleaning_instructions: str,
+    review_recompile_request: str | None,
+    missingness_plan: Sequence[_MissingnessDecisionDraft],
+) -> _SimpleTransformPlanDraft:
+    missingness_actions = [
+        draft.model_dump(mode="json")
+        for draft in missingness_plan
+        if draft.resolution != "none_needed"
+    ]
+    if (
+        not _normalize_text(protocol_discussion)
+        and not _normalize_text(cleaning_instructions)
+        and not _normalize_text(review_recompile_request)
+        and not missingness_actions
+    ):
+        return _SimpleTransformPlanDraft()
+
+    payload: dict[str, Any] = {
+        "confirmed_protocol_discussion": _normalize_text(protocol_discussion),
+        "confirmed_protocol_cleaning_instructions": _normalize_text(cleaning_instructions),
+        "scoped_dataset_summary": _dataset_summary_prompt_payload(scoped_summary),
+        "expected_role_by_column": _expected_role_by_column(draft_causal_spec),
+        "missingness_plan": missingness_actions,
+    }
+    normalized_review_recompile_request = _normalize_text(review_recompile_request)
+    if normalized_review_recompile_request:
+        payload["review_recompile_request"] = normalized_review_recompile_request
+
+    draft = llm.generate_json(
+        schema=_SimpleTransformPlanDraft,
+        system_prompt=data_compilation_simple_transform_prompt(),
+        user_prompt=json.dumps(payload, ensure_ascii=False),
+        config=LLMConfig(model="basic", temperature=0.0),
+        history=None,
+        max_attempts=2,
+    )
+    _validate_simple_transform_plan_columns(
+        draft=draft,
+        scoped_summary=scoped_summary,
+    )
+    return draft
+
+
+def _validate_simple_transform_plan_columns(
+    *,
+    draft: _SimpleTransformPlanDraft,
+    scoped_summary: DatasetSummaryModel,
+) -> None:
+    scoped_columns = {
+        str(profile.name).strip()
+        for profile in scoped_summary.profiles
+        if str(profile.name).strip()
+    }
+    unknown_columns = sorted(
+        str(column.column).strip()
+        for column in draft.columns
+        if str(column.column).strip() not in scoped_columns
+    )
+    if unknown_columns:
+        raise ValueError(
+            "simple transform plan contains non-scoped columns: "
+            f"{unknown_columns}"
+        )
+
+
+def _summarize_simple_transform_draft(draft: _SimpleTransformPlanDraft) -> str:
+    if not draft.columns:
+        return ""
+    return "; ".join(
+        column.model_dump_json(exclude_none=True)
+        for column in draft.columns
+    )
 
 
 def _plan_missingness_resolution(

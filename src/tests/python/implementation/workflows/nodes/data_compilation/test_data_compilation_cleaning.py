@@ -20,6 +20,9 @@ from python.implementation.workflows.tools.common.model.data_summary import Data
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
 )
+from python.implementation.workflows.tools.simple_data_transformation_tool.simple_data_transformation_tool import (
+    SimpleDataTransformationSpec,
+)
 
 
 def _build_dataframe() -> pd.DataFrame:
@@ -207,6 +210,7 @@ class _FakeDataManipulationTool:
     ) -> pd.DataFrame:
         self.calls.append(
             {
+                "dataframe": dataframe.copy(),
                 "dataframe_columns": list(dataframe.columns),
                 "table_name": table_name,
                 "data_summary": data_summary,
@@ -219,6 +223,50 @@ class _FakeDataManipulationTool:
         return dataframe.copy()
 
 
+@dataclass
+class _FakeSimpleDataTransformationTool:
+    calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def transform(
+        self,
+        *,
+        dataframe: pd.DataFrame,
+        specification: SimpleDataTransformationSpec | dict[str, Any],
+        copy: bool = True,
+    ) -> pd.DataFrame:
+        spec = (
+            specification
+            if isinstance(specification, SimpleDataTransformationSpec)
+            else SimpleDataTransformationSpec.model_validate(specification)
+        )
+        self.calls.append(
+            {
+                "dataframe": dataframe.copy(),
+                "specification": spec.model_dump(mode="json"),
+                "copy": copy,
+            }
+        )
+        result = dataframe.copy(deep=True) if copy else dataframe
+        for column_spec in spec.columns:
+            column = str(column_spec.column)
+            if column_spec.has_value:
+                result[column] = column_spec.value
+            for replacement in column_spec.replacements:
+                result[column] = result[column].replace(
+                    {replacement.from_value: replacement.to_value}
+                )
+            if column_spec.has_fill_value:
+                result[column] = result[column].where(
+                    ~result[column].isna(),
+                    column_spec.fill_value,
+                )
+            if column_spec.target_dtype == "integer":
+                result[column] = pd.to_numeric(result[column]).astype("int64")
+            if column_spec.target_dtype == "float":
+                result[column] = pd.to_numeric(result[column]).astype("float64")
+        return result
+
+
 def test_cleaning_narrows_input_dataframe_to_draft_scope_and_preserves_order() -> None:
     dataframe = _build_dataframe()
     result = cleaning(
@@ -229,6 +277,7 @@ def test_cleaning_narrows_input_dataframe_to_draft_scope_and_preserves_order() -
         data_summary=_build_summary(dataframe),
         to_clean_df=dataframe,
         datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
         dataManipulationTool=_FakeDataManipulationTool(),
         llm=_FakeLLM(json_outputs=[_semantic_payload()]),
     )
@@ -258,6 +307,7 @@ def test_cleaning_fails_immediately_when_input_dataframe_missing_draft_column() 
             data_summary=_build_summary(dataframe),
             to_clean_df=dataframe,
             datasetProfilingTool=DatasetProfilingTool(),
+            simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
             dataManipulationTool=_FakeDataManipulationTool(),
             llm=_FakeLLM(json_outputs=[_semantic_payload()]),
         )
@@ -266,7 +316,7 @@ def test_cleaning_fails_immediately_when_input_dataframe_missing_draft_column() 
 def test_cleaning_runs_manipulation_when_effective_instructions_are_present() -> None:
     dataframe = _build_dataframe()
     data_manipulation_tool = _FakeDataManipulationTool()
-    llm = _FakeLLM(json_outputs=[_semantic_payload()])
+    llm = _FakeLLM(json_outputs=[{"columns": []}, _semantic_payload()])
 
     result = cleaning(
         protocol_discussion="Treatment is binary and age is a baseline covariate.",
@@ -276,6 +326,7 @@ def test_cleaning_runs_manipulation_when_effective_instructions_are_present() ->
         data_summary=_build_summary(dataframe),
         to_clean_df=dataframe,
         datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
         dataManipulationTool=data_manipulation_tool,
         llm=llm,
     )
@@ -283,6 +334,7 @@ def test_cleaning_runs_manipulation_when_effective_instructions_are_present() ->
     assert isinstance(result, CleaningResult)
     assert len(data_manipulation_tool.calls) == 1
     assert data_manipulation_tool.calls[0]["dataframe_columns"] == [
+        ID_COL_AUTO_FILL,
         "treatment",
         "outcome",
         "age",
@@ -290,12 +342,77 @@ def test_cleaning_runs_manipulation_when_effective_instructions_are_present() ->
     ]
     assert "Confirmed protocol cleaning instructions:" in data_manipulation_tool.calls[0]["instructions"]
     assert "Confirmed protocol discussion:" in data_manipulation_tool.calls[0]["instructions"]
-    assert "Preserve exactly these columns" in data_manipulation_tool.calls[0]["instructions"]
+    assert "Use SQL only for residual complex cleaning" in data_manipulation_tool.calls[0]["instructions"]
+    assert "runtime will narrow to protocol-scope columns" in data_manipulation_tool.calls[0]["instructions"]
+
+
+def test_cleaning_applies_simple_transform_before_sql_and_manually_drops_extra_columns() -> None:
+    dataframe = _build_dataframe()
+    dataframe["age"] = ["45", "61"]
+    simple_transform_tool = _FakeSimpleDataTransformationTool()
+    data_manipulation_tool = _FakeDataManipulationTool(
+        responses=[
+            pd.DataFrame(
+                {
+                    ID_COL_AUTO_FILL: [1, 2],
+                    "treatment": ["drug", "control"],
+                    "outcome": ["event", "non_event"],
+                    "age": [45, 61],
+                    "isex": [1, 2],
+                    "sql_extra": ["drop", "drop"],
+                }
+            )
+        ]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            {
+                "columns": [
+                    {
+                        "column": "age",
+                        "target_dtype": "integer",
+                    }
+                ]
+            },
+            _semantic_payload(),
+        ]
+    )
+
+    result = cleaning(
+        protocol_discussion="Age is a numeric baseline covariate.",
+        cleaning_instructions="Cast age to an integer before downstream cleaning.",
+        review_recompile_request=None,
+        draft_causal_spec=_draft(),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=simple_transform_tool,
+        dataManipulationTool=data_manipulation_tool,
+        llm=llm,
+    )
+
+    assert len(simple_transform_tool.calls) == 1
+    assert simple_transform_tool.calls[0]["specification"]["columns"][0]["column"] == "age"
+    assert len(data_manipulation_tool.calls) == 1
+    sql_input = data_manipulation_tool.calls[0]["dataframe"]
+    assert str(sql_input["age"].dtype) == "int64"
+    assert "Simple deterministic transformations already applied" in (
+        data_manipulation_tool.calls[0]["instructions"]
+    )
+    assert list(result.pd_cleaned.columns) == [
+        ID_COL_AUTO_FILL,
+        "treatment",
+        "outcome",
+        "age",
+        "isex",
+    ]
+    assert "sql_extra" not in result.pd_cleaned.columns
 
 
 def test_cleaning_skips_manipulation_when_effective_instructions_are_empty() -> None:
     dataframe = _build_dataframe()
     data_manipulation_tool = _FakeDataManipulationTool()
+    simple_transform_tool = _FakeSimpleDataTransformationTool()
     llm = _FakeLLM(json_outputs=[_semantic_payload()])
 
     result = cleaning(
@@ -306,11 +423,13 @@ def test_cleaning_skips_manipulation_when_effective_instructions_are_empty() -> 
         data_summary=_build_summary(dataframe),
         to_clean_df=dataframe,
         datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=simple_transform_tool,
         dataManipulationTool=data_manipulation_tool,
         llm=llm,
     )
 
     assert isinstance(result, CleaningResult)
+    assert simple_transform_tool.calls == []
     assert data_manipulation_tool.calls == []
     assert list(result.pd_cleaned.columns) == [
         ID_COL_AUTO_FILL,
@@ -336,8 +455,9 @@ def test_cleaning_fails_when_manipulation_drops_required_draft_column() -> None:
             data_summary=_build_summary(dataframe),
             to_clean_df=dataframe,
             datasetProfilingTool=DatasetProfilingTool(),
+            simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
             dataManipulationTool=data_manipulation_tool,
-            llm=_FakeLLM(json_outputs=[_semantic_payload()]),
+            llm=_FakeLLM(json_outputs=[{"columns": []}, _semantic_payload()]),
         )
 
 
@@ -345,6 +465,7 @@ def test_cleaning_retries_compile_when_first_semantic_compile_is_invalid() -> No
     dataframe = _build_dataframe()
     llm = _FakeLLM(
         json_outputs=[
+            {"columns": []},
             _semantic_payload(treated="rx", control="control"),
             _semantic_payload(),
         ]
@@ -358,14 +479,15 @@ def test_cleaning_retries_compile_when_first_semantic_compile_is_invalid() -> No
         data_summary=_build_summary(dataframe),
         to_clean_df=dataframe,
         datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
         dataManipulationTool=_FakeDataManipulationTool(),
         llm=llm,
     )
 
     assert isinstance(result, CleaningResult)
-    assert len(llm.generate_json_calls) == 2
-    second_call_payload = json.loads(str(llm.generate_json_calls[1]["user_prompt"]))
-    assert "compile_feedback" in second_call_payload
+    assert len(llm.generate_json_calls) == 3
+    third_call_payload = json.loads(str(llm.generate_json_calls[2]["user_prompt"]))
+    assert "compile_feedback" in third_call_payload
     assert result.causal.treatment_spec.column == "treatment"
     assert result.causal.outcome_spec.column == "outcome"
     assert result.causal.id_col == ID_COL_AUTO_FILL
@@ -378,6 +500,7 @@ def test_cleaning_fails_when_semantic_compile_is_still_invalid_after_retry() -> 
     dataframe = _build_dataframe()
     llm = _FakeLLM(
         json_outputs=[
+            {"columns": []},
             _semantic_payload(treated="rx", control="control"),
             _semantic_payload(treated="rx", control="control"),
         ]
@@ -392,6 +515,7 @@ def test_cleaning_fails_when_semantic_compile_is_still_invalid_after_retry() -> 
             data_summary=_build_summary(dataframe),
             to_clean_df=dataframe,
             datasetProfilingTool=DatasetProfilingTool(),
+            simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
             dataManipulationTool=_FakeDataManipulationTool(),
             llm=llm,
         )
@@ -399,7 +523,7 @@ def test_cleaning_fails_when_semantic_compile_is_still_invalid_after_retry() -> 
 
 def test_cleaning_compiles_without_protocol_discussion() -> None:
     dataframe = _build_dataframe()
-    llm = _FakeLLM(json_outputs=[_semantic_payload()])
+    llm = _FakeLLM(json_outputs=[{"columns": []}, _semantic_payload()])
 
     result = cleaning(
         protocol_discussion=None,
@@ -409,13 +533,14 @@ def test_cleaning_compiles_without_protocol_discussion() -> None:
         data_summary=_build_summary(dataframe),
         to_clean_df=dataframe,
         datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
         dataManipulationTool=_FakeDataManipulationTool(),
         llm=llm,
     )
 
-    first_call_payload = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
+    semantic_call_payload = json.loads(str(llm.generate_json_calls[-1]["user_prompt"]))
     assert isinstance(result, CleaningResult)
-    assert "protocol_discussion" not in first_call_payload
+    assert "protocol_discussion" not in semantic_call_payload
     assert list(result.pd_cleaned.columns) == [
         ID_COL_AUTO_FILL,
         "treatment",
@@ -436,6 +561,7 @@ def test_cleaning_preserves_explicit_identifier_column_and_compiles_it_into_caus
         data_summary=_build_summary(dataframe),
         to_clean_df=dataframe,
         datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
         dataManipulationTool=_FakeDataManipulationTool(),
         llm=_FakeLLM(json_outputs=[_semantic_payload()]),
     )
@@ -462,6 +588,7 @@ def test_cleaning_plans_and_records_missingness_resolution() -> None:
     llm = _FakeLLM(
         json_outputs=[
             _missingness_plan_payload(age="impute"),
+            {"columns": []},
             _semantic_payload(),
         ]
     )
@@ -474,16 +601,17 @@ def test_cleaning_plans_and_records_missingness_resolution() -> None:
         data_summary=_build_summary(dataframe),
         to_clean_df=dataframe,
         datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
         dataManipulationTool=data_manipulation_tool,
         llm=llm,
     )
 
-    assert len(llm.generate_json_calls) == 2
+    assert len(llm.generate_json_calls) == 3
     missingness_call_payload = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
     assert missingness_call_payload["missing_count_by_column"]["age"] == 1
     assert data_manipulation_tool.calls
     assert "Review-time recompilation request:" in data_manipulation_tool.calls[0]["instructions"]
-    assert "Resolve protocol-scope missingness exactly as follows:" in (
+    assert "Resolve remaining protocol-scope missingness exactly as follows:" in (
         data_manipulation_tool.calls[0]["instructions"]
     )
     age_decision = next(
@@ -494,12 +622,72 @@ def test_cleaning_plans_and_records_missingness_resolution() -> None:
     assert age_decision.missing_count_after == 0
 
 
+def test_cleaning_leaves_missingness_row_drops_for_sql() -> None:
+    dataframe = pd.concat(
+        [
+            pd.DataFrame(
+                [
+                    {
+                        "extra": "drop",
+                        "patient_id": "p0",
+                        "isex": 1,
+                        "outcome": "event",
+                        "treatment": None,
+                        "age": 40,
+                    }
+                ]
+            ),
+            _build_dataframe(),
+        ],
+        ignore_index=True,
+    )
+    simple_transform_tool = _FakeSimpleDataTransformationTool()
+    data_manipulation_tool = _FakeDataManipulationTool(
+        responses=[_build_dataframe().loc[:, ["treatment", "outcome", "age", "isex"]]]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            _missingness_plan_payload(treatment="drop_rows"),
+            {"columns": []},
+            _semantic_payload(),
+        ]
+    )
+
+    result = cleaning(
+        protocol_discussion="Treatment must be observed.",
+        cleaning_instructions="Drop rows with missing treatment.",
+        review_recompile_request=None,
+        draft_causal_spec=_draft(),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=simple_transform_tool,
+        dataManipulationTool=data_manipulation_tool,
+        llm=llm,
+    )
+
+    assert simple_transform_tool.calls == []
+    assert data_manipulation_tool.calls
+    assert "drop_rows" in data_manipulation_tool.calls[0]["instructions"]
+    assert "Drop rows where treatment is missing." in (
+        data_manipulation_tool.calls[0]["instructions"]
+    )
+    treatment_decision = next(
+        decision
+        for decision in result.missingness_decisions.decisions
+        if decision.column == "treatment"
+    )
+    assert treatment_decision.resolution == "drop_rows"
+    assert treatment_decision.missing_count_after == 0
+
+
 def test_cleaning_fails_when_protocol_scope_missingness_remains_after_cleaning() -> None:
     dataframe = _build_dataframe()
     dataframe.loc[0, "age"] = None
     llm = _FakeLLM(
         json_outputs=[
             _missingness_plan_payload(age="impute"),
+            {"columns": []},
         ]
     )
 
@@ -515,6 +703,7 @@ def test_cleaning_fails_when_protocol_scope_missingness_remains_after_cleaning()
             data_summary=_build_summary(dataframe),
             to_clean_df=dataframe,
             datasetProfilingTool=DatasetProfilingTool(),
+            simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
             dataManipulationTool=_FakeDataManipulationTool(),
             llm=llm,
         )

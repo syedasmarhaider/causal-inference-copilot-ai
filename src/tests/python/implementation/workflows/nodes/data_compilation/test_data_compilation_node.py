@@ -42,6 +42,9 @@ from python.implementation.workflows.ochestrator.causal_ochestrator_state import
     CausalOchestratorState,
 )
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
+from python.implementation.workflows.tools.causal.encoding.encoding_plan_tool import (
+    EncodingPlanTool,
+)
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.specs.causal_spec_draft import (
     CausalSpecDraft,
@@ -51,6 +54,9 @@ from python.implementation.workflows.tools.data_manupulation_tool.data_manipulat
 )
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
+)
+from python.implementation.workflows.tools.simple_data_transformation_tool.simple_data_transformation_tool import (
+    SimpleDataTransformationTool,
 )
 
 
@@ -290,6 +296,14 @@ class _FakeDataManipulationTool:
 
 
 @dataclass
+class _FakeSimpleDataTransformationTool:
+    NAME: str = SimpleDataTransformationTool.NAME
+
+    def get_tool_info(self) -> str:
+        return "Fake simple data transformation tool for tests."
+
+
+@dataclass
 class _FakeToolFactory(ToolFactory):
     tool_by_name: dict[str, Any]
 
@@ -314,6 +328,8 @@ def _tool_factory() -> _FakeToolFactory:
         tool_by_name={
             DatasetProfilingTool.NAME: DatasetProfilingTool(),
             DataManipulationTool.NAME: _FakeDataManipulationTool(),
+            SimpleDataTransformationTool.NAME: _FakeSimpleDataTransformationTool(),
+            EncodingPlanTool.NAME: EncodingPlanTool(),
         }
     )
 
@@ -914,7 +930,7 @@ def test_data_compilation_node_review_recompile_uses_original_source_dataset() -
     assert second_result.action == "NEEDS_INPUT"
     assert second_result.new_node_state.payload.phase == "REVIEW_READY"
     assert second_result.new_node_state.payload.compiled_dataset_id != first_payload.compiled_dataset_id
-    assert "Recompiled clinician review." == second_result.new_node_state.payload.assistant_message
+    assert second_result.new_node_state.payload.assistant_message == "Recompiled clinician review."
     assert cleaning_mock.call_count == 2
     assert cleaning_mock.call_args_list[1].kwargs["review_recompile_request"] == (
         "Reclean age without changing columns or roles."

@@ -16,17 +16,17 @@ from python.domain.workflows.node import Node, NodeExecutionResult, NodeRequest
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.nodes.data_compilation.data_compilation_cleaning import (
+    MissingnessDecisionList,
     cleaning,
     compile_causal_spec_from_cleaned_summary,
-    MissingnessDecisionList,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_deps import (
     DataCompilationDeps,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
     data_compilation_node_info,
-    data_compilation_review_query_prompt,
     data_compilation_review_decision_prompt,
+    data_compilation_review_query_prompt,
     data_compilation_review_summary_prompt,
     data_compilation_transformation_retry_guidance_prompt,
 )
@@ -43,7 +43,9 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_val
     validate_data_compilation,
 )
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.causal.encoding.encoding_plan_tool import EncodingPlanTool
+from python.implementation.workflows.tools.causal.encoding.encoding_plan_tool import (
+    EncodingPlanTool,
+)
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.specs.causal_spec_draft import (
     CausalSpecDraft,
@@ -56,6 +58,9 @@ from python.implementation.workflows.tools.data_manupulation_tool.data_manipulat
 )
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
+)
+from python.implementation.workflows.tools.simple_data_transformation_tool.simple_data_transformation_tool import (
+    SimpleDataTransformationTool,
 )
 from python.implementation.workflows.utils.utils import safe_err
 
@@ -110,6 +115,10 @@ class DataCompilationNode(Node):
         )
         self._data_manipulation_tool = cast(
             DataManipulationTool, tools_factory.get_tool(DataManipulationTool.NAME)
+        )
+        self._simple_data_transformation_tool = cast(
+            SimpleDataTransformationTool,
+            tools_factory.get_tool(SimpleDataTransformationTool.NAME),
         )
         self._encoding_plan_tool = cast(
             EncodingPlanTool, tools_factory.get_tool(EncodingPlanTool.NAME)
@@ -334,6 +343,7 @@ class DataCompilationNode(Node):
             data_summary=deps.dataset_summary,
             to_clean_df=source_df,
             datasetProfilingTool=self._profiling_tool,
+            simpleDataTransformationTool=self._simple_data_transformation_tool,
             dataManipulationTool=self._data_manipulation_tool,
             llm=self._llm,
         )

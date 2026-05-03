@@ -112,6 +112,41 @@ Rules:
 """.strip()
 
 
+def data_compilation_simple_transform_prompt() -> str:
+    return """
+You are planning deterministic same-column dataframe transformations before SQL cleaning.
+
+Inputs:
+- confirmed protocol discussion
+- confirmed protocol cleaning instructions
+- optional review_recompile_request
+- scoped dataset summary
+- expected_role_by_column
+- missingness_plan
+
+Task:
+- Return a JSON object with a `columns` array.
+- Use an empty `columns` array when no simple deterministic transformation is necessary.
+
+Simple transformation tool scope:
+- Literal same-column replacements.
+- Static same-column value assignment.
+- Scalar missing-value fill.
+- Simple dtype casts.
+
+Rules:
+- Use only existing scoped columns.
+- Keep all column identities and roles locked.
+- Do not create, rename, remove, or reorder columns.
+- Do not emit row filters, joins, aggregations, window logic, parsing logic, or complex conditional cleaning.
+- Do not emit drop-column work; final protocol-scope column dropping is handled by the runtime.
+- Do not emit SQL work; a SQL tool runs later for complex cleaning and row filtering.
+- Missingness `drop_rows` decisions must be left for the later SQL tool.
+- If an imputation cannot be expressed as a scalar `fill_value`, leave it for the later SQL tool.
+- Return JSON only.
+""".strip()
+
+
 def data_compilation_discrepancy_repair_prompt() -> str:
     return """
 You are preparing one corrective SQL-oriented cleaning pass after protocol compilation and validation found grounded data discrepancies.
