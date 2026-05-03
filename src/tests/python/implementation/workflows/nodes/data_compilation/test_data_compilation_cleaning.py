@@ -118,47 +118,6 @@ def _semantic_payload(
     }
 
 
-def _missingness_plan_payload(
-    *,
-    treatment: str = "none_needed",
-    outcome: str = "none_needed",
-    age: str = "none_needed",
-    isex: str = "none_needed",
-) -> dict[str, Any]:
-    return {
-        "decisions": [
-            {
-                "column": "treatment",
-                "role": "treatment",
-                "resolution": treatment,
-                "reason": "Treatment missingness policy is grounded by the protocol.",
-                "instruction": "Drop rows where treatment is missing.",
-            },
-            {
-                "column": "outcome",
-                "role": "outcome",
-                "resolution": outcome,
-                "reason": "Outcome missingness policy is grounded by the protocol.",
-                "instruction": "Drop rows where outcome is missing.",
-            },
-            {
-                "column": "age",
-                "role": "covariate",
-                "resolution": age,
-                "reason": "Age should be complete after cleaning.",
-                "instruction": "Impute missing age values using a grounded numeric strategy.",
-            },
-            {
-                "column": "isex",
-                "role": "effect_modifier",
-                "resolution": isex,
-                "reason": "Sex should be complete after cleaning.",
-                "instruction": "Impute missing sex values using the observed mode.",
-            },
-        ]
-    }
-
-
 @dataclass
 class _FakeLLM:
     json_outputs: list[Any] = field(default_factory=list)
@@ -342,7 +301,7 @@ def test_cleaning_runs_manipulation_when_effective_instructions_are_present() ->
     ]
     assert "Confirmed protocol cleaning instructions:" in data_manipulation_tool.calls[0]["instructions"]
     assert "Confirmed protocol discussion:" in data_manipulation_tool.calls[0]["instructions"]
-    assert "Use SQL only for residual complex cleaning" in data_manipulation_tool.calls[0]["instructions"]
+    assert "Use SQL for residual complex cleaning" in data_manipulation_tool.calls[0]["instructions"]
     assert "runtime will narrow to protocol-scope columns" in data_manipulation_tool.calls[0]["instructions"]
 
 
@@ -577,7 +536,7 @@ def test_cleaning_preserves_explicit_identifier_column_and_compiles_it_into_caus
     assert result.causal.id_col == "patient_id"
 
 
-def test_cleaning_plans_and_records_missingness_resolution() -> None:
+def test_cleaning_records_sql_missingness_resolution_without_missingness_plan() -> None:
     dataframe = _build_dataframe()
     dataframe.loc[0, "age"] = None
     data_manipulation_tool = _FakeDataManipulationTool(
@@ -587,7 +546,6 @@ def test_cleaning_plans_and_records_missingness_resolution() -> None:
     )
     llm = _FakeLLM(
         json_outputs=[
-            _missingness_plan_payload(age="impute"),
             {"columns": []},
             _semantic_payload(),
         ]
@@ -606,12 +564,15 @@ def test_cleaning_plans_and_records_missingness_resolution() -> None:
         llm=llm,
     )
 
-    assert len(llm.generate_json_calls) == 3
-    missingness_call_payload = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
-    assert missingness_call_payload["missing_count_by_column"]["age"] == 1
+    assert len(llm.generate_json_calls) == 2
+    simple_transform_payload = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
+    assert "missingness_plan" not in simple_transform_payload
     assert data_manipulation_tool.calls
     assert "Review-time recompilation request:" in data_manipulation_tool.calls[0]["instructions"]
-    assert "Resolve remaining protocol-scope missingness exactly as follows:" in (
+    assert "Resolve all remaining protocol-scope missingness in SQL" in (
+        data_manipulation_tool.calls[0]["instructions"]
+    )
+    assert "- Column 'age' (covariate): 1 missing value(s) remain." in (
         data_manipulation_tool.calls[0]["instructions"]
     )
     age_decision = next(
@@ -647,7 +608,6 @@ def test_cleaning_leaves_missingness_row_drops_for_sql() -> None:
     )
     llm = _FakeLLM(
         json_outputs=[
-            _missingness_plan_payload(treatment="drop_rows"),
             {"columns": []},
             _semantic_payload(),
         ]
@@ -668,8 +628,10 @@ def test_cleaning_leaves_missingness_row_drops_for_sql() -> None:
 
     assert simple_transform_tool.calls == []
     assert data_manipulation_tool.calls
-    assert "drop_rows" in data_manipulation_tool.calls[0]["instructions"]
-    assert "Drop rows where treatment is missing." in (
+    assert "Drop rows with missing treatment." in (
+        data_manipulation_tool.calls[0]["instructions"]
+    )
+    assert "- Column 'treatment' (treatment): 1 missing value(s) remain." in (
         data_manipulation_tool.calls[0]["instructions"]
     )
     treatment_decision = next(
@@ -686,7 +648,6 @@ def test_cleaning_fails_when_protocol_scope_missingness_remains_after_cleaning()
     dataframe.loc[0, "age"] = None
     llm = _FakeLLM(
         json_outputs=[
-            _missingness_plan_payload(age="impute"),
             {"columns": []},
         ]
     )

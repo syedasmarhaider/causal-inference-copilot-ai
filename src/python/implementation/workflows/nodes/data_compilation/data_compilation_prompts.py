@@ -83,35 +83,6 @@ Output policy:
 """.strip()
 
 
-def data_compilation_cleaning_instructions_prompt() -> str:
-    return """
-You are planning how protocol-scope missingness should be resolved before protocol compilation.
-
-Inputs:
-- confirmed protocol discussion
-- confirmed protocol cleaning instructions
-- scoped dataset summary
-- expected_role_by_column
-- optional review_recompile_request
-
-Rules:
-- Output one decision for every scoped column.
-- The compiled dataset must end with no missing values in treatment, outcome, covariates, or effect modifiers.
-- Prefer grounded imputation when the protocol or data type supports it cleanly.
-- Prefer row removal only when imputation would be clinically or statistically misleading.
-- Keep all column identities and roles locked.
-- Do not invent new columns, values, or unsupported mappings.
-- If review_recompile_request is present, use it only when it preserves the same locked columns and roles.
-- Return JSON only.
-- Each decision must contain:
-  - `column`
-  - `role`
-  - `resolution` as `none_needed` | `drop_rows` | `impute`
-  - `reason`
-  - `instruction`
-""".strip()
-
-
 def data_compilation_simple_transform_prompt() -> str:
     return """
 You are planning deterministic same-column dataframe transformations before SQL cleaning.
@@ -122,7 +93,6 @@ Inputs:
 - optional review_recompile_request
 - scoped dataset summary
 - expected_role_by_column
-- missingness_plan
 
 Task:
 - Return a JSON object with a `columns` array.
@@ -131,7 +101,6 @@ Task:
 Simple transformation tool scope:
 - Literal same-column replacements.
 - Static same-column value assignment.
-- Scalar missing-value fill.
 - Simple dtype casts.
 
 Rules:
@@ -141,8 +110,8 @@ Rules:
 - Do not emit row filters, joins, aggregations, window logic, parsing logic, or complex conditional cleaning.
 - Do not emit drop-column work; final protocol-scope column dropping is handled by the runtime.
 - Do not emit SQL work; a SQL tool runs later for complex cleaning and row filtering.
-- Missingness `drop_rows` decisions must be left for the later SQL tool.
-- If an imputation cannot be expressed as a scalar `fill_value`, leave it for the later SQL tool.
+- Missingness handling and row dropping must be left for the later SQL tool.
+- Do not use `fill_value`; missing-value imputation belongs to the later SQL tool.
 - Return JSON only.
 """.strip()
 

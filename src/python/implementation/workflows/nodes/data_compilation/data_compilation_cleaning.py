@@ -11,7 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
     data_compilation_causal_semantics_prompt,
-    data_compilation_cleaning_instructions_prompt,
     data_compilation_simple_transform_prompt,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import (
@@ -78,22 +77,6 @@ class MissingnessDecisionList(BaseModel):
     decisions: list[MissingnessDecision] = Field(..., min_length=1)
 
 
-class _MissingnessDecisionDraft(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    column: str = Field(..., min_length=1)
-    role: ColumnRole
-    resolution: MissingnessResolution
-    reason: str = Field(..., min_length=1)
-    instruction: str = Field(..., min_length=1)
-
-
-class _MissingnessPlanDraft(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    decisions: list[_MissingnessDecisionDraft] = Field(..., min_length=1)
-
-
 class _SimpleTransformPlanDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -105,6 +88,16 @@ class _SimpleTransformPlanDraft(BaseModel):
         duplicates = sorted({column for column in columns if columns.count(column) > 1})
         if duplicates:
             raise ValueError(f"simple transform plan contains duplicate columns: {duplicates}")
+        fill_columns = [
+            str(column.column).strip()
+            for column in self.columns
+            if column.has_fill_value
+        ]
+        if fill_columns:
+            raise ValueError(
+                "simple transform plan must not handle missingness with fill_value; "
+                f"leave missingness to SQL cleaning: {fill_columns}"
+            )
         return self
 
     def to_spec(self) -> SimpleDataTransformationSpec | None:
@@ -209,15 +202,6 @@ def cleaning(
         dataset_profiling_tool=datasetProfilingTool,
         dataframe=scoped_df,
     )
-    missingness_plan = _plan_missingness_resolution(
-        llm=llm,
-        scoped_df=scoped_df,
-        scoped_summary=scoped_summary,
-        draft_causal_spec=draft_causal_spec,
-        protocol_discussion=protocol_discussion,
-        cleaning_instructions=cleaning_instructions,
-        review_recompile_request=review_recompile_request,
-    )
 
     simple_transform_draft = _plan_simple_transformations(
         llm=llm,
@@ -226,7 +210,6 @@ def cleaning(
         protocol_discussion=protocol_discussion,
         cleaning_instructions=cleaning_instructions,
         review_recompile_request=review_recompile_request,
-        missingness_plan=missingness_plan,
     )
     simple_transform_spec = simple_transform_draft.to_spec()
     transformed_df = scoped_df.copy()
@@ -245,8 +228,8 @@ def cleaning(
         cleaning_instructions=cleaning_instructions,
         review_recompile_request=review_recompile_request,
         draft_scope_columns=input_scope_columns,
-        missingness_plan=missingness_plan,
         current_df=transformed_df,
+        draft_causal_spec=draft_causal_spec,
         simple_transform_draft=simple_transform_draft,
     )
     cleaned_candidate_df = transformed_df.copy()
@@ -278,7 +261,6 @@ def cleaning(
         draft_causal_spec=draft_causal_spec,
         scoped_df=scoped_df,
         cleaned_df=cleaned_df,
-        missingness_plan=missingness_plan,
     )
     cleaned_summary = _profile_dataset(
         dataset_profiling_tool=datasetProfilingTool,
@@ -379,20 +361,18 @@ def _build_manipulation_instructions(
     cleaning_instructions: str,
     review_recompile_request: str | None,
     draft_scope_columns: Sequence[str],
-    missingness_plan: Sequence[_MissingnessDecisionDraft],
     current_df: pd.DataFrame,
+    draft_causal_spec: CausalSpecDraft,
     simple_transform_draft: _SimpleTransformPlanDraft,
 ) -> str:
     normalized_cleaning_instructions = _normalize_text(cleaning_instructions)
     normalized_protocol_discussion = _normalize_text(protocol_discussion)
     normalized_review_recompile_request = _normalize_text(review_recompile_request)
-    missingness_actions = [
-        draft
-        for draft in missingness_plan
-        if draft.resolution != "none_needed"
-        and draft.column in current_df.columns
-        and int(current_df[draft.column].isna().sum()) > 0
-    ]
+    role_by_column = _expected_role_by_column(draft_causal_spec)
+    missing_counts = _missing_counts_by_column(current_df, role_by_column)
+    missingness_actions = {
+        column: count for column, count in missing_counts.items() if count > 0
+    }
     if (
         not normalized_cleaning_instructions
         and not normalized_protocol_discussion
@@ -430,11 +410,15 @@ def _build_manipulation_instructions(
     if missingness_actions:
         if parts:
             parts.append("")
-        parts.append("Resolve remaining protocol-scope missingness exactly as follows:")
-        for draft in missingness_actions:
+        parts.append(
+            "Resolve all remaining protocol-scope missingness in SQL. Use row filtering, "
+            "grounded scalar imputation, or other SQL cleaning that is justified by the "
+            "protocol and cleaning instructions."
+        )
+        for column, count in missingness_actions.items():
             parts.append(
-                f"- Column '{draft.column}' ({draft.role}): {draft.resolution}. "
-                f"Reason: {draft.reason} Instruction: {draft.instruction}"
+                f"- Column '{column}' ({role_by_column[column]}): "
+                f"{count} missing value(s) remain."
             )
 
     if parts:
@@ -450,7 +434,8 @@ def _build_manipulation_instructions(
         parts.extend(
             [
                 "",
-                "Use SQL only for residual complex cleaning and row filtering.",
+                "Use SQL for residual complex cleaning, missingness handling, row filtering, "
+                "complex recoding, and complex imputation.",
                 "Do not perform final drop-column work; runtime will narrow to protocol-scope columns.",
                 "Keep these draft columns available in the cleaned dataframe:",
                 ", ".join(draft_scope_columns),
@@ -467,18 +452,11 @@ def _plan_simple_transformations(
     protocol_discussion: str | None,
     cleaning_instructions: str,
     review_recompile_request: str | None,
-    missingness_plan: Sequence[_MissingnessDecisionDraft],
 ) -> _SimpleTransformPlanDraft:
-    missingness_actions = [
-        draft.model_dump(mode="json")
-        for draft in missingness_plan
-        if draft.resolution != "none_needed"
-    ]
     if (
         not _normalize_text(protocol_discussion)
         and not _normalize_text(cleaning_instructions)
         and not _normalize_text(review_recompile_request)
-        and not missingness_actions
     ):
         return _SimpleTransformPlanDraft()
 
@@ -487,7 +465,6 @@ def _plan_simple_transformations(
         "confirmed_protocol_cleaning_instructions": _normalize_text(cleaning_instructions),
         "scoped_dataset_summary": _dataset_summary_prompt_payload(scoped_summary),
         "expected_role_by_column": _expected_role_by_column(draft_causal_spec),
-        "missingness_plan": missingness_actions,
     }
     normalized_review_recompile_request = _normalize_text(review_recompile_request)
     if normalized_review_recompile_request:
@@ -539,124 +516,26 @@ def _summarize_simple_transform_draft(draft: _SimpleTransformPlanDraft) -> str:
     )
 
 
-def _plan_missingness_resolution(
-    *,
-    llm: LLMService,
-    scoped_df: pd.DataFrame,
-    scoped_summary: DatasetSummaryModel,
-    draft_causal_spec: CausalSpecDraft,
-    protocol_discussion: str | None,
-    cleaning_instructions: str,
-    review_recompile_request: str | None,
-) -> list[_MissingnessDecisionDraft]:
-    role_by_column = _expected_role_by_column(draft_causal_spec)
-    missing_counts_before = _missing_counts_by_column(scoped_df, role_by_column)
-    if not any(count > 0 for count in missing_counts_before.values()):
-        return [
-            _MissingnessDecisionDraft(
-                column=column,
-                role=role,
-                resolution="none_needed",
-                reason="No missing values were detected in the scoped input column.",
-                instruction="No missingness action is required for this column.",
-            )
-            for column, role in role_by_column.items()
-        ]
-
-    payload: dict[str, Any] = {
-        "confirmed_protocol_discussion": _normalize_text(protocol_discussion),
-        "confirmed_protocol_cleaning_instructions": _normalize_text(cleaning_instructions),
-        "scoped_dataset_summary": _dataset_summary_prompt_payload(scoped_summary),
-        "expected_role_by_column": role_by_column,
-        "missing_count_by_column": missing_counts_before,
-    }
-    normalized_review_recompile_request = _normalize_text(review_recompile_request)
-    if normalized_review_recompile_request:
-        payload["review_recompile_request"] = normalized_review_recompile_request
-
-    draft = llm.generate_json(
-        schema=_MissingnessPlanDraft,
-        system_prompt=data_compilation_cleaning_instructions_prompt(),
-        user_prompt=json.dumps(payload, ensure_ascii=False),
-        config=LLMConfig(model="basic", temperature=0.6),
-        history=None,
-        max_attempts=2,
-    )
-    indexed = _validate_and_index_missingness_plan(
-        decisions=draft.decisions,
-        expected_role_by_column=role_by_column,
-        missing_count_by_column=missing_counts_before,
-    )
-    return [indexed[column] for column in role_by_column]
-
-
-def _validate_and_index_missingness_plan(
-    *,
-    decisions: Sequence[_MissingnessDecisionDraft],
-    expected_role_by_column: dict[str, ColumnRole],
-    missing_count_by_column: dict[str, int],
-) -> dict[str, _MissingnessDecisionDraft]:
-    indexed: dict[str, _MissingnessDecisionDraft] = {}
-    duplicates: list[str] = []
-
-    for decision in decisions:
-        column = str(decision.column).strip()
-        expected_role = expected_role_by_column.get(column)
-        if expected_role is None:
-            raise ValueError(f"missingness plan contains non-eligible column: {column}")
-        if decision.role != expected_role:
-            raise ValueError(
-                f"missingness plan assigned wrong role for column '{column}': "
-                f"expected {expected_role}, got {decision.role}"
-            )
-        if column in indexed:
-            duplicates.append(column)
-            continue
-        actual_missing_count = missing_count_by_column.get(column, 0)
-        if actual_missing_count == 0 and decision.resolution != "none_needed":
-            raise ValueError(
-                f"missingness plan must use resolution='none_needed' for complete column '{column}'"
-            )
-        if actual_missing_count > 0 and decision.resolution == "none_needed":
-            raise ValueError(
-                f"missingness plan must resolve missingness for column '{column}'"
-            )
-        indexed[column] = decision
-
-    if duplicates:
-        raise ValueError(
-            f"missingness plan contains duplicate column entries: {sorted(duplicates)}"
-        )
-
-    missing_columns = sorted(set(expected_role_by_column) - set(indexed))
-    if missing_columns:
-        raise ValueError(f"missingness plan is missing scoped columns: {missing_columns}")
-
-    return indexed
-
-
 def _finalize_missingness_decisions(
     *,
     draft_causal_spec: CausalSpecDraft,
     scoped_df: pd.DataFrame,
     cleaned_df: pd.DataFrame,
-    missingness_plan: Sequence[_MissingnessDecisionDraft],
 ) -> MissingnessDecisionList:
     role_by_column = _expected_role_by_column(draft_causal_spec)
     before_counts = _missing_counts_by_column(scoped_df, role_by_column)
     after_counts = _missing_counts_by_column(cleaned_df, role_by_column)
     decisions = MissingnessDecisionList(
         decisions=[
-            MissingnessDecision(
-                column=str(draft.column).strip(),
-                role=draft.role,
-                missing_count_before=before_counts.get(str(draft.column).strip(), 0),
-                resolution=draft.resolution,
-                reason=str(draft.reason).strip(),
-                instruction=str(draft.instruction).strip(),
-                missing_count_after=after_counts.get(str(draft.column).strip(), 0),
+            _build_missingness_decision(
+                column=column,
+                role=role,
+                before_count=before_counts.get(column, 0),
+                after_count=after_counts.get(column, 0),
+                rows_before=len(scoped_df),
+                rows_after=len(cleaned_df),
             )
-            for draft in missingness_plan
+            for column, role in role_by_column.items()
         ]
     )
     unresolved = [
@@ -673,6 +552,40 @@ def _finalize_missingness_decisions(
             f"{formatted}"
         )
     return decisions
+
+
+def _build_missingness_decision(
+    *,
+    column: str,
+    role: ColumnRole,
+    before_count: int,
+    after_count: int,
+    rows_before: int,
+    rows_after: int,
+) -> MissingnessDecision:
+    if before_count == 0:
+        return MissingnessDecision(
+            column=column,
+            role=role,
+            missing_count_before=before_count,
+            resolution="none_needed",
+            reason="No missing values were detected before cleaning.",
+            instruction="No missingness action was required.",
+            missing_count_after=after_count,
+        )
+
+    used_row_filtering = rows_after < rows_before
+    resolution: MissingnessResolution = "drop_rows" if used_row_filtering else "impute"
+    action = "row filtering" if used_row_filtering else "cleaning or imputation"
+    return MissingnessDecision(
+        column=column,
+        role=role,
+        missing_count_before=before_count,
+        resolution=resolution,
+        reason=f"Missing values were resolved during SQL {action}.",
+        instruction="Handled by the SQL cleaning step from the protocol cleaning context.",
+        missing_count_after=after_count,
+    )
 
 
 def _expected_role_by_column(
