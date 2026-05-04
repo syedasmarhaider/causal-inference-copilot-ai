@@ -501,6 +501,7 @@ class _BaseDRLearnerAdapter(CausalModel):
     ESTIMATOR_CLS: ClassVar[Any]
     BACKEND_NAME: ClassVar[str]
     INFO: ClassVar[str]
+    DROP_FIRST_EFFECT_MODIFIER_ONEHOT: ClassVar[bool] = False
 
     def get_info(self) -> str:
         return self.INFO
@@ -581,6 +582,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 effect_modifiers_order=effect_modifiers_order,
                 covariates_order=covariates_order,
                 dense_output=True,
+                drop_first_effect_modifier_onehot=self.DROP_FIRST_EFFECT_MODIFIER_ONEHOT,
             )
 
             pre_x = plan.pre_X
@@ -1074,6 +1076,7 @@ class LinearDRLearnerCausalModel(_BaseDRLearnerAdapter):
     ESTIMATOR_CLS: ClassVar[Any] = LinearDRLearner
     BACKEND_NAME: ClassVar[str] = "econml.dr.LinearDRLearner"
     INFO: ClassVar[str] = get_linear_dr_learner_causal_model_info()
+    DROP_FIRST_EFFECT_MODIFIER_ONEHOT: ClassVar[bool] = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1088,3 +1091,4 @@ class SparseLinearDRLearnerCausalModel(_BaseDRLearnerAdapter):
     ESTIMATOR_CLS: ClassVar[Any] = SparseLinearDRLearner
     BACKEND_NAME: ClassVar[str] = "econml.dr.SparseLinearDRLearner"
     INFO: ClassVar[str] = get_sparse_linear_dr_learner_causal_model_info()
+    DROP_FIRST_EFFECT_MODIFIER_ONEHOT: ClassVar[bool] = True

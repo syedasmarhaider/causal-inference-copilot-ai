@@ -99,6 +99,7 @@ def _causal_spec(
                 effect_modifiers if effect_modifiers is not None else ["segment_score"]
             ),
             "experiment_type": "OBSERVATIONAL",
+            "id_col": "patient_id",
         }
     )
 
@@ -116,6 +117,7 @@ def _inference_ready_spec(
 ) -> InferenceReadyCausalSpec:
     default_profiles = [
         _categorical_profile("treatment", ["drug", "placebo"]),
+        _numeric_profile("patient_id"),
         _numeric_profile("outcome"),
         _numeric_profile("age"),
         _numeric_profile("income"),
@@ -149,6 +151,7 @@ def _df(
                 "placebo",
                 "drug",
             ],
+            "patient_id": [1, 2, 3, 4, 5, 6, 7, 8],
             "outcome": [1.0, 2.2, 1.3, 2.6, 1.1, 2.9, 1.4, 3.0],
             "age": [32.0, 45.0, 37.0, 51.0, 43.0, 39.0, 58.0, 49.0],
             "income": [
@@ -185,6 +188,7 @@ def _df_with_categorical_effect_modifier() -> pd.DataFrame:
                 "placebo",
                 "drug",
             ],
+            "patient_id": [1, 2, 3, 4, 5, 6, 7, 8],
             "outcome": [1.0, 2.2, 1.3, 2.6, 1.1, 2.9, 1.4, 3.0],
             "age": [32.0, 45.0, 37.0, 51.0, 43.0, 39.0, 58.0, 49.0],
             "segment_label": ["A", "B", "A", "B", "A", "B", "A", "B"],
@@ -237,6 +241,32 @@ class _InMemoryModelsRepo:
         model_id: UUID,
     ) -> None:
         self._records.pop((user_id, conversation_id, model_id), None)
+
+
+class _RecordingEncodingUtil(EncodingUtil):
+    last_drop_first_effect_modifier_onehot: ClassVar[bool | None] = None
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.last_drop_first_effect_modifier_onehot = None
+
+    def compile(
+        self,
+        plan: TransformPlan,
+        *,
+        effect_modifiers_order,
+        covariates_order,
+        dense_output: bool = True,
+        drop_first_effect_modifier_onehot: bool = False,
+    ):
+        type(self).last_drop_first_effect_modifier_onehot = drop_first_effect_modifier_onehot
+        return super().compile(
+            plan,
+            effect_modifiers_order=effect_modifiers_order,
+            covariates_order=covariates_order,
+            dense_output=dense_output,
+            drop_first_effect_modifier_onehot=drop_first_effect_modifier_onehot,
+        )
 
 
 class _RecordingFeaturizedEstimator:
@@ -494,6 +524,7 @@ def test_kernel_dml_fit_uses_allow_missing_without_featurizer() -> None:
         ],
         profiles=[
             _categorical_profile("treatment", ["drug", "placebo"]),
+            _numeric_profile("patient_id"),
             _numeric_profile("outcome"),
             _numeric_profile("age"),
             _numeric_profile("income", n_missing=1),
@@ -517,6 +548,79 @@ def test_kernel_dml_fit_uses_allow_missing_without_featurizer() -> None:
     assert _RecordingKernelEstimator.last_init_kwargs["allow_missing"] is True
 
 
+def test_linear_dml_requests_drop_first_effect_modifier_onehot() -> None:
+    _RecordingFeaturizedEstimator.reset()
+    _RecordingEncodingUtil.reset()
+    repo = _InMemoryModelsRepo()
+    model = _TestLinearDMLModel(models_repo=repo, encoding_util=_RecordingEncodingUtil())
+    spec = _inference_ready_spec(
+        plan_columns=[
+            {
+                "column": "segment_label",
+                "role": "effect_modifier",
+                "encoding": {"preset": "cat_onehot", "handle_unknown": "ignore"},
+            },
+            {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
+        ],
+        covariates=["age"],
+        effect_modifiers=["segment_label"],
+        profiles=[
+            _categorical_profile("treatment", ["drug", "placebo"]),
+            _numeric_profile("patient_id"),
+            _numeric_profile("outcome"),
+            _numeric_profile("age"),
+            _categorical_profile("segment_label", ["A", "B"]),
+        ],
+    )
+
+    result = model.execute(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        command=_fit_command(
+            model_name="linear_dml",
+            df=_df_with_categorical_effect_modifier(),
+            inference_ready_spec=spec,
+        ),
+    )
+
+    assert isinstance(result, FitSuccess)
+    assert _RecordingEncodingUtil.last_drop_first_effect_modifier_onehot is True
+    featurizer = _RecordingFeaturizedEstimator.last_init_kwargs["featurizer"]  # type: ignore[index]
+    transformed = featurizer.fit_transform(np.asarray([["A"], ["B"]], dtype=object))
+    assert transformed.shape == (2, 1)
+
+
+def test_kernel_dml_does_not_request_drop_first_effect_modifier_onehot() -> None:
+    _RecordingKernelEstimator.reset()
+    _RecordingEncodingUtil.reset()
+    repo = _InMemoryModelsRepo()
+    model = _TestKernelDMLModel(models_repo=repo, encoding_util=_RecordingEncodingUtil())
+    spec = _inference_ready_spec(
+        plan_columns=[
+            {
+                "column": "segment_score",
+                "role": "effect_modifier",
+                "encoding": {"preset": "num_standard"},
+            },
+            {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
+        ],
+        covariates=["age"],
+    )
+
+    result = model.execute(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        command=_fit_command(
+            model_name="kernel_dml",
+            df=_df(),
+            inference_ready_spec=spec,
+        ),
+    )
+
+    assert isinstance(result, FitSuccess)
+    assert _RecordingEncodingUtil.last_drop_first_effect_modifier_onehot is False
+
+
 def test_kernel_dml_rejects_non_numeric_x() -> None:
     _RecordingKernelEstimator.reset()
     repo = _InMemoryModelsRepo()
@@ -538,6 +642,7 @@ def test_kernel_dml_rejects_non_numeric_x() -> None:
         ),
         data_summary=_summary_model(
             _categorical_profile("treatment", ["drug", "placebo"]),
+            _numeric_profile("patient_id"),
             _numeric_profile("outcome"),
             _numeric_profile("age"),
             _categorical_profile("segment_label", ["A", "B"]),
@@ -575,6 +680,7 @@ def test_linear_dml_fit_rejects_unhandled_missing_effect_modifiers() -> None:
         ],
         profiles=[
             _categorical_profile("treatment", ["drug", "placebo"]),
+            _numeric_profile("patient_id"),
             _numeric_profile("outcome"),
             _numeric_profile("age"),
             _numeric_profile("income"),

@@ -25,6 +25,8 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
     FitSuccess,
 )
 from python.implementation.workflows.tools.causal.inference.econml.dr.dr_learner import (
+    ForestDRLearnerCausalModel,
+    LinearDRLearnerCausalModel,
     _BaseDRLearnerAdapter,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
@@ -87,6 +89,7 @@ def _causal_spec(
                 effect_modifiers if effect_modifiers is not None else ["segment_score"]
             ),
             "experiment_type": "OBSERVATIONAL",
+            "id_col": "patient_id",
         }
     )
 
@@ -113,10 +116,12 @@ def _inference_ready_spec(
         transformation_plan=_transform_plan(columns=plan_columns),
         data_summary=_summary_model(
             _categorical_profile("treatment", ["drug", "placebo"]),
+            _numeric_profile("patient_id"),
             _numeric_profile("outcome"),
             _numeric_profile("age", n_missing=age_missing),
             _numeric_profile("income", n_missing=income_missing),
             _numeric_profile("segment_score", n_missing=segment_missing),
+            _categorical_profile("segment_label", ["A", "B"]),
             _numeric_profile("risk_score", n_missing=risk_missing),
         ),
     )
@@ -139,6 +144,7 @@ def _df(
                 "placebo",
                 "drug",
             ],
+            "patient_id": [1, 2, 3, 4, 5, 6, 7, 8],
             "outcome": [1.0, 2.2, 1.3, 2.6, 1.1, 2.9, 1.4, 3.0],
             "age": [32.0, 45.0, 37.0, 51.0, 43.0, 39.0, 58.0, 49.0],
             "income": [
@@ -207,6 +213,32 @@ class _InMemoryModelsRepo:
         model_id: UUID,
     ) -> None:
         self._records.pop((user_id, conversation_id, model_id), None)
+
+
+class _RecordingEncodingUtil(EncodingUtil):
+    last_drop_first_effect_modifier_onehot: ClassVar[bool | None] = None
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.last_drop_first_effect_modifier_onehot = None
+
+    def compile(
+        self,
+        plan: TransformPlan,
+        *,
+        effect_modifiers_order,
+        covariates_order,
+        dense_output: bool = True,
+        drop_first_effect_modifier_onehot: bool = False,
+    ):
+        type(self).last_drop_first_effect_modifier_onehot = drop_first_effect_modifier_onehot
+        return super().compile(
+            plan,
+            effect_modifiers_order=effect_modifiers_order,
+            covariates_order=covariates_order,
+            dense_output=dense_output,
+            drop_first_effect_modifier_onehot=drop_first_effect_modifier_onehot,
+        )
 
 
 class _RecordingEstimator:
@@ -290,6 +322,18 @@ class _TestDRModel(_BaseDRLearnerAdapter):
     INFO: ClassVar[str] = "test"
 
 
+@dataclass(frozen=True, slots=True)
+class _TestLinearDRModel(LinearDRLearnerCausalModel):
+    ESTIMATOR_CLS: ClassVar[Any] = _RecordingEstimator
+    INFO: ClassVar[str] = "test"
+
+
+@dataclass(frozen=True, slots=True)
+class _TestForestDRModel(ForestDRLearnerCausalModel):
+    ESTIMATOR_CLS: ClassVar[Any] = _RecordingEstimator
+    INFO: ClassVar[str] = "test"
+
+
 def _fit_command(*, df: pd.DataFrame, inference_ready_spec: InferenceReadyCausalSpec) -> FitCommand:
     return FitCommand(
         model_name="linear_dr",
@@ -353,6 +397,67 @@ def test_fit_sets_allow_missing_for_unhandled_covariate_missingness() -> None:
     assert isinstance(result, FitSuccess)
     assert _RecordingEstimator.last_init_kwargs is not None
     assert _RecordingEstimator.last_init_kwargs["allow_missing"] is True
+
+
+def test_linear_dr_requests_drop_first_effect_modifier_onehot() -> None:
+    _RecordingEstimator.reset()
+    _RecordingEncodingUtil.reset()
+    repo = _InMemoryModelsRepo()
+    model = _TestLinearDRModel(models_repo=repo, encoding_util=_RecordingEncodingUtil())
+    spec = _inference_ready_spec(
+        effect_modifiers=["segment_label"],
+        covariates=["age"],
+        plan_columns=[
+            {
+                "column": "segment_label",
+                "role": "effect_modifier",
+                "encoding": {"preset": "cat_onehot", "handle_unknown": "ignore"},
+            },
+            {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
+        ],
+    )
+    df = _df()
+    df["segment_label"] = ["A", "B", "A", "B", "A", "B", "A", "B"]
+
+    result = model.execute(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        command=_fit_command(df=df, inference_ready_spec=spec),
+    )
+
+    assert isinstance(result, FitSuccess)
+    assert _RecordingEncodingUtil.last_drop_first_effect_modifier_onehot is True
+    assert _RecordingEstimator.last_init_kwargs is not None
+    featurizer = _RecordingEstimator.last_init_kwargs["featurizer"]
+    transformed = featurizer.fit_transform(np.asarray([["A"], ["B"]], dtype=object))
+    assert transformed.shape == (2, 1)
+
+
+def test_forest_dr_does_not_request_drop_first_effect_modifier_onehot() -> None:
+    _RecordingEstimator.reset()
+    _RecordingEncodingUtil.reset()
+    repo = _InMemoryModelsRepo()
+    model = _TestForestDRModel(models_repo=repo, encoding_util=_RecordingEncodingUtil())
+    spec = _inference_ready_spec(
+        plan_columns=[
+            {
+                "column": "segment_score",
+                "role": "effect_modifier",
+                "encoding": {"preset": "num_standard"},
+            },
+            {"column": "income", "role": "covariate", "encoding": {"preset": "num_standard"}},
+            {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
+        ]
+    )
+
+    result = model.execute(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        command=_fit_command(df=_df(), inference_ready_spec=spec),
+    )
+
+    assert isinstance(result, FitSuccess)
+    assert _RecordingEncodingUtil.last_drop_first_effect_modifier_onehot is False
 
 
 def test_fit_rejects_unhandled_missing_effect_modifiers_for_dr() -> None:

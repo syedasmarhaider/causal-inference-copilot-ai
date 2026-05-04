@@ -13,6 +13,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
+    CatOneHotParams,
     EncodingPresetSpec,
     TransformPlan,
 )
@@ -28,6 +29,7 @@ class EncodingUtil:
         effect_modifiers_order: Sequence[str],
         covariates_order: Sequence[str],
         dense_output: bool = True,
+        drop_first_effect_modifier_onehot: bool = False,
     ) -> CompiledTransformers:
         return compile_plan_to_transformers(
             plan=plan,
@@ -35,6 +37,7 @@ class EncodingUtil:
             covariates=covariates_order,
             dense_output=dense_output,
             require_full_coverage=True,
+            drop_first_effect_modifier_onehot=drop_first_effect_modifier_onehot,
         )
 
 
@@ -468,6 +471,7 @@ def compile_plan_to_transformers(
     covariates: Sequence[str],
     dense_output: bool = True,
     require_full_coverage: bool = True,
+    drop_first_effect_modifier_onehot: bool = False,
 ) -> CompiledTransformers:
     """
     Requires effect_modifiers and covariates (non-empty). No inference. No None.
@@ -514,7 +518,13 @@ def compile_plan_to_transformers(
                 f"{extra_plans}"
             )
 
-    def _compile(enc: EncodingPresetSpec) -> CTTransformer:
+    def _compile(
+        enc: EncodingPresetSpec,
+        *,
+        force_drop_first_onehot: bool = False,
+    ) -> CTTransformer:
+        if force_drop_first_onehot and isinstance(enc, CatOneHotParams):
+            enc = enc.model_copy(update={"drop_first": True})
         preset = enc.preset
 
         if preset == "drop":
@@ -632,7 +642,16 @@ def compile_plan_to_transformers(
                 f"Column {col!r} is in effect_modifiers order but plan role is "
                 f"{cp.role!r} (expected 'effect_modifier')."
             )
-        x_trs.append((col, _compile(cp.encoding), [x_index[col]]))
+        x_trs.append(
+            (
+                col,
+                _compile(
+                    cp.encoding,
+                    force_drop_first_onehot=drop_first_effect_modifier_onehot,
+                ),
+                [x_index[col]],
+            )
+        )
 
     # pre_XW: effect_modifier then covariate, in (effect_modifiers + covariates)
     for col in xw_cols:

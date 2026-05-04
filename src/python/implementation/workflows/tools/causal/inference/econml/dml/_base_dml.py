@@ -145,6 +145,7 @@ class _BaseDMLAdapter(CausalModel):
     FIT_INCLUDE_NAMES: ClassVar[set[str]]
     USE_PRE_X_AS_FEATURIZER: ClassVar[bool] = True
     REQUIRE_NUMERIC_X: ClassVar[bool] = False
+    DROP_FIRST_EFFECT_MODIFIER_ONEHOT: ClassVar[bool] = False
 
     def get_info(self) -> str:
         return self.INFO
@@ -217,6 +218,7 @@ class _BaseDMLAdapter(CausalModel):
                 effect_modifiers_order=ctx.effect_modifiers_order,
                 covariates_order=ctx.covariates_order,
                 dense_output=True,
+                drop_first_effect_modifier_onehot=self.DROP_FIRST_EFFECT_MODIFIER_ONEHOT,
             )
 
             pre_x = plan.pre_X
