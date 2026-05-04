@@ -393,6 +393,7 @@ def test_get_conversation_returns_snapshot(
             ChatMessage(
                 role="assistant",
                 content="Snapshot message",
+                created_at_utc=1712345678.123,
                 artifact_refs=[
                     {
                         "id": artifact_id,
@@ -418,6 +419,7 @@ def test_get_conversation_returns_snapshot(
             {
                 "role": "assistant",
                 "content": "Snapshot message",
+                "created_at_utc": 1712345678.123,
                 "id": None,
                 "artifact_refs": [
                     {
@@ -458,6 +460,7 @@ def test_create_conversation_message_returns_workflow_result(
             ChatMessage(
                 role="assistant",
                 content="I summarized the dataset.",
+                created_at_utc=1712345678.456,
                 artifact_refs=[
                     {
                         "id": artifact_id,
@@ -488,6 +491,7 @@ def test_create_conversation_message_returns_workflow_result(
             {
                 "role": "assistant",
                 "content": "I summarized the dataset.",
+                "created_at_utc": 1712345678.456,
                 "id": None,
                 "artifact_refs": [
                     {
@@ -548,7 +552,13 @@ def test_create_state_reversion_returns_updated_snapshot(
     conversation_id = uuid4()
     dataset_id = uuid4()
     workflow.revert_result = SimpleNamespace(
-        messages=(ChatMessage(role="system", content="Reverted to MODEL_SELECTION"),),
+        messages=(
+            ChatMessage(
+                role="system",
+                content="Reverted to MODEL_SELECTION",
+                created_at_utc=1712345678.789,
+            ),
+        ),
         states=["DATASET", "MODEL_SELECTION"],
         current_data_id=dataset_id,
         is_dataset_frozen=False,
@@ -567,6 +577,7 @@ def test_create_state_reversion_returns_updated_snapshot(
             {
                 "role": "system",
                 "content": "Reverted to MODEL_SELECTION",
+                "created_at_utc": 1712345678.789,
                 "id": None,
                 "artifact_refs": None,
             }

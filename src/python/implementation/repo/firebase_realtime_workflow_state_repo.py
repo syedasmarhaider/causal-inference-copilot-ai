@@ -44,7 +44,8 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
         /workflows/{user_id}/{conversation_id}/ochestrator_state: json-string
         /workflows/{user_id}/{conversation_id}/states/{state_name}: json-string
-        /workflows/{user_id}/{conversation_id}/messages/{push_id}: ChatMessage dict
+        /workflows/{user_id}/{conversation_id}/messages/{push_id}: ChatMessage dict,
+            including created_at_utc as a UTC Unix timestamp in seconds
     """
 
     _WORKFLOWS_ROOT = "/workflows"
@@ -563,7 +564,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         for key in sorted(data.keys()):
             item = data[key]
             if isinstance(item, dict):
-                messages.append(self._chat_message_from_dict(item))
+                messages.append(self._chat_message_from_dict(item, message_key=key))
 
         return messages
 
@@ -630,6 +631,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         payload: dict[str, Any] = {
             "role": message.role,
             "message": message.content,
+            "created_at_utc": float(message.created_at_utc),
         }
 
         artifact_refs = self._serialize_artifact_refs(
@@ -649,7 +651,12 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
         return payload
 
-    def _chat_message_from_dict(self, payload: dict[str, Any]) -> ChatMessage:
+    def _chat_message_from_dict(
+        self,
+        payload: dict[str, Any],
+        *,
+        message_key: str | None = None,
+    ) -> ChatMessage:
         role = payload.get("role")
         content = payload.get("message", payload.get("content"))
         artifact_refs = self._normalize_artifact_refs(
@@ -657,19 +664,26 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         )
         artifacts = self._normalize_artifacts(payload.get("artifacts"))
         message_id = payload.get("id")
+        created_at_utc = self._coerce_float(payload.get("created_at_utc"))
+        if created_at_utc is None:
+            created_at_utc = self._created_at_utc_from_message_key(message_key)
 
         if not isinstance(role, str) or not isinstance(content, str):
             raise ValueError(
                 "Invalid chat message payload: role/message must be strings"
             )
 
-        return ChatMessage(
-            role=role,  # type: ignore[arg-type]
-            content=content,
-            artifact_refs=artifact_refs,
-            artifacts=artifacts,
-            id=message_id if isinstance(message_id, str) else None,
-        )
+        kwargs: dict[str, Any] = {
+            "role": role,
+            "content": content,
+            "artifact_refs": artifact_refs,
+            "artifacts": artifacts,
+            "id": message_id if isinstance(message_id, str) else None,
+        }
+        if created_at_utc is not None:
+            kwargs["created_at_utc"] = created_at_utc
+
+        return ChatMessage(**kwargs)
 
     # ------------------------------------------------------------------
     # Internal — artifact helpers
@@ -826,6 +840,17 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _created_at_utc_from_message_key(message_key: str | None) -> float | None:
+        if not isinstance(message_key, str):
+            return None
+
+        timestamp_part = message_key.split("_", 1)[0]
+        if len(timestamp_part) != 16 or not timestamp_part.isdigit():
+            return None
+
+        return int(timestamp_part) / 1000.0
 
     @staticmethod
     def _push_id() -> str:

@@ -889,33 +889,78 @@ def test_delete_state_validates_name(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_append_and_load_messages(monkeypatch: pytest.MonkeyPatch) -> None:
-    repo, _ = _make_repo(monkeypatch)
+    repo, fake_db = _make_repo(monkeypatch)
     user_id, conversation_id = _ids()
 
     repo.append_messages(
         user_id=user_id,
         conversation_id=conversation_id,
         messages=[
-            ChatMessage(role="system", content="s1"),
-            ChatMessage(role="user", content="u2"),
-            ChatMessage(role="assistant", content="a3"),
+            ChatMessage(role="system", content="s1", created_at_utc=1712345678.1),
+            ChatMessage(role="user", content="u2", created_at_utc=1712345678.2),
+            ChatMessage(role="assistant", content="a3", created_at_utc=1712345678.3),
         ],
     )
     repo.append_message(
         user_id=user_id,
         conversation_id=conversation_id,
-        message=ChatMessage(role="user", content="u4"),
+        message=ChatMessage(role="user", content="u4", created_at_utc=1712345678.4),
     )
 
     history = repo.load_message_history(
         user_id=user_id, conversation_id=conversation_id, limit=2
     )
     assert [msg.content for msg in history] == ["a3", "u4"]
+    assert [msg.created_at_utc for msg in history] == [1712345678.3, 1712345678.4]
 
     all_history = repo.load_message_history(
         user_id=user_id, conversation_id=conversation_id, limit=100
     )
     assert [msg.content for msg in all_history] == ["s1", "u2", "a3", "u4"]
+    assert [msg.created_at_utc for msg in all_history] == [
+        1712345678.1,
+        1712345678.2,
+        1712345678.3,
+        1712345678.4,
+    ]
+
+    stored_messages = _get_value(
+        fake_db.tree,
+        ("workflows", str(user_id), str(conversation_id), "messages"),
+    )
+    assert isinstance(stored_messages, dict)
+    assert [
+        item["created_at_utc"] for _, item in sorted(stored_messages.items())
+    ] == [
+        1712345678.1,
+        1712345678.2,
+        1712345678.3,
+        1712345678.4,
+    ]
+
+
+def test_load_message_history_derives_legacy_timestamp_from_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fake_db = _make_repo(monkeypatch)
+    user_id, conversation_id = _ids()
+
+    fake_db.reference(f"/workflows/{user_id}/{conversation_id}/messages").set(
+        {
+            "0001712345678123_00000000000000000001_abc": {
+                "role": "assistant",
+                "message": "legacy",
+            }
+        }
+    )
+
+    history = repo.load_message_history(
+        user_id=user_id, conversation_id=conversation_id, limit=10
+    )
+
+    assert len(history) == 1
+    assert history[0].content == "legacy"
+    assert history[0].created_at_utc == 1712345678.123
 
 
 def test_load_message_history_limit_zero_returns_empty(

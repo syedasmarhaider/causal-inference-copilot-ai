@@ -41,6 +41,9 @@ class ChatMessageResponse(BaseModel):
 
     role: MessageRole = Field(description="Message role.")
     content: str = Field(description="Message content.")
+    created_at_utc: float = Field(
+        description="Message creation time as a UTC Unix timestamp in seconds."
+    )
     id: str | None = Field(default=None, description="Optional message identifier.")
     artifact_refs: Sequence[ArtifactRefResponse] | None = Field(
         default=None,
@@ -242,6 +245,7 @@ class ConversationSnapshotResponse(BaseModel):
                     {
                         "role": "assistant",
                         "content": "I loaded your dataset and summarized the main columns.",
+                        "created_at_utc": 1712345678.123,
                         "artifact_refs": None,
                     }
                 ],
@@ -279,6 +283,7 @@ class ConversationExecutionResponse(BaseModel):
                     {
                         "role": "assistant",
                         "content": "I summarized the dataset.",
+                        "created_at_utc": 1712345678.123,
                         "artifact_refs": [
                             {
                                 "id": "44444444-4444-4444-4444-444444444444",

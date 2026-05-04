@@ -544,6 +544,7 @@ def _to_chat_message_response(message: ChatMessage) -> ChatMessageResponse:
     return ChatMessageResponse(
         role=message.role,
         content=message.content,
+        created_at_utc=message.created_at_utc,
         id=message.id,
         artifact_refs=[
             _to_artifact_ref_response(ref) for ref in (message.artifact_refs or ())
