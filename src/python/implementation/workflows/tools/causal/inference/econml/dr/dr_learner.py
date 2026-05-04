@@ -24,7 +24,7 @@ from sklearn.ensemble import (
     RandomForestClassifier,
     RandomForestRegressor,
 )
-from sklearn.linear_model import LogisticRegressionCV, RidgeCV
+from sklearn.linear_model import LogisticRegression, RidgeCV
 from sklearn.pipeline import Pipeline
 
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
@@ -288,6 +288,22 @@ def _wrap_xw_plus_t_model(
     return Pipeline(steps)
 
 
+def _stable_logistic_classifier(
+    *,
+    random_state: int | None,
+    n_jobs: int | None,
+) -> LogisticRegression:
+    return LogisticRegression(
+        penalty="l2",
+        solver="saga",
+        max_iter=5000,
+        C=0.1,
+        class_weight="balanced",
+        n_jobs=n_jobs if n_jobs is not None else -1,
+        random_state=random_state,
+    )
+
+
 # =============================================================================
 # Default nuisance candidates
 # =============================================================================
@@ -314,12 +330,7 @@ def _build_propensity_candidates(
         )
         return [_wrap_xw_model(pre_XW=pre_XW, model=hgb, require_dense=True)]
 
-    lr = LogisticRegressionCV(
-        max_iter=2000,
-        solver="lbfgs",
-        n_jobs=n_jobs,
-        random_state=random_state,
-    )
+    lr = _stable_logistic_classifier(random_state=random_state, n_jobs=n_jobs)
     et = ExtraTreesClassifier(
         n_estimators=400,
         min_samples_leaf=5,
@@ -395,12 +406,7 @@ def _build_regression_candidates(
         ]
 
     if discrete_outcome:
-        lr = LogisticRegressionCV(
-            max_iter=2000,
-            solver="lbfgs",
-            n_jobs=n_jobs,
-            random_state=random_state,
-        )
+        lr = _stable_logistic_classifier(random_state=random_state, n_jobs=n_jobs)
         et = ExtraTreesClassifier(
             n_estimators=400,
             min_samples_leaf=5,
