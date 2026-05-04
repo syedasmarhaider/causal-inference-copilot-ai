@@ -626,10 +626,15 @@ class ProtocolDiscussionNode(Node):
             dataset_changed=dataset_changed,
             prior_dataset_id=prior_dataset_id,
         )
+        decision_discussion = _discussion_with_confirmed_unknown_category_decision(
+            protocol_discussion=decision.discussion,
+            previous_assistant_message=payload.assistant_message,
+            latest_user_message=latest_user_message,
+        )
 
         if decision.next_action == "confirm":
             preview_draft = self._compile_preview_causal_spec_draft(
-                protocol_discussion=decision.discussion,
+                protocol_discussion=decision_discussion,
                 dataset_summary=deps.dataset_summary,
             )
             if preview_draft is not None:
@@ -641,16 +646,20 @@ class ProtocolDiscussionNode(Node):
                     effect_modifiers=[str(column) for column in preview_draft.effect_modifiers],
                 )
                 pending_blockers = unresolved_summary_blockers(
-                    protocol_discussion=decision.discussion,
+                    protocol_discussion=decision_discussion,
                     blockers=blockers,
                 )
                 if pending_blockers:
-                    blocker_message = self._llm_blocker_message(pending_blockers, decision.discussion, deps.dataset_summary)
+                    blocker_message = self._llm_blocker_message(
+                        pending_blockers,
+                        decision_discussion,
+                        deps.dataset_summary,
+                    )
                     return self._needs_input_result(
                         request=request,
                         payload=payload.model_copy(
                             update={
-                                "discussion": decision.discussion,
+                                "discussion": decision_discussion,
                                 "phase": "DISCUSSING",
                                 "pending_dataset_change_request": None,
                                 "assistant_message": self._prefix_dataset_reset_message(
@@ -663,7 +672,7 @@ class ProtocolDiscussionNode(Node):
                     )
             try:
                 review_summary = self._call_review_summary(
-                    protocol_discussion=decision.discussion,
+                    protocol_discussion=decision_discussion,
                     dataset_summary_json=summary_string,
                     identifier_column_candidates=identifier_column_candidates,
                 )
@@ -671,7 +680,7 @@ class ProtocolDiscussionNode(Node):
             except Exception as e:
                 log.exception("PROTOCOL_DISCUSSION review summary failure: %s", safe_err(e))
                 review_message = self._fallback_review_summary(
-                    decision.discussion,
+                    decision_discussion,
                     suggested_identifier_column=(
                         identifier_column_candidates[0]
                         if identifier_column_candidates
@@ -682,7 +691,7 @@ class ProtocolDiscussionNode(Node):
                 request=request,
                 payload=payload.model_copy(
                     update={
-                        "discussion": decision.discussion,
+                        "discussion": decision_discussion,
                         "phase": "REVIEW_READY",
                         "pending_dataset_change_request": cast(
                             str, decision.dataset_change_request
@@ -700,7 +709,7 @@ class ProtocolDiscussionNode(Node):
             request=request,
             payload=payload.model_copy(
                 update={
-                    "discussion": decision.discussion,
+                    "discussion": decision_discussion,
                     "phase": "DISCUSSING",
                     "pending_dataset_change_request": None,
                     "assistant_message": assistant_message,
@@ -767,6 +776,74 @@ def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str 
         if content:
             return content
     return None
+
+
+def _discussion_with_confirmed_unknown_category_decision(
+    *,
+    protocol_discussion: str,
+    previous_assistant_message: str | None,
+    latest_user_message: str,
+) -> str:
+    if not _is_affirmative_confirmation(latest_user_message):
+        return protocol_discussion
+    if not _assistant_asked_unknown_baseline_decision(previous_assistant_message):
+        return protocol_discussion
+
+    answer_text = extract_protocol_answer_text(protocol_discussion, "15)")
+    if answer_text is not None and "unknown" in answer_text.lower() and "unclear" not in answer_text.lower():
+        return protocol_discussion
+
+    decision = (
+        "15) Baseline feature preparation decisions: Keep Unknown and unknown-like "
+        "categories as their own category for all selected covariates and effect modifiers."
+    )
+    stripped = protocol_discussion.rstrip()
+    if not stripped:
+        return decision
+    return f"{stripped}\n{decision}"
+
+
+def _is_affirmative_confirmation(message: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", message.strip().lower()).strip()
+    if not normalized:
+        return False
+    explicit_phrases = (
+        "yes",
+        "yes i confirm",
+        "yes i confirm that",
+        "i confirm",
+        "confirmed",
+        "that is correct",
+        "thats correct",
+        "that s correct",
+        "correct",
+        "approved",
+        "ok",
+        "okay",
+    )
+    return normalized in explicit_phrases or normalized.startswith("yes ")
+
+
+def _assistant_asked_unknown_baseline_decision(message: str | None) -> bool:
+    if not message:
+        return False
+    normalized = message.lower()
+    mentions_unknown = "unknown" in normalized or "unknown-like" in normalized
+    mentions_baseline_scope = any(
+        token in normalized
+        for token in (
+            "baseline",
+            "covariate",
+            "covariates",
+            "effect modifier",
+            "effect modifiers",
+        )
+    )
+    mentions_decision = any(
+        token in normalized
+        for token in ("distinct category", "own category", "kept", "keep", "merged", "handled")
+    )
+    return mentions_unknown and mentions_baseline_scope and mentions_decision
 
 
 

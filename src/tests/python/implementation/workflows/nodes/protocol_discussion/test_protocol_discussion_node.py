@@ -13,6 +13,7 @@ from python.domain.workflows.ochestrator_state import OchestratorState
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import (
     ProtocolDiscussionNode,
     _DiscussionDecisionModel,
+    _discussion_with_confirmed_unknown_category_decision,
     _identifier_column_candidates,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
@@ -240,3 +241,22 @@ def test_fallback_review_summary_includes_identifier_line_from_q16() -> None:
     assert "Identifier handling" in summary
     assert "auto_id" in summary
     assert "Please confirm this protocol" in summary
+
+
+def test_confirmed_unknown_category_blocker_is_written_to_discussion() -> None:
+    discussion = "\n".join(
+        [
+            "1) Causal question: What is the effect of treatment on outcome?",
+            "15) Baseline feature preparation decisions: UNCLEAR",
+        ]
+    )
+    updated = _discussion_with_confirmed_unknown_category_decision(
+        protocol_discussion=discussion,
+        previous_assistant_message=(
+            "I need confirmation for selected effect modifiers with Unknown values. "
+            "Should Unknown be kept as its own category?"
+        ),
+        latest_user_message="yes I confirm that",
+    )
+
+    assert "Keep Unknown and unknown-like categories as their own category" in updated

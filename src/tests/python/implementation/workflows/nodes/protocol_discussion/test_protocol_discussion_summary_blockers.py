@@ -116,6 +116,31 @@ def test_unresolved_summary_blockers_requires_explicit_q14_q15_answers() -> None
     assert ("isex", "unknown_category_present") in unresolved_pairs
 
 
+def test_unresolved_summary_blockers_accepts_global_baseline_unknown_decision() -> None:
+    blockers = scan_protocol_summary_blockers(
+        dataset_summary=_summary_payload(),
+        treatment_column="btransf",
+        outcome_column="istatus",
+        covariates=[],
+        effect_modifiers=["isex"],
+    )
+    discussion = "\n".join(
+        [
+            "8) Outcome specification: Death defined by istatus.",
+            "14) Treatment/outcome data-quality decisions: For istatus, map 1 to Dead and 2/3 to Alive before modeling.",
+            (
+                "15) Baseline feature preparation decisions: Keep Unknown and Other/Unknown "
+                "as their own category for all selected covariates and effect modifiers."
+            ),
+        ]
+    )
+
+    unresolved = unresolved_summary_blockers(protocol_discussion=discussion, blockers=blockers)
+    unresolved_pairs = {(blocker.column, blocker.issue) for blocker in unresolved}
+
+    assert ("isex", "unknown_category_present") not in unresolved_pairs
+
+
 def test_build_summary_blocker_follow_up_message_is_direct_and_actionable() -> None:
     blockers = scan_protocol_summary_blockers(
         dataset_summary=_summary_payload(),

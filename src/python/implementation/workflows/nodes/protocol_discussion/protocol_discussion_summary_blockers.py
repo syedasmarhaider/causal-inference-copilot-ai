@@ -341,7 +341,65 @@ def _answer_resolves_blocker(
             for token in ("binary", "treated", "control", "map", "keep")
         )
 
+    if blocker.issue == "unknown_category_present":
+        return blocker.role in {"covariate", "effect_modifier"} and _baseline_answer_resolves_unknown_category(
+            answer_text
+        )
+
+    if blocker.issue == "coded_categories_need_decision":
+        return blocker.role in {"covariate", "effect_modifier"} and any(
+            token in answer_text
+            for token in (
+                "baseline",
+                "covariate",
+                "covariates",
+                "effect modifier",
+                "effect modifiers",
+            )
+        ) and any(token in answer_text for token in ("coded", "categor", "numeric", "remain numeric"))
+
     return False
+
+
+def _baseline_answer_resolves_unknown_category(answer_text: str) -> bool:
+    baseline_scope = any(
+        token in answer_text
+        for token in (
+            "baseline",
+            "covariate",
+            "covariates",
+            "effect modifier",
+            "effect modifiers",
+        )
+    )
+    if not baseline_scope:
+        return False
+
+    mentions_unknown = any(
+        token in answer_text
+        for token in ("unknown", "other/unknown", "unk", "missing", "not known", "not recorded")
+    )
+    if not mentions_unknown:
+        return False
+
+    return any(
+        token in answer_text
+        for token in (
+            "distinct category",
+            "distinct level",
+            "own category",
+            "own level",
+            "separate category",
+            "separate level",
+            "keep",
+            "kept",
+            "merge",
+            "merged",
+            "imput",
+            "drop",
+            "exclude",
+        )
+    )
 
 
 def _question_number_from_prefix(prefix: str) -> str | None:
