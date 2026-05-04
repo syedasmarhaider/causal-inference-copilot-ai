@@ -432,12 +432,8 @@ def test_model_train_success_stores_training_spec_in_orchestrator_state() -> Non
     ]
 
     training_spec = payload.training_spec
-    assert training_spec["selected_model"] == "econml.dml.CausalForestDML"
-    assert training_spec["fitted_model_id"] == str(fit_result.fitted_model_id)
-    assert training_spec["attempts"] == 1
-    assert training_spec["causal_spec"]["treatment_spec"]["column"] == "treatment"
-    assert training_spec["causal_spec"]["id_col"] == "patient_id"
-    assert training_spec["transformation_plan"]["columns"][0]["column"] == "age"
+    assert sorted(training_spec.keys()) == ["fit"]
+    assert training_spec["fit"]["attempts"] == 1
     assert training_spec["fit"]["backend"] == "fake-backend"
     assert training_spec["fit"]["columns"] == {
         "y": ["outcome"],
@@ -509,7 +505,7 @@ def test_model_train_success_after_retry_records_attempt_count() -> None:
     assert result.status == "DONE"
     assert isinstance(result.new_node_state, ModelTrainState)
     assert result.new_node_state.payload.training_spec is not None
-    assert result.new_node_state.payload.training_spec["attempts"] == 2
+    assert result.new_node_state.payload.training_spec["fit"]["attempts"] == 2
     assert len(fake_model.commands) == 2
 
 

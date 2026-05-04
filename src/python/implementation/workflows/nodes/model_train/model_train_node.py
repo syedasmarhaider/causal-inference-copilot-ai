@@ -423,14 +423,11 @@ def _build_training_spec(
     result: FitSuccess,
     attempts: int,
 ) -> dict[str, Any]:
+    del deps
     meta = result.meta or {}
     return {
-        "selected_model": deps.selected_model,
-        "fitted_model_id": str(result.fitted_model_id),
-        "attempts": int(attempts),
-        "causal_spec": deps.causal_spec.model_dump(mode="json", exclude_none=True),
-        "transformation_plan": deps.transformation_plan.model_dump(mode="json", exclude_none=True),
         "fit": {
+            "attempts": int(attempts),
             "backend": _json_safe_training_value(meta.get("backend")),
             "columns": _json_safe_training_value(meta.get("columns", {})),
             "used_init_kwargs": _json_safe_training_value(meta.get("used_init_kwargs", {})),
