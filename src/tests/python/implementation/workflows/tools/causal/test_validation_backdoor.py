@@ -1209,6 +1209,54 @@ def test_validate_backdoor_reports_real_world_dtype_mismatch_for_numeric_preset(
     assert issue.evidence["preset"] == "num_standard"
 
 
+def test_validate_backdoor_fails_when_passthrough_leaves_yes_no_strings_for_training() -> None:
+    dataframe = _build_dataframe()
+    dataframe["flag"] = ["Yes" if index % 4 in {0, 1} else "No" for index in range(len(dataframe))]
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["flag"], effect_modifiers=[]
+        ),
+        dataframe=dataframe,
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {"column": "flag", "role": "covariate", "encoding": {"preset": "passthrough"}}
+                ]
+            }
+        ),
+    )
+
+    issue = _get_issue(report, "Transform plan produced non-numeric model inputs")
+    assert issue.severity == "FAIL"
+    assert issue.evidence["source_columns"] == ["flag"]
+    assert issue.evidence["invalid_values_sample"][0]["value"] == "Yes"
+
+
+def test_validate_backdoor_accepts_cat_onehot_for_yes_no_strings() -> None:
+    dataframe = _build_dataframe()
+    dataframe["flag"] = ["Yes" if index % 4 in {0, 1} else "No" for index in range(len(dataframe))]
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT", covariates=["flag"], effect_modifiers=[]
+        ),
+        dataframe=dataframe,
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {"column": "flag", "role": "covariate", "encoding": {"preset": "cat_onehot"}}
+                ]
+            }
+        ),
+    )
+
+    assert not any(
+        issue.message.startswith("Transform plan produced non-numeric model inputs")
+        for issue in report.issues
+    )
+
+
 def test_validate_backdoor_converts_internal_step_error_to_fail_issue(monkeypatch) -> None:
     def _boom(*args: object, **kwargs: object) -> list[object]:
         raise RuntimeError("boom")

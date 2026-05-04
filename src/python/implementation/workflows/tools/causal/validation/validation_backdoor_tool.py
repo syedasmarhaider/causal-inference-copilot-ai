@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 
+import numpy as np
 import pandas as pd
 import pandas.api.types as ptypes
 from pydantic import BaseModel, ConfigDict, Field
@@ -882,7 +883,7 @@ def _validate_transform_plan(
         return issues
 
     try:
-        compile_plan_to_transformers(
+        compiled_transformers = compile_plan_to_transformers(
             plan=transform_plan,
             effect_modifiers=effect_modifiers,
             covariates=covariates,
@@ -898,8 +899,153 @@ def _validate_transform_plan(
                 fix_hint="Review and adjust the transform plan so it compiles into sklearn transformers cleanly.",
             )
         )
+        return issues
+
+    issues.extend(
+        _validate_compiled_transformers_against_data(
+            dataframe=dataframe,
+            compiled_transformers=compiled_transformers,
+            effect_modifiers=effect_modifiers,
+            covariates=covariates,
+        )
+    )
 
     return issues
+
+
+def _validate_compiled_transformers_against_data(
+    *,
+    dataframe: pd.DataFrame,
+    compiled_transformers: Any,
+    effect_modifiers: list[str],
+    covariates: list[str],
+) -> list[ValidationIssueModel]:
+    issues: list[ValidationIssueModel] = []
+
+    if effect_modifiers and compiled_transformers.pre_X is not None:
+        issues.extend(
+            _fit_transform_and_validate_numeric(
+                dataframe=dataframe,
+                transformer=compiled_transformers.pre_X,
+                columns=effect_modifiers,
+                label="effect-modifier matrix X",
+            )
+        )
+
+    xw_columns = [*effect_modifiers, *covariates]
+    issues.extend(
+        _fit_transform_and_validate_numeric(
+            dataframe=dataframe,
+            transformer=compiled_transformers.pre_XW,
+            columns=xw_columns,
+            label="adjustment matrix XW",
+        )
+    )
+    return issues
+
+
+def _fit_transform_and_validate_numeric(
+    *,
+    dataframe: pd.DataFrame,
+    transformer: Any,
+    columns: list[str],
+    label: str,
+) -> list[ValidationIssueModel]:
+    if not columns:
+        return []
+
+    raw = dataframe.loc[:, columns].to_numpy(dtype=object)
+    try:
+        transformed = transformer.fit_transform(raw)
+    except Exception as exc:
+        return [
+            _issue(
+                severity="FAIL",
+                message=f"Transform plan failed fitting against compiled data for {label}.",
+                evidence={
+                    "columns": columns,
+                    "error": repr(exc),
+                    "sample_input_rows": _sample_rows(dataframe.loc[:, columns]),
+                },
+                fix_hint=(
+                    "Choose transform presets that can fit the actual compiled values. "
+                    "Use categorical encodings or explicit mappings for text values such as Yes/No."
+                ),
+            )
+        ]
+
+    return _validate_transformed_matrix_numeric(
+        matrix=transformed,
+        label=label,
+        columns=columns,
+        transformer=transformer,
+    )
+
+
+def _validate_transformed_matrix_numeric(
+    *,
+    matrix: Any,
+    label: str,
+    columns: list[str],
+    transformer: Any,
+) -> list[ValidationIssueModel]:
+    arr = matrix.toarray() if hasattr(matrix, "toarray") else np.asarray(matrix)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+
+    frame = pd.DataFrame(arr)
+    numeric = frame.apply(pd.to_numeric, errors="coerce")
+    invalid = frame.notna() & numeric.isna()
+    if not bool(invalid.to_numpy().any()):
+        return []
+
+    feature_names = _safe_feature_names(transformer)
+    invalid_values: list[dict[str, Any]] = []
+    for row_index, col_index in zip(*np.where(invalid.to_numpy()), strict=False):
+        col_pos = int(col_index)
+        invalid_values.append(
+            {
+                "row": int(row_index),
+                "feature": (
+                    feature_names[col_pos]
+                    if feature_names is not None and col_pos < len(feature_names)
+                    else col_pos
+                ),
+                "value": str(frame.iat[int(row_index), col_pos]),
+            }
+        )
+        if len(invalid_values) >= 10:
+            break
+
+    return [
+        _issue(
+            severity="FAIL",
+            message=f"Transform plan produced non-numeric model inputs for {label}.",
+            evidence={
+                "source_columns": columns,
+                "invalid_values_sample": invalid_values,
+            },
+            fix_hint=(
+                "All transformed model inputs must be numeric before training. "
+                "Replace passthrough or numeric presets on text values with cat_onehot, "
+                "map_binary, or map_ordinal as appropriate."
+            ),
+        )
+    ]
+
+
+def _safe_feature_names(transformer: Any) -> list[str] | None:
+    try:
+        return [str(name) for name in transformer.get_feature_names_out()]
+    except Exception:
+        return None
+
+
+def _sample_rows(dataframe: pd.DataFrame, *, limit: int = 5) -> list[dict[str, str]]:
+    return [
+        {str(column): str(value) for column, value in row.items()}
+        for row in dataframe.head(limit).to_dict(orient="records")
+    ]
 
 
 def _validate_encoding_semantics(
