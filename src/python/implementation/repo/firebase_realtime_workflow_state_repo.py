@@ -544,18 +544,20 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         *,
         user_id: UUID,
         conversation_id: UUID,
-        limit: int = 20,
+        limit: int | None = 20,
     ) -> Sequence[ChatMessage]:
-        if limit <= 0:
+        if limit is not None and limit <= 0:
             return []
 
-        data = (
+        query = (
             self._conversation_ref(user_id=user_id, conversation_id=conversation_id)
             .child("messages")
             .order_by_key()
-            .limit_to_last(limit)
-            .get()
         )
+        if limit is not None:
+            query = query.limit_to_last(limit)
+
+        data = query.get()
 
         if not isinstance(data, dict):
             return []

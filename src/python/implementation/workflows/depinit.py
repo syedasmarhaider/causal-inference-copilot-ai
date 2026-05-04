@@ -22,14 +22,16 @@ from python.implementation.service.llms.llm_service_factory import (
     make_llm_service,
 )
 from python.implementation.service.logging.default_logging import get_logger
+from python.implementation.workflows.audit_log_app import AuditLogApp
 from python.implementation.workflows.dataflow_app import DataflowApp
+from python.implementation.workflows.ochestrator.causal_ochestrator_state import (
+    CausalOchestratorState,
+)
 from python.implementation.workflows.ochestrator.data_ochestrator_state import DataOchestratorState
 from python.implementation.workflows.ochestrator.ochestraotor import (
     Ochestrator,
     build_state_classes_by_name,
 )
-
-from python.implementation.workflows.ochestrator.causal_ochestrator_state import CausalOchestratorState
 from python.implementation.workflows.workflow_app import WorkflowApp
 
 log = get_logger(__name__, component="workflow_depinit", log_type="dependency_bootstrap")
@@ -40,7 +42,7 @@ _LOCAL_MODELS_ROOT = _LOCAL_STORAGE_ROOT / "models"
 _LOCAL_DATA_ROOT = _LOCAL_STORAGE_ROOT / "data"
 
 
-def make_apps(*, use_local_files: bool = False) -> tuple[WorkflowApp, DataflowApp]:
+def make_apps(*, use_local_files: bool = False) -> tuple[WorkflowApp, DataflowApp, AuditLogApp]:
     log.info("building workflow app dependencies")
     llm: LLMService = make_llm_service(settings=LLMServiceSettings())
     data_repo: DataRepo = _make_data_repo(use_local_files=use_local_files)
@@ -65,13 +67,15 @@ def make_apps(*, use_local_files: bool = False) -> tuple[WorkflowApp, DataflowAp
     )
 
     log.info("workflow app dependencies created", use_local_files=use_local_files)
-    return (
-        WorkflowApp(
-            repo=workflow_repo,
-            ochestrator=ochestrator,
-        ),
-        dataflow_app,
+    workflow_app = WorkflowApp(
+        repo=workflow_repo,
+        ochestrator=ochestrator,
     )
+    audit_log_app = AuditLogApp(
+        repo=workflow_repo,
+        dataflow=dataflow_app,
+    )
+    return (workflow_app, dataflow_app, audit_log_app)
 
 
 def make_dataflow_app(*, use_local_files: bool = False) -> DataflowApp:

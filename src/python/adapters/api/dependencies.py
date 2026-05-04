@@ -15,6 +15,7 @@ from python.implementation.service.firebsae_auth_service import (
     InvalidTokenError,
 )
 from python.implementation.service.logging.default_logging import get_logger
+from python.implementation.workflows.audit_log_app import AuditLogApp
 from python.implementation.workflows.dataflow_app import DataflowApp
 from python.implementation.workflows.depinit import make_apps
 from python.implementation.workflows.workflow_app import WorkflowApp
@@ -74,7 +75,7 @@ def _unauthorized(detail: str) -> HTTPException:
 
 
 @lru_cache(maxsize=1)
-def get_apps() -> tuple[WorkflowApp, DataflowApp]:
+def get_apps() -> tuple[WorkflowApp, DataflowApp, AuditLogApp]:
     if "use_local_files" in inspect.signature(make_apps).parameters:
         return make_apps(use_local_files=_use_local_files_from_env())
     return make_apps()
@@ -88,6 +89,11 @@ def get_workflow_app() -> WorkflowApp:
 @lru_cache(maxsize=1)
 def get_dataflow_app() -> DataflowApp:
     return get_apps()[1]
+
+
+@lru_cache(maxsize=1)
+def get_audit_log_app() -> AuditLogApp:
+    return get_apps()[2]
 
 
 @lru_cache(maxsize=1)
@@ -128,6 +134,7 @@ async def get_authenticated_user(
 AUTHENTICATED_USER_DEP = Depends(get_authenticated_user)
 WORKFLOW_APP_DEP = Depends(get_workflow_app)
 DATAFLOW_APP_DEP = Depends(get_dataflow_app)
+AUDIT_LOG_APP_DEP = Depends(get_audit_log_app)
 
 
 def _use_local_files_from_env() -> bool:

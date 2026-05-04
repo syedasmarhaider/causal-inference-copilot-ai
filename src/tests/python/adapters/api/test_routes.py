@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from python.adapters.api.app import app
 from python.adapters.api.dependencies import (
+    get_audit_log_app,
     get_authenticated_user,
     get_dataflow_app,
     get_workflow_app,
@@ -271,12 +272,41 @@ class _StubDataflowApp:
         return self.diff_result
 
 
+class _StubAuditLogApp:
+    def __init__(self) -> None:
+        self.render_calls: list[dict[str, object]] = []
+        self.render_result = (
+            "<!doctype html><html><body>"
+            "<h1>Conversation Audit Log</h1>"
+            "<p>Escaped &lt;message&gt;</p>"
+            "</body></html>"
+        )
+
+    def render_html(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        conversation_type: str,
+    ) -> str:
+        self.render_calls.append(
+            {
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "conversation_type": conversation_type,
+            }
+        )
+        return self.render_result
+
+
 @pytest.fixture
 def api_client() -> (
     Generator[tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser], None, None]
 ):
     workflow = _StubWorkflowApp()
     dataflow = _StubDataflowApp()
+    audit_log = _StubAuditLogApp()
+    workflow.audit_log = audit_log  # type: ignore[attr-defined]
     user = AuthenticatedUser(
         uid=uuid4(),
         email="tester@example.com",
@@ -286,6 +316,7 @@ def api_client() -> (
 
     app.dependency_overrides[get_workflow_app] = lambda: workflow
     app.dependency_overrides[get_dataflow_app] = lambda: dataflow
+    app.dependency_overrides[get_audit_log_app] = lambda: audit_log
     app.dependency_overrides[get_authenticated_user] = lambda: user
     app.openapi_schema = None
     with TestClient(app) as client:
@@ -445,6 +476,29 @@ def test_get_conversation_returns_snapshot(
         }
     ]
     assert dataflow.upload_calls == []
+    assert dataflow.artifact_calls == []
+
+
+def test_get_audit_log_returns_html(
+    api_client: tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser],
+) -> None:
+    client, workflow, dataflow, user = api_client
+    conversation_id = uuid4()
+    audit_log = workflow.audit_log  # type: ignore[attr-defined]
+
+    response = client.get(f"/v1/conversations/{conversation_id}/types/causal/audit-log")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Conversation Audit Log" in response.text
+    assert "Escaped &lt;message&gt;" in response.text
+    assert audit_log.render_calls == [
+        {
+            "user_id": user.uid,
+            "conversation_id": conversation_id,
+            "conversation_type": "causal",
+        }
+    ]
     assert dataflow.artifact_calls == []
 
 

@@ -74,7 +74,7 @@ Confirmation rules:
 
 def get_protocol_discussion_update_prompt() -> str:
     return f"""
-You are a Causal ML Copilot conducting a target-trial style protocol discussion.
+You are a Causal ML agent conducting a target-trial style protocol discussion.
 
 Inputs:
 - PROTOCOL_DISCUSSION: the current canonical protocol Q/A document
@@ -235,7 +235,7 @@ def initial_user_message() -> str:
 
 def get_llm_blocker_message_prompt() -> str:
     return '''
-You are a Causal ML Copilot. Your job is to explain to the user, in a clear and actionable way, any blockers or issues that prevent compiling the protocol draft into a valid causal specification.
+You are a Causal ML agent. Your job is to explain to the user, in a clear and actionable way, any blockers or issues that prevent compiling the protocol draft into a valid causal specification.
 
 Inputs:
 - blockers: a list of blocker objects, each with a column, role, issue, and user_question

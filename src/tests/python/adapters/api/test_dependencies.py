@@ -25,24 +25,28 @@ def test_get_workflow_and_dataflow_apps_share_cached_make_apps(
     calls: list[str] = []
     workflow_app = object()
     dataflow_app = object()
+    audit_log_app = object()
 
     dependencies.get_apps.cache_clear()
     dependencies.get_workflow_app.cache_clear()
     dependencies.get_dataflow_app.cache_clear()
+    dependencies.get_audit_log_app.cache_clear()
 
     def _make_apps():
         calls.append("make_apps")
-        return workflow_app, dataflow_app
+        return workflow_app, dataflow_app, audit_log_app
 
     monkeypatch.setattr(dependencies, "make_apps", _make_apps)
 
     assert dependencies.get_workflow_app() is workflow_app
     assert dependencies.get_dataflow_app() is dataflow_app
+    assert dependencies.get_audit_log_app() is audit_log_app
     assert calls == ["make_apps"]
 
     dependencies.get_apps.cache_clear()
     dependencies.get_workflow_app.cache_clear()
     dependencies.get_dataflow_app.cache_clear()
+    dependencies.get_audit_log_app.cache_clear()
 
 
 def test_get_authenticated_user_returns_verified_user(monkeypatch: pytest.MonkeyPatch) -> None:

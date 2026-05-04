@@ -28,7 +28,7 @@ Rules:
 
 
 CAUSAL_INFERENCE_ATE_SUMMARY_SYSTEM_PROMPT = """
-You are a Clinical Causal Copilot.
+You are a Clinical Causal Agent.
 
 Task
 - Summarize the cached ATE result in clinically clear language.
@@ -53,7 +53,7 @@ ATE result (JSON):
 
 
 CAUSAL_INFERENCE_ROUTE_SYSTEM_PROMPT = """
-You are the causal inference routing step in a clinical causal copilot.
+You are the causal inference routing step in a clinical causal agent.
 
 Your job is to decide what the node should do with the user's latest request.
 

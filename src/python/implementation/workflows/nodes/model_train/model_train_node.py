@@ -226,6 +226,8 @@ class ModelTrainNode(Node):
                     {
                         "trained_model_id": result.fitted_model_id,
                         "training_warnings": warnings_list,
+                        "training_spec": training_spec,
+                        "training_error_message": None,
                     },
                 )
                 success_payload = payload.model_copy(
@@ -380,6 +382,15 @@ class ModelTrainNode(Node):
                 "assistant_message": user_message.strip(),
                 "error_message": error_message.strip(),
             }
+        )
+        request.orchestrator_state.set(
+            request.node_state.name(),
+            {
+                "trained_model_id": None,
+                "training_warnings": list(failed_payload.training_warnings),
+                "training_spec": None,
+                "training_error_message": failed_payload.error_message,
+            },
         )
         return self._aborted_result(
             request=request,

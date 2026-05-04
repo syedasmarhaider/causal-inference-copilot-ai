@@ -17,7 +17,6 @@ from python.implementation.repo.firebase_realtime_workflow_state_repo import (
     FirebaseRealtimeWorkflowStateRepo,
 )
 
-
 # -----------------------------------------------------------------------
 # Fake Firebase RTDB (in-memory)
 # -----------------------------------------------------------------------
@@ -923,6 +922,11 @@ def test_append_and_load_messages(monkeypatch: pytest.MonkeyPatch) -> None:
         1712345678.3,
         1712345678.4,
     ]
+
+    unlimited_history = repo.load_message_history(
+        user_id=user_id, conversation_id=conversation_id, limit=None
+    )
+    assert [msg.content for msg in unlimited_history] == ["s1", "u2", "a3", "u4"]
 
     stored_messages = _get_value(
         fake_db.tree,

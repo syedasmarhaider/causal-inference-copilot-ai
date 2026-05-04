@@ -1,4 +1,4 @@
-"""FastAPI route handlers for the Causal Inference Copilot API.
+"""FastAPI route handlers for the Causal Inference Agent API.
 
 The adapter intentionally keeps the HTTP surface thin:
 
@@ -22,6 +22,7 @@ from python.adapters.api.dependencies import (
     ARTIFACT_FORMAT_QUERY_PARAM,
     ARTIFACT_ID_PATH_PARAM,
     ARTIFACT_KIND_QUERY_PARAM,
+    AUDIT_LOG_APP_DEP,
     AUTHENTICATED_USER_DEP,
     CONVERSATION_ID_PATH_PARAM,
     CONVERSATION_TYPE_PATH_PARAM,
@@ -55,6 +56,7 @@ from python.domain.repo.workflow_state_repo import (
     ConversationType,
 )
 from python.domain.service.auth_service import AuthenticatedUser
+from python.implementation.workflows.audit_log_app import AuditLogApp
 from python.implementation.workflows.dataflow_app import DataflowApp
 from python.implementation.workflows.workflow_app import (
     ConversationResponse,
@@ -244,6 +246,44 @@ async def create_state_reversion(
         conversation_id=conversation_id,
         conversation_type=conversation_type,
         workflow_response=response,
+    )
+
+
+@api_router.get(
+    f"{_CONVERSATION_SCOPE_PATH}/audit-log",
+    tags=["conversations"],
+    summary="Get an HTML conversation audit log",
+    description=(
+        "Returns a static HTML audit report built from the full message history and "
+        "current orchestration state. CSV datasets are linked, while Vega-Lite graph "
+        "artifacts referenced by messages are rendered inline."
+    ),
+    response_class=Response,
+    response_description="HTML audit report.",
+    responses={
+        200: {"content": {"text/html": {}}},
+        401: {"description": "Missing or invalid Bearer token."},
+        404: {"description": "Conversation not found for this authenticated user and type."},
+        422: {"description": "Invalid conversation type."},
+        500: {"description": "Unexpected failure rendering the audit log."},
+    },
+)
+async def get_audit_log(
+    conversation_id: UUID = CONVERSATION_ID_PATH_PARAM,
+    conversation_type: ConversationType = CONVERSATION_TYPE_PATH_PARAM,
+    authenticated_user: AuthenticatedUser = AUTHENTICATED_USER_DEP,
+    audit_log: AuditLogApp = AUDIT_LOG_APP_DEP,
+) -> Response:
+    content = await asyncio.to_thread(
+        audit_log.render_html,
+        user_id=authenticated_user.uid,
+        conversation_id=conversation_id,
+        conversation_type=conversation_type,
+    )
+    return Response(
+        content=content,
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "private, max-age=60"},
     )
 
 

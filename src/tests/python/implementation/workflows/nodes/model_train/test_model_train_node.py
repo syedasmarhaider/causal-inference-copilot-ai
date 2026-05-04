@@ -375,7 +375,7 @@ def test_model_train_state_roundtrips_training_spec_and_resets_on_signature_chan
     assert reset_payload.training_spec is None
 
 
-def test_model_train_success_stores_local_training_spec_without_orchestrator_bloat() -> None:
+def test_model_train_success_stores_training_spec_in_orchestrator_state() -> None:
     inputs = _build_training_inputs(selected_model="econml.dml.CausalForestDML")
     started_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
     finished_at = datetime(2026, 1, 1, 12, 5, tzinfo=UTC)
@@ -425,10 +425,11 @@ def test_model_train_success_stores_local_training_spec_without_orchestrator_blo
             {
                 "trained_model_id": fit_result.fitted_model_id,
                 "training_warnings": ["Convergence warning"],
+                "training_spec": payload.training_spec,
+                "training_error_message": None,
             },
         )
     ]
-    assert "training_spec" not in orchestrator_state.set_calls[0][1]
 
     training_spec = payload.training_spec
     assert training_spec["selected_model"] == "econml.dml.CausalForestDML"
@@ -553,3 +554,13 @@ def test_model_train_failure_does_not_keep_stale_training_spec() -> None:
     assert isinstance(result.new_node_state, ModelTrainState)
     assert result.new_node_state.payload.trained_model_id is None
     assert result.new_node_state.payload.training_spec is None
+    assert result.new_node_state.payload.error_message == "fit failed"
+    assert result.new_orchestrator_state.set_calls[-1] == (
+        ModelTrainState.NAME,
+        {
+            "trained_model_id": None,
+            "training_warnings": [],
+            "training_spec": None,
+            "training_error_message": "fit failed",
+        },
+    )

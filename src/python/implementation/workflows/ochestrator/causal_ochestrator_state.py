@@ -9,21 +9,47 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from python.domain.models.validation import ValidationIssueModel
 from python.domain.workflows.ochestrator_state import OchestratorState
 from python.implementation.service.logging.default_logging import get_logger
-from python.implementation.workflows.nodes.causal_inference.causal_inference_node import CausalInferenceNode
-from python.implementation.workflows.nodes.causal_inference.causal_inference_state import CausalInferenceState
-from python.implementation.workflows.nodes.data_compilation.data_compilation_node import DataCompilationNode
-from python.implementation.workflows.nodes.data_compilation.data_compilation_state import DataCompilationState
-from python.implementation.workflows.nodes.data_manupulation.data_manupulation_node import DataManupulationNode
-from python.implementation.workflows.nodes.data_manupulation.data_manupulation_state import DataManupulationState
-from python.implementation.workflows.nodes.data_statistics.data_statistics_node import DataStatisticsNode
-from python.implementation.workflows.nodes.general_queries.general_queries_node import GeneralQueriesNode
-from python.implementation.workflows.nodes.model_selection.mode_selection_state import ModelSelectionState
-from python.implementation.workflows.nodes.model_selection.model_selection_node import ModelSelectionNode
+from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
+    CausalInferenceNode,
+)
+from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
+    CausalInferenceState,
+)
+from python.implementation.workflows.nodes.data_compilation.data_compilation_node import (
+    DataCompilationNode,
+)
+from python.implementation.workflows.nodes.data_compilation.data_compilation_state import (
+    DataCompilationState,
+)
+from python.implementation.workflows.nodes.data_manupulation.data_manupulation_node import (
+    DataManupulationNode,
+)
+from python.implementation.workflows.nodes.data_manupulation.data_manupulation_state import (
+    DataManupulationState,
+)
+from python.implementation.workflows.nodes.data_statistics.data_statistics_node import (
+    DataStatisticsNode,
+)
+from python.implementation.workflows.nodes.general_queries.general_queries_node import (
+    GeneralQueriesNode,
+)
+from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
+    ModelSelectionState,
+)
+from python.implementation.workflows.nodes.model_selection.model_selection_node import (
+    ModelSelectionNode,
+)
 from python.implementation.workflows.nodes.model_train.model_train_node import ModelTrainNode
 from python.implementation.workflows.nodes.model_train.model_train_state import ModelTrainState
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import ProtocolDiscussionNode
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
-from python.implementation.workflows.ochestrator.ochestrator_prompts import ROUTE_SYSTEM_PROMPT_CAUSAL
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import (
+    ProtocolDiscussionNode,
+)
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
+    ProtocolDiscussionState,
+)
+from python.implementation.workflows.ochestrator.ochestrator_prompts import (
+    ROUTE_SYSTEM_PROMPT_CAUSAL,
+)
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.specs.causal_spec_draft import CausalSpecDraft
@@ -60,6 +86,8 @@ class GlobalStateModel(BaseModel):
     # stage 5 — training
     trained_model_id: UUID | None = None
     training_warnings: list[str] = Field(default_factory=list)
+    training_spec: dict[str, Any] | None = None
+    training_error_message: str | None = None
 
     @field_validator("update_counter", mode="before")
     @classmethod
@@ -107,7 +135,12 @@ class CausalOchestratorState(OchestratorState):
             "is_validated",
         ),
         4: ("selected_model", "selection_reasoning"),
-        5: ("trained_model_id", "training_warnings"),
+        5: (
+            "trained_model_id",
+            "training_warnings",
+            "training_spec",
+            "training_error_message",
+        ),
     }
     _MAX_STAGE: ClassVar[int] = 5
     _BOOL_FIELDS: ClassVar[frozenset[str]] = frozenset({"working_dataset_frozen", "is_validated"})
@@ -319,6 +352,12 @@ class CausalOchestratorState(OchestratorState):
         )
         self._model.training_warnings = self._parse_string_list(
             value["training_warnings"], field_name="training_warnings"
+        )
+        self._model.training_spec = self._parse_optional_dict(
+            value.get("training_spec"), field_name="training_spec"
+        )
+        self._model.training_error_message = self._parse_optional_text(
+            value.get("training_error_message")
         )
 
     def get_current_node_name(self) -> str:
@@ -575,6 +614,14 @@ class CausalOchestratorState(OchestratorState):
         if not isinstance(raw, list):
             raise TypeError(f"{field_name} must be a list")
         return [str(item) for item in raw]
+
+    @staticmethod
+    def _parse_optional_dict(raw: Any, *, field_name: str) -> dict[str, Any] | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise TypeError(f"{field_name} must be a dict|null")
+        return deepcopy(raw)
 
     @staticmethod
     def _parse_bool(raw: Any, *, field_name: str) -> bool:

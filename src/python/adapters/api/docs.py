@@ -23,7 +23,7 @@ OPENAPI_TAGS = [
     },
 ]
 
-API_TITLE = "AitiaMed Copilot API"
+API_TITLE = "AitiaMed Agent API"
 API_VERSION = "0.1.0"
 API_SUMMARY = "Authenticated API for medical causal inference workflow interactions."
 API_DESCRIPTION = (
