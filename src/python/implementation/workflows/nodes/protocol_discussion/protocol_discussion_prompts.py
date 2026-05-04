@@ -41,7 +41,7 @@ Identifier column policy:
 - Use exact dataset column names only.
 - If the user names a real patient/unit identifier column, record it exactly in answer 16.
 - If suggested_identifier_column is present and the identifier choice is still unresolved, write that suggestion into answer 16 and ask the user to confirm or correct it.
-- If no obvious identifier candidate exists, or the user says there is no real identifier column, set answer 16 to __auto_id__.
+- If no obvious identifier candidate exists, or the user says there is no real identifier column, set answer 16 to auto_id.
 - Never invent an identifier column.
 """.strip()
 
@@ -156,7 +156,7 @@ Rules:
 - Describe effect modifiers as baseline variables that enable heterogeneous treatment effects across subgroups.
 - Summarize the identifier column choice when grounded.
 - If the proposed protocol currently uses suggested_identifier_column as the likely identifier, say that confirming this review will accept that identifier choice unless the user corrects it.
-- If no real identifier column exists, say that __auto_id__ will be used.
+- If no real identifier column exists, say that auto_id will be used.
 - Summarize the approved upstream data-preparation decisions when grounded, especially treatment/outcome value handling and baseline feature preparation decisions.
 - Mention important outcome-mapping or snapshot assumptions when grounded.
 - End with a direct confirmation question.
@@ -221,7 +221,7 @@ def get_questions() -> list[str]:
         "imputation, category handling, or normalization decisions.",
         "16) Identifier column (optional): If the dataset has a real patient/unit identifier column, name it exactly. "
         "If a likely identifier exists in the dataset metadata, confirm or correct it. If no real identifier column exists, "
-        "use __auto_id__.",
+        "use auto_id.",
     ]
 
 

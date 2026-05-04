@@ -136,7 +136,7 @@ class DataManipulationTool(Tool):
             schema=plan_schema,
             system_prompt=DATA_MANIPULATION_SQL_SYSTEM_PROMPT,
             user_prompt=base_user_prompt,
-            config=LLMConfig(model=self.model, temperature=0.5),
+            config=LLMConfig(model=self.model, temperature=0.2),
             history=None,
             max_attempts=effective_retry_attempts,
         )

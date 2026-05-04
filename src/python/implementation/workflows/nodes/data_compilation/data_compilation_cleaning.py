@@ -352,7 +352,7 @@ def _ensure_draft_matches_dataframe(
 
 def _is_auto_identifier_column(identifier_column: str) -> bool:
     normalized = identifier_column.strip().lower()
-    return normalized in {ID_COL_AUTO_FILL, "__autoid__"}
+    return normalized in {ID_COL_AUTO_FILL, "auto_id"}
 
 
 def _build_manipulation_instructions(

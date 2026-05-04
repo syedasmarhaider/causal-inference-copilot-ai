@@ -74,7 +74,7 @@ def _normalize_model_spec_to_wrapped_list(
                 random_state=random_state,
                 max_depth=None,
                 learning_rate=0.05,
-                max_iter=400,
+                max_iter=4000,
                 early_stopping=True,
             )
             return [_wrap_with_pre(pre_XW=pre_XW, model=hgb, require_dense=True)]
@@ -83,7 +83,7 @@ def _normalize_model_spec_to_wrapped_list(
             random_state=random_state,
             max_depth=None,
             learning_rate=0.05,
-            max_iter=400,
+            max_iter=4000,
             early_stopping=True,
         )
         return [_wrap_with_pre(pre_XW=pre_XW, model=hgb, require_dense=True)]
@@ -96,7 +96,7 @@ def _normalize_model_spec_to_wrapped_list(
             lr = LogisticRegression(
                 penalty="l2",
                 solver="saga",
-                max_iter=5000,
+                max_iter=10000,
                 C=0.1,
                 class_weight="balanced",
                 n_jobs=n_jobs if n_jobs is not None else -1,

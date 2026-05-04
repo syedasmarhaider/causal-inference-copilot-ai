@@ -190,7 +190,7 @@ def test_protocol_discussion_node_uses_empty_identifier_suggestions_when_none_ex
             _DiscussionDecisionModel(
                 discussion="Updated protocol discussion",
                 next_action="continue",
-                assistant_message="If there is no real identifier column, we can use __auto_id__.",
+                assistant_message="If there is no real identifier column, we can use auto_id.",
                 dataset_change_request=None,
             )
         ]
@@ -231,12 +231,12 @@ def test_fallback_review_summary_includes_identifier_line_from_q16() -> None:
             "1) Causal question: What is the effect of treatment on outcome?",
             "14) Treatment/outcome data-quality decisions: Keep grounded values only.",
             "15) Baseline feature preparation decisions: None.",
-            "16) Identifier column (optional): use __auto_id__.",
+            "16) Identifier column (optional): use auto_id.",
         ]
     )
 
     summary = ProtocolDiscussionNode._fallback_review_summary(discussion)
 
     assert "Identifier handling" in summary
-    assert "__auto_id__" in summary
+    assert "auto_id" in summary
     assert "Please confirm this protocol" in summary

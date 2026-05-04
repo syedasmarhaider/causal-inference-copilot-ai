@@ -14,7 +14,7 @@ from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 
-ID_COL_AUTO_FILL = "__auto_id__"
+ID_COL_AUTO_FILL = "auto_id"
 
 class CausalSpecDraft(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)

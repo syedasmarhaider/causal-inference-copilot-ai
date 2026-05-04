@@ -799,10 +799,10 @@ def summarize_identifier_choice(
     lowered = normalized.lower()
     if "unclear" in lowered:
         return None
-    if "__auto_id__" in lowered:
+    if "auto_id" in lowered:
         return (
             "Identifier handling: no real patient/unit identifier column is being used, "
-            "so __auto_id__ will be used."
+            "so auto_id will be used."
         )
 
     if (
