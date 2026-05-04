@@ -213,17 +213,7 @@ class AuditLogApp:
 
 class AuditLogHtmlRenderer:
     def render(self, report: AuditReport) -> str:
-        graphs = [
-            artifact.graph
-            for message in report.messages
-            for artifact in message.artifacts
-            if artifact.graph is not None and artifact.graph.spec is not None
-        ]
-        graph_specs = {
-            graph.element_id: graph.spec
-            for graph in graphs
-            if graph.spec is not None
-        }
+        graph_specs = self._graph_specs(report)
         return "\n".join(
             [
                 "<!doctype html>",
@@ -240,15 +230,27 @@ class AuditLogHtmlRenderer:
                 "<body>",
                 '<main class="audit">',
                 self._header(report),
-                self._dataset_history(report),
+                self.render_metric_strip(self.summarize_report(report)),
+                self._dataset_lineage(report),
+                self._stage_evidence(report),
                 self._messages(report),
-                self._stage_logs(report),
+                self._appendix(report),
                 "</main>",
                 self._graph_script(graph_specs),
                 "</body>",
                 "</html>",
             ]
         )
+
+    @staticmethod
+    def _graph_specs(report: AuditReport) -> dict[str, dict[str, Any]]:
+        return {
+            graph.element_id: graph.spec
+            for message in report.messages
+            for artifact in message.artifacts
+            if artifact.graph is not None
+            and (graph := artifact.graph).spec is not None
+        }
 
     def _header(self, report: AuditReport) -> str:
         conversation = report.conversation
@@ -262,9 +264,9 @@ class AuditLogHtmlRenderer:
             else "None"
         )
         rows = [
-            ("Conversation ID", str(conversation.conversation_id)),
-            ("Conversation Type", conversation.conversation_type),
             ("Conversation Name", conversation.name or ""),
+            ("Conversation Type", conversation.conversation_type),
+            ("Conversation ID", str(conversation.conversation_id)),
             ("Generated At", _format_ts(report.generated_at_utc)),
             ("Current Stage", report.current_stage_name),
             ("Current Dataset", current_dataset_link),
@@ -273,17 +275,59 @@ class AuditLogHtmlRenderer:
         return (
             "<section class=\"hero\">"
             "<h1>Conversation Audit Log</h1>"
+            '<p class="hero-subtitle">Exported workflow evidence for review, traceability, and handoff.</p>'
             f"<dl>{''.join(_definition_row(k, v, raw_value=k == 'Current Dataset') for k, v in rows)}</dl>"
             "</section>"
         )
 
-    def _dataset_history(self, report: AuditReport) -> str:
+    def summarize_report(self, report: AuditReport) -> dict[str, str]:
+        payload = report.orchestrator_payload
+        dataset_ids = _coerce_uuid_list(report.orchestrator_payload.get("working_dataset_ids"))
+        graph_count = sum(
+            1
+            for message in report.messages
+            for artifact in message.artifacts
+            if artifact.graph is not None
+        )
+        data_artifact_count = sum(
+            1
+            for message in report.messages
+            for artifact in message.artifacts
+            if artifact.href is not None
+        )
+        return {
+            "Messages": str(len(report.messages)),
+            "Dataset Versions": str(len(dataset_ids)),
+            "Graphs": str(graph_count),
+            "Linked Data Artifacts": str(data_artifact_count),
+            "Current Dataset": str(report.current_dataset_id) if report.current_dataset_id else "None",
+            "Selected Model": str(payload.get("selected_model") or "Not recorded"),
+            "Trained Model": str(payload.get("trained_model_id") or "Not recorded"),
+        }
+
+    def render_metric_strip(self, metrics: dict[str, str]) -> str:
+        items = [
+            '<div class="metric">'
+            f"<span>{_e(label)}</span>"
+            f"<strong>{_e(value)}</strong>"
+            "</div>"
+            for label, value in metrics.items()
+        ]
+        return f'<section><h2>Audit Summary</h2><div class="metrics">{"".join(items)}</div></section>'
+
+    def _dataset_lineage(self, report: AuditReport) -> str:
         dataset_ids = _coerce_uuid_list(report.orchestrator_payload.get("working_dataset_ids"))
         if not dataset_ids:
             body = '<p class="empty">No dataset versions were recorded.</p>'
         else:
             rows = []
             for index, dataset_id in enumerate(dataset_ids, start=1):
+                label = _dataset_version_label(
+                    index=index,
+                    total=len(dataset_ids),
+                    dataset_id=dataset_id,
+                    current_dataset_id=report.current_dataset_id,
+                )
                 link = _dataset_csv_link(
                     conversation_id=report.conversation.conversation_id,
                     conversation_type=report.conversation.conversation_type,
@@ -292,17 +336,18 @@ class AuditLogHtmlRenderer:
                 rows.append(
                     "<tr>"
                     f"<td>{index}</td>"
+                    f"<td>{_e(label)}</td>"
                     f"<td><code>{_e(str(dataset_id))}</code></td>"
                     f"<td>{link}</td>"
                     "</tr>"
                 )
             body = (
                 "<table>"
-                "<thead><tr><th>Version</th><th>Dataset ID</th><th>CSV</th></tr></thead>"
+                "<thead><tr><th>Version</th><th>Label</th><th>Dataset ID</th><th>CSV</th></tr></thead>"
                 f"<tbody>{''.join(rows)}</tbody>"
                 "</table>"
             )
-        return f'<section><h2>Dataset History</h2>{body}</section>'
+        return f'<section><h2>Dataset Lineage</h2>{body}</section>'
 
     def _messages(self, report: AuditReport) -> str:
         if not report.messages:
@@ -356,31 +401,34 @@ class AuditLogHtmlRenderer:
         links_html = f"<ul>{''.join(link_items)}</ul>" if link_items else ""
         return f'<div class="artifacts">{links_html}{"".join(graph_items)}</div>'
 
-    def _stage_logs(self, report: AuditReport) -> str:
+    def _stage_evidence(self, report: AuditReport) -> str:
         payload = report.orchestrator_payload
-        sections = [
-            self._stage_section(
+        cards = [
+            self.render_stage_card(
                 "Dataset Stage",
                 {
-                    "Working Dataset IDs": payload.get("working_dataset_ids"),
+                    "Current Dataset": str(report.current_dataset_id)
+                    if report.current_dataset_id is not None
+                    else None,
+                    "Dataset Versions": payload.get("working_dataset_ids"),
                     "Latest Dataset Summary": payload.get("latest_dataset_summary"),
                 },
-            )
+            ),
         ]
         if report.conversation.conversation_type == "causal":
-            sections.extend(
+            cards.extend(
                 [
-                    self._stage_section(
+                    self.render_stage_card(
                         "Protocol Discussion",
                         {
-                            "Protocol Discussion": payload.get("protocol_discussion"),
+                            "Final Protocol": payload.get("protocol_discussion"),
                             "Cleaning Instructions": payload.get(
                                 "protocol_cleaning_instructions"
                             ),
                             "Causal Spec Draft": payload.get("causal_spec_draft"),
                         },
                     ),
-                    self._stage_section(
+                    self.render_stage_card(
                         "Data Compilation",
                         {
                             "Compiled Causal Spec": payload.get("causal_spec"),
@@ -390,48 +438,93 @@ class AuditLogHtmlRenderer:
                             "Working Dataset Frozen": payload.get("working_dataset_frozen"),
                         },
                     ),
-                    self._stage_section(
+                    self.render_stage_card(
                         "Model Selection",
                         {
                             "Selected Model": payload.get("selected_model"),
                             "Selection Reasoning": payload.get("selection_reasoning"),
                         },
                     ),
-                    self._stage_section(
-                        "Model Train",
+                    self.render_stage_card(
+                        "Model Training",
                         {
                             "Trained Model ID": payload.get("trained_model_id"),
                             "Training Warnings": payload.get("training_warnings"),
-                            "Training Spec": payload.get("training_spec"),
+                            "Fit Logs": _training_fit_logs(payload.get("training_spec")),
                             "Training Error": payload.get("training_error_message"),
                         },
                     ),
-                    '<section><h2>Causal Inference</h2>'
-                    '<p class="empty">Inference outputs are shown in the message timeline through rendered graph artifacts.</p>'
-                    "</section>",
+                    self.render_stage_card(
+                        "Causal Inference",
+                        {
+                            "Evidence Location": (
+                                "Inference outputs are shown in the message timeline "
+                                "through assistant messages and rendered graph artifacts."
+                            )
+                        },
+                    ),
                 ]
             )
-        sections.append(
-            self._stage_section(
-                "Raw Orchestration State",
-                {
-                    "State Name": report.orchestrator_state_name,
-                    "Payload": payload,
-                },
-            )
-        )
-        return "".join(sections)
+        return f'<section><h2>Stage Evidence</h2><div class="stage-grid">{"".join(cards)}</div></section>'
 
-    def _stage_section(self, title: str, values: dict[str, Any]) -> str:
+    def render_stage_card(self, title: str, values: dict[str, Any]) -> str:
+        status = _stage_status(values)
+        status_badge = self.render_status_badge(status)
         parts: list[str] = []
         for label, value in values.items():
-            parts.append(
-                '<div class="stage-field">'
-                f"<h3>{_e(label)}</h3>"
-                f"{_render_value(value)}"
-                "</div>"
-            )
-        return f'<section><h2>{_e(title)}</h2>{"".join(parts)}</section>'
+            parts.append(self._stage_field(label, value))
+        return (
+            '<article class="stage-card">'
+            '<div class="stage-card-header">'
+            f"<h3>{_e(title)}</h3>"
+            f"{status_badge}"
+            "</div>"
+            f"{''.join(parts)}"
+            "</article>"
+        )
+
+    @staticmethod
+    def render_status_badge(status: str) -> str:
+        return f'<span class="status status-{_attr(status.lower())}">{_e(status)}</span>'
+
+    def _stage_field(self, label: str, value: Any) -> str:
+        return (
+            '<div class="stage-field">'
+            f"<h4>{_e(label)}</h4>"
+            f"{self._render_field_value(label, value)}"
+            "</div>"
+        )
+
+    def _render_field_value(self, label: str, value: Any) -> str:
+        if _is_missing(value):
+            return '<p class="empty">Not recorded.</p>'
+        if isinstance(value, (str, int, float, bool)):
+            return f"<p>{_e(str(value))}</p>"
+        return self.render_json_details(label, value)
+
+    def render_json_details(self, label: str, value: Any, *, open_details: bool = False) -> str:
+        open_attr = " open" if open_details else ""
+        return (
+            f"<details{open_attr}>"
+            f"<summary>{_e(label)}</summary>"
+            f"<pre>{_json_pre(value)}</pre>"
+            "</details>"
+        )
+
+    def _appendix(self, report: AuditReport) -> str:
+        state_name = (
+            '<div class="appendix-meta">'
+            "<span>State Name</span>"
+            f"<strong>{_e(report.orchestrator_state_name)}</strong>"
+            "</div>"
+        )
+        return (
+            "<section>"
+            "<h2>Appendix</h2>"
+            f"{state_name}"
+            f"{self.render_json_details('Raw Orchestration State', report.orchestrator_payload)}"
+            "</section>"
+        )
 
     def _graph_script(self, graph_specs: dict[str, dict[str, Any]]) -> str:
         safe_json = _safe_script_json(graph_specs)
@@ -453,23 +546,37 @@ class AuditLogHtmlRenderer:
     def _style() -> str:
         return """
 <style>
-:root { color-scheme: light; --border: #d8dee4; --muted: #57606a; --bg: #f6f8fa; }
-body { margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #24292f; background: #fff; }
-.audit { max-width: 1100px; margin: 0 auto; padding: 32px 24px 56px; }
-.hero { border-bottom: 1px solid var(--border); padding-bottom: 20px; }
-h1 { font-size: 28px; margin: 0 0 16px; }
-h2 { font-size: 20px; margin: 32px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
-h3 { font-size: 14px; margin: 0 0 8px; color: #24292f; }
+:root { color-scheme: light; --border: #d8dee4; --muted: #57606a; --bg: #f6f8fa; --ink: #24292f; --ok: #1a7f37; --warn: #9a6700; --error: #cf222e; }
+body { margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; }
+.audit { max-width: 1180px; margin: 0 auto; padding: 36px 28px 64px; }
+.hero { border-bottom: 1px solid var(--border); padding-bottom: 22px; }
+h1 { font-size: 30px; margin: 0 0 8px; }
+.hero-subtitle { color: var(--muted); margin: 0 0 18px; }
+h2 { font-size: 20px; margin: 34px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+h3 { font-size: 15px; margin: 0; color: var(--ink); }
+h4 { font-size: 12px; margin: 0 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 dl { display: grid; grid-template-columns: 180px 1fr; gap: 8px 18px; margin: 0; }
 dt { color: var(--muted); font-weight: 600; }
 dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: 8px 10px; border: 1px solid var(--border); vertical-align: top; }
-th { background: var(--bg); }
+th, td { text-align: left; padding: 9px 10px; border: 1px solid var(--border); vertical-align: top; }
+th { background: var(--bg); color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 pre { margin: 0; padding: 12px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; max-height: 520px; }
 a { color: #0969da; text-decoration: none; }
 a:hover { text-decoration: underline; }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.metric { border: 1px solid var(--border); border-radius: 6px; padding: 12px; background: #fff; }
+.metric span { display: block; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.metric strong { display: block; margin-top: 6px; overflow-wrap: anywhere; }
+.stage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+.stage-card { border: 1px solid var(--border); border-radius: 6px; padding: 14px; background: #fff; }
+.stage-card-header { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
+.status { border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 700; border: 1px solid var(--border); }
+.status-recorded { color: var(--ok); background: #dafbe1; border-color: #aceebb; }
+.status-missing { color: var(--muted); background: var(--bg); }
+.status-warning { color: var(--warn); background: #fff8c5; border-color: #eed888; }
+.status-error { color: var(--error); background: #ffebe9; border-color: #ffcecb; }
 .message { border: 1px solid var(--border); border-radius: 6px; padding: 14px; margin: 12px 0; }
 .message-meta { display: flex; gap: 10px; align-items: center; color: var(--muted); margin-bottom: 8px; }
 .role { text-transform: uppercase; font-size: 12px; font-weight: 700; letter-spacing: .04em; }
@@ -481,7 +588,12 @@ a:hover { text-decoration: underline; }
 .graph-card { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
 .graph { min-height: 220px; overflow-x: auto; }
 .graph-error { color: #cf222e; }
-.stage-field { margin: 14px 0; }
+.stage-field { margin: 12px 0; }
+.stage-field p { margin: 0; overflow-wrap: anywhere; }
+.appendix-meta { display: grid; grid-template-columns: 180px 1fr; gap: 12px; margin-bottom: 12px; }
+.appendix-meta span { color: var(--muted); font-weight: 600; }
+details { margin-top: 6px; }
+summary { cursor: pointer; color: #0969da; font-weight: 600; margin-bottom: 8px; }
 .empty { color: var(--muted); margin: 0; }
 @media print { .audit { max-width: none; padding: 16px; } pre { max-height: none; } a { color: inherit; } }
 </style>
@@ -502,12 +614,62 @@ def _format_ts(value: float) -> str:
     return datetime.fromtimestamp(value, tz=UTC).isoformat()
 
 
+def _dataset_version_label(
+    *,
+    index: int,
+    total: int,
+    dataset_id: UUID,
+    current_dataset_id: UUID | None,
+) -> str:
+    is_current = current_dataset_id is not None and dataset_id == current_dataset_id
+    if total == 1:
+        return "Initial / Current" if is_current else "Initial"
+    if index == 1:
+        return "Initial"
+    if is_current or index == total:
+        return "Current"
+    return f"Intermediate {index}"
+
+
+def _training_fit_logs(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return None
+    fit = value.get("fit")
+    return fit if isinstance(fit, dict) else None
+
+
+def _stage_status(values: dict[str, Any]) -> str:
+    normalized = {key.lower(): value for key, value in values.items()}
+    error_value = normalized.get("training error")
+    if not _is_missing(error_value):
+        return "Error"
+    warnings = normalized.get("training warnings")
+    validation_issues = normalized.get("validation issues")
+    if not _is_missing(warnings) or not _is_missing(validation_issues):
+        return "Warning"
+    if any(_is_status_present(value) for value in values.values()):
+        return "Recorded"
+    return "Missing"
+
+
+def _is_status_present(value: Any) -> bool:
+    return not _is_missing(value) and value is not False
+
+
+def _is_missing(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _json_pre(value: Any) -> str:
+    return _e(json.dumps(value, ensure_ascii=False, indent=2, default=str))
+
+
 def _render_value(value: Any) -> str:
-    if value is None or value == "" or value == []:
+    if _is_missing(value):
         return '<p class="empty">Not recorded.</p>'
     if isinstance(value, (str, int, float, bool)):
         return f"<p>{_e(str(value))}</p>"
-    return f"<pre>{_e(json.dumps(value, ensure_ascii=False, indent=2, default=str))}</pre>"
+    return f"<pre>{_json_pre(value)}</pre>"
 
 
 def _is_graph_artifact_ref(artifact_ref: ArtifactRef) -> bool:

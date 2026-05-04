@@ -165,7 +165,11 @@ def test_audit_log_html_uses_full_history_escapes_text_and_renders_graph() -> No
                 "selection_reasoning": "Best fit",
                 "trained_model_id": str(uuid4()),
                 "training_warnings": ["warn <x>"],
-                "training_spec": {"fit": {"backend": "fake"}},
+                "training_spec": {
+                    "fit": {"backend": "fake"},
+                    "causal_spec": {"duplicated": True},
+                    "transformation_plan": {"duplicated": True},
+                },
                 "training_error_message": None,
                 "working_dataset_frozen": True,
             }
@@ -216,10 +220,16 @@ def test_audit_log_html_uses_full_history_escapes_text_and_renders_graph() -> No
 
     assert repo.history_limits == [None]
     assert "Audit &lt;Case&gt;" in html
+    assert "Audit Summary" in html
+    assert "Dataset Lineage" in html
+    assert "Stage Evidence" in html
+    assert "Message Timeline" in html
+    assert "Appendix" in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "Protocol &lt;b&gt;text&lt;/b&gt;" in html
-    assert "Dataset History" in html
-    assert "Model Train" in html
+    assert "Model Training" in html
+    assert "Recorded" in html
+    assert "Warning" in html
     assert "Open CSV" in html
     assert f"/artifacts/{dataset_id}?artifact_kind=data&amp;artifact_format=csv" in html
     assert f"/artifacts/{csv_id}?artifact_kind=data&amp;artifact_format=csv" in html
@@ -227,6 +237,14 @@ def test_audit_log_html_uses_full_history_escapes_text_and_renders_graph() -> No
     assert "https://cdn.jsdelivr.net/npm/vega-lite@5" in html
     assert "auditGraphSpecs" in html
     assert "ATE graph" in html
+    training_section = html.split("<h3>Model Training</h3>", maxsplit=1)[1].split(
+        "<h3>Causal Inference</h3>", maxsplit=1
+    )[0]
+    assert "Fit Logs" in training_section
+    assert "fake" in training_section
+    assert "duplicated" not in training_section
+    assert "causal_spec" not in training_section
+    assert "transformation_plan" not in training_section
     assert dataflow.calls == [
         {
             "user_id": user_id,
@@ -277,6 +295,10 @@ def test_audit_log_html_handles_missing_graph_without_failing_report() -> None:
     )
 
     assert "Conversation Audit Log" in html
+    assert "Dataset Lineage" in html
+    assert "Stage Evidence" in html
+    assert "Missing" in html
+    assert "Not recorded" in html
     assert "Graph artifact could not be rendered" not in html
     assert "Graph Error" not in html
     assert "KeyError" in html or str(graph_id) in html
