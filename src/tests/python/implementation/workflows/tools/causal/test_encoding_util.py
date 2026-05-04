@@ -126,6 +126,42 @@ def test_compile_drop_first_effect_modifier_onehot_only_changes_pre_x() -> None:
     assert plan.columns[0].encoding.drop_first is False  # type: ignore[attr-defined]
 
 
+def test_compile_linear_pre_x_casts_numeric_passthrough_to_float64() -> None:
+    plan = _plan(
+        {
+            "column": "segment",
+            "role": "effect_modifier",
+            "encoding": {"preset": "cat_onehot", "handle_unknown": "ignore"},
+        },
+        {
+            "column": "age",
+            "role": "effect_modifier",
+            "encoding": {"preset": "passthrough"},
+        },
+        {
+            "column": "income",
+            "role": "covariate",
+            "encoding": {"preset": "passthrough"},
+        },
+    )
+
+    compiled = compile_plan_to_transformers(
+        plan=plan,
+        effect_modifiers=["segment", "age"],
+        covariates=["income"],
+        dense_output=True,
+        require_full_coverage=True,
+        drop_first_effect_modifier_onehot=True,
+    )
+
+    x = np.asarray([["A", 72], ["B", 65], ["A", 80]], dtype=object)
+    x_tx = compiled.pre_X.fit_transform(x)  # type: ignore[union-attr]
+
+    assert x_tx.dtype == np.float64
+    assert x_tx.shape == (3, 2)
+    assert x_tx[:, 1].tolist() == [72.0, 65.0, 80.0]
+
+
 def test_compile_rejects_all_dropped_active_view() -> None:
     plan = _plan(
         {

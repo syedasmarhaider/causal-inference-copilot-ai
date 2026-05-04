@@ -100,6 +100,14 @@ def _shape_as_list(x: Any) -> list[int] | None:
     return list(np.asarray(x).shape)
 
 
+def _ndim_or_none(x: Any) -> int | None:
+    if x is None:
+        return None
+    if hasattr(x, "ndim"):
+        return int(x.ndim)
+    return int(np.asarray(x).ndim)
+
+
 def _width(x: Any) -> int:
     if x is None:
         return 0
@@ -109,6 +117,51 @@ def _width(x: Any) -> int:
     if arr.ndim == 1:
         return 1
     return int(arr.shape[1])
+
+
+def _estimator_debug_name(value: Any) -> str:
+    if isinstance(value, Pipeline):
+        try:
+            final_step = value.steps[-1][1]
+            return f"Pipeline(..., {type(final_step).__name__})"
+        except Exception:
+            return "Pipeline"
+    return type(value).__name__
+
+
+def _debug_init_defaults(defaults: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in defaults.items():
+        if isinstance(value, list):
+            out[key] = [_estimator_debug_name(item) for item in value]
+        elif isinstance(value, BaseEstimator):
+            out[key] = _estimator_debug_name(value)
+        else:
+            out[key] = value
+    return out
+
+
+def _dtype_or_none(x: Any) -> str | None:
+    if x is None:
+        return None
+    if hasattr(x, "dtype"):
+        return str(x.dtype)
+    try:
+        return str(np.asarray(x).dtype)
+    except Exception:
+        return None
+
+
+def _inference_attr_debug(value: Any) -> dict[str, Any]:
+    try:
+        arr = np.asarray(value)
+        return {
+            "type": type(value).__name__,
+            "dtype": str(arr.dtype),
+            "shape": list(arr.shape),
+        }
+    except Exception as exc:
+        return {"type": type(value).__name__, "error": repr(exc)}
 
 
 def _to_jsonable(value: Any) -> Any:
@@ -693,9 +746,19 @@ class _BaseDRLearnerAdapter(CausalModel):
             raw_x_has_nan = has_missing(X)
             raw_w_has_nan = has_missing(W)
 
-            log.debug(
+            log.info(
                 "DRLearner fit prepared",
                 backend=self.BACKEND_NAME,
+                estimator_cls=getattr(self.ESTIMATOR_CLS, "__name__", str(self.ESTIMATOR_CLS)),
+                n=int(df.shape[0]),
+                y_shape=_shape_as_list(Y),
+                y_ndim=_ndim_or_none(Y),
+                t_shape=_shape_as_list(T),
+                t_ndim=_ndim_or_none(T),
+                x_shape=_shape_as_list(X),
+                x_ndim=_ndim_or_none(X),
+                w_shape=_shape_as_list(W),
+                w_ndim=_ndim_or_none(W),
                 allow_missing_requested=bool(defaults.get("allow_missing")),
                 estimator_allowed_missing_vars=allowed_missing_vars,
                 missingness_X=missingness_X,
@@ -704,6 +767,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 raw_W_has_nan=raw_w_has_nan,
                 x_columns=effect_modifiers_order,
                 w_columns=covariates_order,
+                init_defaults=_debug_init_defaults(defaults),
             )
             if missingness_W and allowed_missing_vars is not None and "W" not in allowed_missing_vars:
                 log.warning(
@@ -719,13 +783,44 @@ class _BaseDRLearnerAdapter(CausalModel):
                 warnings.simplefilter("always")
                 est.fit(Y=Y, T=T, X=X, W=W)  # pyright: ignore[reportUnknownMemberType]
             fit_warnings = [f"{w.category.__name__}: {str(w.message)}" for w in ws]
+            fit_warning_details = [
+                {
+                    "category": w.category.__name__,
+                    "message": str(w.message),
+                    "filename": w.filename,
+                    "lineno": int(w.lineno),
+                }
+                for w in ws
+            ]
+            for warning_detail in fit_warning_details:
+                log.warning(
+                    "DRLearner fit warning",
+                    backend=self.BACKEND_NAME,
+                    warning_category=warning_detail["category"],
+                    warning_message=warning_detail["message"],
+                    warning_filename=warning_detail["filename"],
+                    warning_lineno=warning_detail["lineno"],
+                )
+            log.info(
+                "DRLearner fit completed",
+                backend=self.BACKEND_NAME,
+                warning_count=len(fit_warnings),
+                score_available=hasattr(est, "score_"),
+                nuisance_scores_propensity_available=hasattr(est, "nuisance_scores_propensity"),
+                nuisance_scores_regression_available=hasattr(est, "nuisance_scores_regression"),
+            )
 
             artifacts: dict[str, Any] = {
                 "n": int(df.shape[0]),
                 "y_shape": _shape_as_list(Y),
+                "y_ndim": _ndim_or_none(Y),
                 "t_shape": _shape_as_list(T),
+                "t_ndim": _ndim_or_none(T),
                 "x_shape": _shape_as_list(X),
+                "x_ndim": _ndim_or_none(X),
                 "w_shape": _shape_as_list(W),
+                "w_ndim": _ndim_or_none(W),
+                "fit_warning_details": fit_warning_details,
             }
             for attr in ("score_", "nuisance_scores_propensity", "nuisance_scores_regression"):
                 try:
@@ -825,7 +920,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 is_global_counter_factual=False,
             )
 
-            _, _, X, _, _ = get_input_params_from_spec(
+            Y, T, X, _, _ = get_input_params_from_spec(
                 df,
                 spec,
                 effect_modifiers_order=effect_modifiers_order,
@@ -833,9 +928,26 @@ class _BaseDRLearnerAdapter(CausalModel):
             )
 
             item: dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
+            log.info(
+                "DRLearner ATE inference input dtypes",
+                backend=self.BACKEND_NAME,
+                fitted_model_id=str(command.fitted_model_id),
+                X_type=str(type(X)),
+                X_dtype=_dtype_or_none(X),
+                Y_dtype=_dtype_or_none(Y),
+                T_dtype=_dtype_or_none(T),
+            )
             item["ate"] = est.ate(
                 X=X, T0=t0, T1=t1
             )  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+            log.info(
+                "DRLearner ATE point estimate",
+                backend=self.BACKEND_NAME,
+                fitted_model_id=str(command.fitted_model_id),
+                ate=_to_jsonable(np.asarray(item["ate"])),
+                ate_type=str(type(item["ate"])),
+                ate_dtype=_dtype_or_none(item["ate"]),
+            )
 
             try:
                 ate_interval = est.ate_interval(
@@ -849,7 +961,20 @@ class _BaseDRLearnerAdapter(CausalModel):
                     item["ate_interval"] = None
                 else:
                     item["ate_interval"] = ate_interval
+                    log.info(
+                        "DRLearner ATE interval object",
+                        backend=self.BACKEND_NAME,
+                        fitted_model_id=str(command.fitted_model_id),
+                        interval_type=str(type(ate_interval)),
+                        interval_dtype=_dtype_or_none(ate_interval),
+                    )
             except Exception as e:
+                log.exception(
+                    "DRLearner EconML ATE interval failed",
+                    backend=self.BACKEND_NAME,
+                    fitted_model_id=str(command.fitted_model_id),
+                    exception=repr(e),
+                )
                 warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                 item["ate_interval"] = None
 
@@ -861,8 +986,26 @@ class _BaseDRLearnerAdapter(CausalModel):
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
                     item["ate_inference"] = None
                 else:
+                    log.info(
+                        "DRLearner ATE inference object",
+                        backend=self.BACKEND_NAME,
+                        fitted_model_id=str(command.fitted_model_id),
+                        inf_type=str(type(inf)),
+                        point_type=str(type(getattr(inf, "point_estimate", None))),
+                        point_dtype=_dtype_or_none(getattr(inf, "point_estimate", None)),
+                        stderr_type=str(type(getattr(inf, "stderr", None))),
+                        stderr_dtype=_dtype_or_none(getattr(inf, "stderr", None)),
+                        point_debug=_inference_attr_debug(getattr(inf, "point_estimate", None)),
+                        stderr_debug=_inference_attr_debug(getattr(inf, "stderr", None)),
+                    )
                     item["ate_inference"] = serialize_inference_obj(inf)
             except Exception as e:
+                log.exception(
+                    "DRLearner EconML ATE inference failed",
+                    backend=self.BACKEND_NAME,
+                    fitted_model_id=str(command.fitted_model_id),
+                    exception=repr(e),
+                )
                 warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                 item["ate_inference"] = None
 
