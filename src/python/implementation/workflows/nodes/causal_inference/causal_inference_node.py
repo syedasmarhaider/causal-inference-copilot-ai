@@ -72,6 +72,7 @@ _WORKING_TABLE_PREFIX = "df_"
 _WORKING_TABLE_HASH_HEX_LEN = 16
 _ARTIFACT_KIND_CHART_SPEC = "chart_spec"
 _GROUP_KEY_COLUMN = "group_key"
+_EFFECT_ROW_COLUMN = "effect_row"
 _CATE_COLUMN = "cate"
 _CATE_LOWER_COLUMN = "cate_lower"
 _CATE_UPPER_COLUMN = "cate_upper"
@@ -402,6 +403,22 @@ class CausalInferenceNode(Node):
             )
 
         if decision.action in ("answer_from_context", "clarify"):
+            cached_cate_request_summary = payload.latest_cate_request_summary
+            if _requests_effect_graph(
+                user_request=latest_user_message,
+                request_summary=cached_cate_request_summary or latest_user_message,
+            ):
+                return self._compute_or_reuse_cate(
+                    request=request,
+                    dataframe=dataframe,
+                    resolved=resolved,
+                    payload=payload,
+                    model=model,
+                    history=history,
+                    user_request=latest_user_message,
+                    request_summary=cached_cate_request_summary or latest_user_message,
+                    produce_graph=True,
+                )
             return self._needs_input_result(
                 request=request,
                 payload=payload,
@@ -441,6 +458,10 @@ class CausalInferenceNode(Node):
             )
 
         if decision.action in ("compute_cate", "generate_cate_graph"):
+            produce_graph = decision.action == "generate_cate_graph" or _requests_effect_graph(
+                user_request=latest_user_message,
+                request_summary=cast(str, decision.cate_request_summary),
+            )
             return self._compute_or_reuse_cate(
                 request=request,
                 dataframe=dataframe,
@@ -450,7 +471,7 @@ class CausalInferenceNode(Node):
                 history=history,
                 user_request=latest_user_message,
                 request_summary=cast(str, decision.cate_request_summary),
-                produce_graph=decision.action == "generate_cate_graph",
+                produce_graph=produce_graph,
             )
 
         return self._needs_input_result(
@@ -764,6 +785,7 @@ class CausalInferenceNode(Node):
 
             cohort_plot_df = x_rows.copy()
             cohort_plot_df[_GROUP_KEY_COLUMN] = normalized_group_key
+            cohort_plot_df[_EFFECT_ROW_COLUMN] = np.arange(1, len(x_rows) + 1, dtype=int)
             cohort_plot_df[_CATE_COLUMN] = cate_values.astype(float, copy=False)
             cohort_plot_df[_CATE_LOWER_COLUMN] = _aligned_interval_column(
                 interval_values=lower_values,
@@ -1196,6 +1218,36 @@ def _should_reuse_latest_cate(
     )
 
 
+def _requests_effect_graph(*, user_request: str, request_summary: str) -> bool:
+    text = f"{user_request} {request_summary}".casefold()
+    graph_markers = (
+        "graph",
+        "chart",
+        "plot",
+        "visual",
+        "figure",
+        "boxplot",
+        "box plot",
+        "forest plot",
+        "distribution",
+        "histogram",
+        "density",
+    )
+    effect_markers = (
+        "cate",
+        "ite",
+        "individual treatment effect",
+        "individual effect",
+        "subgroup",
+        "heterogeneity",
+        "treatment effect",
+        "effect estimate",
+    )
+    return any(marker in text for marker in graph_markers) and any(
+        marker in text for marker in effect_markers
+    )
+
+
 def _dataset_summary_column_names(summary: DatasetSummaryModel) -> list[str]:
     columns: list[str] = []
     seen: set[str] = set()
@@ -1412,11 +1464,15 @@ def _build_cate_graph_user_intent(
         "Create a causal graph for conditional treatment effects. "
         "Each row in the dataframe is an individual-level CATE estimate. "
         f"`{_GROUP_KEY_COLUMN}` identifies requested cohorts when multiple groups are present. "
+        f"`{_EFFECT_ROW_COLUMN}` is a stable row index for individual-level/ITE-style views. "
         f"`{_CATE_COLUMN}` is the estimated effect and `{_CATE_LOWER_COLUMN}`/`{_CATE_UPPER_COLUMN}` "
         "are interval bounds when available. "
-        "Use an appropriate causal-effect visualization for the request: a distribution for a "
-        "single cohort, a cohort comparison when multiple group_key values exist, or a trend "
-        "against a continuous effect modifier when clinically requested. "
+        "Use a real Vega-Lite causal-effect visualization, never a markdown or ASCII chart. "
+        "For box plot requests, use a Vega-Lite boxplot mark with group_key on the categorical axis "
+        "and cate on the quantitative axis. For ITE or individual-effect requests, plot cate by "
+        f"`{_EFFECT_ROW_COLUMN}` and color or facet by group_key when groups exist. "
+        "Otherwise use an appropriate distribution for a single cohort, a cohort comparison when "
+        "multiple group_key values exist, or a trend against a continuous effect modifier when clinically requested. "
         f"Subgroup intent: {request_summary}. Latest user request: {latest_request}"
     )
 

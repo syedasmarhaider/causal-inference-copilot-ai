@@ -68,7 +68,7 @@ Decision rules
 - Use answer_from_context only when the question can be answered from the existing cached ATE/latest CATE context and recent conversation.
 - Use compute_cate when the user requests a new subgroup effect estimate or subgroup comparison that requires cohort filtering on the compiled dataset.
 - Use generate_ate_graph only for effect visualizations of the global ATE.
-- Use generate_cate_graph only for effect visualizations of subgroup/CATE results.
+- Use generate_cate_graph for any effect visualization of subgroup/CATE/ITE-style individual treatment-effect results, including requests that combine estimation with "plot", "chart", "graph", "box plot", "forest plot", or "visualize".
 - Use clarify if the request is too vague to safely answer or compute, or if it is a raw descriptive data-chart request that does not belong to causal inference.
 
 Important
@@ -121,6 +121,7 @@ Rules
 - Never use invented columns.
 - If the user requests a comparison, return one cohort per requested group.
 - If the user requests a single subgroup, return exactly one cohort.
+- If the user requests ITE or individual treatment effects, return one row per matched individual with the requested cohort label; the effect calculation still uses the confirmed effect modifiers.
 - If the request is vague, still try to produce a clinically sensible subgroup split grounded in the provided summary.
 """.strip()
 
@@ -155,6 +156,8 @@ Rules
 - If `non_effect_modifier_filter_columns` is non-empty, treat those as cohort-filter columns only; the effect estimate still comes from the confirmed `effect_modifier_columns`.
 - If the study is observational, remind the user that subgroup interpretation still relies on observational assumptions.
 - Avoid ML jargon.
+- Do not draw, simulate, or describe charts using markdown, ASCII, tables, code blocks, unicode blocks, or inline text graphics.
+- If the user requested a graph, summarize the numeric results only; chart artifacts are generated separately by the system.
 """.strip()
 
 
