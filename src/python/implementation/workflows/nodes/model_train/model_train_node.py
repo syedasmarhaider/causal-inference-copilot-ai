@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
+from datetime import date, datetime
 from typing import Any, ClassVar, cast
 from uuid import UUID, uuid4
 
@@ -82,7 +84,6 @@ class ModelTrainNode(Node):
 
         payload = request.node_state.payload.model_copy(deep=True)
         deps = ModelTrainDeps.from_request(request)
-
 
         training_signature = _training_signature(deps=deps)
         if payload.training_signature != training_signature:
@@ -215,6 +216,11 @@ class ModelTrainNode(Node):
 
             if isinstance(result, FitSuccess):
                 warnings_list = list(result.warnings or [])
+                training_spec = _build_training_spec(
+                    deps=deps,
+                    result=result,
+                    attempts=attempt,
+                )
                 request.orchestrator_state.set(
                     request.node_state.name(),
                     {
@@ -226,6 +232,7 @@ class ModelTrainNode(Node):
                     update={
                         "trained_model_id": result.fitted_model_id,
                         "training_warnings": warnings_list,
+                        "training_spec": training_spec,
                         "assistant_message": _success_message(
                             model_name=deps.selected_model,
                             fitted_model_id=result.fitted_model_id,
@@ -238,8 +245,7 @@ class ModelTrainNode(Node):
                 return self._done_result(
                     request=request,
                     payload=success_payload,
-                    user_message=success_payload.assistant_message
-                    or str(result.fitted_model_id),
+                    user_message=success_payload.assistant_message or str(result.fitted_model_id),
                 )
 
             if isinstance(result, CommandFailure):
@@ -370,6 +376,7 @@ class ModelTrainNode(Node):
         failed_payload = payload.model_copy(
             update={
                 "trained_model_id": None,
+                "training_spec": None,
                 "assistant_message": user_message.strip(),
                 "error_message": error_message.strip(),
             }
@@ -397,6 +404,68 @@ def _training_signature(*, deps: ModelTrainDeps) -> str:
         default=str,
     )
     return hashlib.sha256(signature_json.encode("utf-8")).hexdigest()
+
+
+def _build_training_spec(
+    *,
+    deps: ModelTrainDeps,
+    result: FitSuccess,
+    attempts: int,
+) -> dict[str, Any]:
+    meta = result.meta or {}
+    return {
+        "selected_model": deps.selected_model,
+        "fitted_model_id": str(result.fitted_model_id),
+        "attempts": int(attempts),
+        "causal_spec": deps.causal_spec.model_dump(mode="json", exclude_none=True),
+        "transformation_plan": deps.transformation_plan.model_dump(mode="json", exclude_none=True),
+        "fit": {
+            "backend": _json_safe_training_value(meta.get("backend")),
+            "columns": _json_safe_training_value(meta.get("columns", {})),
+            "used_init_kwargs": _json_safe_training_value(meta.get("used_init_kwargs", {})),
+            "artifacts": _json_safe_training_value(result.artifacts or {}),
+            "warnings": [str(item) for item in (result.warnings or [])],
+            "started_at": _json_safe_training_value(result.started_at),
+            "finished_at": _json_safe_training_value(result.finished_at),
+        },
+    }
+
+
+def _json_safe_training_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, UUID):
+        return str(value)
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_training_value(item) for key, item in value.items()}
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_safe_training_value(item) for item in value]
+
+    get_params = getattr(value, "get_params", None)
+    if callable(get_params):
+        serialized: dict[str, Any] = {
+            "type": _type_name(value),
+            "repr": repr(value),
+        }
+        with suppress(Exception):
+            serialized["params"] = _json_safe_training_value(get_params(deep=False))
+        return serialized
+
+    return {
+        "type": _type_name(value),
+        "repr": repr(value),
+    }
+
+
+def _type_name(value: Any) -> str:
+    value_type = type(value)
+    return f"{value_type.__module__}.{value_type.__qualname__}"
 
 
 def _success_message(

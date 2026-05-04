@@ -15,6 +15,7 @@ class ModelTrainPayloadModel(BaseModel):
     training_signature: str | None = None
     trained_model_id: UUID | None = None
     training_warnings: list[str] = Field(default_factory=list)
+    training_spec: dict[str, Any] | None = None
     assistant_message: str | None = None
     error_message: str | None = None
 
@@ -44,6 +45,7 @@ class ModelTrainPayloadModel(BaseModel):
                 "training_signature": training_signature,
                 "trained_model_id": None,
                 "training_warnings": [],
+                "training_spec": None,
                 "assistant_message": None,
                 "error_message": None,
             }
