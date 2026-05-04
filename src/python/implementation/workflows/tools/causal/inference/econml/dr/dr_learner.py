@@ -71,6 +71,8 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import Causa
 
 log = get_logger(__name__)
 
+_SPARSE_LINEAR_MAX_ITER = 10000
+
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -433,7 +435,10 @@ def _build_regression_candidates(
             _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=hgb, require_dense=True),
         ]
 
-    lasso = WeightedLassoCVWrapper(random_state=random_state)
+    lasso = WeightedLassoCVWrapper(
+        random_state=random_state,
+        max_iter=_SPARSE_LINEAR_MAX_ITER,
+    )
     ridge = RidgeCV(alphas=np.logspace(-4, 4, 25))
     et = ExtraTreesRegressor(
         n_estimators=400,
@@ -637,6 +642,8 @@ class _BaseDRLearnerAdapter(CausalModel):
                 defaults, init_map, "categories", _treatment_categories_from_spec(specs)
             )
             _set_if_supported(defaults, init_map, "allow_missing", missingness_W)
+            if self.ESTIMATOR_CLS is SparseLinearDRLearner:
+                _set_if_supported(defaults, init_map, "max_iter", _SPARSE_LINEAR_MAX_ITER)
 
             if pre_xw is not None:
                 _set_if_supported(
