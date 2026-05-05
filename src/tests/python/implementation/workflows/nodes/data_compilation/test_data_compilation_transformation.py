@@ -13,6 +13,9 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_tra
     TransformationResult,
     transform,
 )
+from python.implementation.workflows.tools.causal.encoding.encoding_plan_tool import (
+    EncodingPlanTool,
+)
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
@@ -290,6 +293,39 @@ def test_transform_only_allows_cat_onehot_for_categorical_columns() -> None:
         "passthrough",
         "cat_onehot",
     ]
+
+
+def test_transform_converts_text_boolean_passthrough_to_cat_onehot() -> None:
+    dataframe = _build_dataframe()
+    dataframe["flag"] = ["Yes" if index % 2 == 0 else "No" for index in range(len(dataframe))]
+    llm = _FakeLLM(
+        json_outputs=[
+            {
+                "columns": [
+                    {
+                        "column": "flag",
+                        "role": "covariate",
+                        "preset": "passthrough",
+                        "preferred_type": "BOOLEAN",
+                        "preferred_type_reason": "Flag is a boolean-like Yes/No indicator.",
+                    }
+                ]
+            }
+        ]
+    )
+
+    result = transform(
+        transformation_instructions="",
+        causal_spec=CausalSpec.model_validate(
+            _causal_spec_payload(covariates=["flag"], effect_modifiers=[])
+        ),
+        data_summary=_build_summary(dataframe),
+        llm=llm,
+        encoding_plan_tool=EncodingPlanTool(),
+    )
+
+    assert result.transformation_plan is not None
+    assert result.transformation_plan.columns[0].encoding.preset == "cat_onehot"
 
 
 def test_transform_only_allows_datetime_epoch_seconds_for_datetime_columns() -> None:

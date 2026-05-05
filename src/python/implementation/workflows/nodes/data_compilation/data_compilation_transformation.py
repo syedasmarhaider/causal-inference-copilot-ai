@@ -101,8 +101,11 @@ def transform(
     causal_spec: CausalSpec,
     data_summary: DatasetSummaryModel,
     llm: LLMService,
-    encoding_plan_tool: EncodingPlanTool,
+    encoding_plan_tool: EncodingPlanTool | None = None,
 ) -> TransformationResult:
+    if encoding_plan_tool is None:
+        encoding_plan_tool = EncodingPlanTool()
+
     expected_role_by_column = _protocol_scope_role_by_column(causal_spec)
     if not expected_role_by_column:
         return TransformationResult(
@@ -327,19 +330,20 @@ def _materialize_encoding_payload_from_draft_column(
             f"'{draft_column.preset}' is not allowed"
         )
 
+    if (
+        draft_column.preset == "passthrough"
+        and isinstance(profile, BooleanColumnProfileModel)
+        and not _boolean_passthrough_is_numeric_safe(profile)
+    ):
+        return _cat_onehot_payload()
+
     match draft_column.preset:
         case "drop":
             return {"preset": "drop"}
         case "passthrough":
             return {"preset": "passthrough"}
         case "cat_onehot":
-            return {
-                "preset": "cat_onehot",
-                "drop_first": False,
-                "handle_unknown": "ignore",
-                "missing": "impute_token",
-                "missing_token": "__MISSING__",
-            }
+            return _cat_onehot_payload()
         case "num_standard":
             return {
                 "preset": "num_standard",
@@ -372,6 +376,25 @@ def _materialize_encoding_payload_from_draft_column(
             raise ValueError(
                 f"unsupported preset '{draft_column.preset}' for column '{draft_column.column}'"
             )
+
+
+def _cat_onehot_payload() -> dict[str, Any]:
+    return {
+        "preset": "cat_onehot",
+        "drop_first": False,
+        "handle_unknown": "ignore",
+        "missing": "impute_token",
+        "missing_token": "__MISSING__",
+    }
+
+
+def _boolean_passthrough_is_numeric_safe(profile: BooleanColumnProfileModel) -> bool:
+    dtype = str(profile.dtype or "").strip().lower()
+    if not dtype:
+        return False
+    if dtype in {"bool", "boolean"} or dtype.startswith("bool"):
+        return True
+    return any(token in dtype for token in ("int", "uint", "float"))
 
 
 def _build_transformation_suggestions(

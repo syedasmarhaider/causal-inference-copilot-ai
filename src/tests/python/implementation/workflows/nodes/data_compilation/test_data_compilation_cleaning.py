@@ -118,6 +118,18 @@ def _semantic_payload(
     }
 
 
+def _empty_simple_plan() -> dict[str, Any]:
+    return {"columns": []}
+
+
+def _empty_manipulation_plan() -> dict[str, Any]:
+    return {"instructions": None}
+
+
+def _column_names_from_prompt_summary(summary: dict[str, Any]) -> list[str]:
+    return [str(column["name"]) for column in summary["columns"]]
+
+
 @dataclass
 class _FakeLLM:
     json_outputs: list[Any] = field(default_factory=list)
@@ -238,7 +250,13 @@ def test_cleaning_narrows_input_dataframe_to_draft_scope_and_preserves_order() -
         datasetProfilingTool=DatasetProfilingTool(),
         simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
         dataManipulationTool=_FakeDataManipulationTool(),
-        llm=_FakeLLM(json_outputs=[_semantic_payload()]),
+        llm=_FakeLLM(
+            json_outputs=[
+                _empty_simple_plan(),
+                _empty_manipulation_plan(),
+                _semantic_payload(),
+            ]
+        ),
     )
 
     assert isinstance(result, CleaningResult)
@@ -257,7 +275,10 @@ def test_cleaning_narrows_input_dataframe_to_draft_scope_and_preserves_order() -
 def test_cleaning_fails_immediately_when_input_dataframe_missing_draft_column() -> None:
     dataframe = _build_dataframe().drop(columns=["age"])
 
-    with pytest.raises(ValueError, match="input dataframe does not satisfy draft causal spec"):
+    with pytest.raises(
+        ValueError,
+        match="input dataframe is missing required column\\(s\\): age",
+    ):
         cleaning(
             protocol_discussion="Confirmed protocol discussion",
             cleaning_instructions="Keep only protocol columns.",
@@ -275,7 +296,13 @@ def test_cleaning_fails_immediately_when_input_dataframe_missing_draft_column() 
 def test_cleaning_runs_manipulation_when_effective_instructions_are_present() -> None:
     dataframe = _build_dataframe()
     data_manipulation_tool = _FakeDataManipulationTool()
-    llm = _FakeLLM(json_outputs=[{"columns": []}, _semantic_payload()])
+    llm = _FakeLLM(
+        json_outputs=[
+            _empty_simple_plan(),
+            {"instructions": "Normalize only grounded values."},
+            _semantic_payload(),
+        ]
+    )
 
     result = cleaning(
         protocol_discussion="Treatment is binary and age is a baseline covariate.",
@@ -293,16 +320,15 @@ def test_cleaning_runs_manipulation_when_effective_instructions_are_present() ->
     assert isinstance(result, CleaningResult)
     assert len(data_manipulation_tool.calls) == 1
     assert data_manipulation_tool.calls[0]["dataframe_columns"] == [
-        ID_COL_AUTO_FILL,
-        "treatment",
-        "outcome",
-        "age",
+        "extra",
+        "patient_id",
         "isex",
+        "outcome",
+        "treatment",
+        "age",
+        ID_COL_AUTO_FILL,
     ]
-    assert "Confirmed protocol cleaning instructions:" in data_manipulation_tool.calls[0]["instructions"]
-    assert "Confirmed protocol discussion:" in data_manipulation_tool.calls[0]["instructions"]
-    assert "Use SQL for residual complex cleaning" in data_manipulation_tool.calls[0]["instructions"]
-    assert "runtime will narrow to protocol-scope columns" in data_manipulation_tool.calls[0]["instructions"]
+    assert data_manipulation_tool.calls[0]["instructions"] == ("Normalize only grounded values.")
 
 
 def test_cleaning_applies_simple_transform_before_sql_and_manually_drops_extra_columns() -> None:
@@ -333,6 +359,7 @@ def test_cleaning_applies_simple_transform_before_sql_and_manually_drops_extra_c
                     }
                 ]
             },
+            {"instructions": "Apply downstream SQL cleaning."},
             _semantic_payload(),
         ]
     )
@@ -355,9 +382,22 @@ def test_cleaning_applies_simple_transform_before_sql_and_manually_drops_extra_c
     assert len(data_manipulation_tool.calls) == 1
     sql_input = data_manipulation_tool.calls[0]["dataframe"]
     assert str(sql_input["age"].dtype) == "int64"
-    assert "Simple deterministic transformations already applied" in (
-        data_manipulation_tool.calls[0]["instructions"]
+    assert data_manipulation_tool.calls[0]["instructions"] == ("Apply downstream SQL cleaning.")
+    simple_prompt = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
+    manipulation_prompt = json.loads(str(llm.generate_json_calls[1]["user_prompt"]))
+    assert ID_COL_AUTO_FILL not in _column_names_from_prompt_summary(
+        simple_prompt["source_dataset_summary"]
     )
+    assert ID_COL_AUTO_FILL in _column_names_from_prompt_summary(
+        simple_prompt["prepared_dataset_summary"]
+    )
+    transformed_age_profile = next(
+        column
+        for column in manipulation_prompt["transformed_dataset_summary"]["columns"]
+        if column["name"] == "age"
+    )
+    assert transformed_age_profile["dtype"] == "int64"
+    assert json.loads(data_manipulation_tool.calls[0]["data_summary"])
     assert list(result.pd_cleaned.columns) == [
         ID_COL_AUTO_FILL,
         "treatment",
@@ -372,7 +412,13 @@ def test_cleaning_skips_manipulation_when_effective_instructions_are_empty() -> 
     dataframe = _build_dataframe()
     data_manipulation_tool = _FakeDataManipulationTool()
     simple_transform_tool = _FakeSimpleDataTransformationTool()
-    llm = _FakeLLM(json_outputs=[_semantic_payload()])
+    llm = _FakeLLM(
+        json_outputs=[
+            _empty_simple_plan(),
+            _empty_manipulation_plan(),
+            _semantic_payload(),
+        ]
+    )
 
     result = cleaning(
         protocol_discussion=None,
@@ -388,6 +434,7 @@ def test_cleaning_skips_manipulation_when_effective_instructions_are_empty() -> 
     )
 
     assert isinstance(result, CleaningResult)
+    assert len(llm.generate_json_calls) == 3
     assert simple_transform_tool.calls == []
     assert data_manipulation_tool.calls == []
     assert list(result.pd_cleaned.columns) == [
@@ -405,7 +452,10 @@ def test_cleaning_fails_when_manipulation_drops_required_draft_column() -> None:
         responses=[dataframe.loc[:, ["treatment", "outcome", "isex"]]]
     )
 
-    with pytest.raises(ValueError, match="cleaned dataframe does not satisfy draft causal spec"):
+    with pytest.raises(
+        ValueError,
+        match="cleaned dataframe is missing required column\\(s\\): " f"{ID_COL_AUTO_FILL}, age",
+    ):
         cleaning(
             protocol_discussion="Confirmed protocol discussion",
             cleaning_instructions="Apply the protocol cleaning.",
@@ -416,7 +466,13 @@ def test_cleaning_fails_when_manipulation_drops_required_draft_column() -> None:
             datasetProfilingTool=DatasetProfilingTool(),
             simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
             dataManipulationTool=data_manipulation_tool,
-            llm=_FakeLLM(json_outputs=[{"columns": []}, _semantic_payload()]),
+            llm=_FakeLLM(
+                json_outputs=[
+                    _empty_simple_plan(),
+                    {"instructions": "Apply the protocol cleaning."},
+                    _semantic_payload(),
+                ]
+            ),
         )
 
 
@@ -424,7 +480,8 @@ def test_cleaning_retries_compile_when_first_semantic_compile_is_invalid() -> No
     dataframe = _build_dataframe()
     llm = _FakeLLM(
         json_outputs=[
-            {"columns": []},
+            _empty_simple_plan(),
+            _empty_manipulation_plan(),
             _semantic_payload(treated="rx", control="control"),
             _semantic_payload(),
         ]
@@ -444,9 +501,9 @@ def test_cleaning_retries_compile_when_first_semantic_compile_is_invalid() -> No
     )
 
     assert isinstance(result, CleaningResult)
-    assert len(llm.generate_json_calls) == 3
-    third_call_payload = json.loads(str(llm.generate_json_calls[2]["user_prompt"]))
-    assert "compile_feedback" in third_call_payload
+    assert len(llm.generate_json_calls) == 4
+    fourth_call_payload = json.loads(str(llm.generate_json_calls[3]["user_prompt"]))
+    assert "compile_feedback" in fourth_call_payload
     assert result.causal.treatment_spec.column == "treatment"
     assert result.causal.outcome_spec.column == "outcome"
     assert result.causal.id_col == ID_COL_AUTO_FILL
@@ -459,13 +516,16 @@ def test_cleaning_fails_when_semantic_compile_is_still_invalid_after_retry() -> 
     dataframe = _build_dataframe()
     llm = _FakeLLM(
         json_outputs=[
-            {"columns": []},
+            _empty_simple_plan(),
+            _empty_manipulation_plan(),
             _semantic_payload(treated="rx", control="control"),
             _semantic_payload(treated="rx", control="control"),
         ]
     )
 
-    with pytest.raises(ValueError, match="compiled causal spec semantics remained invalid after retry"):
+    with pytest.raises(
+        ValueError, match="compiled causal spec semantics remained invalid after retry"
+    ):
         cleaning(
             protocol_discussion="Confirmed protocol discussion",
             cleaning_instructions="",
@@ -482,7 +542,13 @@ def test_cleaning_fails_when_semantic_compile_is_still_invalid_after_retry() -> 
 
 def test_cleaning_compiles_without_protocol_discussion() -> None:
     dataframe = _build_dataframe()
-    llm = _FakeLLM(json_outputs=[{"columns": []}, _semantic_payload()])
+    llm = _FakeLLM(
+        json_outputs=[
+            _empty_simple_plan(),
+            _empty_manipulation_plan(),
+            _semantic_payload(),
+        ]
+    )
 
     result = cleaning(
         protocol_discussion=None,
@@ -522,7 +588,13 @@ def test_cleaning_preserves_explicit_identifier_column_and_compiles_it_into_caus
         datasetProfilingTool=DatasetProfilingTool(),
         simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
         dataManipulationTool=_FakeDataManipulationTool(),
-        llm=_FakeLLM(json_outputs=[_semantic_payload()]),
+        llm=_FakeLLM(
+            json_outputs=[
+                _empty_simple_plan(),
+                _empty_manipulation_plan(),
+                _semantic_payload(),
+            ]
+        ),
     )
 
     assert list(result.pd_cleaned.columns) == [
@@ -536,17 +608,99 @@ def test_cleaning_preserves_explicit_identifier_column_and_compiles_it_into_caus
     assert result.causal.id_col == "patient_id"
 
 
+@pytest.mark.parametrize(
+    "identifier_values",
+    [
+        [None, "p2"],
+        ["p1", "p1"],
+    ],
+)
+def test_cleaning_generates_auto_id_when_explicit_identifier_is_unusable(
+    identifier_values: list[str | None],
+) -> None:
+    dataframe = _build_dataframe()
+    dataframe["patient_id"] = identifier_values
+
+    result = cleaning(
+        protocol_discussion=None,
+        cleaning_instructions="",
+        review_recompile_request=None,
+        draft_causal_spec=_draft_with_identifier("patient_id"),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
+        dataManipulationTool=_FakeDataManipulationTool(),
+        llm=_FakeLLM(
+            json_outputs=[
+                _empty_simple_plan(),
+                _empty_manipulation_plan(),
+                _semantic_payload(),
+            ]
+        ),
+    )
+
+    assert list(result.pd_cleaned.columns) == [
+        ID_COL_AUTO_FILL,
+        "treatment",
+        "outcome",
+        "age",
+        "isex",
+    ]
+    assert result.pd_cleaned[ID_COL_AUTO_FILL].tolist() == [1, 2]
+    assert result.causal.id_col == ID_COL_AUTO_FILL
+
+
+def test_cleaning_generates_auto_id_when_explicit_identifier_is_missing() -> None:
+    dataframe = _build_dataframe().drop(columns=["patient_id"])
+
+    result = cleaning(
+        protocol_discussion=None,
+        cleaning_instructions="",
+        review_recompile_request=None,
+        draft_causal_spec=_draft_with_identifier("patient_id"),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
+        dataManipulationTool=_FakeDataManipulationTool(),
+        llm=_FakeLLM(
+            json_outputs=[
+                _empty_simple_plan(),
+                _empty_manipulation_plan(),
+                _semantic_payload(),
+            ]
+        ),
+    )
+
+    assert list(result.pd_cleaned.columns) == [
+        ID_COL_AUTO_FILL,
+        "treatment",
+        "outcome",
+        "age",
+        "isex",
+    ]
+    assert result.causal.id_col == ID_COL_AUTO_FILL
+
+
 def test_cleaning_records_sql_missingness_resolution_without_missingness_plan() -> None:
     dataframe = _build_dataframe()
     dataframe.loc[0, "age"] = None
     data_manipulation_tool = _FakeDataManipulationTool(
         responses=[
-            dataframe.assign(age=[53.0, 61.0]),
+            dataframe.assign(age=[53.0, 61.0], **{ID_COL_AUTO_FILL: [1, 2]}),
         ]
     )
     llm = _FakeLLM(
         json_outputs=[
-            {"columns": []},
+            _empty_simple_plan(),
+            {
+                "instructions": (
+                    "Review-time recompilation request: Handle the baseline age gap "
+                    "before review. Resolve all remaining protocol-scope missingness "
+                    "in SQL. - Column 'age' (covariate): 1 missing value(s) remain."
+                )
+            },
             _semantic_payload(),
         ]
     )
@@ -564,15 +718,14 @@ def test_cleaning_records_sql_missingness_resolution_without_missingness_plan() 
         llm=llm,
     )
 
-    assert len(llm.generate_json_calls) == 2
+    assert len(llm.generate_json_calls) == 3
     simple_transform_payload = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
     assert "missingness_plan" not in simple_transform_payload
+    manipulation_payload = json.loads(str(llm.generate_json_calls[1]["user_prompt"]))
+    assert manipulation_payload["required_column_missing_counts"]["age"] == 1
     assert data_manipulation_tool.calls
-    assert "Review-time recompilation request:" in data_manipulation_tool.calls[0]["instructions"]
+    assert "Review-time recompilation request:" in (data_manipulation_tool.calls[0]["instructions"])
     assert "Resolve all remaining protocol-scope missingness in SQL" in (
-        data_manipulation_tool.calls[0]["instructions"]
-    )
-    assert "- Column 'age' (covariate): 1 missing value(s) remain." in (
         data_manipulation_tool.calls[0]["instructions"]
     )
     age_decision = next(
@@ -604,11 +757,21 @@ def test_cleaning_leaves_missingness_row_drops_for_sql() -> None:
     )
     simple_transform_tool = _FakeSimpleDataTransformationTool()
     data_manipulation_tool = _FakeDataManipulationTool(
-        responses=[_build_dataframe().loc[:, ["treatment", "outcome", "age", "isex"]]]
+        responses=[
+            _build_dataframe()
+            .assign(**{ID_COL_AUTO_FILL: [2, 3]})
+            .loc[:, [ID_COL_AUTO_FILL, "treatment", "outcome", "age", "isex"]]
+        ]
     )
     llm = _FakeLLM(
         json_outputs=[
-            {"columns": []},
+            _empty_simple_plan(),
+            {
+                "instructions": (
+                    "Drop rows with missing treatment. - Column 'treatment' "
+                    "(treatment): 1 missing value(s) remain."
+                )
+            },
             _semantic_payload(),
         ]
     )
@@ -628,9 +791,7 @@ def test_cleaning_leaves_missingness_row_drops_for_sql() -> None:
 
     assert simple_transform_tool.calls == []
     assert data_manipulation_tool.calls
-    assert "Drop rows with missing treatment." in (
-        data_manipulation_tool.calls[0]["instructions"]
-    )
+    assert "Drop rows with missing treatment." in (data_manipulation_tool.calls[0]["instructions"])
     assert "- Column 'treatment' (treatment): 1 missing value(s) remain." in (
         data_manipulation_tool.calls[0]["instructions"]
     )
@@ -648,7 +809,8 @@ def test_cleaning_fails_when_protocol_scope_missingness_remains_after_cleaning()
     dataframe.loc[0, "age"] = None
     llm = _FakeLLM(
         json_outputs=[
-            {"columns": []},
+            _empty_simple_plan(),
+            _empty_manipulation_plan(),
         ]
     )
 

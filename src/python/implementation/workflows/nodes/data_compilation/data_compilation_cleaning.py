@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
     data_compilation_causal_semantics_prompt,
+    data_compilation_data_manipulation_plan_prompt,
     data_compilation_simple_transform_prompt,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import (
@@ -77,21 +78,19 @@ class MissingnessDecisionList(BaseModel):
     decisions: list[MissingnessDecision] = Field(..., min_length=1)
 
 
-class _SimpleTransformPlanDraft(BaseModel):
+class _SimpleTransformationPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     columns: list[ColumnTransformationSpec] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _validate_columns(self) -> _SimpleTransformPlanDraft:
+    def _validate_columns(self) -> _SimpleTransformationPlan:
         columns = [str(column.column).strip() for column in self.columns]
         duplicates = sorted({column for column in columns if columns.count(column) > 1})
         if duplicates:
             raise ValueError(f"simple transform plan contains duplicate columns: {duplicates}")
         fill_columns = [
-            str(column.column).strip()
-            for column in self.columns
-            if column.has_fill_value
+            str(column.column).strip() for column in self.columns if column.has_fill_value
         ]
         if fill_columns:
             raise ValueError(
@@ -104,6 +103,19 @@ class _SimpleTransformPlanDraft(BaseModel):
         if not self.columns:
             return None
         return SimpleDataTransformationSpec(columns=self.columns)
+
+
+class _DataManipulationPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    instructions: str | None = None
+
+    @model_validator(mode="after")
+    def _normalize_instructions(self) -> _DataManipulationPlan:
+        if self.instructions is not None:
+            normalized = self.instructions.strip()
+            self.instructions = normalized or None
+        return self
 
 
 class _TreatmentSemanticsModel(BaseModel):
@@ -179,43 +191,39 @@ def cleaning(
     dataManipulationTool: DataManipulationTool,
     llm: LLMService,
 ) -> CleaningResult:
-    _ = data_summary
-
-    prepared_input_df = _materialize_identifier_column(
+    prepared_df, effective_id_col = _resolve_identifier_column(
         dataframe=to_clean_df,
         draft_causal_spec=draft_causal_spec,
-        materialize_when_missing=True,
     )
-    input_scope_columns = _draft_scope_columns(
-        draft_causal_spec,
-        include_auto_generated_identifier=True,
-    )
-    _ensure_draft_matches_dataframe(
+    required_columns = _required_columns(
         draft_causal_spec=draft_causal_spec,
-        dataframe=prepared_input_df,
+        effective_id_col=effective_id_col,
+    )
+    _ensure_columns_present(
+        dataframe=prepared_df,
+        columns=required_columns,
         context="input dataframe",
-        require_generated_identifier=True,
     )
-
-    scoped_df = prepared_input_df.loc[:, input_scope_columns].copy()
-    scoped_summary = _profile_dataset(
+    prepared_summary = _profile_dataset(
         dataset_profiling_tool=datasetProfilingTool,
-        dataframe=scoped_df,
+        dataframe=prepared_df,
     )
 
-    simple_transform_draft = _plan_simple_transformations(
+    simple_plan = _plan_simple_transformations(
         llm=llm,
-        scoped_summary=scoped_summary,
+        source_summary=data_summary,
+        prepared_summary=prepared_summary,
         draft_causal_spec=draft_causal_spec,
+        effective_id_col=effective_id_col,
         protocol_discussion=protocol_discussion,
         cleaning_instructions=cleaning_instructions,
         review_recompile_request=review_recompile_request,
     )
-    simple_transform_spec = simple_transform_draft.to_spec()
-    transformed_df = scoped_df.copy()
+    simple_transform_spec = simple_plan.to_spec()
+    transformed_df = prepared_df.copy()
     if simple_transform_spec is not None:
         transformed_df = simpleDataTransformationTool.transform(
-            dataframe=scoped_df,
+            dataframe=prepared_df,
             specification=simple_transform_spec,
         )
     transformed_summary = _profile_dataset(
@@ -223,43 +231,41 @@ def cleaning(
         dataframe=transformed_df,
     )
 
-    effective_instructions = _build_manipulation_instructions(
+    manipulation_plan = _plan_data_manipulation(
+        llm=llm,
+        source_summary=data_summary,
+        transformed_summary=transformed_summary,
+        transformed_df=transformed_df,
+        draft_causal_spec=draft_causal_spec,
+        effective_id_col=effective_id_col,
+        required_columns=required_columns,
+        simple_plan=simple_plan,
         protocol_discussion=protocol_discussion,
         cleaning_instructions=cleaning_instructions,
         review_recompile_request=review_recompile_request,
-        draft_scope_columns=input_scope_columns,
-        current_df=transformed_df,
-        draft_causal_spec=draft_causal_spec,
-        simple_transform_draft=simple_transform_draft,
     )
     cleaned_candidate_df = transformed_df.copy()
-    if effective_instructions:
+    if manipulation_plan.instructions:
         cleaned_candidate_df = dataManipulationTool.manipulate(
             dataframe=transformed_df,
             table_name="protocol_scope_df",
             data_summary=datasetProfilingTool.dataset_summary_to_json(transformed_summary),
-            instructions=effective_instructions,
+            instructions=manipulation_plan.instructions,
             retry_attempts=3,
         )
 
-    cleaned_candidate_df = _materialize_identifier_column(
+    _ensure_columns_present(
         dataframe=cleaned_candidate_df,
-        draft_causal_spec=draft_causal_spec,
-    )
-    _ensure_draft_matches_dataframe(
-        draft_causal_spec=draft_causal_spec,
-        dataframe=cleaned_candidate_df,
+        columns=required_columns,
         context="cleaned dataframe",
-        require_generated_identifier=True,
     )
-    final_scope_columns = _draft_scope_columns(
-        draft_causal_spec,
-        include_auto_generated_identifier=True,
+    cleaned_df = _project_required_columns(
+        dataframe=cleaned_candidate_df,
+        columns=required_columns,
     )
-    cleaned_df = cleaned_candidate_df.loc[:, final_scope_columns].copy()
     missingness_decisions = _finalize_missingness_decisions(
         draft_causal_spec=draft_causal_spec,
-        scoped_df=scoped_df,
+        before_df=prepared_df,
         cleaned_df=cleaned_df,
     )
     cleaned_summary = _profile_dataset(
@@ -271,6 +277,7 @@ def cleaning(
         cleaned_summary=cleaned_summary,
         draft_causal_spec=draft_causal_spec,
         protocol_discussion=protocol_discussion,
+        effective_id_col=effective_id_col,
     )
 
     return CleaningResult(
@@ -281,249 +288,175 @@ def cleaning(
     )
 
 
-def _draft_scope_columns(
-    draft_causal_spec: CausalSpecDraft,
+def _resolve_identifier_column(
     *,
-    include_auto_generated_identifier: bool,
+    dataframe: pd.DataFrame,
+    draft_causal_spec: CausalSpecDraft,
+) -> tuple[pd.DataFrame, str]:
+    draft_id_col = str(draft_causal_spec.id_col).strip()
+    if draft_id_col in dataframe.columns:
+        identifier = dataframe[draft_id_col]
+        if bool(identifier.notna().all()) and bool(identifier.is_unique):
+            return dataframe.copy(), draft_id_col
+
+    prepared = dataframe.copy()
+    prepared[ID_COL_AUTO_FILL] = pd.RangeIndex(start=1, stop=len(prepared) + 1, step=1)
+    return prepared, ID_COL_AUTO_FILL
+
+
+def _required_columns(
+    *,
+    draft_causal_spec: CausalSpecDraft,
+    effective_id_col: str,
 ) -> list[str]:
-    id_col = str(draft_causal_spec.id_col).strip()
     ordered_columns = [
-        (
-            id_col
-            if not _is_auto_identifier_column(id_col)
-            or include_auto_generated_identifier
-            else None
-        ),
+        effective_id_col,
         str(draft_causal_spec.treatment_column).strip(),
         str(draft_causal_spec.outcome_column).strip(),
         *(str(column).strip() for column in draft_causal_spec.covariates),
         *(str(column).strip() for column in draft_causal_spec.effect_modifiers),
     ]
-    deduped_columns: list[str] = []
-    for column in ordered_columns:
-        if column and column not in deduped_columns:
-            deduped_columns.append(column)
-    return deduped_columns
+    return [
+        column
+        for index, column in enumerate(ordered_columns)
+        if column and column not in ordered_columns[:index]
+    ]
 
 
-def _materialize_identifier_column(
+def _ensure_columns_present(
     *,
     dataframe: pd.DataFrame,
-    draft_causal_spec: CausalSpecDraft,
-    materialize_when_missing: bool = False,
-) -> pd.DataFrame:
-    identifier_column = str(draft_causal_spec.id_col).strip()
-    should_materialize = _is_auto_identifier_column(identifier_column) or (
-        materialize_when_missing and identifier_column not in dataframe.columns
-    )
-    if not should_materialize:
-        return dataframe
-
-    prepared = dataframe.copy()
-    prepared[identifier_column] = pd.RangeIndex(start=1, stop=len(prepared) + 1, step=1)
-    return prepared
-
-
-def _ensure_draft_matches_dataframe(
-    *,
-    draft_causal_spec: CausalSpecDraft,
-    dataframe: pd.DataFrame,
+    columns: Sequence[str],
     context: str,
-    require_generated_identifier: bool,
 ) -> None:
-    validation_issue = draft_causal_spec.validate_against_dataframe(df=dataframe)
-    if validation_issue is not None:
-        raise ValueError(
-            f"{context} does not satisfy draft causal spec: "
-            f"[{validation_issue.severity}] {validation_issue.message}"
-        )
-
-    identifier_column = str(draft_causal_spec.id_col).strip()
-    if _is_auto_identifier_column(identifier_column) and not require_generated_identifier:
-        return
-    if identifier_column in dataframe.columns:
-        return
-
-    raise ValueError(
-        f'{context} does not satisfy draft causal spec: [FAIL] Identifier column '
-        f'"{identifier_column}" not found in dataset'
-    )
+    missing = [column for column in columns if column not in dataframe.columns]
+    if missing:
+        raise ValueError(f"{context} is missing required column(s): {', '.join(missing)}")
 
 
-def _is_auto_identifier_column(identifier_column: str) -> bool:
-    normalized = identifier_column.strip().lower()
-    return normalized in {ID_COL_AUTO_FILL, "auto_id"}
-
-
-def _build_manipulation_instructions(
+def _project_required_columns(
     *,
-    protocol_discussion: str | None,
-    cleaning_instructions: str,
-    review_recompile_request: str | None,
-    draft_scope_columns: Sequence[str],
-    current_df: pd.DataFrame,
-    draft_causal_spec: CausalSpecDraft,
-    simple_transform_draft: _SimpleTransformPlanDraft,
-) -> str:
-    normalized_cleaning_instructions = _normalize_text(cleaning_instructions)
-    normalized_protocol_discussion = _normalize_text(protocol_discussion)
-    normalized_review_recompile_request = _normalize_text(review_recompile_request)
-    role_by_column = _expected_role_by_column(draft_causal_spec)
-    missing_counts = _missing_counts_by_column(current_df, role_by_column)
-    missingness_actions = {
-        column: count for column, count in missing_counts.items() if count > 0
-    }
-    if (
-        not normalized_cleaning_instructions
-        and not normalized_protocol_discussion
-        and not normalized_review_recompile_request
-        and not missingness_actions
-    ):
-        return ""
-
-    parts: list[str] = []
-    if normalized_cleaning_instructions:
-        parts.extend(
-            [
-                "Confirmed protocol cleaning instructions:",
-                normalized_cleaning_instructions,
-            ]
-        )
-    if normalized_protocol_discussion:
-        if parts:
-            parts.append("")
-        parts.extend(
-            [
-                "Confirmed protocol discussion:",
-                normalized_protocol_discussion,
-            ]
-        )
-    if normalized_review_recompile_request:
-        if parts:
-            parts.append("")
-        parts.extend(
-            [
-                "Review-time recompilation request:",
-                normalized_review_recompile_request,
-            ]
-        )
-    if missingness_actions:
-        if parts:
-            parts.append("")
-        parts.append(
-            "Resolve all remaining protocol-scope missingness in SQL. Use row filtering, "
-            "grounded scalar imputation, or other SQL cleaning that is justified by the "
-            "protocol and cleaning instructions."
-        )
-        for column, count in missingness_actions.items():
-            parts.append(
-                f"- Column '{column}' ({role_by_column[column]}): "
-                f"{count} missing value(s) remain."
-            )
-
-    if parts:
-        simple_transform_summary = _summarize_simple_transform_draft(simple_transform_draft)
-        if simple_transform_summary:
-            parts.extend(
-                [
-                    "",
-                    "Simple deterministic transformations already applied; do not repeat them:",
-                    simple_transform_summary,
-                ]
-            )
-        parts.extend(
-            [
-                "",
-                "Use SQL for residual complex cleaning, missingness handling, row filtering, "
-                "complex recoding, and complex imputation.",
-                "Do not perform final drop-column work; runtime will narrow to protocol-scope columns.",
-                "Keep these draft columns available in the cleaned dataframe:",
-                ", ".join(draft_scope_columns),
-            ]
-        )
-    return "\n".join(parts).strip()
+    dataframe: pd.DataFrame,
+    columns: Sequence[str],
+) -> pd.DataFrame:
+    return dataframe.loc[:, list(columns)].copy()
 
 
 def _plan_simple_transformations(
     *,
     llm: LLMService,
-    scoped_summary: DatasetSummaryModel,
+    source_summary: DatasetSummaryModel,
+    prepared_summary: DatasetSummaryModel,
     draft_causal_spec: CausalSpecDraft,
+    effective_id_col: str,
     protocol_discussion: str | None,
     cleaning_instructions: str,
     review_recompile_request: str | None,
-) -> _SimpleTransformPlanDraft:
-    if (
-        not _normalize_text(protocol_discussion)
-        and not _normalize_text(cleaning_instructions)
-        and not _normalize_text(review_recompile_request)
-    ):
-        return _SimpleTransformPlanDraft()
-
+) -> _SimpleTransformationPlan:
     payload: dict[str, Any] = {
         "confirmed_protocol_discussion": _normalize_text(protocol_discussion),
         "confirmed_protocol_cleaning_instructions": _normalize_text(cleaning_instructions),
-        "scoped_dataset_summary": _dataset_summary_prompt_payload(scoped_summary),
+        "source_dataset_summary": _dataset_summary_prompt_payload(source_summary),
+        "prepared_dataset_summary": _dataset_summary_prompt_payload(prepared_summary),
+        "draft_causal_spec": draft_causal_spec.model_dump(mode="json"),
+        "effective_id_col": effective_id_col,
         "expected_role_by_column": _expected_role_by_column(draft_causal_spec),
     }
     normalized_review_recompile_request = _normalize_text(review_recompile_request)
     if normalized_review_recompile_request:
         payload["review_recompile_request"] = normalized_review_recompile_request
 
-    draft = llm.generate_json(
-        schema=_SimpleTransformPlanDraft,
+    plan = llm.generate_json(
+        schema=_SimpleTransformationPlan,
         system_prompt=data_compilation_simple_transform_prompt(),
         user_prompt=json.dumps(payload, ensure_ascii=False),
         config=LLMConfig(model="basic", temperature=0.7),
         history=None,
         max_attempts=2,
     )
-    _validate_simple_transform_plan_columns(
-        draft=draft,
-        scoped_summary=scoped_summary,
-    )
-    return draft
 
-
-def _validate_simple_transform_plan_columns(
-    *,
-    draft: _SimpleTransformPlanDraft,
-    scoped_summary: DatasetSummaryModel,
-) -> None:
-    scoped_columns = {
+    prepared_columns = {
         str(profile.name).strip()
-        for profile in scoped_summary.profiles
+        for profile in prepared_summary.profiles
         if str(profile.name).strip()
     }
     unknown_columns = sorted(
         str(column.column).strip()
-        for column in draft.columns
-        if str(column.column).strip() not in scoped_columns
+        for column in plan.columns
+        if str(column.column).strip() not in prepared_columns
     )
     if unknown_columns:
         raise ValueError(
-            "simple transform plan contains non-scoped columns: "
-            f"{unknown_columns}"
+            "simple transform plan contains unknown prepared columns: " f"{unknown_columns}"
         )
 
+    transformed_id = [
+        str(column.column).strip()
+        for column in plan.columns
+        if str(column.column).strip() == effective_id_col
+    ]
+    if transformed_id:
+        raise ValueError(
+            "simple transform plan must not transform the effective identifier column: "
+            f"{effective_id_col}"
+        )
+    return plan
 
-def _summarize_simple_transform_draft(draft: _SimpleTransformPlanDraft) -> str:
-    if not draft.columns:
-        return ""
-    return "; ".join(
-        column.model_dump_json(exclude_none=True)
-        for column in draft.columns
+
+def _plan_data_manipulation(
+    *,
+    llm: LLMService,
+    source_summary: DatasetSummaryModel,
+    transformed_summary: DatasetSummaryModel,
+    transformed_df: pd.DataFrame,
+    draft_causal_spec: CausalSpecDraft,
+    effective_id_col: str,
+    required_columns: Sequence[str],
+    simple_plan: _SimpleTransformationPlan,
+    protocol_discussion: str | None,
+    cleaning_instructions: str,
+    review_recompile_request: str | None,
+) -> _DataManipulationPlan:
+    role_by_column = _expected_role_by_column(draft_causal_spec)
+    payload: dict[str, Any] = {
+        "confirmed_protocol_discussion": _normalize_text(protocol_discussion),
+        "confirmed_protocol_cleaning_instructions": _normalize_text(cleaning_instructions),
+        "source_dataset_summary": _dataset_summary_prompt_payload(source_summary),
+        "transformed_dataset_summary": _dataset_summary_prompt_payload(transformed_summary),
+        "draft_causal_spec": draft_causal_spec.model_dump(mode="json"),
+        "effective_id_col": effective_id_col,
+        "required_final_columns": list(required_columns),
+        "expected_role_by_column": role_by_column,
+        "simple_transformations_applied": [
+            column.model_dump(mode="json", exclude_none=True) for column in simple_plan.columns
+        ],
+        "required_column_missing_counts": _missing_counts_by_column(
+            transformed_df,
+            role_by_column,
+        ),
+    }
+    normalized_review_recompile_request = _normalize_text(review_recompile_request)
+    if normalized_review_recompile_request:
+        payload["review_recompile_request"] = normalized_review_recompile_request
+
+    return llm.generate_json(
+        schema=_DataManipulationPlan,
+        system_prompt=data_compilation_data_manipulation_plan_prompt(),
+        user_prompt=json.dumps(payload, ensure_ascii=False),
+        config=LLMConfig(model="basic", temperature=0.4),
+        history=None,
+        max_attempts=2,
     )
 
 
 def _finalize_missingness_decisions(
     *,
     draft_causal_spec: CausalSpecDraft,
-    scoped_df: pd.DataFrame,
+    before_df: pd.DataFrame,
     cleaned_df: pd.DataFrame,
 ) -> MissingnessDecisionList:
     role_by_column = _expected_role_by_column(draft_causal_spec)
-    before_counts = _missing_counts_by_column(scoped_df, role_by_column)
+    before_counts = _missing_counts_by_column(before_df, role_by_column)
     after_counts = _missing_counts_by_column(cleaned_df, role_by_column)
     decisions = MissingnessDecisionList(
         decisions=[
@@ -532,24 +465,19 @@ def _finalize_missingness_decisions(
                 role=role,
                 before_count=before_counts.get(column, 0),
                 after_count=after_counts.get(column, 0),
-                rows_before=len(scoped_df),
+                rows_before=len(before_df),
                 rows_after=len(cleaned_df),
             )
             for column, role in role_by_column.items()
         ]
     )
-    unresolved = [
-        decision
-        for decision in decisions.decisions
-        if decision.missing_count_after > 0
-    ]
+    unresolved = [decision for decision in decisions.decisions if decision.missing_count_after > 0]
     if unresolved:
         formatted = ", ".join(
             f"{decision.column}={decision.missing_count_after}" for decision in unresolved
         )
         raise ValueError(
-            "cleaned dataframe still contains protocol-scope missing values: "
-            f"{formatted}"
+            "cleaned dataframe still contains protocol-scope missing values: " f"{formatted}"
         )
     return decisions
 
@@ -653,9 +581,14 @@ def compile_causal_spec_from_cleaned_summary(
     draft_causal_spec: CausalSpecDraft,
     protocol_discussion: str | None,
     retry_feedback: str | None = None,
+    effective_id_col: str | None = None,
 ) -> CausalSpec:
     causal_specs_tool = CausalSpecsTool()
     compile_feedback = _normalize_text(retry_feedback) or None
+    resolved_id_col = effective_id_col or _resolve_summary_identifier_column(
+        cleaned_summary=cleaned_summary,
+        draft_causal_spec=draft_causal_spec,
+    )
 
     for attempt in range(2):
         semantics = _compile_causal_semantics_once(
@@ -668,6 +601,7 @@ def compile_causal_spec_from_cleaned_summary(
         causal_spec = _assemble_causal_spec(
             draft_causal_spec=draft_causal_spec,
             semantics=semantics,
+            effective_id_col=resolved_id_col,
         )
         try:
             return causal_specs_tool.post_validate_backdoor_spec(
@@ -686,8 +620,7 @@ def compile_causal_spec_from_cleaned_summary(
             )
 
     raise ValueError(
-        "compiled causal spec semantics remained invalid after retry: "
-        f"{compile_feedback}"
+        "compiled causal spec semantics remained invalid after retry: " f"{compile_feedback}"
     )
 
 
@@ -699,6 +632,24 @@ def _merge_compile_feedback(
     if not compile_feedback:
         return compile_issue
     return f"{compile_feedback}\n\nAlso fix this issue: {compile_issue}"
+
+
+def _resolve_summary_identifier_column(
+    *,
+    cleaned_summary: DatasetSummaryModel,
+    draft_causal_spec: CausalSpecDraft,
+) -> str:
+    summary_columns = {
+        str(profile.name).strip()
+        for profile in cleaned_summary.profiles
+        if str(profile.name).strip()
+    }
+    draft_id_col = str(draft_causal_spec.id_col).strip()
+    if draft_id_col in summary_columns:
+        return draft_id_col
+    if ID_COL_AUTO_FILL in summary_columns:
+        return ID_COL_AUTO_FILL
+    return draft_id_col
 
 
 def _compile_causal_semantics_once(
@@ -740,6 +691,7 @@ def _assemble_causal_spec(
     *,
     draft_causal_spec: CausalSpecDraft,
     semantics: _CausalSemanticsModel,
+    effective_id_col: str,
 ) -> CausalSpec:
     treatment_column = str(draft_causal_spec.treatment_column).strip()
     outcome_column = str(draft_causal_spec.outcome_column).strip()
@@ -771,11 +723,9 @@ def _assemble_causal_spec(
         treatment_spec=treatment_spec,
         outcome_spec=outcome_spec,
         covariates=[str(column).strip() for column in draft_causal_spec.covariates],
-        effect_modifiers=[
-            str(column).strip() for column in draft_causal_spec.effect_modifiers
-        ],
+        effect_modifiers=[str(column).strip() for column in draft_causal_spec.effect_modifiers],
         experiment_type=semantics.experiment_type,
-        id_col=str(draft_causal_spec.id_col).strip(),
+        id_col=effective_id_col,
     )
 
 

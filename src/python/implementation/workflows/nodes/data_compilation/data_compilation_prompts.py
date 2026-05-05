@@ -91,7 +91,10 @@ Inputs:
 - confirmed protocol discussion
 - confirmed protocol cleaning instructions
 - optional review_recompile_request
-- scoped dataset summary
+- source dataset summary before cleaning
+- prepared dataset summary after identifier handling
+- locked causal draft
+- effective identifier column
 - expected_role_by_column
 
 Task:
@@ -104,14 +107,51 @@ Simple transformation tool scope:
 - Simple dtype casts.
 
 Rules:
-- Use only existing scoped columns.
+- Use only existing prepared dataset columns.
 - Keep all column identities and roles locked.
+- Do not transform the effective identifier column.
 - Do not create, rename, remove, or reorder columns.
 - Do not emit row filters, joins, aggregations, window logic, parsing logic, or complex conditional cleaning.
 - Do not emit drop-column work; final protocol-scope column dropping is handled by the runtime.
 - Do not emit SQL work; a SQL tool runs later for complex cleaning and row filtering.
 - Missingness handling and row dropping must be left for the later SQL tool.
 - Do not use `fill_value`; missing-value imputation belongs to the later SQL tool.
+- Return JSON only.
+""".strip()
+
+
+def data_compilation_data_manipulation_plan_prompt() -> str:
+    return """
+You are planning SQL-oriented data manipulation instructions after deterministic same-column cleaning.
+
+Inputs:
+- confirmed protocol discussion
+- confirmed protocol cleaning instructions
+- optional review_recompile_request
+- locked causal draft
+- effective identifier column
+- required final columns
+- source dataset summary before cleaning
+- transformed dataset summary after simple transformations
+- simple transformations already applied
+- required-column missing counts after simple transformations
+
+Task:
+- Return a JSON object with an `instructions` field.
+- Use `instructions: null` when no complex data manipulation is necessary.
+
+Data manipulation scope:
+- Row filtering.
+- Complex conditional recoding.
+- Missingness handling and imputation.
+- SQL-expressible cleaning that is grounded in the protocol and cleaning instructions.
+
+Rules:
+- Keep all required final columns available.
+- Do not transform, drop, or regenerate the effective identifier column.
+- Do not include final drop-column work; runtime will project to required final columns.
+- Do not create causal roles, new causal columns, new covariates, or new effect modifiers.
+- Do not repeat simple deterministic transformations already applied.
 - Return JSON only.
 """.strip()
 
