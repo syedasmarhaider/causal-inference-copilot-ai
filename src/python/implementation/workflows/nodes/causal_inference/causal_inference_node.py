@@ -996,15 +996,40 @@ def _normalize_ate_result(result: ATESuccess) -> dict[str, Any]:
     item = result.ate[0] if result.ate else {}
     estimate = _scalar_from_any(item.get("ate"))
     lower, upper = _interval_from_any(item.get("ate_interval"))
+    sensitivity = _normalize_ate_sensitivity(item)
     return {
         "contrast": dict(result.contrast),
         "estimate": estimate,
         "interval": (
             {"lower": lower, "upper": upper} if lower is not None and upper is not None else None
         ),
+        "sensitivity": sensitivity,
         "warnings": list(result.warnings or []),
         "meta": dict(result.meta or {}),
     }
+
+
+def _normalize_ate_sensitivity(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    summary = item.get("sensitivity_summary")
+    robustness_value = item.get("robustness_value")
+    sensitivity_interval = item.get("sensitivity_interval")
+
+    lower, upper = _interval_from_any(sensitivity_interval)
+    normalized: dict[str, Any] = {}
+
+    if summary is not None:
+        normalized["summary"] = str(summary)
+
+    if robustness_value is not None:
+        scalar = _scalar_from_any(robustness_value)
+        normalized["robustness_value"] = scalar if scalar is not None else robustness_value
+
+    if lower is not None and upper is not None:
+        normalized["interval"] = {"lower": lower, "upper": upper}
+    elif sensitivity_interval is not None:
+        normalized["interval"] = sensitivity_interval
+
+    return normalized or None
 
 
 def _scalar_from_any(value: Any) -> float | None:

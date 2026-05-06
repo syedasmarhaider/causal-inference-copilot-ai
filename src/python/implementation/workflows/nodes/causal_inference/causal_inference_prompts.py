@@ -37,6 +37,7 @@ Rules
 - Use plain, clinical wording.
 - State what treatment comparison is being estimated and what outcome is affected.
 - Describe direction, magnitude, and uncertainty.
+- If sensitivity analysis is available, summarize the robustness value and sensitivity interval plainly.
 - If the study is observational, explicitly say interpretation depends on observational assumptions and residual confounding may remain.
 - If warnings exist, surface only the clinically relevant ones.
 - Keep the answer focused and directly usable by clinicians.

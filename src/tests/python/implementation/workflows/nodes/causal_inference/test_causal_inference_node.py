@@ -518,7 +518,15 @@ def test_causal_inference_initial_run_computes_and_caches_ate_without_copying_de
         meta={},
         fitted_model_id=train_state.payload.trained_model_id,
         contrast={"treated": "drug", "control": "control"},
-        ate=[{"ate": 0.5, "ate_interval": [0.1, 0.9]}],
+        ate=[
+            {
+                "ate": 0.5,
+                "ate_interval": [0.1, 0.9],
+                "sensitivity_summary": "Sensitivity summary.",
+                "robustness_value": 0.2,
+                "sensitivity_interval": [0.2, 0.8],
+            }
+        ],
     )
     fake_model = _FakeCausalModel(results=[ate_success])
     fake_factory = _FakeModelFactory(model=fake_model)
@@ -551,6 +559,12 @@ def test_causal_inference_initial_run_computes_and_caches_ate_without_copying_de
     assert isinstance(result, CausalInferenceState)
     assert result.status() == "PENDING"
     assert result.payload.ate_result_raw_json_str is not None
+    ate_payload = json.loads(result.payload.ate_result_raw_json_str)
+    assert ate_payload["sensitivity"] == {
+        "summary": "Sensitivity summary.",
+        "robustness_value": 0.2,
+        "interval": {"lower": 0.2, "upper": 0.8},
+    }
     assert result.payload.latest_cate_result_raw_json_str is None
     assert result.payload.assistant_message == "Clinical ATE summary."
     assert result.payload.system_message is None
@@ -914,9 +928,7 @@ def test_causal_inference_cate_allows_age_filter_with_disclaimer() -> None:
     assert payload["non_effect_modifier_filter_columns"] == ["age"]
     assert payload["effect_modifier_columns"] == ["sex"]
     assert "filtered using age" in cast(str, result.payload.assistant_message).lower()
-    assert "confirmed effect modifiers: sex" in cast(
-        str, result.payload.assistant_message
-    ).lower()
+    assert "confirmed effect modifiers: sex" in cast(str, result.payload.assistant_message).lower()
 
 
 def test_causal_inference_cate_allows_identifier_filter_with_disclaimer() -> None:
@@ -976,9 +988,7 @@ def test_causal_inference_cate_allows_identifier_filter_with_disclaimer() -> Non
             ModelSelectionState.NAME: selection_state,
             ModelTrainState.NAME: train_state,
         },
-        messages_history=[
-            ChatMessage(role="user", content="Estimate CATE for patient_id p1.")
-        ],
+        messages_history=[ChatMessage(role="user", content="Estimate CATE for patient_id p1.")],
     )
 
     assert result.status() == "PENDING"
@@ -1050,9 +1060,10 @@ def test_causal_inference_invalid_cate_selection_stays_pending() -> None:
     assert result.status() == "PENDING"
     assert result.error() is None
     assert result.payload.latest_cate_result_raw_json_str is None
-    assert "final returned dataframe must contain only group_key" in cast(
-        str, result.payload.assistant_message
-    ).lower()
+    assert (
+        "final returned dataframe must contain only group_key"
+        in cast(str, result.payload.assistant_message).lower()
+    )
 
 
 def test_extract_explicit_column_mentions_is_case_insensitive() -> None:

@@ -48,6 +48,7 @@ from python.implementation.workflows.tools.causal.inference.econml.utils import 
     now_utc,
     raise_if_x_rows_not_exactly_match_fit_x_cols,
     required_init_keys,
+    serialize_econml_sensitivity_analysis,
     serialize_inference_obj,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
@@ -609,6 +610,14 @@ class _BaseDMLAdapter(CausalModel):
                 )
                 warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                 item["ate_inference"] = None
+
+            sensitivity_fields, sensitivity_warnings = serialize_econml_sensitivity_analysis(
+                est,
+                treatment_value=t1,
+                alpha=command.inputs.alpha,
+            )
+            item.update(sensitivity_fields)
+            warnings_list.extend(sensitivity_warnings)
 
             finished = now_utc()
             return ATESuccess(

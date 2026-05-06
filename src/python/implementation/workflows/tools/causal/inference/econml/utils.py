@@ -402,6 +402,107 @@ def serialize_inference_obj(obj: Any) -> dict[str, Any]:
     return {"type": "repr", "data": repr(obj)}
 
 
+def serialize_econml_sensitivity_analysis(
+    estimator: Any,
+    *,
+    treatment_value: Any | None,
+    alpha: float,
+) -> tuple[dict[str, Any], list[str]]:
+    """
+    Collect optional EconML ATE sensitivity outputs without requiring every estimator
+    to support the sensitivity API.
+    """
+    results: dict[str, Any] = {}
+    warnings: list[str] = []
+
+    for method_name in (
+        "sensitivity_summary",
+        "robustness_value",
+        "sensitivity_interval",
+    ):
+        try:
+            if not hasattr(estimator, method_name):
+                continue
+            method = getattr(estimator, method_name)
+        except Exception as exc:
+            warnings.append(f"SENSITIVITY_NOT_AVAILABLE: {method_name} lookup failed: {repr(exc)}")
+            results[method_name] = None
+            continue
+
+        if not callable(method):
+            continue
+
+        try:
+            value = _call_econml_sensitivity_method(
+                method,
+                treatment_value=treatment_value,
+                alpha=alpha,
+            )
+        except Exception as exc:
+            warnings.append(f"SENSITIVITY_NOT_AVAILABLE: {method_name} failed: {repr(exc)}")
+            results[method_name] = None
+            continue
+
+        results[method_name] = _json_safe_sensitivity_value(value)
+
+    return results, warnings
+
+
+def _call_econml_sensitivity_method(
+    method: Any,
+    *,
+    treatment_value: Any | None,
+    alpha: float,
+) -> Any:
+    args: list[Any] = []
+    kwargs: dict[str, Any] = {}
+
+    try:
+        signature = inspect.signature(method)
+    except Exception:
+        return method()
+
+    parameters = signature.parameters
+    treatment_parameter = parameters.get("T")
+    if treatment_parameter is not None:
+        if treatment_value is None and treatment_parameter.default is inspect.Parameter.empty:
+            raise ValueError("sensitivity method requires treatment value T")
+        if treatment_parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
+            args.append(treatment_value)
+        else:
+            kwargs["T"] = treatment_value
+
+    if "alpha" in parameters:
+        kwargs["alpha"] = alpha
+
+    return method(*args, **kwargs)
+
+
+def _json_safe_sensitivity_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return _json_safe_sensitivity_value(value.tolist())
+    if isinstance(value, pd.DataFrame):
+        return {"type": "dataframe", "data": value.to_dict(orient="list")}
+    if isinstance(value, pd.Series):
+        return _json_safe_sensitivity_value(value.to_list())
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_sensitivity_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_sensitivity_value(item) for item in value]
+    if hasattr(value, "as_text"):
+        try:
+            return value.as_text()
+        except Exception:
+            pass
+    return str(value)
+
+
 def materialize_x_query(
     *,
     x_rows: list[dict[str, Any]],
