@@ -84,6 +84,15 @@ def _get_issue(report, message_prefix: str):
     return next(issue for issue in report.issues if issue.message.startswith(message_prefix))
 
 
+def _has_linear_inference_warning(report) -> bool:
+    return any(
+        issue.message.startswith(
+            "Encoded effect modifiers are rank-deficient for linear final-stage inference."
+        )
+        for issue in report.issues
+    )
+
+
 def test_validate_backdoor_accepts_rct_without_covariates() -> None:
     report = validate_backdoor(
         causal_spec=_build_causal_spec(experiment_type="RCT", covariates=[], effect_modifiers=[]),
@@ -441,9 +450,7 @@ def test_validate_backdoor_covariate_missing_with_passthrough_warns() -> None:
     assert issue.evidence["preset"] == "passthrough"
 
 
-def test_validate_backdoor_covariate_missing_with_numeric_imputer_warns() -> (
-    None
-):
+def test_validate_backdoor_covariate_missing_with_numeric_imputer_warns() -> None:
     dataframe = _build_dataframe()
     dataframe.loc[0, "age"] = None
 
@@ -1014,9 +1021,7 @@ def test_validate_backdoor_reports_datetime_parse_failures() -> None:
         ),
     )
 
-    issue = _get_issue(
-        report, "Column 'visit_dt' has preset 'datetime_epoch_seconds'"
-    )
+    issue = _get_issue(report, "Column 'visit_dt' has preset 'datetime_epoch_seconds'")
     assert issue.severity == "FAIL"
     assert issue.evidence["preset"] == "datetime_epoch_seconds"
 
@@ -1201,9 +1206,7 @@ def test_validate_backdoor_reports_real_world_dtype_mismatch_for_numeric_preset(
         ),
     )
 
-    issue = _get_issue(
-        report, "Column 'age' has preset 'num_standard'"
-    )
+    issue = _get_issue(report, "Column 'age' has preset 'num_standard'")
     assert issue.severity == "FAIL"
     assert issue.evidence["column"] == "age"
     assert issue.evidence["preset"] == "num_standard"
@@ -1255,6 +1258,177 @@ def test_validate_backdoor_accepts_cat_onehot_for_yes_no_strings() -> None:
         issue.message.startswith("Transform plan produced non-numeric model inputs")
         for issue in report.issues
     )
+
+
+def test_validate_backdoor_warns_for_duplicate_encoded_effect_modifier_columns_without_mutation() -> (
+    None
+):
+    dataframe = _build_dataframe()
+    dataframe["first_flag"] = [
+        "Unknown" if index % 4 in {0, 1} else "Known" for index in range(len(dataframe))
+    ]
+    dataframe["second_flag"] = dataframe["first_flag"]
+    dataframe_before = dataframe.copy(deep=True)
+    transform_plan = TransformPlan.model_validate(
+        {
+            "columns": [
+                {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
+                {
+                    "column": "first_flag",
+                    "role": "effect_modifier",
+                    "encoding": {"preset": "cat_onehot"},
+                },
+                {
+                    "column": "second_flag",
+                    "role": "effect_modifier",
+                    "encoding": {"preset": "cat_onehot"},
+                },
+            ]
+        }
+    )
+    transform_plan_before = transform_plan.model_dump(mode="json")
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT",
+            covariates=["age"],
+            effect_modifiers=["first_flag", "second_flag"],
+        ),
+        dataframe=dataframe,
+        transform_plan=transform_plan,
+    )
+
+    issue = _get_issue(
+        report,
+        "Encoded effect modifiers are rank-deficient for linear final-stage inference.",
+    )
+    assert issue.severity == "WARN"
+    assert not any(issue.severity == "FAIL" for issue in report.issues)
+    assert issue.evidence["source_effect_modifiers"] == ["first_flag", "second_flag"]
+    assert issue.evidence["encoded_feature_count"] == 2
+    assert issue.evidence["intercept_augmented_parameter_count"] == 3
+    assert issue.evidence["matrix_rank"] == 2
+    duplicate_group_text = " ".join(issue.evidence["duplicate_encoded_feature_groups"][0])
+    assert "first_flag" in duplicate_group_text
+    assert "second_flag" in duplicate_group_text
+    assert "confidence intervals" in issue.message
+    assert "If confidence intervals are required" in issue.fix_hint
+    pd.testing.assert_frame_equal(dataframe, dataframe_before)
+    assert transform_plan.model_dump(mode="json") == transform_plan_before
+
+
+def test_validate_backdoor_warns_for_rank_deficient_effect_modifier_design_without_duplicates() -> (
+    None
+):
+    dataframe = _build_dataframe()
+    dataframe["x1"] = [float(index) for index in range(len(dataframe))]
+    dataframe["x2"] = [float(index**2) for index in range(len(dataframe))]
+    dataframe["x3"] = dataframe["x1"] + dataframe["x2"]
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT",
+            covariates=["age"],
+            effect_modifiers=["x1", "x2", "x3"],
+        ),
+        dataframe=dataframe,
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
+                    {
+                        "column": "x1",
+                        "role": "effect_modifier",
+                        "encoding": {"preset": "passthrough"},
+                    },
+                    {
+                        "column": "x2",
+                        "role": "effect_modifier",
+                        "encoding": {"preset": "passthrough"},
+                    },
+                    {
+                        "column": "x3",
+                        "role": "effect_modifier",
+                        "encoding": {"preset": "passthrough"},
+                    },
+                ]
+            }
+        ),
+    )
+
+    issue = _get_issue(
+        report,
+        "Encoded effect modifiers are rank-deficient for linear final-stage inference.",
+    )
+    assert issue.severity == "WARN"
+    assert issue.evidence["duplicate_encoded_feature_groups"] == []
+    assert issue.evidence["matrix_rank"] < issue.evidence["intercept_augmented_parameter_count"]
+
+
+def test_validate_backdoor_does_not_warn_for_full_rank_effect_modifier_design() -> None:
+    dataframe = _build_dataframe()
+    dataframe["x1"] = [float(index) for index in range(len(dataframe))]
+    dataframe["x2"] = [float(index**2) for index in range(len(dataframe))]
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT",
+            covariates=["age"],
+            effect_modifiers=["x1", "x2"],
+        ),
+        dataframe=dataframe,
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
+                    {
+                        "column": "x1",
+                        "role": "effect_modifier",
+                        "encoding": {"preset": "passthrough"},
+                    },
+                    {
+                        "column": "x2",
+                        "role": "effect_modifier",
+                        "encoding": {"preset": "passthrough"},
+                    },
+                ]
+            }
+        ),
+    )
+
+    assert report.status == "PASS"
+    assert not _has_linear_inference_warning(report)
+
+
+def test_validate_backdoor_skips_linear_inference_warning_when_transform_validation_fails() -> None:
+    dataframe = _build_dataframe()
+    dataframe["flag"] = ["Yes" if index % 4 in {0, 1} else "No" for index in range(len(dataframe))]
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT",
+            covariates=["age"],
+            effect_modifiers=["flag"],
+        ),
+        dataframe=dataframe,
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
+                    {
+                        "column": "flag",
+                        "role": "effect_modifier",
+                        "encoding": {"preset": "passthrough"},
+                    },
+                ]
+            }
+        ),
+    )
+
+    issue = _get_issue(report, "Transform plan produced non-numeric model inputs")
+    assert issue.severity == "FAIL"
+    assert report.status == "FAIL"
+    assert not _has_linear_inference_warning(report)
 
 
 def test_validate_backdoor_converts_internal_step_error_to_fail_issue(monkeypatch) -> None:

@@ -75,11 +75,7 @@ class ValidationBackdoorTool(Tool):
         covariates = _dedup_keep_order(list(causal_spec.covariates))
         effect_modifiers = _dedup_keep_order(list(causal_spec.effect_modifiers))
         eligible_cols = _dedup_keep_order(
-            [
-                column
-                for column in covariates + effect_modifiers
-                if column != identifier_col
-            ]
+            [column for column in covariates + effect_modifiers if column != identifier_col]
         )
 
         metrics: dict[str, Any] = {
@@ -148,8 +144,8 @@ class ValidationBackdoorTool(Tool):
                         treatment_spec=causal_spec.treatment_spec,
                         outcome_spec=causal_spec.outcome_spec,
                     ),
+                )
             )
-        )
 
         if identifier_col in dataframe.columns:
             issues.extend(
@@ -356,11 +352,7 @@ def _validate_causal_spec(
         )
 
     identifier_overlap = sorted(
-        {
-            column
-            for column in covariates + effect_modifiers
-            if column == identifier_col
-        }
+        {column for column in covariates + effect_modifiers if column == identifier_col}
     )
     if identifier_overlap:
         issues.append(
@@ -419,7 +411,8 @@ def _validate_identifier_column(
     duplicate_count = int(duplicate_mask.sum())
     if duplicate_count > 0:
         duplicate_values = [
-            str(value) for value in non_missing.loc[duplicate_mask].astype(str).unique().tolist()[:10]
+            str(value)
+            for value in non_missing.loc[duplicate_mask].astype(str).unique().tolist()[:10]
         ]
         issues.append(
             _issue(
@@ -752,9 +745,7 @@ def _validate_transform_plan(
     plan_set = set(plan_columns)
     eligible_set = set(eligible_cols)
 
-    illegal_columns = sorted(
-        plan_set.intersection({treatment_col, outcome_col, identifier_col})
-    )
+    illegal_columns = sorted(plan_set.intersection({treatment_col, outcome_col, identifier_col}))
     if illegal_columns:
         protected_labels: list[str] = []
         for column in illegal_columns:
@@ -787,8 +778,7 @@ def _validate_transform_plan(
             _issue(
                 severity="FAIL",
                 message=(
-                    f"Transform plan is missing eligible columns: "
-                    f"{', '.join(missing_columns)}."
+                    f"Transform plan is missing eligible columns: " f"{', '.join(missing_columns)}."
                 ),
                 evidence={"missing_columns": missing_columns},
                 fix_hint=(
@@ -901,16 +891,109 @@ def _validate_transform_plan(
         )
         return issues
 
-    issues.extend(
-        _validate_compiled_transformers_against_data(
-            dataframe=dataframe,
-            compiled_transformers=compiled_transformers,
-            effect_modifiers=effect_modifiers,
-            covariates=covariates,
-        )
+    transformer_issues = _validate_compiled_transformers_against_data(
+        dataframe=dataframe,
+        compiled_transformers=compiled_transformers,
+        effect_modifiers=effect_modifiers,
+        covariates=covariates,
     )
+    issues.extend(transformer_issues)
+
+    if effect_modifiers and not any(issue.severity == "FAIL" for issue in transformer_issues):
+        issues.extend(
+            _validate_linear_effect_modifier_inference_matrix(
+                dataframe=dataframe,
+                transform_plan=transform_plan,
+                effect_modifiers=effect_modifiers,
+                covariates=covariates,
+            )
+        )
 
     return issues
+
+
+def _validate_linear_effect_modifier_inference_matrix(
+    *,
+    dataframe: pd.DataFrame,
+    transform_plan: TransformPlan,
+    effect_modifiers: list[str],
+    covariates: list[str],
+) -> list[ValidationIssueModel]:
+    try:
+        compiled_transformers = compile_plan_to_transformers(
+            plan=transform_plan,
+            effect_modifiers=effect_modifiers,
+            covariates=covariates,
+            dense_output=True,
+            require_full_coverage=True,
+            drop_first_effect_modifier_onehot=True,
+        )
+        if compiled_transformers.pre_X is None:
+            return []
+
+        raw = dataframe.loc[:, effect_modifiers].to_numpy(dtype=object)
+        transformed = compiled_transformers.pre_X.fit_transform(raw)
+        arr = transformed.toarray() if hasattr(transformed, "toarray") else np.asarray(transformed)
+        arr = np.asarray(arr, dtype="float64")
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        if arr.shape[0] == 0 or arr.shape[1] == 0:
+            return []
+        if not np.isfinite(arr).all():
+            return []
+
+        feature_names = _safe_feature_names(compiled_transformers.pre_X) or [
+            f"encoded_feature_{index}" for index in range(arr.shape[1])
+        ]
+        duplicate_groups: list[list[str]] = []
+        seen: dict[bytes, list[int]] = {}
+        for index in range(arr.shape[1]):
+            key = np.ascontiguousarray(arr[:, index]).tobytes()
+            seen.setdefault(key, []).append(index)
+        for group in seen.values():
+            if len(group) > 1:
+                duplicate_groups.append(
+                    [
+                        (
+                            feature_names[index]
+                            if index < len(feature_names)
+                            else f"encoded_feature_{index}"
+                        )
+                        for index in group
+                    ]
+                )
+
+        design = np.column_stack([np.ones(arr.shape[0], dtype="float64"), arr])
+        parameter_count = int(design.shape[1])
+        matrix_rank = int(np.linalg.matrix_rank(design))
+    except Exception:
+        return []
+
+    if not duplicate_groups and matrix_rank >= parameter_count:
+        return []
+
+    return [
+        _issue(
+            severity="WARN",
+            message=(
+                "Encoded effect modifiers are rank-deficient for linear final-stage inference. "
+                "Point estimates may still train, but confidence intervals, standard errors, "
+                "and p-values from linear DR/DML models may be invalid."
+            ),
+            evidence={
+                "source_effect_modifiers": effect_modifiers,
+                "encoded_feature_count": int(arr.shape[1]),
+                "intercept_augmented_parameter_count": parameter_count,
+                "matrix_rank": matrix_rank,
+                "duplicate_encoded_feature_groups": duplicate_groups[:20],
+            },
+            fix_hint=(
+                "If confidence intervals are required, simplify or recode duplicate effect "
+                "modifiers, or choose a model whose inference method does not rely on this "
+                "linear design matrix."
+            ),
+        )
+    ]
 
 
 def _validate_compiled_transformers_against_data(
