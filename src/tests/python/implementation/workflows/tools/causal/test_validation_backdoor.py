@@ -106,6 +106,7 @@ def test_validate_backdoor_accepts_rct_without_covariates() -> None:
         for issue in report.issues
     )
     assert not any(issue.severity == "FAIL" for issue in report.issues)
+    assert "overlap" not in report.metrics
 
 
 def test_validate_backdoor_fails_observational_without_covariates() -> None:
@@ -573,6 +574,126 @@ def test_validate_backdoor_warns_for_low_cardinality_numeric_with_numeric_preset
     )
     assert issue.severity == "WARN"
     assert issue.evidence["distinct_non_null_count"] == 5
+
+
+def test_validate_backdoor_computes_propensity_overlap_metrics_without_weak_warning() -> None:
+    dataframe = _build_dataframe()
+    dataframe["age"] = [30, 30, 40, 40, 50, 50, 60, 60] * 5
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="OBSERVATIONAL", covariates=["age"], effect_modifiers=[]
+        ),
+        dataframe=dataframe,
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
+        ),
+    )
+
+    assert "overlap" in report.metrics
+    overlap = report.metrics["overlap"]
+    assert overlap["status"] == "computed"
+    assert overlap["thresholds"] == {"lower": 0.05, "upper": 0.95}
+    assert overlap["n_rows_used"] == len(dataframe)
+    assert overlap["n_treated"] == 20
+    assert overlap["n_control"] == 20
+    assert overlap["weak_overlap"]["overall_count"] == 0
+    assert not any(
+        issue.message == "Propensity-score overlap diagnostics found weak common support."
+        for issue in report.issues
+    )
+
+
+def test_validate_backdoor_warns_for_propensity_weak_overlap() -> None:
+    dataframe = _build_dataframe()
+    dataframe["treatment"] = ["0"] * 20 + ["1"] * 20
+    dataframe["risk_score"] = [-100.0] * 20 + [100.0] * 20
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="OBSERVATIONAL", covariates=["risk_score"], effect_modifiers=[]
+        ),
+        dataframe=dataframe,
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {
+                        "column": "risk_score",
+                        "role": "covariate",
+                        "encoding": {"preset": "passthrough"},
+                    }
+                ]
+            }
+        ),
+    )
+
+    overlap = report.metrics["overlap"]
+    assert overlap["status"] == "computed"
+    assert overlap["weak_overlap"]["overall_count"] > 0
+    issue = _get_issue(report, "Propensity-score overlap diagnostics found weak common support.")
+    assert issue.severity == "WARN"
+    assert (
+        issue.evidence["weak_overlap"]["overall_count"] == overlap["weak_overlap"]["overall_count"]
+    )
+
+
+def test_validate_backdoor_skips_overlap_metrics_when_transform_plan_invalid() -> None:
+    dataframe = _build_dataframe()
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="OBSERVATIONAL", covariates=["age"], effect_modifiers=[]
+        ),
+        dataframe=dataframe,
+        transform_plan=None,
+    )
+
+    assert any(
+        issue.message
+        == "Transform plan is required when covariates or effect modifiers are present."
+        for issue in report.issues
+    )
+    assert "overlap" not in report.metrics
+
+
+def test_validate_backdoor_warns_when_propensity_overlap_fit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingLogisticRegression:
+        def __init__(self, *, max_iter: int, solver: str) -> None:
+            _ = max_iter, solver
+
+        def fit(self, X, y):  # pyright: ignore[reportMissingParameterType]
+            _ = X, y
+            raise ValueError("separation")
+
+    monkeypatch.setattr(validator_module, "LogisticRegression", FailingLogisticRegression)
+
+    dataframe = _build_dataframe()
+    dataframe["age"] = [30, 30, 40, 40, 50, 50, 60, 60] * 5
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="OBSERVATIONAL", covariates=["age"], effect_modifiers=[]
+        ),
+        dataframe=dataframe,
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
+        ),
+    )
+
+    assert report.metrics["overlap"]["status"] == "unavailable"
+    issue = _get_issue(report, "Propensity-score overlap diagnostics could not be computed.")
+    assert issue.severity == "WARN"
+    assert "separation" in issue.evidence["error"]
 
 
 def test_validate_backdoor_does_not_add_low_cardinality_warning_for_numeric_column_with_categorical_preset() -> (

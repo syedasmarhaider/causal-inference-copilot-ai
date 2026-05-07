@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numbers
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 
@@ -9,6 +10,8 @@ import numpy as np
 import pandas as pd
 import pandas.api.types as ptypes
 from pydantic import BaseModel, ConfigDict, Field
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 
 from python.domain.models.validation import ValidationIssueModel, ValidationStatus
 from python.domain.workflows.tool import Tool
@@ -29,6 +32,10 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import (
     CausalSpec,
     ContinuousOutcomeSpecModel,
 )
+
+_OVERLAP_PROPENSITY_LOWER = 0.05
+_OVERLAP_PROPENSITY_UPPER = 0.95
+_OVERLAP_QUANTILES = (0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99)
 
 
 class ValidationBackdoorReport(BaseModel):
@@ -97,43 +104,42 @@ class ValidationBackdoorTool(Tool):
         }
 
         issues: list[ValidationIssueModel] = []
-        issues.extend(
-            _guard_validation_step(
-                step_name="dataframe structure",
-                validator=lambda: _validate_dataframe_structure(
-                    dataframe=dataframe,
-                    treatment_col=treatment_col,
-                    outcome_col=outcome_col,
-                    identifier_col=identifier_col,
-                    eligible_cols=eligible_cols,
-                ),
-            )
+        dataframe_issues = _guard_validation_step(
+            step_name="dataframe structure",
+            validator=lambda: _validate_dataframe_structure(
+                dataframe=dataframe,
+                treatment_col=treatment_col,
+                outcome_col=outcome_col,
+                identifier_col=identifier_col,
+                eligible_cols=eligible_cols,
+            ),
         )
-        issues.extend(
-            _guard_validation_step(
-                step_name="causal spec",
-                validator=lambda: _validate_causal_spec(
-                    causal_spec=causal_spec,
-                    treatment_col=treatment_col,
-                    outcome_col=outcome_col,
-                    identifier_col=identifier_col,
-                    covariates=covariates,
-                    effect_modifiers=effect_modifiers,
-                ),
-            )
-        )
+        issues.extend(dataframe_issues)
 
+        causal_spec_issues = _guard_validation_step(
+            step_name="causal spec",
+            validator=lambda: _validate_causal_spec(
+                causal_spec=causal_spec,
+                treatment_col=treatment_col,
+                outcome_col=outcome_col,
+                identifier_col=identifier_col,
+                covariates=covariates,
+                effect_modifiers=effect_modifiers,
+            ),
+        )
+        issues.extend(causal_spec_issues)
+
+        treatment_issues: list[ValidationIssueModel] = []
         if treatment_col in dataframe.columns:
-            issues.extend(
-                _guard_validation_step(
-                    step_name="treatment column",
-                    validator=lambda: _validate_treatment_column(
-                        dataframe=dataframe,
-                        treatment_spec=causal_spec.treatment_spec,
-                        experiment_type=causal_spec.experiment_type,
-                    ),
-                )
+            treatment_issues = _guard_validation_step(
+                step_name="treatment column",
+                validator=lambda: _validate_treatment_column(
+                    dataframe=dataframe,
+                    treatment_spec=causal_spec.treatment_spec,
+                    experiment_type=causal_spec.experiment_type,
+                ),
             )
+            issues.extend(treatment_issues)
 
         if outcome_col in dataframe.columns:
             issues.extend(
@@ -158,20 +164,36 @@ class ValidationBackdoorTool(Tool):
                 )
             )
 
+        transform_issues = _guard_validation_step(
+            step_name="transform plan",
+            validator=lambda: _validate_transform_plan(
+                dataframe=dataframe,
+                treatment_spec=causal_spec.treatment_spec,
+                transform_plan=transform_plan,
+                covariates=covariates,
+                effect_modifiers=effect_modifiers,
+                eligible_cols=eligible_cols,
+                identifier_col=identifier_col,
+                treatment_col=treatment_col,
+                outcome_col=outcome_col,
+            ),
+        )
+        issues.extend(transform_issues)
+
         issues.extend(
-            _guard_validation_step(
-                step_name="transform plan",
-                validator=lambda: _validate_transform_plan(
-                    dataframe=dataframe,
-                    treatment_spec=causal_spec.treatment_spec,
-                    transform_plan=transform_plan,
-                    covariates=covariates,
-                    effect_modifiers=effect_modifiers,
-                    eligible_cols=eligible_cols,
-                    identifier_col=identifier_col,
-                    treatment_col=treatment_col,
-                    outcome_col=outcome_col,
-                ),
+            _validate_propensity_overlap(
+                dataframe=dataframe,
+                treatment_spec=causal_spec.treatment_spec,
+                transform_plan=transform_plan,
+                covariates=covariates,
+                effect_modifiers=effect_modifiers,
+                metrics=metrics,
+                blocking_issues=[
+                    *dataframe_issues,
+                    *causal_spec_issues,
+                    *treatment_issues,
+                    *transform_issues,
+                ],
             )
         )
 
@@ -910,6 +932,227 @@ def _validate_transform_plan(
         )
 
     return issues
+
+
+def _validate_propensity_overlap(
+    *,
+    dataframe: pd.DataFrame,
+    treatment_spec: BinaryTreatmentSpecModel,
+    transform_plan: TransformPlan | None,
+    covariates: list[str],
+    effect_modifiers: list[str],
+    metrics: dict[str, Any],
+    blocking_issues: list[ValidationIssueModel],
+) -> list[ValidationIssueModel]:
+    xw_columns = [*effect_modifiers, *covariates]
+    if not xw_columns or transform_plan is None:
+        return []
+    if any(issue.severity == "FAIL" for issue in blocking_issues):
+        return []
+
+    treatment_col = str(treatment_spec.column)
+    if treatment_col not in dataframe.columns:
+        return []
+    if any(column not in dataframe.columns for column in xw_columns):
+        return []
+
+    try:
+        compiled_transformers = compile_plan_to_transformers(
+            plan=transform_plan,
+            effect_modifiers=effect_modifiers,
+            covariates=covariates,
+            dense_output=True,
+            require_full_coverage=True,
+        )
+        raw_xw = dataframe.loc[:, xw_columns].to_numpy(dtype=object)
+        transformed_xw = compiled_transformers.pre_XW.fit_transform(raw_xw)
+        X = _as_2d_float_array(transformed_xw)
+        if X.shape[0] == 0 or X.shape[1] == 0:
+            return []
+        if X.shape[0] != len(dataframe):
+            raise ValueError(
+                "transformed adjustment matrix row count does not match dataframe row count"
+            )
+        if not np.isfinite(X).all():
+            raise ValueError("transformed adjustment matrix contains non-finite values")
+
+        y = _encode_binary_treatment_for_overlap(dataframe[treatment_col], treatment_spec)
+        if y.shape[0] != X.shape[0]:
+            raise ValueError("encoded treatment row count does not match adjustment matrix")
+        if np.unique(y).shape[0] != 2:
+            return []
+
+        propensity_model = LogisticRegression(max_iter=1000, solver="lbfgs")
+        propensity_model.fit(X, y)
+        propensities = np.asarray(propensity_model.predict_proba(X)[:, 1], dtype=float)
+        if propensities.shape[0] != y.shape[0]:
+            raise ValueError("propensity model returned an unexpected number of scores")
+        if not np.isfinite(propensities).all():
+            raise ValueError("propensity model returned non-finite scores")
+
+    except Exception as exc:
+        metrics["overlap"] = {
+            "status": "unavailable",
+            "reason": repr(exc),
+            "source_columns": xw_columns,
+        }
+        return [
+            _issue(
+                severity="WARN",
+                message="Propensity-score overlap diagnostics could not be computed.",
+                evidence={
+                    "error": repr(exc),
+                    "source_columns": xw_columns,
+                },
+                fix_hint=(
+                    "Inspect the treatment encoding and adjustment-feature transform plan. "
+                    "The causal model can still be validated by the other deterministic checks."
+                ),
+            )
+        ]
+
+    overlap_metrics = _build_overlap_metrics(
+        propensities=propensities,
+        treatment=y,
+        source_columns=xw_columns,
+        encoded_feature_count=int(X.shape[1]),
+    )
+    metrics["overlap"] = overlap_metrics
+
+    weak_overlap = overlap_metrics["weak_overlap"]
+    if int(weak_overlap["overall_count"]) == 0:
+        return []
+
+    return [
+        _issue(
+            severity="WARN",
+            message="Propensity-score overlap diagnostics found weak common support.",
+            evidence={
+                "thresholds": overlap_metrics["thresholds"],
+                "weak_overlap": weak_overlap,
+                "common_support": overlap_metrics["common_support"],
+            },
+            fix_hint=(
+                "Rows with propensities near 0 or 1 have limited treated/control comparability. "
+                "Review inclusion criteria, treatment definition, and sparse adjustment features "
+                "before relying on causal estimates in those regions."
+            ),
+        )
+    ]
+
+
+def _as_2d_float_array(value: Any) -> np.ndarray:
+    arr = value.toarray() if hasattr(value, "toarray") else np.asarray(value)
+    arr = np.asarray(arr, dtype=float)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    if arr.ndim != 2:
+        raise ValueError(f"expected 2D transformed matrix, got ndim={arr.ndim}")
+    return arr
+
+
+def _encode_binary_treatment_for_overlap(
+    series: pd.Series,
+    treatment_spec: BinaryTreatmentSpecModel,
+) -> np.ndarray:
+    treated_key = _normalize_discrete_value(treatment_spec.treated)
+    control_key = _normalize_discrete_value(treatment_spec.control)
+    encoded: list[int] = []
+    for value in series.tolist():
+        key = _normalize_discrete_value(value)
+        if key == treated_key:
+            encoded.append(1)
+        elif key == control_key:
+            encoded.append(0)
+        else:
+            raise ValueError(f"unexpected treatment value for overlap diagnostics: {value!r}")
+    return np.asarray(encoded, dtype=int)
+
+
+def _build_overlap_metrics(
+    *,
+    propensities: np.ndarray,
+    treatment: np.ndarray,
+    source_columns: list[str],
+    encoded_feature_count: int,
+) -> dict[str, Any]:
+    lower = _OVERLAP_PROPENSITY_LOWER
+    upper = _OVERLAP_PROPENSITY_UPPER
+    treated_mask = treatment == 1
+    control_mask = treatment == 0
+    weak_mask = (propensities < lower) | (propensities > upper)
+    treated_propensities = propensities[treated_mask]
+    control_propensities = propensities[control_mask]
+
+    common_lower = float(max(np.min(treated_propensities), np.min(control_propensities)))
+    common_upper = float(min(np.max(treated_propensities), np.max(control_propensities)))
+    common_width = max(common_upper - common_lower, 0.0)
+
+    metrics: dict[str, Any] = {
+        "status": "computed",
+        "method": "logistic_regression",
+        "thresholds": {"lower": lower, "upper": upper},
+        "source_columns": source_columns,
+        "encoded_feature_count": encoded_feature_count,
+        "n_rows_used": int(propensities.shape[0]),
+        "n_treated": int(treated_mask.sum()),
+        "n_control": int(control_mask.sum()),
+        "propensity": {
+            "overall": _summarize_propensity(propensities),
+            "treated": _summarize_propensity(treated_propensities),
+            "control": _summarize_propensity(control_propensities),
+        },
+        "weak_overlap": {
+            "overall_count": int(weak_mask.sum()),
+            "overall_rate": _safe_rate(int(weak_mask.sum()), int(propensities.shape[0])),
+            "treated_count": int((weak_mask & treated_mask).sum()),
+            "treated_rate": _safe_rate(
+                int((weak_mask & treated_mask).sum()),
+                int(treated_mask.sum()),
+            ),
+            "control_count": int((weak_mask & control_mask).sum()),
+            "control_rate": _safe_rate(
+                int((weak_mask & control_mask).sum()),
+                int(control_mask.sum()),
+            ),
+        },
+        "common_support": {
+            "lower": common_lower,
+            "upper": common_upper,
+            "width": common_width,
+            "has_overlap": common_lower <= common_upper,
+        },
+    }
+
+    with suppress(Exception):
+        metrics["auc"] = float(roc_auc_score(treatment, propensities))
+
+    return metrics
+
+
+def _summarize_propensity(values: np.ndarray) -> dict[str, Any]:
+    if values.size == 0:
+        return {
+            "min": None,
+            "max": None,
+            "mean": None,
+            "quantiles": {},
+        }
+    return {
+        "min": float(np.min(values)),
+        "max": float(np.max(values)),
+        "mean": float(np.mean(values)),
+        "quantiles": {
+            f"{quantile:.2f}": float(np.quantile(values, quantile))
+            for quantile in _OVERLAP_QUANTILES
+        },
+    }
+
+
+def _safe_rate(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return float(numerator / denominator)
 
 
 def _validate_linear_effect_modifier_inference_matrix(
