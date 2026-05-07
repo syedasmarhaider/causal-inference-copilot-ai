@@ -18,6 +18,8 @@ Grounding and safety rules:
 - Do not invent columns, values, timing rules, horizons, or adjustment variables.
 - Treatment must be binary.
 - Outcome must be binary or continuous only.
+- Negative-control outcome, when present, must be binary or continuous only and must
+  remain distinct from treatment, primary outcome, identifier, covariates, and effect modifiers.
 - Covariates and effect modifiers must stay distinct.
 - Treatment and outcome must not appear in covariates or effect modifiers.
 """.strip()
@@ -58,6 +60,7 @@ Inputs:
 - locked causal draft
 - treatment column profile
 - outcome column profile
+- optional negative_control_outcome column profile
 - optional compile_feedback
 
 Task:
@@ -70,9 +73,15 @@ Rules:
   - treatment treated/control labels
   - outcome kind (`binary` or `continuous`)
   - binary outcome event/non_event labels or continuous outcome metadata
+  - negative_control_outcome kind/event/non_event/continuous metadata only when the
+    locked causal draft includes a negative_control_outcome column
   - experiment_type
 - Use exact grounded values from the protocol discussion and the provided treatment/outcome profiles.
 - Do not invent new columns, covariates, effect modifiers, timing rules, or post-treatment assumptions.
+- Do not invent a negative-control outcome. If the locked causal draft has
+  negative_control_outcome: null, return null for negative_control_outcome semantics.
+- If the locked causal draft has a negative_control_outcome column, resolve it with the
+  same binary/continuous outcome rules as the primary outcome using its provided profile.
 - If compile_feedback is present, fix that specific semantic problem directly.
 - If the outcome is continuous, only choose `continuous` when the outcome profile is numeric and the protocol supports it.
 
@@ -116,6 +125,8 @@ Rules:
 - Do not emit SQL work; a SQL tool runs later for complex cleaning and row filtering.
 - Missingness handling and row dropping must be left for the later SQL tool.
 - Do not use `fill_value`; missing-value imputation belongs to the later SQL tool.
+- The negative-control outcome, when present, is an outcome-like column to preserve and
+  not a baseline adjustment feature.
 - Return JSON only.
 """.strip()
 
@@ -151,6 +162,7 @@ Rules:
 - Do not transform, drop, or regenerate the effective identifier column.
 - Do not include final drop-column work; runtime will project to required final columns.
 - Do not create causal roles, new causal columns, new covariates, or new effect modifiers.
+- Preserve the negative-control outcome column when it appears in required final columns.
 - Do not repeat simple deterministic transformations already applied.
 - Return JSON only.
 """.strip()
@@ -194,7 +206,7 @@ Additional grounded retry guidance for the next causal-spec and transformation a
 _PLAN_GUARDRAILS = """
 Transformation-plan safety rules:
 - Build the plan only for covariates and effect modifiers from the compiled causal specification.
-- Never include treatment or outcome in the transformation plan.
+- Never include treatment, primary outcome, or negative-control outcome in the transformation plan.
 - Use the compiled dataset summary as the source of truth for the current stored kind of each column.
 - The applied preset must stay compatible with the current stored kind; do not reinterpret the current type.
 - Keep the plan conservative and type-driven.
@@ -320,7 +332,8 @@ Content rules:
 - Surface non-blocking warnings clearly and explain what each warning means for interpretation or trust in the analysis.
 - State explicitly whether you recommend accepting the setup now or revising it before moving forward.
 - If recommending acceptance with cautions, say that plainly and explain the cautions.
-- Summarize the treatment, outcome, covariates, effect modifiers, and compiled dataset shape clearly.
+- Summarize the treatment, outcome, negative-control outcome status, covariates, effect modifiers, and compiled dataset shape clearly.
+- If no valid negative-control outcome was provided or identified, surface that warning and state that CATE negative-control refutation will not be performed.
 - End by asking the user to confirm the compiled dataset, transformation plan, and validation result or say exactly what should change.
 - Do not mention internal JSON, validators, or workflow implementation details.
 
@@ -474,6 +487,7 @@ Task:
 - Produce one JSON object with a `columns` array.
 - Include every eligible column exactly once.
 - Never include treatment or outcome.
+- Never include negative-control outcome.
 - Each `columns` entry must contain exactly:
   - `column`
   - `role`
@@ -523,6 +537,7 @@ Task:
 - Produce one JSON object with a single `column` entry.
 - Keep the provided column name and role unchanged.
 - Never refer to treatment or outcome.
+- Never refer to negative-control outcome.
 
 Rules:
 - Output exactly:

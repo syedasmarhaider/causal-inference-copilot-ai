@@ -108,6 +108,9 @@ class _ResolvedInferenceContext:
     selected_model: str
     trained_model_id: UUID
     inference_ready_spec: InferenceReadyCausalSpec
+    negative_control_refutation_summary: dict[str, Any] | None = None
+    negative_control_refutation_artifact_id: UUID | None = None
+    negative_control_refutation_vectors_dataset_id: UUID | None = None
 
 
 class CausalInferenceNode(Node):
@@ -224,6 +227,13 @@ class CausalInferenceNode(Node):
             selected_model=deps.selected_model,
             trained_model_id=deps.trained_model_id,
             inference_ready_spec=inference_ready_spec,
+            negative_control_refutation_summary=deps.negative_control_refutation_summary,
+            negative_control_refutation_artifact_id=(
+                deps.negative_control_refutation_artifact_id
+            ),
+            negative_control_refutation_vectors_dataset_id=(
+                deps.negative_control_refutation_vectors_dataset_id
+            ),
         )
         source_signature = _source_signature(resolved=resolved)
         if payload.source_signature != source_signature:
@@ -377,6 +387,9 @@ class CausalInferenceNode(Node):
             "identifier_column": str(resolved.inference_ready_spec.causal_spec.id_col).strip(),
             "effect_modifiers": resolved.inference_ready_spec.get_effect_modifiers_order(),
             "selected_model": resolved.selected_model,
+            "negative_control_refutation_summary": (
+                resolved.negative_control_refutation_summary
+            ),
         }
 
         try:
@@ -505,6 +518,9 @@ class CausalInferenceNode(Node):
                 selected_model=resolved.selected_model,
                 causal_spec=resolved.inference_ready_spec.causal_spec,
                 cate_payload=cached_cate_payload,
+                negative_control_refutation_summary=(
+                    resolved.negative_control_refutation_summary
+                ),
                 history=history,
             )
             return self._needs_input_result(
@@ -620,6 +636,7 @@ class CausalInferenceNode(Node):
             selected_model=resolved.selected_model,
             causal_spec=resolved.inference_ready_spec.causal_spec,
             cate_payload=cate_payload,
+            negative_control_refutation_summary=resolved.negative_control_refutation_summary,
             history=history,
         )
 
@@ -960,6 +977,19 @@ def _source_signature(*, resolved: _ResolvedInferenceContext) -> str:
         ),
         "selected_model": resolved.selected_model,
         "trained_model_id": str(resolved.trained_model_id),
+        "negative_control_refutation_artifact_id": (
+            None
+            if resolved.negative_control_refutation_artifact_id is None
+            else str(resolved.negative_control_refutation_artifact_id)
+        ),
+        "negative_control_refutation_vectors_dataset_id": (
+            None
+            if resolved.negative_control_refutation_vectors_dataset_id is None
+            else str(resolved.negative_control_refutation_vectors_dataset_id)
+        ),
+        "negative_control_refutation_summary": (
+            resolved.negative_control_refutation_summary
+        ),
     }
     signature_json = json.dumps(
         signature_payload,
@@ -1206,11 +1236,13 @@ def _summarize_cate(
     selected_model: str,
     causal_spec: Any,
     cate_payload: dict[str, Any],
+    negative_control_refutation_summary: dict[str, Any] | None,
     history: Sequence[ChatMessage],
 ) -> str:
     context = {
         "selected_model": selected_model,
         "causal_spec": causal_spec.model_dump(mode="json"),
+        "negative_control_refutation_summary": negative_control_refutation_summary,
     }
     try:
         summary = llm.generate(

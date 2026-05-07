@@ -24,6 +24,7 @@ def _build_dataframe() -> pd.DataFrame:
                 "patient_id": f"p{index + 1}",
                 "treatment": "1" if index % 2 == 0 else "0",
                 "outcome": float(index + 1),
+                "negative_control": float(index + 101),
                 "age": 30 + index,
                 "segment": "A" if index % 4 in {0, 1} else "B",
             }
@@ -32,52 +33,76 @@ def _build_dataframe() -> pd.DataFrame:
 
 
 def _build_causal_spec(
-    *, experiment_type: str, covariates: list[str], effect_modifiers: list[str]
+    *,
+    experiment_type: str,
+    covariates: list[str],
+    effect_modifiers: list[str],
+    include_negative_control: bool = True,
 ) -> CausalSpec:
-    return CausalSpec.model_validate(
-        {
-            "treatment_spec": {
-                "kind": "binary",
-                "column": "treatment",
-                "treated": "1",
-                "control": "0",
-            },
-            "outcome_spec": {
+    payload = {
+        "treatment_spec": {
+            "kind": "binary",
+            "column": "treatment",
+            "treated": "1",
+            "control": "0",
+        },
+        "outcome_spec": {
+            "kind": "continuous",
+            "column": "outcome",
+            "unit": "score",
+        },
+        "negative_control_outcome": (
+            {
                 "kind": "continuous",
-                "column": "outcome",
+                "column": "negative_control",
                 "unit": "score",
-            },
-            "covariates": covariates,
-            "effect_modifiers": effect_modifiers,
-            "experiment_type": experiment_type,
-            "id_col": "patient_id",
-        }
-    )
+            }
+            if include_negative_control
+            else None
+        ),
+        "covariates": covariates,
+        "effect_modifiers": effect_modifiers,
+        "experiment_type": experiment_type,
+        "id_col": "patient_id",
+    }
+    return CausalSpec.model_validate(payload)
 
 
 def _build_binary_outcome_causal_spec(
-    *, experiment_type: str, covariates: list[str], effect_modifiers: list[str]
+    *,
+    experiment_type: str,
+    covariates: list[str],
+    effect_modifiers: list[str],
+    include_negative_control: bool = True,
 ) -> CausalSpec:
-    return CausalSpec.model_validate(
-        {
-            "treatment_spec": {
-                "kind": "binary",
-                "column": "treatment",
-                "treated": "1",
-                "control": "0",
-            },
-            "outcome_spec": {
-                "kind": "binary",
-                "column": "outcome",
-                "event": "1",
-                "non_event": "0",
-            },
-            "covariates": covariates,
-            "effect_modifiers": effect_modifiers,
-            "experiment_type": experiment_type,
-            "id_col": "patient_id",
-        }
-    )
+    payload = {
+        "treatment_spec": {
+            "kind": "binary",
+            "column": "treatment",
+            "treated": "1",
+            "control": "0",
+        },
+        "outcome_spec": {
+            "kind": "binary",
+            "column": "outcome",
+            "event": "1",
+            "non_event": "0",
+        },
+        "negative_control_outcome": (
+            {
+                "kind": "continuous",
+                "column": "negative_control",
+                "unit": "score",
+            }
+            if include_negative_control
+            else None
+        ),
+        "covariates": covariates,
+        "effect_modifiers": effect_modifiers,
+        "experiment_type": experiment_type,
+        "id_col": "patient_id",
+    }
+    return CausalSpec.model_validate(payload)
 
 
 def _get_issue(report, message_prefix: str):
@@ -107,6 +132,49 @@ def test_validate_backdoor_accepts_rct_without_covariates() -> None:
     )
     assert not any(issue.severity == "FAIL" for issue in report.issues)
     assert "overlap" not in report.metrics
+
+
+def test_validate_backdoor_warns_when_negative_control_outcome_missing() -> None:
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT",
+            covariates=[],
+            effect_modifiers=[],
+            include_negative_control=False,
+        ),
+        dataframe=_build_dataframe(),
+        transform_plan=None,
+    )
+
+    assert report.status == "WARN"
+    assert report.metrics["negative_control_outcome"] is None
+    assert any(
+        issue.severity == "WARN"
+        and issue.message
+        == (
+            "No valid negative-control outcome was provided or identified. "
+            "CATE negative-control refutation will not be performed."
+        )
+        for issue in report.issues
+    )
+
+
+def test_validate_backdoor_uses_negative_control_outcome_as_required_outcome_like_column() -> None:
+    dataframe = _build_dataframe().drop(columns=["negative_control"])
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="RCT",
+            covariates=[],
+            effect_modifiers=[],
+        ),
+        dataframe=dataframe,
+        transform_plan=None,
+    )
+
+    issue = _get_issue(report, "Dataframe is missing columns referenced by the causal spec.")
+    assert issue.severity == "FAIL"
+    assert issue.evidence["missing_columns"] == ["negative_control"]
 
 
 def test_validate_backdoor_fails_observational_without_covariates() -> None:

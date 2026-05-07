@@ -35,13 +35,25 @@ Protocol edit rules:
 """.strip()
 
 
+_NEGATIVE_CONTROL_OUTCOME_RULES = """
+Negative-control outcome policy:
+- Negative-control outcome handling is optional and non-blocking.
+- During protocol discussion, ask the user for a clinically valid negative-control outcome candidate.
+- Use exact dataset column names only.
+- If the user names a clinically valid negative-control outcome column, record it exactly in answer 16.
+- If the user does not provide one, suggest or record a candidate only when there is strong evidence from column names, metadata, or time ordering that the column is outcome-like and should not be affected by the treatment.
+- If no valid candidate is provided or strongly identified, set answer 16 to null.
+- Never silently invent a negative-control outcome.
+""".strip()
+
+
 _IDENTIFIER_RULES = """
 Identifier column policy:
 - Identifier column handling is optional and non-blocking.
 - Use exact dataset column names only.
-- If the user names a real patient/unit identifier column, record it exactly in answer 16.
-- If suggested_identifier_column is present and the identifier choice is still unresolved, write that suggestion into answer 16 and ask the user to confirm or correct it.
-- If no obvious identifier candidate exists, or the user says there is no real identifier column, set answer 16 to auto_id.
+- If the user names a real patient/unit identifier column, record it exactly in answer 17.
+- If suggested_identifier_column is present and the identifier choice is still unresolved, write that suggestion into answer 17 and ask the user to confirm or correct it.
+- If no obvious identifier candidate exists, or the user says there is no real identifier column, set answer 17 to auto_id.
 - Never invent an identifier column.
 """.strip()
 
@@ -93,6 +105,8 @@ Tasks:
 
 {_PROTOCOL_EDIT_RULES}
 
+{_NEGATIVE_CONTROL_OUTCOME_RULES}
+
 {_IDENTIFIER_RULES}
 
 {_FEASIBILITY_RULES}
@@ -112,6 +126,7 @@ dataset_change_request policy when next_action="confirm":
 - Make it self-contained, operational, and grounded.
 - State explicitly that this is a data-changing request.
 - Specify the confirmed treatment, outcome, covariates, effect modifiers, and any time-zero relevant columns that must be preserved.
+- Specify the confirmed negative-control outcome column if one exists; if none exists, state that negative_control_outcome is null and non-blocking.
 - Carry forward the confirmed upstream data-preparation decisions from the protocol, especially treatment/outcome value handling and baseline covariate/effect-modifier preparation decisions.
 - End the request with one exact line in this format: `Final protocol-scope columns to keep exactly: col_a, col_b, col_c`
 - Specify row filters or cohort eligibility restrictions only when they are grounded in the discussion.
@@ -152,6 +167,7 @@ Rules:
 - Do not say the protocol is already confirmed.
 - Do not mention internal phases, JSON, or workflow implementation.
 - Summarize the proposed treatment, outcome, study type, target population, time-zero approach, covariates, and effect modifiers when grounded.
+- Summarize the negative-control outcome choice when grounded; if none was provided or strongly identified, say that CATE negative-control refutation will not be performed.
 - Describe covariates as baseline adjustment or control variables.
 - Describe effect modifiers as baseline variables that enable heterogeneous treatment effects across subgroups.
 - Summarize the identifier column choice when grounded.
@@ -219,7 +235,10 @@ def get_questions() -> list[str]:
         "15) Baseline feature preparation decisions: For selected covariates/effect modifiers with missingness, unknown "
         "categories, or coded categorical values, how should they be prepared before modeling? State the approved "
         "imputation, category handling, or normalization decisions.",
-        "16) Identifier column (optional): If the dataset has a real patient/unit identifier column, name it exactly. "
+        "16) Negative-control outcome (optional): Name a clinically valid outcome-like dataset column that should not "
+        "be affected by the treatment and can be used for CATE negative-control refutation. If none is provided or "
+        "strongly identifiable from column names, metadata, or time ordering, use null.",
+        "17) Identifier column (optional): If the dataset has a real patient/unit identifier column, name it exactly. "
         "If a likely identifier exists in the dataset metadata, confirm or correct it. If no real identifier column exists, "
         "use auto_id.",
     ]
@@ -229,7 +248,8 @@ def initial_user_message() -> str:
     return (
         "Let’s define the protocol carefully from the current dataset. "
         "Please state the causal question, treatment, outcome, study type, target population, "
-        "how you want to define time zero, which identifier column should represent the patient or unit if one exists, "
+        "how you want to define time zero, any clinically valid negative-control outcome candidate if one exists, "
+        "which identifier column should represent the patient or unit if one exists, "
         "and any upstream data-handling decisions you already want for treatment, outcome, or baseline features."
     )
 

@@ -87,6 +87,9 @@ class GlobalStateModel(BaseModel):
     trained_model_id: UUID | None = None
     training_warnings: list[str] = Field(default_factory=list)
     training_spec: dict[str, Any] | None = None
+    negative_control_refutation_artifact_id: UUID | None = None
+    negative_control_refutation_vectors_dataset_id: UUID | None = None
+    negative_control_refutation_summary: dict[str, Any] | None = None
     training_error_message: str | None = None
 
     @field_validator("update_counter", mode="before")
@@ -107,7 +110,12 @@ class GlobalStateModel(BaseModel):
             return [item if isinstance(item, UUID) else UUID(str(item)) for item in v]
         raise ValueError(f"working_dataset_ids must be a list, got {type(v).__name__}")
 
-    @field_validator("trained_model_id", mode="before")
+    @field_validator(
+        "trained_model_id",
+        "negative_control_refutation_artifact_id",
+        "negative_control_refutation_vectors_dataset_id",
+        mode="before",
+    )
     @classmethod
     def _parse_trained_model_id(cls, v: Any) -> UUID | None:
         if v is None:
@@ -139,6 +147,9 @@ class CausalOchestratorState(OchestratorState):
             "trained_model_id",
             "training_warnings",
             "training_spec",
+            "negative_control_refutation_artifact_id",
+            "negative_control_refutation_vectors_dataset_id",
+            "negative_control_refutation_summary",
             "training_error_message",
         ),
     }
@@ -355,6 +366,18 @@ class CausalOchestratorState(OchestratorState):
         )
         self._model.training_spec = self._parse_optional_dict(
             value.get("training_spec"), field_name="training_spec"
+        )
+        self._model.negative_control_refutation_artifact_id = self._parse_optional_uuid(
+            value.get("negative_control_refutation_artifact_id"),
+            field_name="negative_control_refutation_artifact_id",
+        )
+        self._model.negative_control_refutation_vectors_dataset_id = self._parse_optional_uuid(
+            value.get("negative_control_refutation_vectors_dataset_id"),
+            field_name="negative_control_refutation_vectors_dataset_id",
+        )
+        self._model.negative_control_refutation_summary = self._parse_optional_dict(
+            value.get("negative_control_refutation_summary"),
+            field_name="negative_control_refutation_summary",
         )
         self._model.training_error_message = self._parse_optional_text(
             value.get("training_error_message")

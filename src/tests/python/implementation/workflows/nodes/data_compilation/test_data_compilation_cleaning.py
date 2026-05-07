@@ -81,6 +81,18 @@ def _draft_with_identifier(identifier_column: str) -> CausalSpecDraft:
     )
 
 
+def _draft_with_negative_control() -> CausalSpecDraft:
+    return CausalSpecDraft.model_validate(
+        {
+            "treatment_column": "treatment",
+            "outcome_column": "outcome",
+            "negative_control_outcome": "negative_control",
+            "covariates": ["age"],
+            "effect_modifiers": ["isex"],
+        }
+    )
+
+
 def _semantic_payload(
     *,
     treated: str = "drug",
@@ -92,6 +104,7 @@ def _semantic_payload(
     clip_min: float | None = None,
     clip_max: float | None = None,
     experiment_type: str = "OBSERVATIONAL",
+    negative_control_outcome: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     outcome: dict[str, Any]
     if outcome_kind == "continuous":
@@ -114,6 +127,7 @@ def _semantic_payload(
             "control": control,
         },
         "outcome": outcome,
+        "negative_control_outcome": negative_control_outcome,
         "experiment_type": experiment_type,
     }
 
@@ -270,6 +284,49 @@ def test_cleaning_narrows_input_dataframe_to_draft_scope_and_preserves_order() -
     assert result.causal.id_col == ID_COL_AUTO_FILL
     assert result.pd_cleaned[ID_COL_AUTO_FILL].tolist() == [1, 2]
     assert "extra" not in result.cleaned_data_summary.model_dump_json()
+
+
+def test_cleaning_preserves_negative_control_outcome_and_compiles_final_spec() -> None:
+    dataframe = _build_dataframe()
+    dataframe["negative_control"] = ["neg_event", "neg_non_event"]
+
+    result = cleaning(
+        protocol_discussion=(
+            "Confirmed protocol discussion. Negative-control outcome is negative_control."
+        ),
+        cleaning_instructions="Keep protocol columns only.",
+        review_recompile_request=None,
+        draft_causal_spec=_draft_with_negative_control(),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
+        dataManipulationTool=_FakeDataManipulationTool(),
+        llm=_FakeLLM(
+            json_outputs=[
+                _empty_simple_plan(),
+                _empty_manipulation_plan(),
+                _semantic_payload(
+                    negative_control_outcome={
+                        "kind": "binary",
+                        "event": "neg_event",
+                        "non_event": "neg_non_event",
+                    }
+                ),
+            ]
+        ),
+    )
+
+    assert list(result.pd_cleaned.columns) == [
+        ID_COL_AUTO_FILL,
+        "treatment",
+        "outcome",
+        "negative_control",
+        "age",
+        "isex",
+    ]
+    assert result.causal.negative_control_outcome is not None
+    assert result.causal.negative_control_outcome.column == "negative_control"
 
 
 def test_cleaning_fails_immediately_when_input_dataframe_missing_draft_column() -> None:

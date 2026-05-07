@@ -70,6 +70,7 @@ class CausalSpec(BaseModel):
 
     treatment_spec: TreatmentSpecModel
     outcome_spec: OutcomeSpecModel
+    negative_control_outcome: OutcomeSpecModel | None = None
     covariates: list[NonEmptyStr]
     effect_modifiers: list[NonEmptyStr]
     experiment_type: ExperimentType
@@ -188,9 +189,20 @@ def _validate_causal_spec_against_summary(
 ) -> None:
     treatment_col = str(spec.treatment_spec.column).strip()
     outcome_col = str(spec.outcome_spec.column).strip()
+    negative_control_outcome_col = (
+        str(spec.negative_control_outcome.column).strip()
+        if spec.negative_control_outcome is not None
+        else None
+    )
     covariates = [str(value).strip() for value in spec.covariates]
     effect_modifiers = [str(value).strip() for value in spec.effect_modifiers]
-    referenced_columns = [treatment_col, outcome_col, *covariates, *effect_modifiers]
+    referenced_columns = [
+        treatment_col,
+        outcome_col,
+        *([negative_control_outcome_col] if negative_control_outcome_col else []),
+        *covariates,
+        *effect_modifiers,
+    ]
 
     missing = [column for column in referenced_columns if column not in set(summary_field_names)]
     if missing:
@@ -200,6 +212,26 @@ def _validate_causal_spec_against_summary(
 
     if treatment_col == outcome_col:
         raise ValueError("treatment and outcome must be different columns")
+
+    if negative_control_outcome_col is not None:
+        negative_control_overlap = sorted(
+            {
+                column
+                for column in [
+                    treatment_col,
+                    outcome_col,
+                    str(spec.id_col).strip(),
+                    *covariates,
+                    *effect_modifiers,
+                ]
+                if column == negative_control_outcome_col
+            }
+        )
+        if negative_control_overlap:
+            raise ValueError(
+                "negative_control_outcome must be different from treatment, outcome, "
+                "identifier, covariate, and effect modifier columns"
+            )
 
     duplicate_covariates = _find_duplicates(covariates)
     if duplicate_covariates:
@@ -232,25 +264,29 @@ def _validate_causal_spec_against_summary(
     if isinstance(spec.outcome_spec, BinaryOutcomeSpecModel):
         if spec.outcome_spec.event == spec.outcome_spec.non_event:
             raise ValueError("event and non_event must be different values")
+    if isinstance(spec.negative_control_outcome, BinaryOutcomeSpecModel):
+        if spec.negative_control_outcome.event == spec.negative_control_outcome.non_event:
+            raise ValueError(
+                "negative_control_outcome event and non_event must be different values"
+            )
 
     treatment_kind = summary_field_kinds.get(treatment_col)
     if treatment_kind == "DATETIME":
         raise ValueError("binary treatment column cannot be DATETIME in dataset_summary")
 
-    outcome_kind = summary_field_kinds.get(outcome_col)
-    if isinstance(spec.outcome_spec, ContinuousOutcomeSpecModel):
-        if outcome_kind != "NUMERIC":
-            raise ValueError(
-                f"continuous outcome requires NUMERIC dataset_summary column, got {outcome_kind}"
-            )
-        if (
-            spec.outcome_spec.clip_min is not None
-            and spec.outcome_spec.clip_max is not None
-            and spec.outcome_spec.clip_min > spec.outcome_spec.clip_max
-        ):
-            raise ValueError("clip_min must be <= clip_max")
-    elif outcome_kind == "DATETIME":
-        raise ValueError("binary outcome column cannot be DATETIME in dataset_summary")
+    _validate_outcome_spec_against_summary(
+        outcome_spec=spec.outcome_spec,
+        summary_field_kinds=summary_field_kinds,
+        summary_known_values=summary_known_values,
+        label="outcome",
+    )
+    if spec.negative_control_outcome is not None:
+        _validate_outcome_spec_against_summary(
+            outcome_spec=spec.negative_control_outcome,
+            summary_field_kinds=summary_field_kinds,
+            summary_known_values=summary_known_values,
+            label="negative_control_outcome",
+        )
 
     treatment_values = summary_known_values.get(treatment_col)
     if treatment_values is not None:
@@ -261,15 +297,42 @@ def _validate_causal_spec_against_summary(
             label="treatment",
         )
 
-    if isinstance(spec.outcome_spec, BinaryOutcomeSpecModel):
-        outcome_values = summary_known_values.get(outcome_col)
-        if outcome_values is not None:
-            _validate_discrete_literals(
-                column=outcome_col,
-                expected_values={str(spec.outcome_spec.event), str(spec.outcome_spec.non_event)},
-                known_values=outcome_values,
-                label="outcome",
+
+def _validate_outcome_spec_against_summary(
+    *,
+    outcome_spec: BinaryOutcomeSpecModel | ContinuousOutcomeSpecModel,
+    summary_field_kinds: dict[str, str],
+    summary_known_values: dict[str, set[str] | None],
+    label: str,
+) -> None:
+    outcome_col = str(outcome_spec.column).strip()
+    outcome_kind = summary_field_kinds.get(outcome_col)
+    if isinstance(outcome_spec, ContinuousOutcomeSpecModel):
+        if outcome_kind != "NUMERIC":
+            raise ValueError(
+                f"continuous {label} requires NUMERIC dataset_summary column, got {outcome_kind}"
             )
+        if (
+            outcome_spec.clip_min is not None
+            and outcome_spec.clip_max is not None
+            and outcome_spec.clip_min > outcome_spec.clip_max
+        ):
+            if label == "outcome":
+                raise ValueError("clip_min must be <= clip_max")
+            raise ValueError(f"{label} clip_min must be <= clip_max")
+        return
+
+    if outcome_kind == "DATETIME":
+        raise ValueError(f"binary {label} column cannot be DATETIME in dataset_summary")
+
+    outcome_values = summary_known_values.get(outcome_col)
+    if outcome_values is not None:
+        _validate_discrete_literals(
+            column=outcome_col,
+            expected_values={str(outcome_spec.event), str(outcome_spec.non_event)},
+            known_values=outcome_values,
+            label=label,
+        )
 
 
 def _validate_discrete_literals(

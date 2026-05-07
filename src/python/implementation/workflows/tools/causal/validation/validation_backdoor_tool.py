@@ -36,6 +36,10 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import (
 _OVERLAP_PROPENSITY_LOWER = 0.05
 _OVERLAP_PROPENSITY_UPPER = 0.95
 _OVERLAP_QUANTILES = (0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99)
+_NEGATIVE_CONTROL_OUTCOME_UNAVAILABLE_WARNING = (
+    "No valid negative-control outcome was provided or identified. "
+    "CATE negative-control refutation will not be performed."
+)
 
 
 class ValidationBackdoorReport(BaseModel):
@@ -78,6 +82,12 @@ class ValidationBackdoorTool(Tool):
     ) -> ValidationBackdoorReport:
         treatment_col = str(causal_spec.treatment_spec.column)
         outcome_col = str(causal_spec.outcome_spec.column)
+        negative_control_outcome = causal_spec.negative_control_outcome
+        negative_control_outcome_col = (
+            str(negative_control_outcome.column)
+            if negative_control_outcome is not None
+            else None
+        )
         identifier_col = str(causal_spec.id_col)
         covariates = _dedup_keep_order(list(causal_spec.covariates))
         effect_modifiers = _dedup_keep_order(list(causal_spec.effect_modifiers))
@@ -92,6 +102,12 @@ class ValidationBackdoorTool(Tool):
             "columns": [str(column) for column in dataframe.columns.tolist()],
             "treatment_col": treatment_col,
             "outcome_col": outcome_col,
+            "negative_control_outcome": (
+                None
+                if negative_control_outcome is None
+                else negative_control_outcome.model_dump(mode="json")
+            ),
+            "negative_control_outcome_col": negative_control_outcome_col,
             "identifier_col": identifier_col,
             "covariates": covariates,
             "effect_modifiers": effect_modifiers,
@@ -110,6 +126,7 @@ class ValidationBackdoorTool(Tool):
                 dataframe=dataframe,
                 treatment_col=treatment_col,
                 outcome_col=outcome_col,
+                negative_control_outcome_col=negative_control_outcome_col,
                 identifier_col=identifier_col,
                 eligible_cols=eligible_cols,
             ),
@@ -122,6 +139,7 @@ class ValidationBackdoorTool(Tool):
                 causal_spec=causal_spec,
                 treatment_col=treatment_col,
                 outcome_col=outcome_col,
+                negative_control_outcome_col=negative_control_outcome_col,
                 identifier_col=identifier_col,
                 covariates=covariates,
                 effect_modifiers=effect_modifiers,
@@ -153,6 +171,21 @@ class ValidationBackdoorTool(Tool):
                 )
             )
 
+        if (
+            negative_control_outcome is not None
+            and negative_control_outcome_col in dataframe.columns
+        ):
+            issues.extend(
+                _guard_validation_step(
+                    step_name="negative-control outcome column",
+                    validator=lambda: _validate_outcome_column(
+                        dataframe=dataframe,
+                        treatment_spec=causal_spec.treatment_spec,
+                        outcome_spec=negative_control_outcome,
+                    ),
+                )
+            )
+
         if identifier_col in dataframe.columns:
             issues.extend(
                 _guard_validation_step(
@@ -176,6 +209,7 @@ class ValidationBackdoorTool(Tool):
                 identifier_col=identifier_col,
                 treatment_col=treatment_col,
                 outcome_col=outcome_col,
+                negative_control_outcome_col=negative_control_outcome_col,
             ),
         )
         issues.extend(transform_issues)
@@ -236,6 +270,7 @@ def _validate_dataframe_structure(
     dataframe: pd.DataFrame,
     treatment_col: str,
     outcome_col: str,
+    negative_control_outcome_col: str | None,
     identifier_col: str,
     eligible_cols: list[str],
 ) -> list[ValidationIssueModel]:
@@ -273,7 +308,15 @@ def _validate_dataframe_structure(
             )
         )
 
-    required_cols = _dedup_keep_order([identifier_col, treatment_col, outcome_col, *eligible_cols])
+    required_cols = _dedup_keep_order(
+        [
+            identifier_col,
+            treatment_col,
+            outcome_col,
+            *([negative_control_outcome_col] if negative_control_outcome_col else []),
+            *eligible_cols,
+        ]
+    )
     missing_cols = [column for column in required_cols if column not in dataframe.columns]
     if missing_cols:
         issues.append(
@@ -293,6 +336,7 @@ def _validate_causal_spec(
     causal_spec: CausalSpec,
     treatment_col: str,
     outcome_col: str,
+    negative_control_outcome_col: str | None,
     identifier_col: str,
     covariates: list[str],
     effect_modifiers: list[str],
@@ -308,6 +352,51 @@ def _validate_causal_spec(
                 fix_hint="Choose distinct treatment and outcome columns in the causal spec.",
             )
         )
+
+    if negative_control_outcome_col is None:
+        issues.append(
+            _issue(
+                severity="WARN",
+                message=_NEGATIVE_CONTROL_OUTCOME_UNAVAILABLE_WARNING,
+                evidence={"negative_control_outcome": None},
+                fix_hint=(
+                    "Provide a clinically valid negative-control outcome column if CATE "
+                    "negative-control refutation should be run."
+                ),
+            )
+        )
+    else:
+        negative_control_overlap = sorted(
+            {
+                column
+                for column in [
+                    treatment_col,
+                    outcome_col,
+                    identifier_col,
+                    *covariates,
+                    *effect_modifiers,
+                ]
+                if column == negative_control_outcome_col
+            }
+        )
+        if negative_control_overlap:
+            issues.append(
+                _issue(
+                    severity="FAIL",
+                    message=(
+                        "Negative-control outcome column must be different from treatment, "
+                        "outcome, identifier, covariate, and effect modifier columns."
+                    ),
+                    evidence={
+                        "negative_control_outcome_col": negative_control_outcome_col,
+                        "overlap_columns": negative_control_overlap,
+                    },
+                    fix_hint=(
+                        "Choose an outcome-like column that should not be affected by the "
+                        "treatment and is not already used in another causal role."
+                    ),
+                )
+            )
 
     cov_duplicates = _find_duplicates(list(causal_spec.covariates))
     if cov_duplicates:
@@ -733,6 +822,7 @@ def _validate_transform_plan(
     identifier_col: str,
     treatment_col: str,
     outcome_col: str,
+    negative_control_outcome_col: str | None,
 ) -> list[ValidationIssueModel]:
     issues: list[ValidationIssueModel] = []
 
@@ -767,7 +857,10 @@ def _validate_transform_plan(
     plan_set = set(plan_columns)
     eligible_set = set(eligible_cols)
 
-    illegal_columns = sorted(plan_set.intersection({treatment_col, outcome_col, identifier_col}))
+    protected_columns = {treatment_col, outcome_col, identifier_col}
+    if negative_control_outcome_col:
+        protected_columns.add(negative_control_outcome_col)
+    illegal_columns = sorted(plan_set.intersection(protected_columns))
     if illegal_columns:
         protected_labels: list[str] = []
         for column in illegal_columns:
@@ -777,13 +870,23 @@ def _validate_transform_plan(
                 protected_labels.append(f"{column} (treatment)")
             elif column == outcome_col:
                 protected_labels.append(f"{column} (outcome)")
+            elif column == negative_control_outcome_col:
+                protected_labels.append(f"{column} (negative-control outcome)")
             else:
                 protected_labels.append(column)
+        protected_role_text = (
+            "identifier, treatment, outcome, or negative-control outcome columns"
+            if (
+                negative_control_outcome_col
+                and negative_control_outcome_col in illegal_columns
+            )
+            else "identifier, treatment, or outcome columns"
+        )
         issues.append(
             _issue(
                 severity="FAIL",
                 message=(
-                    f"Transform plan must not include identifier, treatment, or outcome columns, "
+                    f"Transform plan must not include {protected_role_text}, "
                     f"but found: {', '.join(protected_labels)}."
                 ),
                 evidence={"illegal_columns": illegal_columns},

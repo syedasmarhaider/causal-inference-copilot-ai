@@ -67,6 +67,7 @@ Allowed actions
 
 Decision rules
 - Use answer_from_context only when the question can be answered from the existing cached ATE/latest CATE context and recent conversation.
+- Use answer_from_context when the user asks about negative-control CATE refutation and the cached context contains a negative_control_refutation_summary.
 - Use compute_cate when the user requests a new subgroup effect estimate or subgroup comparison that requires cohort filtering on the compiled dataset.
 - Use generate_ate_graph only for effect visualizations of the global ATE.
 - Use generate_cate_graph for any effect visualization of subgroup/CATE/ITE-style individual treatment-effect results, including requests that combine estimation with "plot", "chart", "graph", "box plot", "forest plot", or "visualize".
@@ -155,6 +156,8 @@ Rules
 - If estimates vary across groups, explain the heterogeneity briefly.
 - If uncertainty is wide or intervals include zero, say so clearly.
 - If `non_effect_modifier_filter_columns` is non-empty, treat those as cohort-filter columns only; the effect estimate still comes from the confirmed `effect_modifier_columns`.
+- If `negative_control_refutation_summary` is present in context, use it as the only source for CATE negative-control refutation status; do not imply a new refutation was run for this query.
+- If the summary status is SKIPPED or FAILED, state that clearly when refutation is relevant.
 - If the study is observational, remind the user that subgroup interpretation still relies on observational assumptions.
 - Avoid ML jargon.
 - Do not draw, simulate, or describe charts using markdown, ASCII, tables, code blocks, unicode blocks, or inline text graphics.

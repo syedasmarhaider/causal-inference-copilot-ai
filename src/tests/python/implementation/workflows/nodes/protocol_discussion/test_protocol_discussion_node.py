@@ -226,13 +226,14 @@ def test_identifier_column_candidates_preserve_deterministic_order() -> None:
     ]
 
 
-def test_fallback_review_summary_includes_identifier_line_from_q16() -> None:
+def test_fallback_review_summary_includes_identifier_line_from_q17() -> None:
     discussion = "\n".join(
         [
             "1) Causal question: What is the effect of treatment on outcome?",
             "14) Treatment/outcome data-quality decisions: Keep grounded values only.",
             "15) Baseline feature preparation decisions: None.",
-            "16) Identifier column (optional): use auto_id.",
+            "16) Negative-control outcome (optional): null.",
+            "17) Identifier column (optional): use auto_id.",
         ]
     )
 

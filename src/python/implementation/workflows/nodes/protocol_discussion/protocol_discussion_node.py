@@ -868,7 +868,7 @@ def summarize_identifier_choice(
     *,
     suggested_identifier_column: str | None = None,
 ) -> str | None:
-    answer_text = extract_protocol_answer_text(protocol_discussion, "16)")
+    answer_text = extract_protocol_answer_text(protocol_discussion, "17)")
     if answer_text is None:
         return None
 

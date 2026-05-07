@@ -56,7 +56,13 @@ class CleaningResult:
     missingness_decisions: MissingnessDecisionList
 
 
-ColumnRole = Literal["treatment", "outcome", "covariate", "effect_modifier"]
+ColumnRole = Literal[
+    "treatment",
+    "outcome",
+    "negative_control_outcome",
+    "covariate",
+    "effect_modifier",
+]
 MissingnessResolution = Literal["none_needed", "drop_rows", "impute"]
 
 
@@ -175,6 +181,7 @@ class _CausalSemanticsModel(BaseModel):
 
     treatment: _TreatmentSemanticsModel
     outcome: _OutcomeSemanticsModel
+    negative_control_outcome: _OutcomeSemanticsModel | None = None
     experiment_type: Literal["RCT", "OBSERVATIONAL"]
 
 
@@ -313,6 +320,11 @@ def _required_columns(
         effective_id_col,
         str(draft_causal_spec.treatment_column).strip(),
         str(draft_causal_spec.outcome_column).strip(),
+        *(
+            [str(draft_causal_spec.negative_control_outcome).strip()]
+            if draft_causal_spec.negative_control_outcome is not None
+            else []
+        ),
         *(str(column).strip() for column in draft_causal_spec.covariates),
         *(str(column).strip() for column in draft_causal_spec.effect_modifiers),
     ]
@@ -523,6 +535,10 @@ def _expected_role_by_column(
         str(draft_causal_spec.treatment_column).strip(): "treatment",
         str(draft_causal_spec.outcome_column).strip(): "outcome",
     }
+    if draft_causal_spec.negative_control_outcome is not None:
+        role_by_column[str(draft_causal_spec.negative_control_outcome).strip()] = (
+            "negative_control_outcome"
+        )
     for column in draft_causal_spec.covariates:
         normalized = str(column).strip()
         if normalized:
@@ -671,6 +687,11 @@ def _compile_causal_semantics_once(
             column=str(draft_causal_spec.outcome_column).strip(),
         ),
     }
+    if draft_causal_spec.negative_control_outcome is not None:
+        context_payload["negative_control_outcome_column_profile"] = _summary_profile_payload(
+            summary=cleaned_summary,
+            column=str(draft_causal_spec.negative_control_outcome).strip(),
+        )
     normalized_protocol_discussion = _normalize_text(protocol_discussion)
     if normalized_protocol_discussion:
         context_payload["protocol_discussion"] = normalized_protocol_discussion
@@ -703,29 +724,51 @@ def _assemble_causal_spec(
         control=semantics.treatment.control,
     )
 
-    if isinstance(semantics.outcome, _BinaryOutcomeSemanticsModel):
-        outcome_spec = BinaryOutcomeSpecModel(
-            kind="binary",
-            column=outcome_column,
-            event=semantics.outcome.event,
-            non_event=semantics.outcome.non_event,
-        )
-    else:
-        outcome_spec = ContinuousOutcomeSpecModel(
-            kind="continuous",
-            column=outcome_column,
-            unit=semantics.outcome.unit,
-            clip_min=semantics.outcome.clip_min,
-            clip_max=semantics.outcome.clip_max,
+    outcome_spec = _outcome_spec_from_semantics(
+        column=outcome_column,
+        semantics=semantics.outcome,
+    )
+    negative_control_outcome = None
+    if draft_causal_spec.negative_control_outcome is not None:
+        if semantics.negative_control_outcome is None:
+            raise ValueError(
+                "negative_control_outcome semantics are required when the causal draft "
+                "includes a negative-control outcome column"
+            )
+        negative_control_outcome = _outcome_spec_from_semantics(
+            column=str(draft_causal_spec.negative_control_outcome).strip(),
+            semantics=semantics.negative_control_outcome,
         )
 
     return CausalSpec(
         treatment_spec=treatment_spec,
         outcome_spec=outcome_spec,
+        negative_control_outcome=negative_control_outcome,
         covariates=[str(column).strip() for column in draft_causal_spec.covariates],
         effect_modifiers=[str(column).strip() for column in draft_causal_spec.effect_modifiers],
         experiment_type=semantics.experiment_type,
         id_col=effective_id_col,
+    )
+
+
+def _outcome_spec_from_semantics(
+    *,
+    column: str,
+    semantics: _OutcomeSemanticsModel,
+) -> BinaryOutcomeSpecModel | ContinuousOutcomeSpecModel:
+    if isinstance(semantics, _BinaryOutcomeSemanticsModel):
+        return BinaryOutcomeSpecModel(
+            kind="binary",
+            column=column,
+            event=semantics.event,
+            non_event=semantics.non_event,
+        )
+    return ContinuousOutcomeSpecModel(
+        kind="continuous",
+        column=column,
+        unit=semantics.unit,
+        clip_min=semantics.clip_min,
+        clip_max=semantics.clip_max,
     )
 
 

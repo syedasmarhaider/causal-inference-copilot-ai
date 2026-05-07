@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
 from python.domain.workflows.node import NodeRequest
@@ -9,6 +10,8 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import Causa
 from python.implementation.workflows.tools.common.model.data_summary import (
     DatasetSummaryModel,
 )
+from python.implementation.workflows.utils.utils import uuid_from_any
+
 
 @dataclass(frozen=True)
 class CausalInferenceDeps:
@@ -18,6 +21,9 @@ class CausalInferenceDeps:
     transformation_plan: TransformPlan
     selected_model: str
     trained_model_id: UUID
+    negative_control_refutation_artifact_id: UUID | None = None
+    negative_control_refutation_vectors_dataset_id: UUID | None = None
+    negative_control_refutation_summary: dict[str, Any] | None = None
 
     @classmethod
     def from_request(cls, request: NodeRequest) -> CausalInferenceDeps:
@@ -27,6 +33,18 @@ class CausalInferenceDeps:
         dataset_summary_raw = request.orchestrator_state.get("latest_dataset_summary")
         selected_model_raw = request.orchestrator_state.get("selected_model")
         trained_model_id_raw = request.orchestrator_state.get("trained_model_id")
+        negative_control_refutation_artifact_id_raw = _get_optional_state_value(
+            request,
+            "negative_control_refutation_artifact_id",
+        )
+        negative_control_refutation_vectors_dataset_id_raw = _get_optional_state_value(
+            request,
+            "negative_control_refutation_vectors_dataset_id",
+        )
+        negative_control_refutation_summary_raw = _get_optional_state_value(
+            request,
+            "negative_control_refutation_summary",
+        )
 
         if dataset_id_raw is None:
             raise ValueError("CausalInferenceDeps: dataset_id is required but was not found in compilation state")
@@ -53,6 +71,19 @@ class CausalInferenceDeps:
             raise TypeError("ModelTrainDeps: selected_model must be a string")
         if not isinstance(trained_model_id_raw, UUID):
             raise TypeError("CausalInferenceDeps: trained_model_id must be a UUID")
+        negative_control_refutation_artifact_id = uuid_from_any(
+            negative_control_refutation_artifact_id_raw
+        )
+        negative_control_refutation_vectors_dataset_id = uuid_from_any(
+            negative_control_refutation_vectors_dataset_id_raw
+        )
+        if (
+            negative_control_refutation_summary_raw is not None
+            and not isinstance(negative_control_refutation_summary_raw, dict)
+        ):
+            raise TypeError(
+                "CausalInferenceDeps: negative_control_refutation_summary must be a dict"
+            )
 
         return cls(
             dataset_id=dataset_id_raw,
@@ -61,7 +92,19 @@ class CausalInferenceDeps:
             transformation_plan=transformation_plan_raw,
             selected_model=selected_model_raw,
             trained_model_id=trained_model_id_raw,
+            negative_control_refutation_artifact_id=negative_control_refutation_artifact_id,
+            negative_control_refutation_vectors_dataset_id=(
+                negative_control_refutation_vectors_dataset_id
+            ),
+            negative_control_refutation_summary=negative_control_refutation_summary_raw,
         )
+
+
+def _get_optional_state_value(request: NodeRequest, key: str) -> Any:
+    try:
+        return request.orchestrator_state.get(key)
+    except KeyError:
+        return None
 
 
 __all__ = ["CausalInferenceDeps"]

@@ -24,6 +24,7 @@ class CausalSpecDraft(BaseModel):
     id_col: NonEmptyStr = Field(default=ID_COL_AUTO_FILL)
     treatment_column: NonEmptyStr
     outcome_column: NonEmptyStr
+    negative_control_outcome: NonEmptyStr | None = None
     covariates: list[NonEmptyStr] = Field(default_factory=list)
     effect_modifiers: list[NonEmptyStr] = Field(default_factory=list)
 
@@ -36,11 +37,17 @@ class CausalSpecDraft(BaseModel):
         known_columns = set(summary_field_names)
         treatment_column = str(self.treatment_column).strip()
         outcome_column = str(self.outcome_column).strip()
+        negative_control_outcome = (
+            str(self.negative_control_outcome).strip()
+            if self.negative_control_outcome is not None
+            else None
+        )
         covariates = [str(column).strip() for column in self.covariates]
         effect_modifiers = [str(column).strip() for column in self.effect_modifiers]
         referenced_columns = [
             treatment_column,
             outcome_column,
+            *([negative_control_outcome] if negative_control_outcome else []),
             *covariates,
             *effect_modifiers,
         ]
@@ -53,6 +60,26 @@ class CausalSpecDraft(BaseModel):
 
         if treatment_column == outcome_column:
             raise ValueError("treatment and outcome must be different columns")
+
+        if negative_control_outcome is not None:
+            protected_negative_control_overlap = sorted(
+                {
+                    column
+                    for column in [
+                        treatment_column,
+                        outcome_column,
+                        str(self.id_col).strip(),
+                        *covariates,
+                        *effect_modifiers,
+                    ]
+                    if column == negative_control_outcome
+                }
+            )
+            if protected_negative_control_overlap:
+                raise ValueError(
+                    "negative_control_outcome must be different from treatment, outcome, "
+                    "identifier, covariate, and effect modifier columns"
+                )
 
         duplicate_covariates = _find_duplicates(covariates)
         if duplicate_covariates:
@@ -107,6 +134,17 @@ class CausalSpecDraft(BaseModel):
             return ValidationIssueModel(
                 severity="FAIL",
                 message=f'Outcome column "{self.outcome_column}" not found in dataset',
+            )
+        if (
+            self.negative_control_outcome is not None
+            and self.negative_control_outcome not in df.columns
+        ):
+            return ValidationIssueModel(
+                severity="FAIL",
+                message=(
+                    f'Negative-control outcome column "{self.negative_control_outcome}" '
+                    "not found in dataset"
+                ),
             )
         missing_covariates = [col for col in self.covariates if col not in df.columns]
         if missing_covariates:
@@ -173,7 +211,17 @@ Rules:
 - Use only columns that appear exactly in dataset_summary.
 - Never invent, rename, normalize, or paraphrase column names.
 - treatment_column and outcome_column must be explicit and different.
+- negative_control_outcome is optional and must be null when no clinically valid candidate
+  is provided or strongly identified.
 - covariates and effect_modifiers are optional but must be grounded in the confirmed protocol discussion.
+- If the protocol names a clinically valid negative-control outcome candidate, copy that
+  exact dataset column into negative_control_outcome.
+- If the user does not provide one, only suggest a negative_control_outcome when there is
+  strong evidence from column names, metadata, or time ordering that the column is an
+  outcome-like variable that should not be affected by the treatment.
+- If no valid candidate is provided or strongly identified, set negative_control_outcome to null.
+- Do not use the treatment, primary outcome, identifier, covariate, or effect modifier
+  column as negative_control_outcome.
 - Remove duplicates.
 - Do not place treatment or outcome inside covariates or effect_modifiers.
 - Do not let covariates and effect_modifiers overlap.
