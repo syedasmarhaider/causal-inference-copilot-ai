@@ -35,6 +35,17 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
 from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
 )
+from python.implementation.workflows.tools.causal.inference.cate_cache import (
+    CATE_COLUMN,
+    CATE_LOWER_COLUMN,
+    CATE_REVERSE_COLUMN,
+    CATE_REVERSE_LOWER_COLUMN,
+    CATE_REVERSE_UPPER_COLUMN,
+    CATE_T0_COLUMN,
+    CATE_T1_COLUMN,
+    CATE_UPPER_COLUMN,
+    EFFECT_ROW_COLUMN,
+)
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
@@ -402,6 +413,8 @@ def test_model_train_state_roundtrips_training_spec_and_resets_on_signature_chan
     assert reset_payload.trained_model_id is None
     assert reset_payload.training_warnings == []
     assert reset_payload.training_spec is None
+    assert reset_payload.all_row_cate_dataset_id is None
+    assert reset_payload.all_row_cate_summary is None
     assert reset_payload.negative_control_refutation_artifact_id is None
     assert reset_payload.negative_control_refutation_vectors_dataset_id is None
     assert reset_payload.negative_control_refutation_summary is None
@@ -429,7 +442,21 @@ def test_model_train_success_stores_training_spec_in_orchestrator_state() -> Non
         fitted_model_id=uuid4(),
         artifacts={"n": 4, "x_shape": [4, 1], "w_shape": [4, 1]},
     )
-    fake_model = _FakeCausalModel(results=[fit_result])
+    all_row_cate_result = CATESuccess(
+        run_id=uuid4(),
+        started_at=None,
+        finished_at=None,
+        warnings=[],
+        meta={},
+        fitted_model_id=fit_result.fitted_model_id,
+        x_cols=["sex"],
+        effects={
+            "for_treatment": {"t0": 0.0, "t1": 1.0},
+            "cate": [0.1, 0.6, 0.2, 0.8],
+            "cate_interval": [[-0.1, 0.3, 0.0, 0.5], [0.3, 0.9, 0.4, 1.1]],
+        },
+    )
+    fake_model = _FakeCausalModel(results=[fit_result, all_row_cate_result])
     data_repo = _FakeDataRepo(dataframe=_build_dataframe())
     orchestrator_state = _orchestrator_state(inputs)
     node = _node_with_model(fake_model=fake_model, data_repo=data_repo)
@@ -453,6 +480,8 @@ def test_model_train_success_stores_training_spec_in_orchestrator_state() -> Non
         _NEGATIVE_CONTROL_OUTCOME_UNAVAILABLE_WARNING,
     ]
     assert payload.training_spec is not None
+    assert payload.all_row_cate_dataset_id is not None
+    assert payload.all_row_cate_summary is not None
     assert payload.negative_control_refutation_artifact_id is None
     assert payload.negative_control_refutation_vectors_dataset_id is None
     assert payload.negative_control_refutation_summary is not None
@@ -467,6 +496,8 @@ def test_model_train_success_stores_training_spec_in_orchestrator_state() -> Non
                     _NEGATIVE_CONTROL_OUTCOME_UNAVAILABLE_WARNING,
                 ],
                 "training_spec": payload.training_spec,
+                "all_row_cate_dataset_id": payload.all_row_cate_dataset_id,
+                "all_row_cate_summary": payload.all_row_cate_summary,
                 "negative_control_refutation_artifact_id": None,
                 "negative_control_refutation_vectors_dataset_id": None,
                 "negative_control_refutation_summary": (
@@ -478,7 +509,15 @@ def test_model_train_success_stores_training_spec_in_orchestrator_state() -> Non
     ]
 
     training_spec = payload.training_spec
-    assert sorted(training_spec.keys()) == ["fit", "negative_control_refutation"]
+    assert sorted(training_spec.keys()) == [
+        "all_row_cate",
+        "fit",
+        "negative_control_refutation",
+    ]
+    assert training_spec["all_row_cate"]["status"] == "COMPLETED"
+    assert training_spec["all_row_cate"]["dataset_id"] == str(payload.all_row_cate_dataset_id)
+    assert training_spec["all_row_cate"]["row_count"] == 4
+    assert abs(training_spec["all_row_cate"]["cate_summary"]["mean"] - 0.425) < 1e-12
     assert training_spec["fit"]["attempts"] == 1
     assert training_spec["fit"]["backend"] == "fake-backend"
     assert training_spec["fit"]["columns"] == {
@@ -511,10 +550,26 @@ def test_model_train_success_stores_training_spec_in_orchestrator_state() -> Non
     json.dumps(training_spec)
 
     assert data_repo.loaded_dataset_ids == [inputs.dataset_id]
-    assert data_repo.saved_csv_calls == []
+    assert len(data_repo.saved_csv_calls) == 1
+    saved_cate_df = data_repo.saved_csv_calls[0]["df"]
+    assert data_repo.saved_csv_calls[0]["dataset_id"] == payload.all_row_cate_dataset_id
+    assert list(saved_cate_df["patient_id"]) == ["p1", "p2", "p3", "p4"]
+    assert {
+        EFFECT_ROW_COLUMN,
+        CATE_COLUMN,
+        CATE_LOWER_COLUMN,
+        CATE_UPPER_COLUMN,
+        CATE_REVERSE_COLUMN,
+        CATE_REVERSE_LOWER_COLUMN,
+        CATE_REVERSE_UPPER_COLUMN,
+        CATE_T0_COLUMN,
+        CATE_T1_COLUMN,
+    }.issubset(saved_cate_df.columns)
+    assert list(saved_cate_df[CATE_COLUMN]) == [0.1, 0.6, 0.2, 0.8]
     assert data_repo.saved_json_calls == []
-    assert len(fake_model.commands) == 1
+    assert len(fake_model.commands) == 2
     assert fake_model.commands[0].model_name == "econml.dml.CausalForestDML"
+    assert isinstance(fake_model.commands[1], CATECommand)
 
 
 def test_model_train_with_negative_control_runs_cate_refutation_and_saves_artifacts() -> None:
@@ -545,7 +600,11 @@ def test_model_train_with_negative_control_runs_cate_refutation_and_saves_artifa
         meta={},
         fitted_model_id=primary_model_id,
         x_cols=["sex"],
-        effects={"cate": [0.4, 0.2, 0.5, 0.1], "cate_interval": [[0.1, 0.0, 0.2, -0.1], [0.7, 0.4, 0.8, 0.3]]},
+        effects={
+            "for_treatment": {"t0": 0.0, "t1": 1.0},
+            "cate": [0.4, 0.2, 0.5, 0.1],
+            "cate_interval": [[0.1, 0.0, 0.2, -0.1], [0.7, 0.4, 0.8, 0.3]],
+        },
     )
     negative_control_cate_result = CATESuccess(
         run_id=uuid4(),
@@ -583,6 +642,9 @@ def test_model_train_with_negative_control_runs_cate_refutation_and_saves_artifa
     payload = result.new_node_state.payload
     assert payload.trained_model_id == primary_model_id
     assert payload.training_warnings == []
+    assert payload.all_row_cate_dataset_id is not None
+    assert payload.all_row_cate_summary is not None
+    assert payload.all_row_cate_summary["status"] == "COMPLETED"
     assert payload.negative_control_refutation_artifact_id is not None
     assert payload.negative_control_refutation_vectors_dataset_id is not None
     assert payload.negative_control_refutation_summary is not None
@@ -608,8 +670,14 @@ def test_model_train_with_negative_control_runs_cate_refutation_and_saves_artifa
     assert fake_model.commands[2].inference_ready_spec.causal_spec.negative_control_outcome is None
     assert fake_model.commands[1].inputs.x_rows.equals(fake_model.commands[3].inputs.x_rows)
 
-    assert len(data_repo.saved_csv_calls) == 1
-    vector_df = data_repo.saved_csv_calls[0]["df"]
+    assert len(data_repo.saved_csv_calls) == 2
+    cached_cate_df = data_repo.saved_csv_calls[0]["df"]
+    assert data_repo.saved_csv_calls[0]["dataset_id"] == payload.all_row_cate_dataset_id
+    assert list(cached_cate_df["patient_id"]) == ["p1", "p2", "p3", "p4"]
+    assert {CATE_COLUMN, CATE_REVERSE_COLUMN, CATE_T0_COLUMN, CATE_T1_COLUMN}.issubset(
+        cached_cate_df.columns
+    )
+    vector_df = data_repo.saved_csv_calls[1]["df"]
     assert list(vector_df["patient_id"]) == ["p1", "p2", "p3", "p4"]
     assert {"primary_cate", "negative_control_cate", "sex"}.issubset(vector_df.columns)
     assert len(data_repo.saved_json_calls) == 1
@@ -670,6 +738,9 @@ def test_model_train_negative_control_fit_failure_keeps_primary_model() -> None:
     assert isinstance(result.new_node_state, ModelTrainState)
     payload = result.new_node_state.payload
     assert payload.trained_model_id == primary_model_id
+    assert payload.all_row_cate_dataset_id is not None
+    assert payload.all_row_cate_summary is not None
+    assert payload.all_row_cate_summary["status"] == "COMPLETED"
     assert payload.negative_control_refutation_artifact_id is None
     assert payload.negative_control_refutation_vectors_dataset_id is None
     assert payload.negative_control_refutation_summary is not None
@@ -677,7 +748,8 @@ def test_model_train_negative_control_fit_failure_keeps_primary_model() -> None:
     assert payload.negative_control_refutation_summary["reason"] == "negative_control_fit_failed"
     assert any("negative fit failed" in warning for warning in payload.training_warnings)
     assert len(fake_model.commands) == 3
-    assert data_repo.saved_csv_calls == []
+    assert len(data_repo.saved_csv_calls) == 1
+    assert data_repo.saved_csv_calls[0]["dataset_id"] == payload.all_row_cate_dataset_id
     assert data_repo.saved_json_calls == []
 
 
@@ -690,6 +762,16 @@ def test_model_train_success_after_retry_records_attempt_count() -> None:
         warnings=[],
         meta={"backend": "fake-backend", "columns": {}, "used_init_kwargs": {}},
         fitted_model_id=uuid4(),
+    )
+    all_row_cate_result = CATESuccess(
+        run_id=uuid4(),
+        started_at=None,
+        finished_at=None,
+        warnings=[],
+        meta={},
+        fitted_model_id=fit_result.fitted_model_id,
+        x_cols=["sex"],
+        effects={"cate": [0.1, 0.6, 0.2, 0.8]},
     )
     fake_model = _FakeCausalModel(
         results=[
@@ -706,6 +788,7 @@ def test_model_train_success_after_retry_records_attempt_count() -> None:
                 ),
             ),
             fit_result,
+            all_row_cate_result,
         ]
     )
 
@@ -723,7 +806,7 @@ def test_model_train_success_after_retry_records_attempt_count() -> None:
     assert isinstance(result.new_node_state, ModelTrainState)
     assert result.new_node_state.payload.training_spec is not None
     assert result.new_node_state.payload.training_spec["fit"]["attempts"] == 2
-    assert len(fake_model.commands) == 2
+    assert len(fake_model.commands) == 3
 
 
 def test_model_train_failure_does_not_keep_stale_training_spec() -> None:
@@ -774,6 +857,8 @@ def test_model_train_failure_does_not_keep_stale_training_spec() -> None:
             "trained_model_id": None,
             "training_warnings": [],
             "training_spec": None,
+            "all_row_cate_dataset_id": None,
+            "all_row_cate_summary": None,
             "negative_control_refutation_artifact_id": None,
             "negative_control_refutation_vectors_dataset_id": None,
             "negative_control_refutation_summary": None,

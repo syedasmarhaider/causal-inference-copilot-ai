@@ -69,6 +69,7 @@ Decision rules
 - Use answer_from_context only when the question can be answered from the existing cached ATE/latest CATE context and recent conversation.
 - Use answer_from_context when the user asks about negative-control CATE refutation and the cached context contains a negative_control_refutation_summary.
 - Use compute_cate when the user requests a new subgroup effect estimate or subgroup comparison that requires cohort filtering on the compiled dataset.
+- Use compute_cate when the user asks which patients, patient types, subgroups, or profiles benefit most, respond best, have the highest treatment effect, or have the highest/top CATE. In cate_request_summary, say to use the cached all-row CATE dataset and then rank or group by the stored CATE columns.
 - Use generate_ate_graph only for effect visualizations of the global ATE.
 - Use generate_cate_graph for any effect visualization of subgroup/CATE/ITE-style individual treatment-effect results, including requests that combine estimation with "plot", "chart", "graph", "box plot", "forest plot", or "visualize".
 - Use clarify if the request is too vague to safely answer or compute, or if it is a raw descriptive data-chart request that does not belong to causal inference.
@@ -156,6 +157,8 @@ Rules
 - If estimates vary across groups, explain the heterogeneity briefly.
 - If uncertainty is wide or intervals include zero, say so clearly.
 - If `non_effect_modifier_filter_columns` is non-empty, treat those as cohort-filter columns only; the effect estimate still comes from the confirmed `effect_modifier_columns`.
+- If `analysis_kind` is "cached_cate_query", explain that CATE was estimated once for every row after training, appended to the compiled dataset as row-level treatment-effect contrast columns, and then queried with DuckDB. Use `query_result` as the primary answer. Be clear that "benefit" means higher estimated treatment effect on the model outcome scale unless the clinical direction of the outcome is explicitly established.
+- If `analysis_kind` is "top_cate_discovery", explain that CATE was estimated for all rows first, appended to the compiled dataset as a row-level counterfactual contrast, and then queried/ranked by DuckDB. If `top_cate.query_result` is present, use it as the primary answer for which patients or patient profiles have the largest estimated effect. Use `top_cate.effect_modifier_profile` and `top_cate.ranked_rows` as supporting fallback detail. Be clear that "benefit" means higher estimated treatment effect on the model outcome scale unless the clinical direction of the outcome is explicitly established.
 - If `negative_control_refutation_summary` is present in context, use it as the only source for CATE negative-control refutation status; do not imply a new refutation was run for this query.
 - If the summary status is SKIPPED or FAILED, state that clearly when refutation is relevant.
 - If the study is observational, remind the user that subgroup interpretation still relies on observational assumptions.

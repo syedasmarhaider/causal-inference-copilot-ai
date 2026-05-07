@@ -21,6 +21,8 @@ class CausalInferenceDeps:
     transformation_plan: TransformPlan
     selected_model: str
     trained_model_id: UUID
+    all_row_cate_dataset_id: UUID | None = None
+    all_row_cate_summary: dict[str, Any] | None = None
     negative_control_refutation_artifact_id: UUID | None = None
     negative_control_refutation_vectors_dataset_id: UUID | None = None
     negative_control_refutation_summary: dict[str, Any] | None = None
@@ -33,6 +35,14 @@ class CausalInferenceDeps:
         dataset_summary_raw = request.orchestrator_state.get("latest_dataset_summary")
         selected_model_raw = request.orchestrator_state.get("selected_model")
         trained_model_id_raw = request.orchestrator_state.get("trained_model_id")
+        all_row_cate_dataset_id_raw = _get_optional_state_value(
+            request,
+            "all_row_cate_dataset_id",
+        )
+        all_row_cate_summary_raw = _get_optional_state_value(
+            request,
+            "all_row_cate_summary",
+        )
         negative_control_refutation_artifact_id_raw = _get_optional_state_value(
             request,
             "negative_control_refutation_artifact_id",
@@ -71,6 +81,12 @@ class CausalInferenceDeps:
             raise TypeError("ModelTrainDeps: selected_model must be a string")
         if not isinstance(trained_model_id_raw, UUID):
             raise TypeError("CausalInferenceDeps: trained_model_id must be a UUID")
+        all_row_cate_dataset_id = uuid_from_any(all_row_cate_dataset_id_raw)
+        if (
+            all_row_cate_summary_raw is not None
+            and not isinstance(all_row_cate_summary_raw, dict)
+        ):
+            raise TypeError("CausalInferenceDeps: all_row_cate_summary must be a dict")
         negative_control_refutation_artifact_id = uuid_from_any(
             negative_control_refutation_artifact_id_raw
         )
@@ -92,6 +108,8 @@ class CausalInferenceDeps:
             transformation_plan=transformation_plan_raw,
             selected_model=selected_model_raw,
             trained_model_id=trained_model_id_raw,
+            all_row_cate_dataset_id=all_row_cate_dataset_id,
+            all_row_cate_summary=all_row_cate_summary_raw,
             negative_control_refutation_artifact_id=negative_control_refutation_artifact_id,
             negative_control_refutation_vectors_dataset_id=(
                 negative_control_refutation_vectors_dataset_id

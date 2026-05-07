@@ -87,6 +87,8 @@ class GlobalStateModel(BaseModel):
     trained_model_id: UUID | None = None
     training_warnings: list[str] = Field(default_factory=list)
     training_spec: dict[str, Any] | None = None
+    all_row_cate_dataset_id: UUID | None = None
+    all_row_cate_summary: dict[str, Any] | None = None
     negative_control_refutation_artifact_id: UUID | None = None
     negative_control_refutation_vectors_dataset_id: UUID | None = None
     negative_control_refutation_summary: dict[str, Any] | None = None
@@ -112,6 +114,7 @@ class GlobalStateModel(BaseModel):
 
     @field_validator(
         "trained_model_id",
+        "all_row_cate_dataset_id",
         "negative_control_refutation_artifact_id",
         "negative_control_refutation_vectors_dataset_id",
         mode="before",
@@ -147,6 +150,8 @@ class CausalOchestratorState(OchestratorState):
             "trained_model_id",
             "training_warnings",
             "training_spec",
+            "all_row_cate_dataset_id",
+            "all_row_cate_summary",
             "negative_control_refutation_artifact_id",
             "negative_control_refutation_vectors_dataset_id",
             "negative_control_refutation_summary",
@@ -366,6 +371,14 @@ class CausalOchestratorState(OchestratorState):
         )
         self._model.training_spec = self._parse_optional_dict(
             value.get("training_spec"), field_name="training_spec"
+        )
+        self._model.all_row_cate_dataset_id = self._parse_optional_uuid(
+            value.get("all_row_cate_dataset_id"),
+            field_name="all_row_cate_dataset_id",
+        )
+        self._model.all_row_cate_summary = self._parse_optional_dict(
+            value.get("all_row_cate_summary"),
+            field_name="all_row_cate_summary",
         )
         self._model.negative_control_refutation_artifact_id = self._parse_optional_uuid(
             value.get("negative_control_refutation_artifact_id"),

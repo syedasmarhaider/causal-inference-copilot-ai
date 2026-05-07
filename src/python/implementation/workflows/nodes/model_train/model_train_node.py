@@ -38,6 +38,12 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
     FitInputs,
     FitSuccess,
 )
+from python.implementation.workflows.tools.causal.inference.cate_cache import (
+    build_all_row_cate_dataframe,
+    failed_all_row_cate_summary,
+    skipped_all_row_cate_summary,
+    summarize_all_row_cate_dataframe,
+)
 from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
 )
@@ -69,6 +75,16 @@ class _NegativeControlRefutationResult:
     summary: dict[str, Any] | None
     artifact_id: UUID | None = None
     vectors_dataset_id: UUID | None = None
+
+
+@dataclass(frozen=True)
+class _AllRowCATEResult:
+    warnings: list[str]
+    summary: dict[str, Any] | None
+    dataset_id: UUID | None = None
+    cate_values: np.ndarray | None = None
+    lower_values: np.ndarray | None = None
+    upper_values: np.ndarray | None = None
 
 
 class ModelTrainNode(Node):
@@ -240,7 +256,7 @@ class ModelTrainNode(Node):
                 )
 
             if isinstance(result, FitSuccess):
-                refutation = self._run_negative_control_cate_refutation(
+                all_row_cate = self._materialize_all_row_cate(
                     request=request,
                     deps=deps,
                     dataframe=df,
@@ -248,11 +264,34 @@ class ModelTrainNode(Node):
                     model=model,
                     primary_fit_result=result,
                 )
-                warnings_list = list(result.warnings or []) + list(refutation.warnings)
+                refutation = self._run_negative_control_cate_refutation(
+                    request=request,
+                    deps=deps,
+                    dataframe=df,
+                    inference_ready_spec=inference_ready_spec,
+                    model=model,
+                    primary_fit_result=result,
+                    primary_cate_result=(
+                        (
+                            all_row_cate.cate_values,
+                            all_row_cate.lower_values,
+                            all_row_cate.upper_values,
+                        )
+                        if all_row_cate.cate_values is not None
+                        else None
+                    ),
+                )
+                warnings_list = (
+                    list(result.warnings or [])
+                    + list(all_row_cate.warnings)
+                    + list(refutation.warnings)
+                )
                 training_spec = _build_training_spec(
                     deps=deps,
                     result=result,
                     attempts=attempt,
+                    all_row_cate_summary=all_row_cate.summary,
+                    all_row_cate_dataset_id=all_row_cate.dataset_id,
                     negative_control_refutation_summary=refutation.summary,
                     negative_control_refutation_artifact_id=refutation.artifact_id,
                     negative_control_refutation_vectors_dataset_id=refutation.vectors_dataset_id,
@@ -263,6 +302,8 @@ class ModelTrainNode(Node):
                         "trained_model_id": result.fitted_model_id,
                         "training_warnings": warnings_list,
                         "training_spec": training_spec,
+                        "all_row_cate_dataset_id": all_row_cate.dataset_id,
+                        "all_row_cate_summary": all_row_cate.summary,
                         "negative_control_refutation_artifact_id": refutation.artifact_id,
                         "negative_control_refutation_vectors_dataset_id": (
                             refutation.vectors_dataset_id
@@ -276,6 +317,8 @@ class ModelTrainNode(Node):
                         "trained_model_id": result.fitted_model_id,
                         "training_warnings": warnings_list,
                         "training_spec": training_spec,
+                        "all_row_cate_dataset_id": all_row_cate.dataset_id,
+                        "all_row_cate_summary": all_row_cate.summary,
                         "negative_control_refutation_artifact_id": refutation.artifact_id,
                         "negative_control_refutation_vectors_dataset_id": (
                             refutation.vectors_dataset_id
@@ -425,6 +468,8 @@ class ModelTrainNode(Node):
             update={
                 "trained_model_id": None,
                 "training_spec": None,
+                "all_row_cate_dataset_id": None,
+                "all_row_cate_summary": None,
                 "negative_control_refutation_artifact_id": None,
                 "negative_control_refutation_vectors_dataset_id": None,
                 "negative_control_refutation_summary": None,
@@ -438,6 +483,8 @@ class ModelTrainNode(Node):
                 "trained_model_id": None,
                 "training_warnings": list(failed_payload.training_warnings),
                 "training_spec": None,
+                "all_row_cate_dataset_id": None,
+                "all_row_cate_summary": None,
                 "negative_control_refutation_artifact_id": None,
                 "negative_control_refutation_vectors_dataset_id": None,
                 "negative_control_refutation_summary": None,
@@ -450,6 +497,159 @@ class ModelTrainNode(Node):
             user_message=failed_payload.assistant_message or user_message,
         )
 
+    def _materialize_all_row_cate(
+        self,
+        *,
+        request: NodeRequest,
+        deps: ModelTrainDeps,
+        dataframe: pd.DataFrame,
+        inference_ready_spec: InferenceReadyCausalSpec,
+        model: Any,
+        primary_fit_result: FitSuccess,
+    ) -> _AllRowCATEResult:
+        effect_modifier_columns = inference_ready_spec.get_effect_modifiers_order()
+        if not effect_modifier_columns:
+            warning = (
+                "All-row CATE cache skipped: no effect modifiers are available for CATE "
+                "estimation."
+            )
+            return _AllRowCATEResult(
+                warnings=[warning],
+                summary=skipped_all_row_cate_summary(
+                    reason="no_effect_modifiers",
+                    warning=warning,
+                ),
+            )
+
+        try:
+            x_rows = dataframe.loc[:, effect_modifier_columns].reset_index(drop=True).copy()
+        except Exception as exc:
+            warning = (
+                "All-row CATE cache skipped: could not prepare all-row effect-modifier "
+                f"matrix: {safe_err(exc)}"
+            )
+            return _AllRowCATEResult(
+                warnings=[warning],
+                summary=failed_all_row_cate_summary(
+                    reason="effect_modifier_matrix_unavailable",
+                    warning=warning,
+                    details={"exception": repr(exc)},
+                ),
+            )
+
+        command = CATECommand(
+            model_name=deps.selected_model,
+            df=dataframe,
+            run_id=uuid4(),
+            inference_ready_spec=inference_ready_spec,
+            fitted_model_id=primary_fit_result.fitted_model_id,
+            inputs=CATEInputs(x_rows=x_rows),
+        )
+        try:
+            cate_result = model.execute(
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                command=command,
+            )
+        except Exception as exc:
+            warning = f"All-row CATE cache failed during CATE computation: {safe_err(exc)}"
+            return _AllRowCATEResult(
+                warnings=[warning],
+                summary=failed_all_row_cate_summary(
+                    reason="cate_exception",
+                    warning=warning,
+                    details={"exception": repr(exc)},
+                ),
+            )
+
+        if isinstance(cate_result, CommandFailure):
+            warning = f"All-row CATE cache failed during CATE computation: {cate_result.error.message}"
+            return _AllRowCATEResult(
+                warnings=[warning],
+                summary=failed_all_row_cate_summary(
+                    reason="cate_failed",
+                    warning=warning,
+                    details={
+                        "error_code": cate_result.error.code,
+                        "error_details": cate_result.error.details,
+                    },
+                ),
+            )
+
+        if not isinstance(cate_result, CATESuccess):
+            warning = (
+                "All-row CATE cache failed: CATE returned unexpected result type "
+                f"{type(cate_result).__name__}."
+            )
+            return _AllRowCATEResult(
+                warnings=[warning],
+                summary=failed_all_row_cate_summary(
+                    reason="cate_unexpected_result",
+                    warning=warning,
+                ),
+            )
+
+        cate_values, lower_values, upper_values = _extract_cate_effect_arrays(cate_result.effects)
+        if cate_values is None or cate_values.size != len(x_rows):
+            warning = "All-row CATE cache failed: CATE vector length did not match row count."
+            return _AllRowCATEResult(
+                warnings=[warning],
+                summary=failed_all_row_cate_summary(
+                    reason="cate_vector_length_mismatch",
+                    warning=warning,
+                    details={
+                        "expected_rows": int(len(x_rows)),
+                        "actual_rows": None if cate_values is None else int(cate_values.size),
+                    },
+                ),
+            )
+
+        dataset_id = uuid4()
+        cate_df = build_all_row_cate_dataframe(
+            dataframe=dataframe,
+            cate_values=cate_values,
+            lower_values=lower_values,
+            upper_values=upper_values,
+            for_treatment=cate_result.effects.get("for_treatment"),
+        )
+        try:
+            self._data_repo.save_csv_data(
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                dataset_id=dataset_id,
+                df=cate_df,
+                overwrite=True,
+                include_index=False,
+            )
+        except Exception as exc:
+            warning = f"All-row CATE cache failed while saving dataset: {safe_err(exc)}"
+            return _AllRowCATEResult(
+                warnings=[warning],
+                summary=failed_all_row_cate_summary(
+                    reason="artifact_save_failed",
+                    warning=warning,
+                    details={"dataset_id": str(dataset_id), "exception": repr(exc)},
+                ),
+                cate_values=cate_values,
+                lower_values=lower_values,
+                upper_values=upper_values,
+            )
+
+        summary = summarize_all_row_cate_dataframe(
+            dataframe=cate_df,
+            dataset_id=dataset_id,
+            effect_modifier_columns=effect_modifier_columns,
+            for_treatment=cate_result.effects.get("for_treatment"),
+        )
+        return _AllRowCATEResult(
+            warnings=[],
+            summary=summary,
+            dataset_id=dataset_id,
+            cate_values=cate_values,
+            lower_values=lower_values,
+            upper_values=upper_values,
+        )
+
     def _run_negative_control_cate_refutation(
         self,
         *,
@@ -459,6 +659,7 @@ class ModelTrainNode(Node):
         inference_ready_spec: InferenceReadyCausalSpec,
         model: Any,
         primary_fit_result: FitSuccess,
+        primary_cate_result: tuple[np.ndarray, np.ndarray | None, np.ndarray | None] | None = None,
     ) -> _NegativeControlRefutationResult:
         negative_control_outcome = deps.causal_spec.negative_control_outcome
         if negative_control_outcome is None:
@@ -511,17 +712,18 @@ class ModelTrainNode(Node):
                 ),
             )
 
-        primary_cate_result = self._execute_refutation_cate(
-            request=request,
-            deps=deps,
-            dataframe=dataframe,
-            inference_ready_spec=inference_ready_spec,
-            model=model,
-            fitted_model_id=primary_fit_result.fitted_model_id,
-            summary_primary_model_id=primary_fit_result.fitted_model_id,
-            summary_negative_control_model_id=None,
-            x_rows=x_rows,
-        )
+        if primary_cate_result is None:
+            primary_cate_result = self._execute_refutation_cate(
+                request=request,
+                deps=deps,
+                dataframe=dataframe,
+                inference_ready_spec=inference_ready_spec,
+                model=model,
+                fitted_model_id=primary_fit_result.fitted_model_id,
+                summary_primary_model_id=primary_fit_result.fitted_model_id,
+                summary_negative_control_model_id=None,
+                x_rows=x_rows,
+            )
         if isinstance(primary_cate_result, _NegativeControlRefutationResult):
             return primary_cate_result
 
@@ -850,6 +1052,8 @@ def _build_training_spec(
     deps: ModelTrainDeps,
     result: FitSuccess,
     attempts: int,
+    all_row_cate_summary: dict[str, Any] | None,
+    all_row_cate_dataset_id: UUID | None,
     negative_control_refutation_summary: dict[str, Any] | None,
     negative_control_refutation_artifact_id: UUID | None,
     negative_control_refutation_vectors_dataset_id: UUID | None,
@@ -868,6 +1072,16 @@ def _build_training_spec(
             "finished_at": _json_safe_training_value(result.finished_at),
         },
     }
+    if all_row_cate_summary is not None:
+        cate_summary = _json_safe_training_value(all_row_cate_summary)
+        if isinstance(cate_summary, dict):
+            cate_summary = dict(cate_summary)
+            cate_summary["dataset_id"] = (
+                str(all_row_cate_dataset_id)
+                if all_row_cate_dataset_id is not None
+                else cate_summary.get("dataset_id")
+            )
+        training_spec["all_row_cate"] = cate_summary
     if negative_control_refutation_summary is not None:
         refutation_summary = _json_safe_training_value(negative_control_refutation_summary)
         if isinstance(refutation_summary, dict):

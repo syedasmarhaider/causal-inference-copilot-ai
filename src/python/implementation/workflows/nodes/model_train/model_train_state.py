@@ -16,6 +16,8 @@ class ModelTrainPayloadModel(BaseModel):
     trained_model_id: UUID | None = None
     training_warnings: list[str] = Field(default_factory=list)
     training_spec: dict[str, Any] | None = None
+    all_row_cate_dataset_id: UUID | None = None
+    all_row_cate_summary: dict[str, Any] | None = None
     negative_control_refutation_artifact_id: UUID | None = None
     negative_control_refutation_vectors_dataset_id: UUID | None = None
     negative_control_refutation_summary: dict[str, Any] | None = None
@@ -24,6 +26,7 @@ class ModelTrainPayloadModel(BaseModel):
 
     @field_validator(
         "trained_model_id",
+        "all_row_cate_dataset_id",
         "negative_control_refutation_artifact_id",
         "negative_control_refutation_vectors_dataset_id",
         mode="before",
@@ -54,6 +57,8 @@ class ModelTrainPayloadModel(BaseModel):
                 "trained_model_id": None,
                 "training_warnings": [],
                 "training_spec": None,
+                "all_row_cate_dataset_id": None,
+                "all_row_cate_summary": None,
                 "negative_control_refutation_artifact_id": None,
                 "negative_control_refutation_vectors_dataset_id": None,
                 "negative_control_refutation_summary": None,

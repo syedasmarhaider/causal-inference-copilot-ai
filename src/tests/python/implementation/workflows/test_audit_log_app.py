@@ -182,7 +182,7 @@ def test_audit_log_html_uses_full_history_escapes_text_and_renders_graph() -> No
             ),
             ChatMessage(
                 role="assistant",
-                content="Here is a graph",
+                content="# Here is a graph\n\n- Graph follows",
                 created_at_utc=1712345700.0,
                 artifact_refs=[
                     {
@@ -222,10 +222,15 @@ def test_audit_log_html_uses_full_history_escapes_text_and_renders_graph() -> No
     assert "Audit &lt;Case&gt;" in html
     assert "Audit Summary" in html
     assert "Dataset Lineage" in html
+    assert "Workflow Stage Truth" in html
+    assert "Current Orchestration State" in html
     assert "Stage Evidence" in html
     assert "Message Timeline" in html
+    assert "Chat Transcript" in html
     assert "Appendix" in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert '<h3 class="chat-heading chat-heading-1">Here is a graph</h3>' in html
+    assert "<li>Graph follows</li>" in html
     assert "Protocol &lt;b&gt;text&lt;/b&gt;" in html
     assert "Model Training" in html
     assert "Recorded" in html
