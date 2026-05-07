@@ -153,6 +153,8 @@ def test_build_summary_blocker_follow_up_message_is_direct_and_actionable() -> N
     message = build_summary_blocker_follow_up_message(blockers)
 
     assert "Before I lock this protocol" in message
+    assert "deterministic cleaning and encoding instructions" in message
+    assert "validation/refutation results" in message
     assert "istatus" in message
     assert "iage" in message
     assert "explicit cleaning instructions" in message

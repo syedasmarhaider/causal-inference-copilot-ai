@@ -39,6 +39,7 @@ _NEGATIVE_CONTROL_OUTCOME_RULES = """
 Negative-control outcome policy:
 - Negative-control outcome handling is optional and non-blocking.
 - During protocol discussion, ask the user for a clinically valid negative-control outcome candidate.
+- When explaining this choice to the user, state why it matters: a negative-control outcome is used only for CATE refutation, and it must be an outcome-like variable that the treatment should not affect; otherwise the refutation would be misleading. If none is available, null is acceptable and the refutation is skipped.
 - Use exact dataset column names only.
 - If the user names a clinically valid negative-control outcome column, record it exactly in answer 16.
 - If the user does not provide one, suggest or record a candidate only when there is strong evidence from column names, metadata, or time ordering that the column is outcome-like and should not be affected by the treatment.
@@ -72,6 +73,7 @@ _BLOCKER_RULES = """
 Upstream blocker policy:
 - Surface only blockers that would prevent safe compilation, transformation, or validation for the chosen treatment, outcome, covariates, and effect modifiers.
 - Focus on clinically meaningful blockers such as treatment/outcome mapping ambiguity, treatment or outcome missing/invalid values, baseline covariate/effect-modifier missingness, coded categorical variables with unclear meaning, and suspected post-treatment variable misuse.
+- When asking for blocker decisions, briefly explain why they are necessary: downstream compilation must turn the protocol into deterministic cleaning and encoding instructions, and selected treatment, outcome, covariate, or effect-modifier values cannot be left ambiguous without risking silent drops, invalid categories, or misleading validation/refutation results.
 - Ask at most 2 blocker questions in one turn, and prefer the most important unresolved blockers first.
 - Do not enumerate non-blocking profiling trivia or generic dataset observations.
 """.strip()
@@ -118,6 +120,7 @@ Tasks:
 Assistant message policy:
 - The user prefers comprehensive, specific responses.
 - For next_action="continue", answer the latest user point first and then ask the most important unresolved blocker question if one is still needed.
+- When asking the user to confirm missingness, unknown-category, coded-category, or "cannot assess" handling, include one concise reason before the questions: these choices become locked cleaning instructions and prevent downstream compilation, validation, and refutation from guessing how protocol-scope variables should be encoded.
 - For next_action="confirm", acknowledge that the protocol discussion is now confirmed and explain that the compilation stage will clean, compile, transform, and validate next.
 - If the protocol cannot proceed under the current assumptions or data, keep next_action="continue" and explain clearly what is not possible, apologize briefly, and state what would need to change.
 
@@ -265,6 +268,7 @@ Inputs:
 Task:
 - Write a comprehensive, specific, and user-friendly message that:
   - Explains each blocker in context
+  - Explains why the clarification is required for the protocol: the answer becomes deterministic cleaning/encoding instructions, avoids silent assumptions, and protects downstream validation and CATE refutation from ambiguous protocol-scope variables
   - Asks the user to explicitly clarify or confirm how to resolve each issue
   - Avoids technical jargon, but is precise about what is needed
   - Groups similar issues for clarity if possible

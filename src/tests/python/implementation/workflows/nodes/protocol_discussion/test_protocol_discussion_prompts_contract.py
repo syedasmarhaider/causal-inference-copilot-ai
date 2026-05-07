@@ -41,6 +41,9 @@ def test_protocol_discussion_update_prompt_mentions_identifier_handling_rules() 
     assert "ask the user for a clinically valid negative-control outcome candidate" in prompt
     assert "set answer 16 to null" in prompt
     assert "Never silently invent a negative-control outcome." in prompt
+    assert "a negative-control outcome is used only for CATE refutation" in prompt
+    assert "deterministic cleaning and encoding instructions" in prompt
+    assert "validation, and refutation" in prompt
     assert "covariates are baseline variables used to control or adjust" in prompt
     assert "effect modifiers are baseline variables that can change the size or direction" in prompt
 

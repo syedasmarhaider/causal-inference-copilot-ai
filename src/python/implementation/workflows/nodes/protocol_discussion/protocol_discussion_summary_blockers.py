@@ -164,6 +164,7 @@ def build_summary_blocker_follow_up_message(
 
     lines = [
         "Before I lock this protocol, I need your decision on a few upstream data-preparation issues that are already visible in the selected columns:",
+        "These decisions are necessary because they become deterministic cleaning and encoding instructions for downstream compilation; leaving them ambiguous would force the workflow to guess how to handle protocol-scope values, which can produce silent drops, invalid categories, or misleading validation/refutation results.",
         "",
     ]
     for blocker in blockers:
