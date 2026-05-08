@@ -227,6 +227,7 @@ def test_audit_log_html_uses_full_history_escapes_text_and_renders_graph() -> No
     assert "Stage Evidence" in html
     assert "Message Timeline" in html
     assert "Chat Transcript" in html
+    assert html.index("Message Timeline") < html.index("Workflow Stage Truth")
     assert "Appendix" in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert '<h3 class="chat-heading chat-heading-1">Here is a graph</h3>' in html
@@ -242,8 +243,15 @@ def test_audit_log_html_uses_full_history_escapes_text_and_renders_graph() -> No
     assert "https://cdn.jsdelivr.net/npm/vega-lite@5" in html
     assert "auditGraphSpecs" in html
     assert "auditPrepareGraphSpec" in html
+    assert "auditApplyHorizontalComposition" in html
+    assert "auditShouldTransposeCategoricalXAxis" in html
+    assert "AUDIT_GRAPH_MIN_PLOT_WIDTH = 760" in html
     assert "fit-x" in html
     assert "continuousWidth: 1040" in html
+    assert ".audit { max-width: 1680px;" in html
+    assert ".artifacts { display: grid; gap: 14px; width: 100%; max-width: none;" in html
+    assert ".graph { min-height: 420px; min-width: 760px; }" in html
+    assert ".graph svg, .graph canvas { display: block; max-width: none; }" in html
     assert '<div class="graph-card-header"><h3>ATE graph</h3></div>' in html
     assert (
         '<div class="graph-viewport"><div id="audit-graph-2-1" class="graph"></div></div>' in html

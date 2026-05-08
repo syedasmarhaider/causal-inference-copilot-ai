@@ -17,6 +17,7 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     _identifier_column_candidates,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
+    ProtocolDiscussionPayloadModel,
     ProtocolDiscussionState,
 )
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
@@ -100,6 +101,7 @@ class _FakeOrchestratorState(OchestratorState):
 @dataclass
 class _FakeLLM:
     json_outputs: list[Any] = field(default_factory=list)
+    generate_outputs: list[Any] = field(default_factory=list)
     generate_json_calls: list[dict[str, Any]] = field(default_factory=list)
     generate_calls: list[dict[str, Any]] = field(default_factory=list)
 
@@ -144,7 +146,20 @@ class _FakeLLM:
                 "history": history,
             }
         )
+        if self.generate_outputs:
+            next_output = self.generate_outputs.pop(0)
+            if isinstance(next_output, str):
+                return ChatMessage(role="assistant", content=next_output)
+            return next_output
         return ChatMessage(role="assistant", content="Please resolve the protocol blocker.")
+
+
+@dataclass
+class _FakeDataRepo:
+    dataframe: pd.DataFrame
+
+    def get_csv_data(self, **_: Any) -> pd.DataFrame:
+        return self.dataframe.head(1)
 
 
 def _request(
@@ -280,6 +295,82 @@ def test_confirmed_unknown_category_blocker_is_written_to_discussion() -> None:
     )
 
     assert "Keep Unknown and unknown-like categories as their own category" in updated
+
+
+def test_protocol_discussion_confirmation_blocker_message_is_not_truncated() -> None:
+    dataframe = pd.DataFrame(
+        {
+            "RXASP": ["Y", "N", "Y"],
+            "DIED": ["Y", "N", "N"],
+            "race": ["white", "black", "other"],
+        }
+    )
+    summary = _summary_for_df(dataframe)
+    discussion = "\n".join(
+        [
+            "1) Causal question: What is the effect of aspirin allocation on death?",
+            "6) Treatment/exposure definition: RXASP, treated Y, control N.",
+            "8) Outcome specification: DIED.",
+            "11) Effect modifiers / heterogeneity features (X, optional): race.",
+            "14) Treatment/outcome data-quality decisions: Treatment and outcome are complete; use as-is.",
+            "15) Baseline feature preparation decisions: UNCLEAR",
+            "16) Negative-control outcome (optional): null.",
+            "17) Identifier column (optional): auto_id.",
+        ]
+    )
+    long_blocker_message = (
+        "I have reviewed your protocol draft and the dataset metadata. "
+        "We have one clarification needed regarding your baseline features before we can finalize "
+        "the causal specification.\n\n"
+        "Issue: Handling of the 'other' category in the 'race' variable\n\n"
+        "You have identified race as an effect modifier. The dataset shows three categories for "
+        'this column: "white", "black", and "other". In causal modeling, we must have a '
+        "deterministic cleaning decision for this category before compilation can continue. "
+        "Please confirm whether to keep 'other' as its own level, merge it into another group, "
+        "or use another explicit handling rule."
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            {"action": "confirm", "assistant_message": "Confirmed."},
+            {
+                "id_col": "auto_id",
+                "treatment_column": "RXASP",
+                "outcome_column": "DIED",
+                "negative_control_outcome": None,
+                "covariates": [],
+                "effect_modifiers": ["race"],
+            },
+        ],
+        generate_outputs=[long_blocker_message],
+    )
+    node = ProtocolDiscussionNode(
+        llm=llm,  # type: ignore[arg-type]
+        data_repo=_FakeDataRepo(dataframe=dataframe),  # type: ignore[arg-type]
+    )
+    orchestrator_state = _FakeOrchestratorState(dataset_summary=summary)
+    request = NodeRequest(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        node_state=ProtocolDiscussionState(
+            ProtocolDiscussionPayloadModel(
+                dataset_id=orchestrator_state.get("working_dataset_id"),
+                discussion=discussion,
+                phase="REVIEW_READY",
+                pending_dataset_change_request="Keep confirmed protocol columns only.",
+                assistant_message="Please confirm this protocol.",
+            )
+        ),
+        orchestrator_state=orchestrator_state,
+        read_only_messages_history=[ChatMessage(role="user", content="yes confirm")],
+    )
+
+    result = node.run(request=request)
+
+    assert result.status == "PENDING"
+    assert result.action == "NEEDS_INPUT"
+    assert result.response_messages[0].content == long_blocker_message
+    assert result.response_messages[0].content.endswith("explicit handling rule.")
+    assert len(result.response_messages[0].content) > 500
 
 
 def test_protocol_discussion_blocks_negative_control_effect_modifier_conflict() -> None:

@@ -255,10 +255,10 @@ class AuditLogHtmlRenderer:
                 self._header(report),
                 self.render_metric_strip(self.summarize_report(report)),
                 self._dataset_lineage(report),
+                self._messages(report),
                 self._stage_truth(report),
                 self._orchestration_truth(report),
                 self._stage_evidence(report),
-                self._messages(report),
                 self._appendix(report),
                 "</main>",
                 self._graph_script(graph_specs),
@@ -703,40 +703,442 @@ class AuditLogHtmlRenderer:
     def _graph_script(self, graph_specs: dict[str, dict[str, Any]]) -> str:
         safe_json = _safe_script_json(graph_specs)
         return (
-            "<script>"
-            f"const auditGraphSpecs = {safe_json};"
-            "function auditClone(value) {"
-            "return typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value));"
-            "}"
-            "function auditPlainObject(value) {"
-            "return value && typeof value === 'object' && !Array.isArray(value);"
-            "}"
-            "function auditLooksLikeVegaLite(spec) {"
-            "const schema = String(spec && spec.$schema || '');"
-            "return schema.includes('vega-lite') || 'mark' in spec || 'encoding' in spec || 'layer' in spec || 'facet' in spec || 'hconcat' in spec || 'vconcat' in spec || 'repeat' in spec;"
-            "}"
-            "function auditPrepareGraphSpec(spec) {"
-            "if (!auditPlainObject(spec)) return spec;"
-            "const prepared = auditClone(spec);"
-            "if (!auditLooksLikeVegaLite(prepared)) return prepared;"
-            "if (!prepared.autosize) prepared.autosize = {type: 'fit-x', contains: 'padding'};"
-            "if (!('width' in prepared) || (typeof prepared.width === 'number' && prepared.width < 640)) prepared.width = 'container';"
-            "if (!('height' in prepared) || (typeof prepared.height === 'number' && prepared.height < 320)) prepared.height = 380;"
-            "prepared.config = Object.assign({}, prepared.config || {});"
-            "prepared.config.view = Object.assign({stroke: null, continuousWidth: 1040, continuousHeight: 380}, prepared.config.view || {});"
-            "prepared.config.axis = Object.assign({labelColor: '#475569', titleColor: '#334155', gridColor: '#e7edf3', labelFontSize: 12, titleFontSize: 12}, prepared.config.axis || {});"
-            "prepared.config.legend = Object.assign({labelColor: '#475569', titleColor: '#334155', labelFontSize: 12, titleFontSize: 12}, prepared.config.legend || {});"
-            "return prepared;"
-            "}"
-            "for (const [id, spec] of Object.entries(auditGraphSpecs)) {"
-            "const target = document.getElementById(id);"
-            "if (!target) continue;"
-            "vegaEmbed(target, auditPrepareGraphSpec(spec), {actions: {export: true, source: false, compiled: false, editor: false}, renderer: 'svg'}).catch((error) => {"
-            "target.classList.add('graph-error');"
-            "target.textContent = `Graph render failed: ${error.message || error}`;"
-            "});"
-            "}"
-            "</script>"
+            "<script>\n"
+            f"const auditGraphSpecs = {safe_json};\n"
+            """
+const AUDIT_GRAPH_MIN_PLOT_WIDTH = 760;
+const AUDIT_GRAPH_MAX_PLOT_WIDTH = 2200;
+
+function auditClone(value) {
+  return typeof structuredClone === 'function'
+    ? structuredClone(value)
+    : JSON.parse(JSON.stringify(value));
+}
+
+function auditPlainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function auditLooksLikeVegaLite(spec) {
+  const schema = String((spec && spec.$schema) || '');
+  return schema.includes('vega-lite') ||
+    'mark' in spec ||
+    'encoding' in spec ||
+    'layer' in spec ||
+    'facet' in spec ||
+    'concat' in spec ||
+    'hconcat' in spec ||
+    'vconcat' in spec ||
+    'repeat' in spec;
+}
+
+function auditClamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function auditViewportWidth(target) {
+  const viewport = target && target.closest ? target.closest('.graph-viewport') : null;
+  const width = viewport ? viewport.clientWidth : target ? target.clientWidth : 0;
+  return Math.max(width || 0, AUDIT_GRAPH_MIN_PLOT_WIDTH);
+}
+
+function auditMarkType(spec) {
+  const mark = spec && spec.mark;
+  if (typeof mark === 'string') return mark.toLowerCase();
+  if (auditPlainObject(mark) && typeof mark.type === 'string') {
+    return mark.type.toLowerCase();
+  }
+  return '';
+}
+
+function auditEncoding(spec, channel) {
+  if (!auditPlainObject(spec.encoding)) return null;
+  const encoding = spec.encoding[channel];
+  return auditPlainObject(encoding) ? encoding : null;
+}
+
+function auditType(encoding) {
+  return String((encoding && encoding.type) || '').toLowerCase();
+}
+
+function auditIsCategoricalEncoding(encoding) {
+  const type = auditType(encoding);
+  return type === 'nominal' || type === 'ordinal';
+}
+
+function auditIsQuantitativeEncoding(encoding) {
+  return auditType(encoding) === 'quantitative';
+}
+
+function auditRootValues(spec) {
+  return auditPlainObject(spec.data) && Array.isArray(spec.data.values)
+    ? spec.data.values
+    : [];
+}
+
+function auditValuesForSpec(spec, inheritedValues) {
+  const values = auditRootValues(spec);
+  return values.length ? values : Array.isArray(inheritedValues) ? inheritedValues : [];
+}
+
+function auditCategoryStatsForValues(values, encoding) {
+  if (!auditPlainObject(encoding) || typeof encoding.field !== 'string') {
+    return {count: 0, longest: 0};
+  }
+  const categories = new Set();
+  let longest = 0;
+  for (const row of values) {
+    if (!auditPlainObject(row) || !(encoding.field in row) || row[encoding.field] == null) {
+      continue;
+    }
+    const value = String(row[encoding.field]);
+    categories.add(value);
+    longest = Math.max(longest, value.length);
+  }
+  return {count: categories.size, longest};
+}
+
+function auditNumericDimension(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function auditTargetDimension(target, property) {
+  const value = target && target.style ? target.style[property] : '';
+  const parsed = Number.parseFloat(value || '0');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function auditSetTargetMinWidth(target, width) {
+  target.style.minWidth = `${Math.ceil(Math.max(auditTargetDimension(target, 'minWidth'), width))}px`;
+}
+
+function auditSetTargetMinHeight(target, height) {
+  target.style.minHeight = `${Math.ceil(Math.max(auditTargetDimension(target, 'minHeight'), height))}px`;
+}
+
+function auditMergeAxis(encoding, defaults) {
+  if (!auditPlainObject(encoding)) return;
+  encoding.axis = Object.assign(
+    {},
+    defaults,
+    auditPlainObject(encoding.axis) ? encoding.axis : {}
+  );
+}
+
+function auditWrapText(text, maxChars, maxLines) {
+  const words = String(text).split(/\\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length <= maxChars || !line) {
+      line = next;
+      continue;
+    }
+    lines.push(line);
+    line = word;
+    if (lines.length === maxLines - 1) {
+      break;
+    }
+  }
+  const consumed = lines.join(' ').split(/\\s+/).filter(Boolean).length + line.split(/\\s+/).filter(Boolean).length;
+  if (consumed < words.length) {
+    line = [line, ...words.slice(consumed)].join(' ');
+  }
+  if (line) lines.push(line);
+  return lines.length > 1 ? lines : String(text);
+}
+
+function auditWrapTitle(prepared, target) {
+  const maxChars = auditClamp(Math.floor(auditViewportWidth(target) / 13), 36, 96);
+  const titleDefaults = {anchor: 'start', color: '#0f172a', fontSize: 16, fontWeight: 700, lineHeight: 20};
+  prepared.config = Object.assign({}, prepared.config || {});
+  prepared.config.title = Object.assign(
+    titleDefaults,
+    auditPlainObject(prepared.config.title) ? prepared.config.title : {}
+  );
+
+  if (typeof prepared.title === 'string') {
+    prepared.title = auditWrapText(prepared.title, maxChars, 3);
+    return;
+  }
+  if (auditPlainObject(prepared.title) && typeof prepared.title.text === 'string') {
+    prepared.title = Object.assign(
+      {},
+      {anchor: 'start'},
+      prepared.title,
+      {text: auditWrapText(prepared.title.text, maxChars, 3)}
+    );
+  }
+}
+
+function auditShouldTransposeCategoricalXAxis(prepared, xStats) {
+  const markType = auditMarkType(prepared);
+  const supportedMarks = new Set(['bar', 'boxplot', 'errorbar', 'point', 'circle', 'square', 'tick', 'rule']);
+  if (!supportedMarks.has(markType)) return false;
+  if ('layer' in prepared || 'facet' in prepared || 'hconcat' in prepared || 'vconcat' in prepared || 'concat' in prepared || 'repeat' in prepared) {
+    return false;
+  }
+  const x = auditEncoding(prepared, 'x');
+  const y = auditEncoding(prepared, 'y');
+  return auditIsCategoricalEncoding(x) &&
+    auditIsQuantitativeEncoding(y) &&
+    (xStats.count >= 6 || xStats.longest >= 12);
+}
+
+function auditTransposeCategoricalXAxis(prepared, target, xStats) {
+  const x = auditEncoding(prepared, 'x');
+  const y = auditEncoding(prepared, 'y');
+  if (!x || !y) return false;
+
+  prepared.encoding.x = y;
+  prepared.encoding.y = x;
+  prepared.width = 'container';
+  prepared.height = auditClamp(120 + xStats.count * 44, 360, 1100);
+  prepared.autosize = {type: 'fit-x', contains: 'padding'};
+
+  auditMergeAxis(prepared.encoding.x, {grid: true, labelColor: '#475569', titleColor: '#334155'});
+  auditMergeAxis(prepared.encoding.y, {
+    labelAngle: 0,
+    labelLimit: 280,
+    labelOverlap: false,
+    labelPadding: 8,
+    titlePadding: 12
+  });
+  target.style.minWidth = `${Math.max(auditViewportWidth(target), AUDIT_GRAPH_MIN_PLOT_WIDTH)}px`;
+  target.style.minHeight = `${prepared.height + 90}px`;
+  return true;
+}
+
+function auditApplyCategoricalYAxis(prepared, target, yStats) {
+  const y = auditEncoding(prepared, 'y');
+  if (!auditIsCategoricalEncoding(y)) return;
+  auditMergeAxis(y, {
+    labelAngle: 0,
+    labelLimit: 320,
+    labelOverlap: false,
+    labelPadding: 8,
+    titlePadding: 12
+  });
+  const height = auditClamp(130 + yStats.count * 46, 360, 1200);
+  if (!('height' in prepared) || auditNumericDimension(prepared.height) < height) {
+    prepared.height = height;
+  }
+  auditSetTargetMinHeight(target, height + 120);
+}
+
+function auditDefaultPanelWidth(panel, values, viewportWidth) {
+  const xStats = auditCategoryStatsForValues(values, auditEncoding(panel, 'x'));
+  const yStats = auditCategoryStatsForValues(values, auditEncoding(panel, 'y'));
+  const categoricalWidth = auditIsCategoricalEncoding(auditEncoding(panel, 'x'))
+    ? Math.max(520, 160 + xStats.count * 82, 220 + xStats.longest * 13)
+    : 0;
+  const yLabelWidth = auditIsCategoricalEncoding(auditEncoding(panel, 'y'))
+    ? Math.max(500, 430 + yStats.longest * 8)
+    : 0;
+  return auditClamp(
+    Math.max(auditNumericDimension(panel.width), categoricalWidth, yLabelWidth, 520),
+    500,
+    Math.max(760, Math.min(900, viewportWidth - 180))
+  );
+}
+
+function auditDefaultPanelHeight(panel, values) {
+  const yStats = auditCategoryStatsForValues(values, auditEncoding(panel, 'y'));
+  const categoricalHeight = auditIsCategoricalEncoding(auditEncoding(panel, 'y'))
+    ? 130 + yStats.count * 46
+    : 380;
+  return auditClamp(Math.max(auditNumericDimension(panel.height), categoricalHeight), 360, 1200);
+}
+
+function auditApplyHorizontalComposition(prepared, target, children, inheritedValues) {
+  const panels = children.filter(auditPlainObject);
+  if (!panels.length) return false;
+  const viewportWidth = auditViewportWidth(target);
+  const spacing = Math.max(auditNumericDimension(prepared.spacing), 52);
+  const values = auditValuesForSpec(prepared, inheritedValues);
+  let totalWidth = 0;
+  let maxHeight = 0;
+
+  for (const panel of panels) {
+    const panelValues = auditValuesForSpec(panel, values);
+    auditApplyResponsiveGraphSpec(panel, target, {inheritedValues: values, nested: true});
+    const width = auditDefaultPanelWidth(panel, panelValues, viewportWidth);
+    const height = auditDefaultPanelHeight(panel, panelValues);
+    if (!('width' in panel) || panel.width === 'container' || auditNumericDimension(panel.width) < width) {
+      panel.width = width;
+    }
+    if (!('height' in panel) || auditNumericDimension(panel.height) < height) {
+      panel.height = height;
+    }
+    totalWidth += auditNumericDimension(panel.width) || width;
+    maxHeight = Math.max(maxHeight, auditNumericDimension(panel.height) || height);
+  }
+
+  prepared.spacing = spacing;
+  auditSetTargetMinWidth(target, totalWidth + spacing * Math.max(panels.length - 1, 0) + 280);
+  auditSetTargetMinHeight(target, maxHeight + 190);
+  return true;
+}
+
+function auditApplyVerticalComposition(prepared, target, children, inheritedValues) {
+  const panels = children.filter(auditPlainObject);
+  if (!panels.length) return false;
+  const viewportWidth = auditViewportWidth(target);
+  const spacing = Math.max(auditNumericDimension(prepared.spacing), 42);
+  const values = auditValuesForSpec(prepared, inheritedValues);
+  let maxWidth = 0;
+  let totalHeight = 0;
+
+  for (const panel of panels) {
+    const panelValues = auditValuesForSpec(panel, values);
+    auditApplyResponsiveGraphSpec(panel, target, {inheritedValues: values, nested: true});
+    const width = Math.max(auditDefaultPanelWidth(panel, panelValues, viewportWidth), viewportWidth - 120);
+    const height = auditDefaultPanelHeight(panel, panelValues);
+    if (!('width' in panel) || panel.width === 'container' || auditNumericDimension(panel.width) < width) {
+      panel.width = auditClamp(width, AUDIT_GRAPH_MIN_PLOT_WIDTH, AUDIT_GRAPH_MAX_PLOT_WIDTH);
+    }
+    if (!('height' in panel) || auditNumericDimension(panel.height) < height) {
+      panel.height = height;
+    }
+    maxWidth = Math.max(maxWidth, auditNumericDimension(panel.width) || width);
+    totalHeight += auditNumericDimension(panel.height) || height;
+  }
+
+  prepared.spacing = spacing;
+  auditSetTargetMinWidth(target, maxWidth + 240);
+  auditSetTargetMinHeight(target, totalHeight + spacing * Math.max(panels.length - 1, 0) + 190);
+  return true;
+}
+
+function auditApplyFacetedComposition(prepared, target, inheritedValues) {
+  if (!auditPlainObject(prepared.spec)) return false;
+  const viewportWidth = auditViewportWidth(target);
+  const values = auditValuesForSpec(prepared, inheritedValues);
+  auditApplyResponsiveGraphSpec(prepared.spec, target, {inheritedValues: values, nested: true});
+
+  const width = auditDefaultPanelWidth(prepared.spec, values, viewportWidth);
+  const height = auditDefaultPanelHeight(prepared.spec, values);
+  if (!('width' in prepared.spec) || prepared.spec.width === 'container' || auditNumericDimension(prepared.spec.width) < width) {
+    prepared.spec.width = width;
+  }
+  if (!('height' in prepared.spec) || auditNumericDimension(prepared.spec.height) < height) {
+    prepared.spec.height = height;
+  }
+
+  const columns = Math.max(1, Math.min(4, auditNumericDimension(prepared.columns) || 2));
+  auditSetTargetMinWidth(target, columns * (width + 110) + 180);
+  auditSetTargetMinHeight(target, height + 230);
+  return true;
+}
+
+function auditApplyCompositionGraphSpec(prepared, target, inheritedValues) {
+  if (Array.isArray(prepared.hconcat)) {
+    return auditApplyHorizontalComposition(prepared, target, prepared.hconcat, inheritedValues);
+  }
+  if (Array.isArray(prepared.concat)) {
+    return auditApplyHorizontalComposition(prepared, target, prepared.concat, inheritedValues);
+  }
+  if (Array.isArray(prepared.vconcat)) {
+    return auditApplyVerticalComposition(prepared, target, prepared.vconcat, inheritedValues);
+  }
+  if ('facet' in prepared || 'repeat' in prepared) {
+    return auditApplyFacetedComposition(prepared, target, inheritedValues);
+  }
+  return false;
+}
+
+function auditApplyResponsiveGraphSpec(prepared, target, options = {}) {
+  const inheritedValues = Array.isArray(options.inheritedValues) ? options.inheritedValues : [];
+  if (auditApplyCompositionGraphSpec(prepared, target, inheritedValues)) {
+    return;
+  }
+
+  const viewportWidth = auditViewportWidth(target);
+  const values = auditValuesForSpec(prepared, inheritedValues);
+  const x = auditEncoding(prepared, 'x');
+  const y = auditEncoding(prepared, 'y');
+  const xStats = auditCategoryStatsForValues(values, x);
+  const yStats = auditCategoryStatsForValues(values, y);
+
+  if (auditShouldTransposeCategoricalXAxis(prepared, xStats) &&
+      auditTransposeCategoricalXAxis(prepared, target, xStats)) {
+    return;
+  }
+
+  let plotWidth = Math.max(viewportWidth - 96, AUDIT_GRAPH_MIN_PLOT_WIDTH);
+  if (auditIsCategoricalEncoding(x)) {
+    plotWidth = auditClamp(
+      Math.max(plotWidth, 160 + xStats.count * 82, 220 + xStats.longest * 13),
+      AUDIT_GRAPH_MIN_PLOT_WIDTH,
+      AUDIT_GRAPH_MAX_PLOT_WIDTH
+    );
+    auditMergeAxis(x, {
+      labelAngle: xStats.longest >= 8 ? -35 : 0,
+      labelLimit: 150,
+      labelOverlap: false,
+      labelPadding: 8,
+      titlePadding: 12
+    });
+    prepared.width = plotWidth;
+    auditSetTargetMinWidth(target, plotWidth + 180);
+  } else if (!('width' in prepared) || (typeof prepared.width === 'number' && prepared.width < AUDIT_GRAPH_MIN_PLOT_WIDTH)) {
+    prepared.width = 'container';
+    auditSetTargetMinWidth(target, AUDIT_GRAPH_MIN_PLOT_WIDTH);
+  }
+
+  auditApplyCategoricalYAxis(prepared, target, yStats);
+
+  if (!('height' in prepared) || (typeof prepared.height === 'number' && prepared.height < 360)) {
+    prepared.height = 420;
+  }
+}
+
+function auditPrepareGraphSpec(spec, target) {
+  if (!auditPlainObject(spec)) return spec;
+  const prepared = auditClone(spec);
+  if (!auditLooksLikeVegaLite(prepared)) return prepared;
+
+  prepared.config = Object.assign({}, prepared.config || {});
+  prepared.config.view = Object.assign(
+    {stroke: null, continuousWidth: 1040, continuousHeight: 420},
+    prepared.config.view || {}
+  );
+  prepared.config.axis = Object.assign(
+    {
+      labelColor: '#475569',
+      titleColor: '#334155',
+      gridColor: '#e7edf3',
+      labelFontSize: 12,
+      titleFontSize: 12
+    },
+    prepared.config.axis || {}
+  );
+  prepared.config.legend = Object.assign(
+    {labelColor: '#475569', titleColor: '#334155', labelFontSize: 12, titleFontSize: 12},
+    prepared.config.legend || {}
+  );
+
+  if (!prepared.autosize) prepared.autosize = {type: 'fit-x', contains: 'padding'};
+  auditWrapTitle(prepared, target);
+  auditApplyResponsiveGraphSpec(prepared, target);
+  return prepared;
+}
+
+for (const [id, spec] of Object.entries(auditGraphSpecs)) {
+  const target = document.getElementById(id);
+  if (!target) continue;
+  vegaEmbed(
+    target,
+    auditPrepareGraphSpec(spec, target),
+    {actions: {export: true, source: false, compiled: false, editor: false}, renderer: 'svg'}
+  ).catch((error) => {
+    target.classList.add('graph-error');
+    target.textContent = `Graph render failed: ${error.message || error}`;
+  });
+}
+</script>
+""".strip()
         )
 
     @staticmethod
@@ -746,7 +1148,7 @@ class AuditLogHtmlRenderer:
 :root { color-scheme: light; --border: #d8dee4; --border-soft: #e7edf3; --muted: #64748b; --soft: #f8fafc; --soft-2: #eef7f4; --ink: #0f172a; --ink-2: #334155; --primary: #2563eb; --teal: #0f766e; --ok: #15803d; --warn: #a16207; --error: #b91c1c; }
 * { box-sizing: border-box; }
 body { margin: 0; font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: linear-gradient(180deg, #f8fbfd 0%, #ffffff 220px); }
-.audit { max-width: 1440px; margin: 0 auto; padding: 36px 32px 72px; }
+.audit { max-width: 1680px; margin: 0 auto; padding: 36px 32px 72px; }
 .hero { border: 1px solid var(--border-soft); border-radius: 8px; padding: 24px; background: #fff; box-shadow: 0 18px 44px rgba(15, 23, 42, 0.07); }
 h1 { font-size: 30px; line-height: 1.12; margin: 0 0 8px; letter-spacing: 0; }
 .hero-subtitle { color: var(--muted); margin: 0 0 20px; max-width: 720px; }
@@ -784,8 +1186,8 @@ a:hover { text-decoration: underline; }
 .status-error { color: var(--error); background: #fee2e2; border-color: #fecaca; }
 .stage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
 .stage-card-header { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
-.chat-thread { display: grid; gap: 20px; padding: 22px; border: 1px solid var(--border-soft); border-radius: 8px; background: linear-gradient(180deg, #f8fafc, #ffffff); }
-.chat-message { display: flex; align-items: flex-start; gap: 12px; width: min(100%, 1180px); }
+.chat-thread { display: grid; gap: 20px; padding: 18px; border: 1px solid var(--border-soft); border-radius: 8px; background: linear-gradient(180deg, #f8fafc, #ffffff); }
+.chat-message { display: flex; align-items: flex-start; gap: 12px; width: 100%; }
 .chat-message-assistant { width: 100%; }
 .chat-message-user { margin-left: auto; flex-direction: row-reverse; }
 .chat-message-system { max-width: 760px; margin: 0 auto; }
@@ -815,17 +1217,17 @@ a:hover { text-decoration: underline; }
 .chat-bubble code { border-radius: 6px; padding: 2px 5px; background: rgba(15, 23, 42, .06); font-size: 12px; }
 .chat-message-user code { background: rgba(255,255,255,.18); color: #fff; }
 .chat-bubble pre { margin: 10px 0; white-space: pre; }
-.artifacts { width: min(100%, 1120px); margin-top: 14px; }
-.chat-message-assistant .artifacts { width: min(100%, 1180px); }
+.artifacts { display: grid; gap: 14px; width: 100%; max-width: none; margin-top: 14px; }
+.chat-message-assistant .artifacts { width: 100%; max-width: none; }
 .artifact-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .artifact-chip { display: inline-flex; align-items: center; border: 1px solid var(--border-soft); border-radius: 999px; background: #fff; padding: 6px 10px; font-size: 12px; font-weight: 800; }
-.graph-card { width: 100%; margin-top: 16px; overflow: hidden; border: 1px solid #dbe5ef; border-radius: 8px; background: #fff; box-shadow: 0 18px 36px rgba(15, 23, 42, 0.08); }
+.graph-card { width: 100%; margin-top: 0; overflow: hidden; border: 1px solid #dbe5ef; border-radius: 8px; background: #fff; box-shadow: 0 18px 36px rgba(15, 23, 42, 0.08); }
 .graph-card-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--border-soft); background: linear-gradient(180deg, #ffffff, #f8fafc); }
 .graph-card-header h3 { overflow-wrap: anywhere; }
-.graph-viewport { width: 100%; overflow-x: auto; padding: 18px; background: #fff; }
-.graph { min-height: 380px; min-width: 360px; }
+.graph-viewport { width: 100%; overflow-x: auto; padding: 18px; background: #fff; scrollbar-gutter: stable; }
+.graph { min-height: 420px; min-width: 760px; }
 .graph > .vega-embed { width: 100%; }
-.graph svg, .graph canvas { max-width: 100%; }
+.graph svg, .graph canvas { display: block; max-width: none; }
 .graph-error { color: var(--error); }
 .stage-field { margin: 12px 0; }
 .stage-field p { margin: 0; overflow-wrap: anywhere; }
@@ -834,7 +1236,7 @@ a:hover { text-decoration: underline; }
 details { margin-top: 6px; }
 summary { cursor: pointer; color: var(--primary); font-weight: 700; margin-bottom: 8px; }
 .empty { color: var(--muted); margin: 0; }
-@media (max-width: 720px) { .audit { padding: 20px 14px 44px; } .hero { padding: 18px; } dl, .appendix-meta { grid-template-columns: 1fr; } .truth-step { grid-template-columns: 32px 1fr; } .truth-status { grid-column: 2; justify-self: start; } .chat-thread { padding: 12px; } .chat-message, .chat-message-user { width: 100%; max-width: 100%; } .chat-avatar { display: none; } .chat-body, .chat-message-assistant .chat-body { max-width: 100%; } .chat-bubble, .chat-message-assistant .chat-bubble { max-width: 100%; } .artifacts, .chat-message-assistant .artifacts { width: 100%; } .graph-viewport { padding: 10px; } .graph { min-height: 300px; } }
+@media (max-width: 720px) { .audit { padding: 20px 14px 44px; } .hero { padding: 18px; } dl, .appendix-meta { grid-template-columns: 1fr; } .truth-step { grid-template-columns: 32px 1fr; } .truth-status { grid-column: 2; justify-self: start; } .chat-thread { padding: 12px; } .chat-message, .chat-message-user { width: 100%; max-width: 100%; } .chat-avatar { display: none; } .chat-body, .chat-message-assistant .chat-body { max-width: 100%; } .chat-bubble, .chat-message-assistant .chat-bubble { max-width: 100%; } .artifacts, .chat-message-assistant .artifacts { width: 100%; max-width: none; } .graph-viewport { padding: 10px; } .graph { min-height: 320px; min-width: 720px; } }
 @media print { body { background: #fff; } .audit { max-width: none; padding: 16px; } .hero, .metric, .truth-card, .stage-card, .chat-bubble, .graph-card { box-shadow: none; } pre { max-height: none; } a { color: inherit; } }
 </style>
 """.strip()

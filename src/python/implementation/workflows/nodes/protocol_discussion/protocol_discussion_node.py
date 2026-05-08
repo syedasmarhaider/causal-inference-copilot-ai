@@ -108,6 +108,11 @@ class _ProtocolSummaryBlockersError(ValueError):
     """Raised when deterministic protocol blockers remain unresolved at confirmation time."""
 
 
+def _protocol_blocker_error_message(error: Exception) -> str:
+    message = str(error).strip()
+    return message if message else error.__class__.__name__
+
+
 class ProtocolDiscussionNode(Node):
     def _llm_blocker_message(
         self,
@@ -549,9 +554,9 @@ class ProtocolDiscussionNode(Node):
                         protocol_discussion=payload.discussion,
                     )
                 except _ProtocolSummaryBlockersError as e:
-                    log.exception(
+                    log.warning(
                         "PROTOCOL_DISCUSSION unresolved protocol blockers at confirmation: %s",
-                        safe_err(e),
+                        _protocol_blocker_error_message(e),
                     )
                     return self._needs_input_result(
                         request=request,
@@ -559,7 +564,7 @@ class ProtocolDiscussionNode(Node):
                             update={
                                 "phase": "DISCUSSING",
                                 "pending_dataset_change_request": None,
-                                "assistant_message": safe_err(e),
+                                "assistant_message": _protocol_blocker_error_message(e),
                             }
                         ),
                     )
@@ -666,7 +671,7 @@ class ProtocolDiscussionNode(Node):
                             "phase": "DISCUSSING",
                             "pending_dataset_change_request": None,
                             "assistant_message": self._prefix_dataset_reset_message(
-                                assistant_message=safe_err(e),
+                                assistant_message=_protocol_blocker_error_message(e),
                                 dataset_changed=dataset_changed,
                                 prior_dataset_id=prior_dataset_id,
                             ),
