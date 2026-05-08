@@ -24,14 +24,14 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     get_questions,
     initial_user_message,
 )
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
+    ProtocolDiscussionPayloadModel,
+    ProtocolDiscussionState,
+)
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_summary_blockers import (
     extract_protocol_answer_text,
     scan_protocol_summary_blockers,
     unresolved_summary_blockers,
-)
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
-    ProtocolDiscussionPayloadModel,
-    ProtocolDiscussionState,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec_draft import (
     CausalSpecDraft,
@@ -108,7 +108,6 @@ class _ProtocolSummaryBlockersError(ValueError):
     """Raised when deterministic protocol blockers remain unresolved at confirmation time."""
 
 
-
 class ProtocolDiscussionNode(Node):
     def _llm_blocker_message(
         self,
@@ -125,10 +124,15 @@ class ProtocolDiscussionNode(Node):
                     "role": b.role,
                     "issue": b.issue,
                     "user_question": b.user_question,
-                } for b in blockers
+                }
+                for b in blockers
             ],
             "protocol_discussion": protocol_discussion,
-            "dataset_summary": dataset_summary.model_dump_json() if hasattr(dataset_summary, 'model_dump_json') else str(dataset_summary),
+            "dataset_summary": (
+                dataset_summary.model_dump_json()
+                if hasattr(dataset_summary, "model_dump_json")
+                else str(dataset_summary)
+            ),
         }
         return self._generate_string(
             system_prompt=prompt,
@@ -180,9 +184,7 @@ class ProtocolDiscussionNode(Node):
         identifier_column_candidates: Sequence[str],
     ) -> dict[str, Any]:
         suggested_identifier_column = (
-            str(identifier_column_candidates[0]).strip()
-            if identifier_column_candidates
-            else None
+            str(identifier_column_candidates[0]).strip() if identifier_column_candidates else None
         )
         return {
             "canonical_questions": list(questions),
@@ -265,9 +267,7 @@ class ProtocolDiscussionNode(Node):
         identifier_column_candidates: Sequence[str],
     ) -> _ReviewSummaryModel:
         suggested_identifier_column = (
-            str(identifier_column_candidates[0]).strip()
-            if identifier_column_candidates
-            else None
+            str(identifier_column_candidates[0]).strip() if identifier_column_candidates else None
         )
         return self._llm.generate_json(
             schema=_ReviewSummaryModel,
@@ -324,8 +324,7 @@ class ProtocolDiscussionNode(Node):
         )
         prep_decisions = summarize_upstream_data_prep_decisions(protocol_discussion)
         summary = (
-            "I drafted the final protocol summary based on the current discussion. "
-            f"{preview}"
+            "I drafted the final protocol summary based on the current discussion. " f"{preview}"
         )
         if identifier_choice:
             summary += f" {identifier_choice}"
@@ -367,6 +366,14 @@ class ProtocolDiscussionNode(Node):
                 retry_feedback=retry_feedback,
                 previous_draft=previous_draft,
             )
+            role_conflict_message = _negative_control_role_conflict_message(
+                protocol_discussion=protocol_discussion,
+                draft=draft,
+                dataset_summary=deps.dataset_summary,
+            )
+            if role_conflict_message is not None:
+                raise _ProtocolSummaryBlockersError(role_conflict_message)
+
             validation_issue = draft.validate_against_dataframe(df=validation_df)
             if validation_issue is None:
                 blockers = scan_protocol_summary_blockers(
@@ -414,6 +421,14 @@ class ProtocolDiscussionNode(Node):
                 protocol_discussion=protocol_discussion,
                 dataset_summary=dataset_summary,
             )
+            role_conflict_message = _negative_control_role_conflict_message(
+                protocol_discussion=protocol_discussion,
+                draft=draft,
+                dataset_summary=dataset_summary,
+            )
+            if role_conflict_message is not None:
+                raise _ProtocolSummaryBlockersError(role_conflict_message)
+
             blockers = scan_protocol_summary_blockers(
                 dataset_summary=dataset_summary,
                 treatment_column=str(draft.treatment_column),
@@ -427,9 +442,13 @@ class ProtocolDiscussionNode(Node):
             )
             if pending_blockers:
                 # Use LLM to generate the user-facing message for blockers
-                _ = self._llm_blocker_message(pending_blockers, protocol_discussion, dataset_summary)
+                _ = self._llm_blocker_message(
+                    pending_blockers, protocol_discussion, dataset_summary
+                )
                 return None
             return draft
+        except _ProtocolSummaryBlockersError:
+            raise
         except Exception as e:
             log.warning(
                 "PROTOCOL_DISCUSSION preview causal draft compile failed before review: %s",
@@ -633,10 +652,27 @@ class ProtocolDiscussionNode(Node):
         )
 
         if decision.next_action == "confirm":
-            preview_draft = self._compile_preview_causal_spec_draft(
-                protocol_discussion=decision_discussion,
-                dataset_summary=deps.dataset_summary,
-            )
+            try:
+                preview_draft = self._compile_preview_causal_spec_draft(
+                    protocol_discussion=decision_discussion,
+                    dataset_summary=deps.dataset_summary,
+                )
+            except _ProtocolSummaryBlockersError as e:
+                return self._needs_input_result(
+                    request=request,
+                    payload=payload.model_copy(
+                        update={
+                            "discussion": decision_discussion,
+                            "phase": "DISCUSSING",
+                            "pending_dataset_change_request": None,
+                            "assistant_message": self._prefix_dataset_reset_message(
+                                assistant_message=safe_err(e),
+                                dataset_changed=dataset_changed,
+                                prior_dataset_id=prior_dataset_id,
+                            ),
+                        }
+                    ),
+                )
             if preview_draft is not None:
                 blockers = scan_protocol_summary_blockers(
                     dataset_summary=deps.dataset_summary,
@@ -682,9 +718,7 @@ class ProtocolDiscussionNode(Node):
                 review_message = self._fallback_review_summary(
                     decision_discussion,
                     suggested_identifier_column=(
-                        identifier_column_candidates[0]
-                        if identifier_column_candidates
-                        else None
+                        identifier_column_candidates[0] if identifier_column_candidates else None
                     ),
                 )
             return self._needs_input_result(
@@ -790,7 +824,11 @@ def _discussion_with_confirmed_unknown_category_decision(
         return protocol_discussion
 
     answer_text = extract_protocol_answer_text(protocol_discussion, "15)")
-    if answer_text is not None and "unknown" in answer_text.lower() and "unclear" not in answer_text.lower():
+    if (
+        answer_text is not None
+        and "unknown" in answer_text.lower()
+        and "unclear" not in answer_text.lower()
+    ):
         return protocol_discussion
 
     decision = (
@@ -801,6 +839,126 @@ def _discussion_with_confirmed_unknown_category_decision(
     if not stripped:
         return decision
     return f"{stripped}\n{decision}"
+
+
+def _negative_control_role_conflict_message(
+    *,
+    protocol_discussion: str,
+    draft: CausalSpecDraft,
+    dataset_summary: DatasetSummaryModel,
+) -> str | None:
+    selected_column = _selected_negative_control_column(
+        protocol_discussion=protocol_discussion,
+        dataset_summary=dataset_summary,
+    )
+    if selected_column is None:
+        return None
+
+    selected_key = _normalize_column_key(selected_column)
+    roles = _protected_roles_for_column(draft=draft, column_key=selected_key)
+    if roles:
+        return _build_negative_control_role_conflict_message(
+            column=selected_column,
+            roles=roles,
+        )
+
+    draft_negative_control = (
+        str(draft.negative_control_outcome).strip()
+        if draft.negative_control_outcome is not None
+        else None
+    )
+    if (
+        draft_negative_control is None
+        or _normalize_column_key(draft_negative_control) != selected_key
+    ):
+        return (
+            f"{selected_column} was selected as the negative-control outcome in the "
+            "protocol, but I could not preserve it safely in the compiled causal draft. "
+            "Please confirm whether to use this column only as the negative-control "
+            "outcome, choose a different negative-control outcome, or set the "
+            "negative-control outcome to null."
+        )
+
+    return None
+
+
+def _selected_negative_control_column(
+    *,
+    protocol_discussion: str,
+    dataset_summary: DatasetSummaryModel,
+) -> str | None:
+    answer_text = extract_protocol_answer_text(protocol_discussion, "16)")
+    if answer_text is None:
+        return None
+
+    lowered = answer_text.lower()
+    if "unclear" in lowered or re.search(r"\b(null|none|no negative|not available)\b", lowered):
+        return None
+
+    column_names = [
+        str(profile.name).strip()
+        for profile in dataset_summary.profiles
+        if str(profile.name).strip()
+    ]
+    for column in sorted(column_names, key=len, reverse=True):
+        if _answer_mentions_column(answer_text, column):
+            return column
+    return None
+
+
+def _answer_mentions_column(answer_text: str, column: str) -> bool:
+    escaped = re.escape(column)
+    return (
+        re.search(
+            rf"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])",
+            answer_text,
+            flags=re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _protected_roles_for_column(*, draft: CausalSpecDraft, column_key: str) -> list[str]:
+    roles: list[str] = []
+    role_columns: list[tuple[str, str]] = [
+        (str(draft.treatment_column).strip(), "treatment"),
+        (str(draft.outcome_column).strip(), "primary outcome"),
+        (str(draft.id_col).strip(), "identifier"),
+        *((str(column).strip(), "covariate") for column in draft.covariates),
+        *((str(column).strip(), "effect modifier") for column in draft.effect_modifiers),
+    ]
+    for column, role in role_columns:
+        if _normalize_column_key(column) == column_key and role not in roles:
+            roles.append(role)
+    return roles
+
+
+def _build_negative_control_role_conflict_message(*, column: str, roles: Sequence[str]) -> str:
+    role_text = _format_role_list(roles)
+    return (
+        f"{column} is currently selected as the negative-control outcome and also as "
+        f"{role_text}. In this workflow, a negative-control outcome must be a separate "
+        "outcome-like column and cannot also be used as treatment, the primary outcome, "
+        "an identifier, a covariate, or an effect modifier. Please choose one role: keep "
+        f"{column} in its existing role and skip or select another negative-control "
+        f"outcome, or remove {column} from the other role and use it "
+        "only as the negative-control outcome."
+    )
+
+
+def _format_role_list(roles: Sequence[str]) -> str:
+    if not roles:
+        return "another causal role"
+    if len(roles) == 1:
+        article = "an" if roles[0][0].lower() in {"a", "e", "i", "o", "u"} else "a"
+        return f"{article} {roles[0]}"
+    if len(roles) == 2:
+        return f"{roles[0]} and {roles[1]}"
+    return f"{', '.join(roles[:-1])}, and {roles[-1]}"
+
+
+def _normalize_column_key(column: str) -> str:
+    return column.strip().casefold()
 
 
 def _is_affirmative_confirmation(message: str) -> bool:
@@ -844,7 +1002,6 @@ def _assistant_asked_unknown_baseline_decision(message: str | None) -> bool:
         for token in ("distinct category", "own category", "kept", "keep", "merged", "handled")
     )
     return mentions_unknown and mentions_baseline_scope and mentions_decision
-
 
 
 def summarize_upstream_data_prep_decisions(protocol_discussion: str) -> str | None:

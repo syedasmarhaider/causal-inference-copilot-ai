@@ -15,8 +15,7 @@ def test_protocol_discussion_questions_include_negative_control_and_identifier_q
     questions = get_questions()
 
     assert any(
-        question.startswith("16) Negative-control outcome (optional):")
-        for question in questions
+        question.startswith("16) Negative-control outcome (optional):") for question in questions
     )
     assert questions[-1].startswith("17) Identifier column (optional):")
     assert any(
@@ -24,8 +23,7 @@ def test_protocol_discussion_questions_include_negative_control_and_identifier_q
         for question in questions
     )
     assert any(
-        question.startswith("15) Baseline feature preparation decisions:")
-        for question in questions
+        question.startswith("15) Baseline feature preparation decisions:") for question in questions
     )
 
 
@@ -38,8 +36,14 @@ def test_protocol_discussion_update_prompt_mentions_identifier_handling_rules() 
     assert "set answer 17 to auto_id" in prompt
     assert "Never invent an identifier column." in prompt
     assert "Negative-control outcome handling is optional and non-blocking." in prompt
+    assert "supports only negative-control outcome refutation" in prompt
+    assert "Do not offer" in prompt
+    assert "placebo-treatment refutation" in prompt
+    assert "irrelevant-additional-covariate refutation" in prompt
     assert "ask the user for a clinically valid negative-control outcome candidate" in prompt
     assert "set answer 16 to null" in prompt
+    assert "do not confirm the protocol" in prompt
+    assert "role conflict" in prompt
     assert "Never silently invent a negative-control outcome." in prompt
     assert "a negative-control outcome is used only for CATE refutation" in prompt
     assert "deterministic cleaning and encoding instructions" in prompt
@@ -65,13 +69,11 @@ def test_protocol_discussion_questions_clarify_covariates_and_effect_modifiers()
     questions = get_questions()
 
     assert any(
-        "used to control or adjust for confounding or prognostic differences"
-        in question
+        "used to control or adjust for confounding or prognostic differences" in question
         for question in questions
     )
     assert any(
-        "change the size or direction of the treatment effect across subgroups"
-        in question
+        "change the size or direction of the treatment effect across subgroups" in question
         for question in questions
     )
 

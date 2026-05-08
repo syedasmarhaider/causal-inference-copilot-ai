@@ -12,8 +12,8 @@ from python.domain.workflows.node import NodeRequest
 from python.domain.workflows.ochestrator_state import OchestratorState
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import (
     ProtocolDiscussionNode,
-    _DiscussionDecisionModel,
     _discussion_with_confirmed_unknown_category_decision,
+    _DiscussionDecisionModel,
     _identifier_column_candidates,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
@@ -87,13 +87,13 @@ class _FakeOrchestratorState(OchestratorState):
         return dict(self._values)
 
     @classmethod
-    def from_json_dict(cls, payload: dict[str, Any]) -> "_FakeOrchestratorState":
+    def from_json_dict(cls, payload: dict[str, Any]) -> _FakeOrchestratorState:
         instance = cls(dataset_summary=payload["latest_dataset_summary"])
         instance._values = dict(payload)
         return instance
 
     @classmethod
-    def init_empty(cls) -> "_FakeOrchestratorState":
+    def init_empty(cls) -> _FakeOrchestratorState:
         raise NotImplementedError
 
 
@@ -101,6 +101,7 @@ class _FakeOrchestratorState(OchestratorState):
 class _FakeLLM:
     json_outputs: list[Any] = field(default_factory=list)
     generate_json_calls: list[dict[str, Any]] = field(default_factory=list)
+    generate_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def generate_json(
         self,
@@ -126,6 +127,24 @@ class _FakeLLM:
         if isinstance(next_output, dict):
             return schema.model_validate(next_output)
         return next_output
+
+    def generate(
+        self,
+        *,
+        system_prompt: str | None,
+        user_prompt: str,
+        config: LLMConfig,
+        history: list[ChatMessage] | None,
+    ) -> ChatMessage:
+        self.generate_calls.append(
+            {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "config": config,
+                "history": history,
+            }
+        )
+        return ChatMessage(role="assistant", content="Please resolve the protocol blocker.")
 
 
 def _request(
@@ -261,3 +280,162 @@ def test_confirmed_unknown_category_blocker_is_written_to_discussion() -> None:
     )
 
     assert "Keep Unknown and unknown-like categories as their own category" in updated
+
+
+def test_protocol_discussion_blocks_negative_control_effect_modifier_conflict() -> None:
+    summary = _summary_for_df(
+        pd.DataFrame(
+            {
+                "RXASP": ["Y", "N"],
+                "DIED": ["Y", "N"],
+                "RSBP": [140, 160],
+                "AGE": [72, 67],
+            }
+        )
+    )
+    discussion = "\n".join(
+        [
+            "1) Causal question: What is the effect of aspirin allocation on death?",
+            "6) Treatment/exposure definition: RXASP, treated Y, control N.",
+            "8) Outcome specification: DIED.",
+            "11) Effect modifiers / heterogeneity features (X, optional): RSBP and AGE.",
+            "14) Treatment/outcome data-quality decisions: Treatment and outcome are complete; use as-is.",
+            "15) Baseline feature preparation decisions: Baseline features are complete; use as-is.",
+            "16) Negative-control outcome (optional): RSBP.",
+            "17) Identifier column (optional): auto_id.",
+        ]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            _DiscussionDecisionModel(
+                discussion=discussion,
+                next_action="confirm",
+                assistant_message="Please review this protocol.",
+                dataset_change_request="Keep confirmed protocol columns only.",
+            ),
+            {
+                "id_col": "auto_id",
+                "treatment_column": "RXASP",
+                "outcome_column": "DIED",
+                "negative_control_outcome": None,
+                "covariates": [],
+                "effect_modifiers": ["RSBP", "AGE"],
+            },
+        ]
+    )
+    node, request = _request(dataset_summary=summary, llm=llm)
+
+    result = node.run(request=request)
+    message = result.response_messages[0].content
+
+    assert result.status == "PENDING"
+    assert result.action == "NEEDS_INPUT"
+    assert result.new_node_state.payload.phase == "DISCUSSING"
+    assert "RSBP" in message
+    assert "negative-control outcome" in message
+    assert "effect modifier" in message
+    assert "choose one role" in message
+    assert len(llm.generate_json_calls) == 2
+
+
+def test_protocol_discussion_allows_distinct_negative_control_outcome() -> None:
+    summary = _summary_for_df(
+        pd.DataFrame(
+            {
+                "RXASP": ["Y", "N"],
+                "DIED": ["Y", "N"],
+                "RSBP": [140, 160],
+                "NEGCTRL": [0.1, 0.2],
+            }
+        )
+    )
+    discussion = "\n".join(
+        [
+            "1) Causal question: What is the effect of aspirin allocation on death?",
+            "6) Treatment/exposure definition: RXASP, treated Y, control N.",
+            "8) Outcome specification: DIED.",
+            "11) Effect modifiers / heterogeneity features (X, optional): RSBP.",
+            "14) Treatment/outcome data-quality decisions: Treatment and outcome are complete; use as-is.",
+            "15) Baseline feature preparation decisions: Baseline features are complete; use as-is.",
+            "16) Negative-control outcome (optional): NEGCTRL.",
+            "17) Identifier column (optional): auto_id.",
+        ]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            _DiscussionDecisionModel(
+                discussion=discussion,
+                next_action="confirm",
+                assistant_message="Please review this protocol.",
+                dataset_change_request="Keep confirmed protocol columns only.",
+            ),
+            {
+                "id_col": "auto_id",
+                "treatment_column": "RXASP",
+                "outcome_column": "DIED",
+                "negative_control_outcome": "NEGCTRL",
+                "covariates": [],
+                "effect_modifiers": ["RSBP"],
+            },
+            {"assistant_message": "Review ready."},
+        ]
+    )
+    node, request = _request(dataset_summary=summary, llm=llm)
+
+    result = node.run(request=request)
+
+    assert result.status == "PENDING"
+    assert result.action == "NEEDS_INPUT"
+    assert result.new_node_state.payload.phase == "REVIEW_READY"
+    assert result.response_messages[0].content == "Review ready."
+
+
+def test_protocol_discussion_allows_null_negative_control_outcome() -> None:
+    summary = _summary_for_df(
+        pd.DataFrame(
+            {
+                "RXASP": ["Y", "N"],
+                "DIED": ["Y", "N"],
+                "RSBP": [140, 160],
+            }
+        )
+    )
+    discussion = "\n".join(
+        [
+            "1) Causal question: What is the effect of aspirin allocation on death?",
+            "6) Treatment/exposure definition: RXASP, treated Y, control N.",
+            "8) Outcome specification: DIED.",
+            "11) Effect modifiers / heterogeneity features (X, optional): RSBP.",
+            "14) Treatment/outcome data-quality decisions: Treatment and outcome are complete; use as-is.",
+            "15) Baseline feature preparation decisions: Baseline features are complete; use as-is.",
+            "16) Negative-control outcome (optional): null.",
+            "17) Identifier column (optional): auto_id.",
+        ]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            _DiscussionDecisionModel(
+                discussion=discussion,
+                next_action="confirm",
+                assistant_message="Please review this protocol.",
+                dataset_change_request="Keep confirmed protocol columns only.",
+            ),
+            {
+                "id_col": "auto_id",
+                "treatment_column": "RXASP",
+                "outcome_column": "DIED",
+                "negative_control_outcome": None,
+                "covariates": [],
+                "effect_modifiers": ["RSBP"],
+            },
+            {"assistant_message": "Review ready without negative control."},
+        ]
+    )
+    node, request = _request(dataset_summary=summary, llm=llm)
+
+    result = node.run(request=request)
+
+    assert result.status == "PENDING"
+    assert result.action == "NEEDS_INPUT"
+    assert result.new_node_state.payload.phase == "REVIEW_READY"
+    assert result.response_messages[0].content == "Review ready without negative control."

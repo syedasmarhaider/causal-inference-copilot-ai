@@ -38,12 +38,18 @@ Protocol edit rules:
 _NEGATIVE_CONTROL_OUTCOME_RULES = """
 Negative-control outcome policy:
 - Negative-control outcome handling is optional and non-blocking.
+- This platform supports only negative-control outcome refutation. Do not offer,
+  request, or imply support for placebo-treatment refutation or
+  irrelevant-additional-covariate refutation for now.
 - During protocol discussion, ask the user for a clinically valid negative-control outcome candidate.
 - When explaining this choice to the user, state why it matters: a negative-control outcome is used only for CATE refutation, and it must be an outcome-like variable that the treatment should not affect; otherwise the refutation would be misleading. If none is available, null is acceptable and the refutation is skipped.
 - Use exact dataset column names only.
 - If the user names a clinically valid negative-control outcome column, record it exactly in answer 16.
 - If the user does not provide one, suggest or record a candidate only when there is strong evidence from column names, metadata, or time ordering that the column is outcome-like and should not be affected by the treatment.
 - If no valid candidate is provided or strongly identified, set answer 16 to null.
+- If the named negative-control outcome is also selected as treatment, outcome,
+  identifier, covariate, or effect modifier, do not confirm the protocol. Explain
+  the role conflict and ask the user to choose one role for that column.
 - Never silently invent a negative-control outcome.
 """.strip()
 
@@ -256,8 +262,9 @@ def initial_user_message() -> str:
         "and any upstream data-handling decisions you already want for treatment, outcome, or baseline features."
     )
 
+
 def get_llm_blocker_message_prompt() -> str:
-    return '''
+    return """
 You are a Causal ML agent. Your job is to explain to the user, in a clear and actionable way, any blockers or issues that prevent compiling the protocol draft into a valid causal specification.
 
 Inputs:
@@ -278,4 +285,4 @@ Task:
 
 Output:
 Return only a string with the user-facing message.
-'''
+"""
