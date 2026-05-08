@@ -241,6 +241,13 @@ def test_audit_log_html_uses_full_history_escapes_text_and_renders_graph() -> No
     assert f"/artifacts/{graph_id}" not in html
     assert "https://cdn.jsdelivr.net/npm/vega-lite@5" in html
     assert "auditGraphSpecs" in html
+    assert "auditPrepareGraphSpec" in html
+    assert "fit-x" in html
+    assert "continuousWidth: 1040" in html
+    assert '<div class="graph-card-header"><h3>ATE graph</h3></div>' in html
+    assert (
+        '<div class="graph-viewport"><div id="audit-graph-2-1" class="graph"></div></div>' in html
+    )
     assert "ATE graph" in html
     training_section = html.split("<h3>Model Training</h3>", maxsplit=1)[1].split(
         "<h3>Causal Inference</h3>", maxsplit=1

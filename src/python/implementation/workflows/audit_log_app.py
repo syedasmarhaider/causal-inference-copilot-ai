@@ -533,8 +533,12 @@ class AuditLogHtmlRenderer:
                 else:
                     graph_items.append(
                         '<div class="graph-card">'
+                        '<div class="graph-card-header">'
                         f"<h3>{_e(graph.title)}</h3>"
+                        "</div>"
+                        '<div class="graph-viewport">'
                         f'<div id="{_e(graph.element_id)}" class="graph"></div>'
+                        "</div>"
                         "</div>"
                     )
                 continue
@@ -701,10 +705,33 @@ class AuditLogHtmlRenderer:
         return (
             "<script>"
             f"const auditGraphSpecs = {safe_json};"
+            "function auditClone(value) {"
+            "return typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value));"
+            "}"
+            "function auditPlainObject(value) {"
+            "return value && typeof value === 'object' && !Array.isArray(value);"
+            "}"
+            "function auditLooksLikeVegaLite(spec) {"
+            "const schema = String(spec && spec.$schema || '');"
+            "return schema.includes('vega-lite') || 'mark' in spec || 'encoding' in spec || 'layer' in spec || 'facet' in spec || 'hconcat' in spec || 'vconcat' in spec || 'repeat' in spec;"
+            "}"
+            "function auditPrepareGraphSpec(spec) {"
+            "if (!auditPlainObject(spec)) return spec;"
+            "const prepared = auditClone(spec);"
+            "if (!auditLooksLikeVegaLite(prepared)) return prepared;"
+            "if (!prepared.autosize) prepared.autosize = {type: 'fit-x', contains: 'padding'};"
+            "if (!('width' in prepared) || (typeof prepared.width === 'number' && prepared.width < 640)) prepared.width = 'container';"
+            "if (!('height' in prepared) || (typeof prepared.height === 'number' && prepared.height < 320)) prepared.height = 380;"
+            "prepared.config = Object.assign({}, prepared.config || {});"
+            "prepared.config.view = Object.assign({stroke: null, continuousWidth: 1040, continuousHeight: 380}, prepared.config.view || {});"
+            "prepared.config.axis = Object.assign({labelColor: '#475569', titleColor: '#334155', gridColor: '#e7edf3', labelFontSize: 12, titleFontSize: 12}, prepared.config.axis || {});"
+            "prepared.config.legend = Object.assign({labelColor: '#475569', titleColor: '#334155', labelFontSize: 12, titleFontSize: 12}, prepared.config.legend || {});"
+            "return prepared;"
+            "}"
             "for (const [id, spec] of Object.entries(auditGraphSpecs)) {"
             "const target = document.getElementById(id);"
             "if (!target) continue;"
-            "vegaEmbed(target, spec, {actions: false}).catch((error) => {"
+            "vegaEmbed(target, auditPrepareGraphSpec(spec), {actions: {export: true, source: false, compiled: false, editor: false}, renderer: 'svg'}).catch((error) => {"
             "target.classList.add('graph-error');"
             "target.textContent = `Graph render failed: ${error.message || error}`;"
             "});"
@@ -719,7 +746,7 @@ class AuditLogHtmlRenderer:
 :root { color-scheme: light; --border: #d8dee4; --border-soft: #e7edf3; --muted: #64748b; --soft: #f8fafc; --soft-2: #eef7f4; --ink: #0f172a; --ink-2: #334155; --primary: #2563eb; --teal: #0f766e; --ok: #15803d; --warn: #a16207; --error: #b91c1c; }
 * { box-sizing: border-box; }
 body { margin: 0; font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: linear-gradient(180deg, #f8fbfd 0%, #ffffff 220px); }
-.audit { max-width: 1180px; margin: 0 auto; padding: 36px 28px 64px; }
+.audit { max-width: 1440px; margin: 0 auto; padding: 36px 32px 72px; }
 .hero { border: 1px solid var(--border-soft); border-radius: 8px; padding: 24px; background: #fff; box-shadow: 0 18px 44px rgba(15, 23, 42, 0.07); }
 h1 { font-size: 30px; line-height: 1.12; margin: 0 0 8px; letter-spacing: 0; }
 .hero-subtitle { color: var(--muted); margin: 0 0 20px; max-width: 720px; }
@@ -757,18 +784,21 @@ a:hover { text-decoration: underline; }
 .status-error { color: var(--error); background: #fee2e2; border-color: #fecaca; }
 .stage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
 .stage-card-header { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
-.chat-thread { display: grid; gap: 18px; padding: 18px; border: 1px solid var(--border-soft); border-radius: 8px; background: linear-gradient(180deg, #f8fafc, #ffffff); }
-.chat-message { display: flex; align-items: flex-start; gap: 12px; max-width: 860px; }
+.chat-thread { display: grid; gap: 20px; padding: 22px; border: 1px solid var(--border-soft); border-radius: 8px; background: linear-gradient(180deg, #f8fafc, #ffffff); }
+.chat-message { display: flex; align-items: flex-start; gap: 12px; width: min(100%, 1180px); }
+.chat-message-assistant { width: 100%; }
 .chat-message-user { margin-left: auto; flex-direction: row-reverse; }
 .chat-message-system { max-width: 760px; margin: 0 auto; }
 .chat-avatar { display: flex; width: 36px; height: 36px; flex: 0 0 36px; align-items: center; justify-content: center; border-radius: 8px; color: #fff; font-size: 11px; font-weight: 800; background: linear-gradient(145deg, var(--primary), #0f172a); box-shadow: 0 8px 20px rgba(15, 23, 42, 0.14); }
 .chat-avatar-user { background: linear-gradient(145deg, #0f766e, #134e4a); }
 .chat-avatar-system { background: #64748b; }
-.chat-body { min-width: 0; max-width: min(100%, 760px); }
+.chat-body { min-width: 0; max-width: min(100%, 900px); }
+.chat-message-assistant .chat-body { width: 100%; max-width: none; }
 .chat-message-user .chat-body { display: flex; flex-direction: column; align-items: flex-end; }
 .chat-meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin: 0 0 5px; color: var(--muted); font-size: 11px; }
 .chat-meta span { font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
-.chat-bubble { overflow: hidden; border: 1px solid var(--border-soft); border-radius: 8px; padding: 13px 15px; background: #fff; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05); overflow-wrap: anywhere; }
+.chat-bubble { max-width: 780px; overflow: hidden; border: 1px solid var(--border-soft); border-radius: 8px; padding: 13px 15px; background: #fff; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05); overflow-wrap: anywhere; }
+.chat-message-assistant .chat-bubble { max-width: 820px; }
 .chat-message-user .chat-bubble { background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 64%, #0f766e 100%); color: #fff; border-color: transparent; box-shadow: 0 12px 26px rgba(29, 78, 216, 0.22); }
 .chat-message-system .chat-bubble { background: var(--soft); color: var(--ink-2); }
 .chat-bubble p, .chat-bubble ul, .chat-bubble ol, .chat-bubble blockquote { margin: 0 0 10px; }
@@ -785,12 +815,17 @@ a:hover { text-decoration: underline; }
 .chat-bubble code { border-radius: 6px; padding: 2px 5px; background: rgba(15, 23, 42, .06); font-size: 12px; }
 .chat-message-user code { background: rgba(255,255,255,.18); color: #fff; }
 .chat-bubble pre { margin: 10px 0; white-space: pre; }
-.artifacts { margin-top: 10px; }
+.artifacts { width: min(100%, 1120px); margin-top: 14px; }
+.chat-message-assistant .artifacts { width: min(100%, 1180px); }
 .artifact-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .artifact-chip { display: inline-flex; align-items: center; border: 1px solid var(--border-soft); border-radius: 999px; background: #fff; padding: 6px 10px; font-size: 12px; font-weight: 800; }
-.graph-card { margin-top: 12px; border: 1px solid var(--border-soft); border-radius: 8px; padding: 12px; background: #fff; }
-.graph-card h3 { margin-bottom: 8px; }
-.graph { min-height: 220px; overflow-x: auto; }
+.graph-card { width: 100%; margin-top: 16px; overflow: hidden; border: 1px solid #dbe5ef; border-radius: 8px; background: #fff; box-shadow: 0 18px 36px rgba(15, 23, 42, 0.08); }
+.graph-card-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--border-soft); background: linear-gradient(180deg, #ffffff, #f8fafc); }
+.graph-card-header h3 { overflow-wrap: anywhere; }
+.graph-viewport { width: 100%; overflow-x: auto; padding: 18px; background: #fff; }
+.graph { min-height: 380px; min-width: 360px; }
+.graph > .vega-embed { width: 100%; }
+.graph svg, .graph canvas { max-width: 100%; }
 .graph-error { color: var(--error); }
 .stage-field { margin: 12px 0; }
 .stage-field p { margin: 0; overflow-wrap: anywhere; }
@@ -799,7 +834,7 @@ a:hover { text-decoration: underline; }
 details { margin-top: 6px; }
 summary { cursor: pointer; color: var(--primary); font-weight: 700; margin-bottom: 8px; }
 .empty { color: var(--muted); margin: 0; }
-@media (max-width: 720px) { .audit { padding: 20px 14px 44px; } .hero { padding: 18px; } dl, .appendix-meta { grid-template-columns: 1fr; } .truth-step { grid-template-columns: 32px 1fr; } .truth-status { grid-column: 2; justify-self: start; } .chat-thread { padding: 12px; } .chat-message, .chat-message-user { max-width: 100%; } .chat-avatar { display: none; } .chat-body { max-width: 100%; } }
+@media (max-width: 720px) { .audit { padding: 20px 14px 44px; } .hero { padding: 18px; } dl, .appendix-meta { grid-template-columns: 1fr; } .truth-step { grid-template-columns: 32px 1fr; } .truth-status { grid-column: 2; justify-self: start; } .chat-thread { padding: 12px; } .chat-message, .chat-message-user { width: 100%; max-width: 100%; } .chat-avatar { display: none; } .chat-body, .chat-message-assistant .chat-body { max-width: 100%; } .chat-bubble, .chat-message-assistant .chat-bubble { max-width: 100%; } .artifacts, .chat-message-assistant .artifacts { width: 100%; } .graph-viewport { padding: 10px; } .graph { min-height: 300px; } }
 @media print { body { background: #fff; } .audit { max-width: none; padding: 16px; } .hero, .metric, .truth-card, .stage-card, .chat-bubble, .graph-card { box-shadow: none; } pre { max-height: none; } a { color: inherit; } }
 </style>
 """.strip()
