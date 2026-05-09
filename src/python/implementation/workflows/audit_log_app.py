@@ -851,11 +851,12 @@ function auditWrapText(text, maxChars, maxLines) {
 
 function auditWrapTitle(prepared, target) {
   const maxChars = auditClamp(Math.floor(auditViewportWidth(target) / 13), 36, 96);
-  const titleDefaults = {anchor: 'start', color: '#0f172a', fontSize: 16, fontWeight: 700, lineHeight: 20};
+  const titleDefaults = {anchor: 'start', color: '#0f766e', fontSize: 16, fontWeight: 700, lineHeight: 20};
   prepared.config = Object.assign({}, prepared.config || {});
   prepared.config.title = Object.assign(
-    titleDefaults,
-    auditPlainObject(prepared.config.title) ? prepared.config.title : {}
+    {},
+    auditPlainObject(prepared.config.title) ? prepared.config.title : {},
+    titleDefaults
   );
 
   if (typeof prepared.title === 'string') {
@@ -867,7 +868,7 @@ function auditWrapTitle(prepared, target) {
       {},
       {anchor: 'start'},
       prepared.title,
-      {text: auditWrapText(prepared.title.text, maxChars, 3)}
+      {color: titleDefaults.color, text: auditWrapText(prepared.title.text, maxChars, 3)}
     );
   }
 }
@@ -1223,10 +1224,15 @@ a:hover { text-decoration: underline; }
 .artifact-chip { display: inline-flex; align-items: center; border: 1px solid var(--border-soft); border-radius: 999px; background: #fff; padding: 6px 10px; font-size: 12px; font-weight: 800; }
 .graph-card { width: 100%; margin-top: 0; overflow: hidden; border: 1px solid #dbe5ef; border-radius: 8px; background: #fff; box-shadow: 0 18px 36px rgba(15, 23, 42, 0.08); }
 .graph-card-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--border-soft); background: linear-gradient(180deg, #ffffff, #f8fafc); }
-.graph-card-header h3 { overflow-wrap: anywhere; }
+.graph-card-header h3 { overflow-wrap: anywhere; color: var(--teal); }
 .graph-viewport { width: 100%; overflow-x: auto; padding: 18px; background: #fff; scrollbar-gutter: stable; }
 .graph { min-height: 420px; min-width: 760px; }
 .graph > .vega-embed { width: 100%; }
+.graph .vega-embed details,
+.graph .vega-embed summary,
+.graph .vega-embed .vega-actions a { color: var(--teal) !important; }
+.graph .vega-embed summary svg,
+.graph .vega-embed summary svg path { fill: currentColor !important; stroke: currentColor !important; }
 .graph svg, .graph canvas { display: block; max-width: none; }
 .graph-error { color: var(--error); }
 .stage-field { margin: 12px 0; }

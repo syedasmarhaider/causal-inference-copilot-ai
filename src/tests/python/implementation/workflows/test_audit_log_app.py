@@ -245,12 +245,16 @@ def test_audit_log_html_uses_full_history_escapes_text_and_renders_graph() -> No
     assert "auditPrepareGraphSpec" in html
     assert "auditApplyHorizontalComposition" in html
     assert "auditShouldTransposeCategoricalXAxis" in html
+    assert "const titleDefaults = {anchor: 'start', color: '#0f766e'" in html
     assert "AUDIT_GRAPH_MIN_PLOT_WIDTH = 760" in html
     assert "fit-x" in html
     assert "continuousWidth: 1040" in html
     assert ".audit { max-width: 1680px;" in html
     assert ".artifacts { display: grid; gap: 14px; width: 100%; max-width: none;" in html
     assert ".graph { min-height: 420px; min-width: 760px; }" in html
+    assert ".graph-card-header h3 { overflow-wrap: anywhere; color: var(--teal); }" in html
+    assert ".graph .vega-embed .vega-actions a { color: var(--teal) !important; }" in html
+    assert ".graph .vega-embed summary svg path { fill: currentColor !important; stroke: currentColor !important; }" in html
     assert ".graph svg, .graph canvas { display: block; max-width: none; }" in html
     assert '<div class="graph-card-header"><h3>ATE graph</h3></div>' in html
     assert (
