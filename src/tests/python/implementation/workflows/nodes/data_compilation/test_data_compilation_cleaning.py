@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
+from python.domain.repo.analytics_repo import AnalyticsSQLResult
 from python.domain.service.llm_service import ChatMessage, LLMConfig
 from python.implementation.workflows.nodes.data_compilation.data_compilation_cleaning import (
     CleaningResult,
@@ -137,7 +138,23 @@ def _empty_simple_plan() -> dict[str, Any]:
 
 
 def _empty_manipulation_plan() -> dict[str, Any]:
-    return {"instructions": None}
+    return {"batches": []}
+
+
+def _sql_batch_plan(
+    *statements: str,
+    phase: str = "conditional_recode",
+    purpose: str = "Apply SQL cleaning.",
+) -> dict[str, Any]:
+    return {
+        "batches": [
+            {
+                "phase": phase,
+                "purpose": purpose,
+                "statements": list(statements) or ["SELECT * FROM protocol_scope_df"],
+            }
+        ]
+    }
 
 
 def _column_names_from_prompt_summary(summary: dict[str, Any]) -> list[str]:
@@ -180,9 +197,52 @@ class _FakeLLM:
 
 
 @dataclass
-class _FakeDataManipulationTool:
-    responses: list[pd.DataFrame] = field(default_factory=list)
+class _FakeAnalyticsRepo:
+    responses: list[pd.DataFrame | Exception] = field(default_factory=list)
     calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def execute_sql(
+        self,
+        *,
+        dataframe: pd.DataFrame,
+        request: object,
+    ) -> AnalyticsSQLResult:
+        self.calls.append(
+            {
+                "dataframe": dataframe.copy(),
+                "dataframe_columns": list(dataframe.columns),
+                "request": request,
+                "table_name": request.table_name,
+                "statements": tuple(request.statements),
+            }
+        )
+        if self.responses:
+            response = self.responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            output_df = response.copy()
+        else:
+            output_df = dataframe.copy()
+        return AnalyticsSQLResult(
+            table_name=request.table_name,
+            executed_statements=tuple(request.statements),
+            columns=tuple(str(column) for column in output_df.columns),
+            row_count=int(len(output_df)),
+            has_result_set=True,
+            elapsed_ms=1.0,
+            dataframe=output_df,
+        )
+
+
+@dataclass
+class _FakeDataManipulationTool:
+    responses: list[pd.DataFrame | Exception] = field(default_factory=list)
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    analytics_repo: _FakeAnalyticsRepo | None = None
+
+    def __post_init__(self) -> None:
+        if self.analytics_repo is None:
+            self.analytics_repo = _FakeAnalyticsRepo(responses=self.responses)
 
     def manipulate(
         self,
@@ -204,7 +264,10 @@ class _FakeDataManipulationTool:
             }
         )
         if self.responses:
-            return self.responses.pop(0).copy()
+            response = self.responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response.copy()
         return dataframe.copy()
 
 
@@ -356,7 +419,10 @@ def test_cleaning_runs_manipulation_when_effective_instructions_are_present() ->
     llm = _FakeLLM(
         json_outputs=[
             _empty_simple_plan(),
-            {"instructions": "Normalize only grounded values."},
+            _sql_batch_plan(
+                "SELECT * FROM protocol_scope_df",
+                purpose="Normalize only grounded values.",
+            ),
             _semantic_payload(),
         ]
     )
@@ -375,8 +441,9 @@ def test_cleaning_runs_manipulation_when_effective_instructions_are_present() ->
     )
 
     assert isinstance(result, CleaningResult)
-    assert len(data_manipulation_tool.calls) == 1
-    assert data_manipulation_tool.calls[0]["dataframe_columns"] == [
+    assert data_manipulation_tool.analytics_repo is not None
+    assert len(data_manipulation_tool.analytics_repo.calls) == 1
+    assert data_manipulation_tool.analytics_repo.calls[0]["dataframe_columns"] == [
         "extra",
         "patient_id",
         "isex",
@@ -385,7 +452,9 @@ def test_cleaning_runs_manipulation_when_effective_instructions_are_present() ->
         "age",
         ID_COL_AUTO_FILL,
     ]
-    assert data_manipulation_tool.calls[0]["instructions"] == ("Normalize only grounded values.")
+    assert data_manipulation_tool.analytics_repo.calls[0]["statements"] == (
+        "SELECT * FROM protocol_scope_df",
+    )
 
 
 def test_cleaning_applies_simple_transform_before_sql_and_manually_drops_extra_columns() -> None:
@@ -416,7 +485,10 @@ def test_cleaning_applies_simple_transform_before_sql_and_manually_drops_extra_c
                     }
                 ]
             },
-            {"instructions": "Apply downstream SQL cleaning."},
+            _sql_batch_plan(
+                "SELECT * FROM protocol_scope_df",
+                purpose="Apply downstream SQL cleaning.",
+            ),
             _semantic_payload(),
         ]
     )
@@ -436,10 +508,10 @@ def test_cleaning_applies_simple_transform_before_sql_and_manually_drops_extra_c
 
     assert len(simple_transform_tool.calls) == 1
     assert simple_transform_tool.calls[0]["specification"]["columns"][0]["column"] == "age"
-    assert len(data_manipulation_tool.calls) == 1
-    sql_input = data_manipulation_tool.calls[0]["dataframe"]
+    assert data_manipulation_tool.analytics_repo is not None
+    assert len(data_manipulation_tool.analytics_repo.calls) == 1
+    sql_input = data_manipulation_tool.analytics_repo.calls[0]["dataframe"]
     assert str(sql_input["age"].dtype) == "int64"
-    assert data_manipulation_tool.calls[0]["instructions"] == ("Apply downstream SQL cleaning.")
     simple_prompt = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
     manipulation_prompt = json.loads(str(llm.generate_json_calls[1]["user_prompt"]))
     assert ID_COL_AUTO_FILL not in _column_names_from_prompt_summary(
@@ -454,7 +526,7 @@ def test_cleaning_applies_simple_transform_before_sql_and_manually_drops_extra_c
         if column["name"] == "age"
     )
     assert transformed_age_profile["dtype"] == "int64"
-    assert json.loads(data_manipulation_tool.calls[0]["data_summary"])
+    assert data_manipulation_tool.analytics_repo.calls[0]["table_name"] == "protocol_scope_df"
     assert list(result.pd_cleaned.columns) == [
         ID_COL_AUTO_FILL,
         "treatment",
@@ -493,7 +565,8 @@ def test_cleaning_skips_manipulation_when_effective_instructions_are_empty() -> 
     assert isinstance(result, CleaningResult)
     assert len(llm.generate_json_calls) == 3
     assert simple_transform_tool.calls == []
-    assert data_manipulation_tool.calls == []
+    assert data_manipulation_tool.analytics_repo is not None
+    assert data_manipulation_tool.analytics_repo.calls == []
     assert list(result.pd_cleaned.columns) == [
         ID_COL_AUTO_FILL,
         "treatment",
@@ -506,12 +579,20 @@ def test_cleaning_skips_manipulation_when_effective_instructions_are_empty() -> 
 def test_cleaning_fails_when_manipulation_drops_required_draft_column() -> None:
     dataframe = _build_dataframe()
     data_manipulation_tool = _FakeDataManipulationTool(
-        responses=[dataframe.loc[:, ["treatment", "outcome", "isex"]]]
+        responses=[
+            dataframe.loc[:, ["treatment", "outcome", "isex"]],
+            dataframe.loc[:, ["treatment", "outcome", "isex"]],
+            dataframe.loc[:, ["treatment", "outcome", "isex"]],
+        ]
     )
 
     with pytest.raises(
         ValueError,
-        match="cleaned dataframe is missing required column\\(s\\): " f"{ID_COL_AUTO_FILL}, age",
+        match=(
+            "SQL cleaning failed after 3 attempts: SQL cleaning batch 1 "
+            "\\(conditional_recode\\) output dataframe is missing required column\\(s\\): "
+            f"{ID_COL_AUTO_FILL}, age"
+        ),
     ):
         cleaning(
             protocol_discussion="Confirmed protocol discussion",
@@ -526,8 +607,194 @@ def test_cleaning_fails_when_manipulation_drops_required_draft_column() -> None:
             llm=_FakeLLM(
                 json_outputs=[
                     _empty_simple_plan(),
-                    {"instructions": "Apply the protocol cleaning."},
-                    _semantic_payload(),
+                    _sql_batch_plan("SELECT treatment, outcome, isex FROM protocol_scope_df"),
+                    _sql_batch_plan("SELECT treatment, outcome, isex FROM protocol_scope_df"),
+                    _sql_batch_plan("SELECT treatment, outcome, isex FROM protocol_scope_df"),
+                ]
+            ),
+        )
+
+
+def test_cleaning_allows_sql_helper_columns_and_drops_them_after_projection() -> None:
+    dataframe = _build_dataframe()
+    data_manipulation_tool = _FakeDataManipulationTool(
+        responses=[
+            dataframe.assign(
+                **{
+                    ID_COL_AUTO_FILL: [1, 2],
+                    "mutation_count_missing": [False, False],
+                }
+            )
+        ]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            _empty_simple_plan(),
+            _sql_batch_plan(
+                (
+                    "CREATE TEMP TABLE missingness_flags AS "
+                    "SELECT *, age IS NULL AS mutation_count_missing "
+                    "FROM protocol_scope_df"
+                ),
+                "SELECT * FROM missingness_flags",
+                phase="missingness",
+                purpose="Create helper missingness flags before final projection.",
+            ),
+            _semantic_payload(),
+        ]
+    )
+
+    result = cleaning(
+        protocol_discussion="Confirmed protocol discussion",
+        cleaning_instructions="Use helper flags if needed.",
+        review_recompile_request=None,
+        draft_causal_spec=_draft(),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
+        dataManipulationTool=data_manipulation_tool,
+        llm=llm,
+    )
+
+    assert "mutation_count_missing" not in result.pd_cleaned.columns
+    assert data_manipulation_tool.analytics_repo is not None
+    assert data_manipulation_tool.analytics_repo.calls[0]["statements"] == (
+        "CREATE TEMP TABLE missingness_flags AS SELECT *, age IS NULL AS mutation_count_missing FROM protocol_scope_df",
+        "SELECT * FROM missingness_flags",
+    )
+
+
+def test_cleaning_executes_multiple_sql_batches_in_order() -> None:
+    dataframe = _build_dataframe()
+    first_output = dataframe.assign(**{ID_COL_AUTO_FILL: [1, 2], "age_missing": [False, False]})
+    second_output = first_output.assign(age=[50, 70])
+    data_manipulation_tool = _FakeDataManipulationTool(
+        responses=[
+            first_output,
+            second_output,
+        ]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            _empty_simple_plan(),
+            {
+                "batches": [
+                    {
+                        "phase": "final_consistency",
+                        "purpose": "Create helper flags.",
+                        "statements": [
+                            "SELECT *, age IS NULL AS age_missing FROM protocol_scope_df"
+                        ],
+                    },
+                    {
+                        "phase": "missingness",
+                        "purpose": "Use helper flags while preserving required columns.",
+                        "statements": [
+                            "SELECT * EXCLUDE(age), COALESCE(age, 50) AS age FROM protocol_scope_df"
+                        ],
+                    },
+                ]
+            },
+            _semantic_payload(),
+        ]
+    )
+
+    result = cleaning(
+        protocol_discussion="Confirmed protocol discussion",
+        cleaning_instructions="Create flags before imputation.",
+        review_recompile_request=None,
+        draft_causal_spec=_draft(),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
+        dataManipulationTool=data_manipulation_tool,
+        llm=llm,
+    )
+
+    assert data_manipulation_tool.analytics_repo is not None
+    assert len(data_manipulation_tool.analytics_repo.calls) == 2
+    assert "age_missing" not in data_manipulation_tool.analytics_repo.calls[0]["dataframe"].columns
+    assert "age_missing" in data_manipulation_tool.analytics_repo.calls[1]["dataframe"].columns
+    assert result.pd_cleaned["age"].tolist() == [50, 70]
+
+
+def test_cleaning_retries_sql_plan_after_execution_failure() -> None:
+    dataframe = _build_dataframe()
+    data_manipulation_tool = _FakeDataManipulationTool(
+        responses=[
+            RuntimeError("Catalog Error: Table with name missing_flags does not exist"),
+            dataframe.assign(**{ID_COL_AUTO_FILL: [1, 2]}),
+        ]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            _empty_simple_plan(),
+            _sql_batch_plan(
+                "SELECT * FROM missing_flags",
+                phase="missingness",
+                purpose="Invalid first attempt.",
+            ),
+            _sql_batch_plan(
+                "SELECT * FROM protocol_scope_df",
+                phase="missingness",
+                purpose="Retry with valid source table.",
+            ),
+            _semantic_payload(),
+        ]
+    )
+
+    result = cleaning(
+        protocol_discussion="Confirmed protocol discussion",
+        cleaning_instructions="Retry invalid SQL plans.",
+        review_recompile_request=None,
+        draft_causal_spec=_draft(),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
+        dataManipulationTool=data_manipulation_tool,
+        llm=llm,
+    )
+
+    retry_payload = json.loads(str(llm.generate_json_calls[2]["user_prompt"]))
+    assert "sql_retry_feedback" in retry_payload
+    assert "missing_flags" in retry_payload["sql_retry_feedback"]["error"]
+    assert retry_payload["sql_retry_feedback"]["failed_batch_index"] == 1
+    assert result.pd_cleaned[ID_COL_AUTO_FILL].tolist() == [1, 2]
+
+
+def test_cleaning_fails_when_sql_corrupts_identifier_after_retries() -> None:
+    dataframe = _build_dataframe()
+    data_manipulation_tool = _FakeDataManipulationTool(
+        responses=[
+            dataframe.assign(**{ID_COL_AUTO_FILL: [1, 1]}),
+            dataframe.assign(**{ID_COL_AUTO_FILL: [1, 1]}),
+            dataframe.assign(**{ID_COL_AUTO_FILL: [1, 1]}),
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="SQL cleaning failed after 3 attempts:.*duplicate effective identifier values",
+    ):
+        cleaning(
+            protocol_discussion="Confirmed protocol discussion",
+            cleaning_instructions="Apply SQL cleaning.",
+            review_recompile_request=None,
+            draft_causal_spec=_draft(),
+            data_summary=_build_summary(dataframe),
+            to_clean_df=dataframe,
+            datasetProfilingTool=DatasetProfilingTool(),
+            simpleDataTransformationTool=_FakeSimpleDataTransformationTool(),
+            dataManipulationTool=data_manipulation_tool,
+            llm=_FakeLLM(
+                json_outputs=[
+                    _empty_simple_plan(),
+                    _sql_batch_plan("SELECT * FROM protocol_scope_df"),
+                    _sql_batch_plan("SELECT * FROM protocol_scope_df"),
+                    _sql_batch_plan("SELECT * FROM protocol_scope_df"),
                 ]
             ),
         )
@@ -751,13 +1018,15 @@ def test_cleaning_records_sql_missingness_resolution_without_missingness_plan() 
     llm = _FakeLLM(
         json_outputs=[
             _empty_simple_plan(),
-            {
-                "instructions": (
+            _sql_batch_plan(
+                "SELECT * EXCLUDE(age), COALESCE(age, 53) AS age FROM protocol_scope_df",
+                phase="missingness",
+                purpose=(
                     "Review-time recompilation request: Handle the baseline age gap "
                     "before review. Resolve all remaining protocol-scope missingness "
                     "in SQL. - Column 'age' (covariate): 1 missing value(s) remain."
-                )
-            },
+                ),
+            ),
             _semantic_payload(),
         ]
     )
@@ -780,10 +1049,10 @@ def test_cleaning_records_sql_missingness_resolution_without_missingness_plan() 
     assert "missingness_plan" not in simple_transform_payload
     manipulation_payload = json.loads(str(llm.generate_json_calls[1]["user_prompt"]))
     assert manipulation_payload["required_column_missing_counts"]["age"] == 1
-    assert data_manipulation_tool.calls
-    assert "Review-time recompilation request:" in (data_manipulation_tool.calls[0]["instructions"])
-    assert "Resolve all remaining protocol-scope missingness in SQL" in (
-        data_manipulation_tool.calls[0]["instructions"]
+    assert data_manipulation_tool.analytics_repo is not None
+    assert data_manipulation_tool.analytics_repo.calls
+    assert data_manipulation_tool.analytics_repo.calls[0]["statements"] == (
+        "SELECT * EXCLUDE(age), COALESCE(age, 53) AS age FROM protocol_scope_df",
     )
     age_decision = next(
         decision for decision in result.missingness_decisions.decisions if decision.column == "age"
@@ -823,12 +1092,14 @@ def test_cleaning_leaves_missingness_row_drops_for_sql() -> None:
     llm = _FakeLLM(
         json_outputs=[
             _empty_simple_plan(),
-            {
-                "instructions": (
+            _sql_batch_plan(
+                "SELECT * FROM protocol_scope_df WHERE treatment IS NOT NULL",
+                phase="row_filter",
+                purpose=(
                     "Drop rows with missing treatment. - Column 'treatment' "
                     "(treatment): 1 missing value(s) remain."
-                )
-            },
+                ),
+            ),
             _semantic_payload(),
         ]
     )
@@ -847,10 +1118,10 @@ def test_cleaning_leaves_missingness_row_drops_for_sql() -> None:
     )
 
     assert simple_transform_tool.calls == []
-    assert data_manipulation_tool.calls
-    assert "Drop rows with missing treatment." in (data_manipulation_tool.calls[0]["instructions"])
-    assert "- Column 'treatment' (treatment): 1 missing value(s) remain." in (
-        data_manipulation_tool.calls[0]["instructions"]
+    assert data_manipulation_tool.analytics_repo is not None
+    assert data_manipulation_tool.analytics_repo.calls
+    assert data_manipulation_tool.analytics_repo.calls[0]["statements"] == (
+        "SELECT * FROM protocol_scope_df WHERE treatment IS NOT NULL",
     )
     treatment_decision = next(
         decision
@@ -868,12 +1139,14 @@ def test_cleaning_fails_when_protocol_scope_missingness_remains_after_cleaning()
         json_outputs=[
             _empty_simple_plan(),
             _empty_manipulation_plan(),
+            _empty_manipulation_plan(),
+            _empty_manipulation_plan(),
         ]
     )
 
     with pytest.raises(
         ValueError,
-        match="cleaned dataframe still contains protocol-scope missing values: age=1",
+        match="SQL cleaning failed after 3 attempts: cleaned dataframe still contains protocol-scope missing values: age=1",
     ):
         cleaning(
             protocol_discussion="Confirmed protocol discussion",

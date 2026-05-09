@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from python.domain.repo.analytics_repo import AnalyticsSQLRequest
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
     data_compilation_causal_semantics_prompt,
@@ -64,6 +65,14 @@ ColumnRole = Literal[
     "effect_modifier",
 ]
 MissingnessResolution = Literal["none_needed", "drop_rows", "impute"]
+SQLCleaningPhase = Literal[
+    "row_filter",
+    "conditional_recode",
+    "missingness",
+    "final_consistency",
+]
+_PROTOCOL_SCOPE_TABLE = "protocol_scope_df"
+_SQL_CLEANING_MAX_ATTEMPTS = 3
 
 
 class MissingnessDecision(BaseModel):
@@ -111,17 +120,29 @@ class _SimpleTransformationPlan(BaseModel):
         return SimpleDataTransformationSpec(columns=self.columns)
 
 
+class _SQLCleaningBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    phase: SQLCleaningPhase
+    purpose: str = Field(..., min_length=1)
+    statements: list[str] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _normalize_batch(self) -> _SQLCleaningBatch:
+        self.purpose = self.purpose.strip()
+        normalized_statements = [
+            str(statement).strip() for statement in self.statements if str(statement).strip()
+        ]
+        if not normalized_statements:
+            raise ValueError("SQL cleaning batch statements must contain at least one statement")
+        self.statements = normalized_statements
+        return self
+
+
 class _DataManipulationPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    instructions: str | None = None
-
-    @model_validator(mode="after")
-    def _normalize_instructions(self) -> _DataManipulationPlan:
-        if self.instructions is not None:
-            normalized = self.instructions.strip()
-            self.instructions = normalized or None
-        return self
+    batches: list[_SQLCleaningBatch] = Field(default_factory=list)
 
 
 class _TreatmentSemanticsModel(BaseModel):
@@ -185,6 +206,22 @@ class _CausalSemanticsModel(BaseModel):
     experiment_type: Literal["RCT", "OBSERVATIONAL"]
 
 
+@dataclass(frozen=True)
+class _SQLCleaningFailure:
+    error: str
+    failed_batch_index: int | None = None
+    failed_batch_phase: str | None = None
+    current_summary: DatasetSummaryModel | None = None
+    current_missing_counts: dict[str, int] | None = None
+    invalid_plan: _DataManipulationPlan | None = None
+
+
+class _SQLCleaningExecutionError(ValueError):
+    def __init__(self, feedback: _SQLCleaningFailure) -> None:
+        self.feedback = feedback
+        super().__init__(_format_sql_cleaning_failure(feedback))
+
+
 def cleaning(
     *,
     protocol_discussion: str | None,
@@ -238,11 +275,12 @@ def cleaning(
         dataframe=transformed_df,
     )
 
-    manipulation_plan = _plan_data_manipulation(
+    cleaned_df, missingness_decisions = _clean_with_sql_batches(
         llm=llm,
         source_summary=data_summary,
         transformed_summary=transformed_summary,
         transformed_df=transformed_df,
+        before_df=prepared_df,
         draft_causal_spec=draft_causal_spec,
         effective_id_col=effective_id_col,
         required_columns=required_columns,
@@ -250,30 +288,8 @@ def cleaning(
         protocol_discussion=protocol_discussion,
         cleaning_instructions=cleaning_instructions,
         review_recompile_request=review_recompile_request,
-    )
-    cleaned_candidate_df = transformed_df.copy()
-    if manipulation_plan.instructions:
-        cleaned_candidate_df = dataManipulationTool.manipulate(
-            dataframe=transformed_df,
-            table_name="protocol_scope_df",
-            data_summary=datasetProfilingTool.dataset_summary_to_json(transformed_summary),
-            instructions=manipulation_plan.instructions,
-            retry_attempts=3,
-        )
-
-    _ensure_columns_present(
-        dataframe=cleaned_candidate_df,
-        columns=required_columns,
-        context="cleaned dataframe",
-    )
-    cleaned_df = _project_required_columns(
-        dataframe=cleaned_candidate_df,
-        columns=required_columns,
-    )
-    missingness_decisions = _finalize_missingness_decisions(
-        draft_causal_spec=draft_causal_spec,
-        before_df=prepared_df,
-        cleaned_df=cleaned_df,
+        dataset_profiling_tool=datasetProfilingTool,
+        data_manipulation_tool=dataManipulationTool,
     )
     cleaned_summary = _profile_dataset(
         dataset_profiling_tool=datasetProfilingTool,
@@ -428,6 +444,7 @@ def _plan_data_manipulation(
     protocol_discussion: str | None,
     cleaning_instructions: str,
     review_recompile_request: str | None,
+    retry_feedback: _SQLCleaningFailure | None = None,
 ) -> _DataManipulationPlan:
     role_by_column = _expected_role_by_column(draft_causal_spec)
     payload: dict[str, Any] = {
@@ -450,6 +467,10 @@ def _plan_data_manipulation(
     normalized_review_recompile_request = _normalize_text(review_recompile_request)
     if normalized_review_recompile_request:
         payload["review_recompile_request"] = normalized_review_recompile_request
+    if retry_feedback is not None:
+        payload["sql_retry_feedback"] = _sql_retry_feedback_payload(
+            feedback=retry_feedback,
+        )
 
     return llm.generate_json(
         schema=_DataManipulationPlan,
@@ -459,6 +480,269 @@ def _plan_data_manipulation(
         history=None,
         max_attempts=2,
     )
+
+
+def _clean_with_sql_batches(
+    *,
+    llm: LLMService,
+    source_summary: DatasetSummaryModel,
+    transformed_summary: DatasetSummaryModel,
+    transformed_df: pd.DataFrame,
+    before_df: pd.DataFrame,
+    draft_causal_spec: CausalSpecDraft,
+    effective_id_col: str,
+    required_columns: Sequence[str],
+    simple_plan: _SimpleTransformationPlan,
+    protocol_discussion: str | None,
+    cleaning_instructions: str,
+    review_recompile_request: str | None,
+    dataset_profiling_tool: DatasetProfilingTool,
+    data_manipulation_tool: DataManipulationTool,
+) -> tuple[pd.DataFrame, MissingnessDecisionList]:
+    retry_feedback: _SQLCleaningFailure | None = None
+    role_by_column = _expected_role_by_column(draft_causal_spec)
+
+    for attempt_index in range(_SQL_CLEANING_MAX_ATTEMPTS):
+        plan: _DataManipulationPlan | None = None
+        try:
+            plan = _plan_data_manipulation(
+                llm=llm,
+                source_summary=source_summary,
+                transformed_summary=transformed_summary,
+                transformed_df=transformed_df,
+                draft_causal_spec=draft_causal_spec,
+                effective_id_col=effective_id_col,
+                required_columns=required_columns,
+                simple_plan=simple_plan,
+                protocol_discussion=protocol_discussion,
+                cleaning_instructions=cleaning_instructions,
+                review_recompile_request=review_recompile_request,
+                retry_feedback=retry_feedback,
+            )
+            cleaned_candidate_df, cleaned_candidate_summary = _execute_sql_cleaning_batches(
+                data_manipulation_tool=data_manipulation_tool,
+                dataset_profiling_tool=dataset_profiling_tool,
+                dataframe=transformed_df,
+                initial_summary=transformed_summary,
+                plan=plan,
+                required_columns=required_columns,
+                effective_id_col=effective_id_col,
+                role_by_column=role_by_column,
+            )
+            _ensure_columns_present(
+                dataframe=cleaned_candidate_df,
+                columns=required_columns,
+                context="cleaned dataframe",
+            )
+            cleaned_df = _project_required_columns(
+                dataframe=cleaned_candidate_df,
+                columns=required_columns,
+            )
+            try:
+                missingness_decisions = _finalize_missingness_decisions(
+                    draft_causal_spec=draft_causal_spec,
+                    before_df=before_df,
+                    cleaned_df=cleaned_df,
+                )
+            except Exception as exc:
+                retry_feedback = _SQLCleaningFailure(
+                    error=str(exc).strip() or exc.__class__.__name__,
+                    current_summary=_safe_profile_dataset(
+                        dataset_profiling_tool=dataset_profiling_tool,
+                        dataframe=cleaned_df,
+                    )
+                    or cleaned_candidate_summary,
+                    current_missing_counts=_missing_counts_by_column(
+                        cleaned_df,
+                        role_by_column,
+                    ),
+                    invalid_plan=plan,
+                )
+                if attempt_index == _SQL_CLEANING_MAX_ATTEMPTS - 1:
+                    raise ValueError(
+                        "SQL cleaning failed after "
+                        f"{_SQL_CLEANING_MAX_ATTEMPTS} attempts: {retry_feedback.error}"
+                    ) from exc
+                continue
+            return cleaned_df, missingness_decisions
+        except _SQLCleaningExecutionError as exc:
+            retry_feedback = exc.feedback
+            if attempt_index == _SQL_CLEANING_MAX_ATTEMPTS - 1:
+                raise ValueError(
+                    "SQL cleaning failed after "
+                    f"{_SQL_CLEANING_MAX_ATTEMPTS} attempts: {retry_feedback.error}"
+                ) from exc
+        except Exception as exc:
+            current_summary = _safe_profile_dataset(
+                dataset_profiling_tool=dataset_profiling_tool,
+                dataframe=transformed_df,
+            )
+            retry_feedback = _SQLCleaningFailure(
+                error=str(exc).strip() or exc.__class__.__name__,
+                current_summary=current_summary or transformed_summary,
+                current_missing_counts=_missing_counts_by_column(
+                    transformed_df,
+                    role_by_column,
+                ),
+                invalid_plan=plan,
+            )
+            if attempt_index == _SQL_CLEANING_MAX_ATTEMPTS - 1:
+                raise ValueError(
+                    "SQL cleaning failed after "
+                    f"{_SQL_CLEANING_MAX_ATTEMPTS} attempts: {retry_feedback.error}"
+                ) from exc
+
+    raise ValueError("SQL cleaning failed unexpectedly without returning a result")
+
+
+def _execute_sql_cleaning_batches(
+    *,
+    data_manipulation_tool: DataManipulationTool,
+    dataset_profiling_tool: DatasetProfilingTool,
+    dataframe: pd.DataFrame,
+    initial_summary: DatasetSummaryModel,
+    plan: _DataManipulationPlan,
+    required_columns: Sequence[str],
+    effective_id_col: str,
+    role_by_column: dict[str, ColumnRole],
+) -> tuple[pd.DataFrame, DatasetSummaryModel]:
+    if not plan.batches:
+        return dataframe.copy(), initial_summary
+
+    current_df = dataframe.copy()
+    current_summary = initial_summary
+    for batch_index, batch in enumerate(plan.batches):
+        try:
+            sql_result = data_manipulation_tool.analytics_repo.execute_sql(
+                dataframe=current_df,
+                request=AnalyticsSQLRequest(
+                    statements=tuple(batch.statements),
+                    table_name=_PROTOCOL_SCOPE_TABLE,
+                ),
+            )
+            if not sql_result.has_result_set:
+                raise ValueError("SQL cleaning batch final statement did not return a result set")
+            batch_output_df = sql_result.dataframe
+            batch_context = f"SQL cleaning batch {batch_index + 1} ({batch.phase}) output dataframe"
+            _ensure_columns_present(
+                dataframe=batch_output_df,
+                columns=required_columns,
+                context=batch_context,
+            )
+            _ensure_identifier_integrity(
+                before_df=current_df,
+                after_df=batch_output_df,
+                effective_id_col=effective_id_col,
+                context=f"SQL cleaning batch {batch_index + 1} ({batch.phase})",
+            )
+            current_summary = _profile_dataset(
+                dataset_profiling_tool=dataset_profiling_tool,
+                dataframe=batch_output_df,
+            )
+            current_df = batch_output_df
+        except Exception as exc:
+            raise _sql_batch_error(
+                batch=batch,
+                batch_index=batch_index,
+                error=exc,
+                current_summary=current_summary,
+                current_df=current_df,
+                role_by_column=role_by_column,
+                plan=plan,
+            ) from exc
+
+    return current_df, current_summary
+
+
+def _sql_batch_error(
+    *,
+    batch: _SQLCleaningBatch,
+    batch_index: int,
+    error: Exception,
+    current_summary: DatasetSummaryModel,
+    current_df: pd.DataFrame,
+    role_by_column: dict[str, ColumnRole],
+    plan: _DataManipulationPlan,
+) -> ValueError:
+    feedback = _SQLCleaningFailure(
+        error=str(error).strip() or error.__class__.__name__,
+        failed_batch_index=batch_index + 1,
+        failed_batch_phase=batch.phase,
+        current_summary=current_summary,
+        current_missing_counts=_missing_counts_by_column(current_df, role_by_column),
+        invalid_plan=plan,
+    )
+    return _SQLCleaningExecutionError(feedback)
+
+
+def _ensure_identifier_integrity(
+    *,
+    before_df: pd.DataFrame,
+    after_df: pd.DataFrame,
+    effective_id_col: str,
+    context: str,
+) -> None:
+    before_id_columns = list(before_df.columns).count(effective_id_col)
+    after_id_columns = list(after_df.columns).count(effective_id_col)
+    if before_id_columns != 1 or after_id_columns != 1:
+        raise ValueError(
+            f"{context} must contain exactly one effective identifier column: "
+            f"{effective_id_col}"
+        )
+
+    before_ids = before_df[effective_id_col]
+    after_ids = after_df[effective_id_col]
+    if bool(after_ids.isna().any()):
+        raise ValueError(
+            f"{context} produced null values in effective identifier column: " f"{effective_id_col}"
+        )
+    duplicated = after_ids[after_ids.duplicated()].head(25).tolist()
+    if duplicated:
+        raise ValueError(
+            f"{context} produced duplicate effective identifier values in "
+            f"{effective_id_col}: {duplicated}"
+        )
+    regenerated = after_ids[~after_ids.isin(before_ids)].head(25).tolist()
+    if regenerated:
+        raise ValueError(
+            f"{context} produced regenerated effective identifier values in "
+            f"{effective_id_col}: {regenerated}"
+        )
+
+
+def _sql_retry_feedback_payload(
+    *,
+    feedback: _SQLCleaningFailure,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "error": feedback.error,
+    }
+    if feedback.failed_batch_index is not None:
+        payload["failed_batch_index"] = feedback.failed_batch_index
+    if feedback.failed_batch_phase is not None:
+        payload["failed_batch_phase"] = feedback.failed_batch_phase
+    if feedback.current_summary is not None:
+        payload["current_dataframe_summary"] = _dataset_summary_prompt_payload(
+            feedback.current_summary
+        )
+    if feedback.current_missing_counts is not None:
+        payload["current_required_column_missing_counts"] = feedback.current_missing_counts
+    if feedback.invalid_plan is not None:
+        payload["previous_invalid_sql_plan"] = feedback.invalid_plan.model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+    return payload
+
+
+def _format_sql_cleaning_failure(feedback: _SQLCleaningFailure) -> str:
+    parts = ["SQL cleaning batch failed"]
+    if feedback.failed_batch_index is not None:
+        parts.append(f"batch={feedback.failed_batch_index}")
+    if feedback.failed_batch_phase is not None:
+        parts.append(f"phase={feedback.failed_batch_phase}")
+    parts.append(f"error={feedback.error}")
+    return "; ".join(parts)
 
 
 def _finalize_missingness_decisions(
@@ -581,6 +865,20 @@ def _profile_dataset(
         compute_quantiles=False,
         strict=True,
     )
+
+
+def _safe_profile_dataset(
+    *,
+    dataset_profiling_tool: DatasetProfilingTool,
+    dataframe: pd.DataFrame,
+) -> DatasetSummaryModel | None:
+    try:
+        return _profile_dataset(
+            dataset_profiling_tool=dataset_profiling_tool,
+            dataframe=dataframe,
+        )
+    except Exception:
+        return None
 
 
 def _dataset_summary_prompt_payload(summary: DatasetSummaryModel) -> dict[str, Any]:

@@ -133,7 +133,7 @@ Rules:
 
 def data_compilation_data_manipulation_plan_prompt() -> str:
     return """
-You are planning SQL-oriented data manipulation instructions after deterministic same-column cleaning.
+You are planning ordered DuckDB SQL cleaning batches after deterministic same-column cleaning.
 
 Inputs:
 - confirmed protocol discussion
@@ -146,10 +146,15 @@ Inputs:
 - transformed dataset summary after simple transformations
 - simple transformations already applied
 - required-column missing counts after simple transformations
+- optional sql_retry_feedback with a previous invalid SQL plan and exact failure
 
 Task:
-- Return a JSON object with an `instructions` field.
-- Use `instructions: null` when no complex data manipulation is necessary.
+- Return a JSON object with a `batches` array.
+- Use `batches: []` when no SQL data manipulation is necessary.
+- Each batch must have:
+  - `phase`: one of `row_filter`, `conditional_recode`, `missingness`, `final_consistency`
+  - `purpose`: a short explanation of why this batch exists
+  - `statements`: one or more DuckDB SQL statements
 
 Data manipulation scope:
 - Row filtering.
@@ -157,13 +162,26 @@ Data manipulation scope:
 - Missingness handling and imputation.
 - SQL-expressible cleaning that is grounded in the protocol and cleaning instructions.
 
+SQL contract:
+- SQL runs against the current dataframe registered as `protocol_scope_df`.
+- The final statement in every batch must return the full current working dataset.
+- Use multiple statements inside a batch when useful.
+- Helper columns and temp tables are allowed.
+- Do not assume helper columns already exist before the statement that creates them.
+- When replacing an existing column, avoid duplicate output names; prefer DuckDB syntax
+  like `* EXCLUDE(column_name)` plus the replacement expression.
+
 Rules:
+- Plan all needed batches at once, in execution order.
+- Split unrelated work into separate batches.
+- Prefer this phase order when multiple phases are needed: row_filter, conditional_recode, missingness, final_consistency.
 - Keep all required final columns available.
 - Do not transform, drop, or regenerate the effective identifier column.
 - Do not include final drop-column work; runtime will project to required final columns.
 - Do not create causal roles, new causal columns, new covariates, or new effect modifiers.
 - Preserve the negative-control outcome column when it appears in required final columns.
 - Do not repeat simple deterministic transformations already applied.
+- If sql_retry_feedback is present, revise the full SQL batch plan to fix that exact failure.
 - Return JSON only.
 """.strip()
 
