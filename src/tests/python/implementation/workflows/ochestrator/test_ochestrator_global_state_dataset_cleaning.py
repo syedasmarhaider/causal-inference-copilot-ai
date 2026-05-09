@@ -24,6 +24,7 @@ from python.implementation.workflows.ochestrator.causal_ochestrator_state import
 )
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec_draft import CausalSpecDraft
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 
@@ -49,7 +50,20 @@ def _causal_spec() -> CausalSpec:
             "covariates": ["age"],
             "effect_modifiers": ["isex"],
             "experiment_type": "RCT",
+            "id_col": "auto_id",
         }
+    )
+
+
+def _causal_draft() -> CausalSpecDraft:
+    return CausalSpecDraft(
+        treatment_column="treatment",
+        outcome_column="outcome",
+        covariates=["age"],
+        effect_modifiers=["isex"],
+        target_population="all rows",
+        study_type="RCT",
+        time_zero="baseline treatment assignment",
     )
 
 
@@ -67,9 +81,7 @@ def _transform_plan() -> TransformPlan:
     )
 
 
-def test_data_compilation_dataset_only_publish_preserves_protocol_and_invalidates_downstream() -> (
-    None
-):
+def test_data_compilation_dataset_only_publish_preserves_draft_and_invalidates_downstream() -> None:
     state = CausalOchestratorState.init_empty()
     source_dataset_id = uuid4()
     compiled_dataset_id = uuid4()
@@ -84,18 +96,17 @@ def test_data_compilation_dataset_only_publish_preserves_protocol_and_invalidate
     )
     state.set(
         ProtocolDiscussionState.NAME,
-        {
-            "protocol_discussion": "Confirmed protocol discussion.",
-            "protocol_cleaning_instructions": "Keep treatment, outcome, age, and isex.",
-        },
+        {"causal_spec_draft": _causal_draft()},
     )
     state.set(
         DataCompilationState.NAME,
         {
             "working_dataset_id": compiled_dataset_id,
             "latest_dataset_summary": _summary(90),
+            "causal_spec_draft": _causal_draft(),
             "causal_spec": _causal_spec(),
             "data_transformation_plan": _transform_plan(),
+            "working_dataset_frozen": True,
             "validation_issues": [],
             "is_validated": True,
         },
@@ -113,6 +124,7 @@ def test_data_compilation_dataset_only_publish_preserves_protocol_and_invalidate
         {
             "working_dataset_id": repaired_dataset_id,
             "latest_dataset_summary": _summary(88),
+            "causal_spec_draft": _causal_draft(),
             "publish_dataset_only": True,
         },
     )
@@ -121,10 +133,10 @@ def test_data_compilation_dataset_only_publish_preserves_protocol_and_invalidate
     assert state.get("latest_dataset_summary").model_dump(mode="json") == _summary(88).model_dump(
         mode="json"
     )
-    assert state.get("protocol_discussion") == "Confirmed protocol discussion."
-    assert (
-        state.get("protocol_cleaning_instructions")
-        == "Keep treatment, outcome, age, and isex."
+    assert state.get("protocol_discussion") is None
+    assert state.get("protocol_cleaning_instructions") is None
+    assert state.get("causal_spec_draft").model_dump(mode="json") == _causal_draft().model_dump(
+        mode="json"
     )
     assert state.get("causal_spec") is None
     assert state.get("data_transformation_plan") is None
@@ -150,10 +162,7 @@ def test_data_compilation_dataset_only_publish_allows_partial_payload() -> None:
     )
     state.set(
         ProtocolDiscussionState.NAME,
-        {
-            "protocol_discussion": "Confirmed protocol discussion.",
-            "protocol_cleaning_instructions": "Normalize treatment and outcome values.",
-        },
+        {"causal_spec_draft": _causal_draft()},
     )
 
     state.set(
@@ -161,11 +170,15 @@ def test_data_compilation_dataset_only_publish_allows_partial_payload() -> None:
         {
             "working_dataset_id": repaired_dataset_id,
             "latest_dataset_summary": _summary(48),
+            "causal_spec_draft": _causal_draft(),
             "publish_dataset_only": True,
         },
     )
 
     assert state.get("working_dataset_id") == repaired_dataset_id
+    assert state.get("causal_spec_draft").model_dump(mode="json") == _causal_draft().model_dump(
+        mode="json"
+    )
     assert state.get("causal_spec") is None
     assert state.get("data_transformation_plan") is None
 
@@ -183,10 +196,7 @@ def test_data_compilation_full_publish_still_requires_full_payload() -> None:
     )
     state.set(
         ProtocolDiscussionState.NAME,
-        {
-            "protocol_discussion": "Confirmed protocol discussion.",
-            "protocol_cleaning_instructions": "Keep the study columns only.",
-        },
+        {"causal_spec_draft": _causal_draft()},
     )
 
     with pytest.raises(KeyError, match="DATA_COMPILATION updates must include"):

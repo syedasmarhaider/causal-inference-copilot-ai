@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import pandas as pd
 from litellm import ConfigDict
@@ -13,8 +13,8 @@ from python.domain.models.validation import ValidationIssueModel
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
-
 ID_COL_AUTO_FILL = "auto_id"
+
 
 class CausalSpecDraft(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -27,6 +27,9 @@ class CausalSpecDraft(BaseModel):
     negative_control_outcome: NonEmptyStr | None = None
     covariates: list[NonEmptyStr] = Field(default_factory=list)
     effect_modifiers: list[NonEmptyStr] = Field(default_factory=list)
+    target_population: NonEmptyStr | None = None
+    study_type: Literal["RCT", "OBSERVATIONAL"] | None = None
+    time_zero: NonEmptyStr | None = None
 
     @model_validator(mode="after")
     def _validate_against_summary(self) -> CausalSpecDraft:
@@ -51,11 +54,12 @@ class CausalSpecDraft(BaseModel):
             *covariates,
             *effect_modifiers,
         ]
-        missing_columns = sorted({column for column in referenced_columns if column not in known_columns})
+        missing_columns = sorted(
+            {column for column in referenced_columns if column not in known_columns}
+        )
         if missing_columns:
             raise ValueError(
-                "causal draft references unknown dataset_summary columns: "
-                f"{missing_columns}"
+                "causal draft references unknown dataset_summary columns: " f"{missing_columns}"
             )
 
         if treatment_column == outcome_column:
@@ -87,9 +91,7 @@ class CausalSpecDraft(BaseModel):
 
         duplicate_effect_modifiers = _find_duplicates(effect_modifiers)
         if duplicate_effect_modifiers:
-            raise ValueError(
-                f"effect_modifiers contain duplicates: {duplicate_effect_modifiers}"
-            )
+            raise ValueError(f"effect_modifiers contain duplicates: {duplicate_effect_modifiers}")
 
         overlap = sorted(set(covariates).intersection(effect_modifiers))
         if overlap:
@@ -152,9 +154,7 @@ class CausalSpecDraft(BaseModel):
                 severity="WARN",
                 message=f'Covariate columns not found in dataset: {", ".join(missing_covariates)}',
             )
-        missing_effect_modifiers = [
-            col for col in self.effect_modifiers if col not in df.columns
-        ]
+        missing_effect_modifiers = [col for col in self.effect_modifiers if col not in df.columns]
         if missing_effect_modifiers:
             return ValidationIssueModel(
                 severity="WARN",

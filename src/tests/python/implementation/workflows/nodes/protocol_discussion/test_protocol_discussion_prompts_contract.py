@@ -1,119 +1,57 @@
 from __future__ import annotations
 
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import (
-    summarize_upstream_data_prep_decisions,
-)
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
-    get_protocol_discussion_review_summary_prompt,
+    get_protocol_discussion_get_node_info,
     get_protocol_discussion_update_prompt,
-    get_questions,
     initial_user_message,
 )
 
 
-def test_protocol_discussion_questions_include_negative_control_and_identifier_questions() -> None:
-    questions = get_questions()
+def test_protocol_discussion_info_describes_draft_only_node() -> None:
+    info = get_protocol_discussion_get_node_info()
 
-    assert any(
-        question.startswith("16) Negative-control outcome (optional):") for question in questions
-    )
-    assert questions[-1].startswith("17) Identifier column (optional):")
-    assert any(
-        question.startswith("14) Treatment/outcome data-quality decisions:")
-        for question in questions
-    )
-    assert any(
-        question.startswith("15) Baseline feature preparation decisions:") for question in questions
-    )
+    assert "Draft-only causal specification node" in info
+    assert "accepted causal draft artifact" in info
 
 
-def test_protocol_discussion_update_prompt_mentions_identifier_handling_rules() -> None:
+def test_protocol_discussion_update_prompt_uses_structured_draft_as_source_of_truth() -> None:
     prompt = get_protocol_discussion_update_prompt()
 
-    assert "identifier_column_candidates" in prompt
-    assert "suggested_identifier_column" in prompt
-    assert "Identifier column handling is optional and non-blocking." in prompt
-    assert "set answer 17 to auto_id" in prompt
-    assert "Never invent an identifier column." in prompt
-    assert "Negative-control outcome handling is optional and non-blocking." in prompt
-    assert "supports only negative-control outcome refutation" in prompt
-    assert "Do not offer" in prompt
-    assert "placebo-treatment refutation" in prompt
-    assert "irrelevant-additional-covariate refutation" in prompt
-    assert "ask the user for a clinically valid negative-control outcome candidate" in prompt
-    assert "set answer 16 to null" in prompt
-    assert "do not confirm the protocol" in prompt
-    assert "role conflict" in prompt
-    assert "Never silently invent a negative-control outcome." in prompt
-    assert "a negative-control outcome is used only for CATE refutation" in prompt
-    assert "deterministic cleaning and encoding instructions" in prompt
-    assert "validation, and refutation" in prompt
-    assert 'Do not frame covariates and effect modifiers as "confounders vs subgroup variables."' in prompt
-    assert "Both must be baseline variables, and both can contribute" in prompt
-    assert "covariates (W) are adjustment-only controls" in prompt
-    assert "effect modifiers (X) are baseline features" in prompt
-    assert "place it in effect modifiers instead of duplicating it in covariates" in prompt
+    assert "current_draft" in prompt
+    assert "authoritative in-progress causal draft" in prompt
+    assert "treatment_column" in prompt
+    assert "outcome_column" in prompt
+    assert "covariates" in prompt
+    assert "effect_modifiers" in prompt
+    assert "target_population" in prompt
+    assert "study_type" in prompt
+    assert "negative_control_outcome" in prompt
+    assert "time_zero" in prompt
 
 
-def test_protocol_discussion_review_prompt_mentions_identifier_handling() -> None:
-    prompt = get_protocol_discussion_review_summary_prompt()
+def test_protocol_discussion_update_prompt_keeps_target_trial_guidance_without_cleaning_questions() -> (
+    None
+):
+    prompt = get_protocol_discussion_update_prompt()
 
-    assert "Summarize the identifier column choice when grounded." in prompt
-    assert "suggested_identifier_column" in prompt
-    assert "confirming this review will accept that identifier choice" in prompt
-    assert "auto_id will be used" in prompt
-    assert "negative-control outcome choice" in prompt
-    assert "CATE negative-control refutation will not be performed" in prompt
-    assert "baseline adjustment-only controls" in prompt
-    assert "also participate in adjustment" in prompt
-    assert "heterogeneous or individualized treatment-effect estimates" in prompt
-
-
-def test_protocol_discussion_questions_clarify_covariates_and_effect_modifiers() -> None:
-    questions = get_questions()
-
-    assert any(
-        "adjustment-only controls for confounding or prognostic differences" in question
-        for question in questions
-    )
-    assert any(
-        "can also contribute to adjustment" in question
-        and "drive heterogeneity or individualized effects" in question
-        for question in questions
+    assert "Ask about time zero conceptually" in prompt
+    assert "when follow-up starts and treatment assignment is anchored" in prompt
+    assert "Covariates are baseline adjustment variables" in prompt
+    assert "Effect modifiers are baseline variables used for heterogeneity" in prompt
+    assert "Do not ask treatment/outcome value mapping questions." in prompt
+    assert (
+        "Do not ask imputation, missingness, category-handling, recoding, or cleaning questions."
+        in prompt
     )
 
 
-def test_initial_user_message_mentions_identifier_selection() -> None:
+def test_initial_user_message_mentions_only_draft_fields() -> None:
     message = initial_user_message()
 
-    assert "identifier column" in message
-    assert "negative-control outcome" in message
-    assert "patient or unit" in message
-    assert "treatment, outcome, or baseline features" in message
-
-
-def test_summarize_upstream_data_prep_decisions_collects_questions_14_and_15() -> None:
-    discussion = "\n".join(
-        [
-            "1) Causal question: effect of transfusion on mortality.",
-            "14) Treatment/outcome data-quality decisions: Map istatus so 1=Dead and 2/3=Alive.",
-            "15) Baseline feature preparation decisions: Impute missing iage values before modeling and keep isex unknown as its own category.",
-        ]
-    )
-
-    summary = summarize_upstream_data_prep_decisions(discussion)
-
-    assert summary is not None
-    assert "Map istatus so 1=Dead and 2/3=Alive." in summary
-    assert "Impute missing iage values before modeling" in summary
-
-
-def test_summarize_upstream_data_prep_decisions_skips_unclear_items() -> None:
-    discussion = "\n".join(
-        [
-            "14) Treatment/outcome data-quality decisions: UNCLEAR",
-            "15) Baseline feature preparation decisions: UNCLEAR",
-        ]
-    )
-
-    assert summarize_upstream_data_prep_decisions(discussion) is None
+    assert "causal draft" in message
+    assert "treatment column" in message
+    assert "outcome column" in message
+    assert "target population" in message
+    assert "study type" in message
+    assert "time zero" in message
+    assert "cleaning" not in message.lower()

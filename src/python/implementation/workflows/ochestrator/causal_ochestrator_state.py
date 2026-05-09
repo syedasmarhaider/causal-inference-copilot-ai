@@ -63,27 +63,27 @@ class GlobalStateModel(BaseModel):
 
     update_counter: int = Field(default=0, ge=0)
 
-    # stage 1 — dataset
+    # stage 1 - dataset
     working_dataset_ids: list[UUID] = Field(default_factory=list)
     latest_dataset_summary: DatasetSummaryModel | None = None
 
-    # stage 2 — protocol discussion + draft
+    # stage 2 - causal draft
     protocol_discussion: str | None = None
     protocol_cleaning_instructions: str | None = None
     causal_spec_draft: CausalSpecDraft | None = None
 
-    # stage 3 — compiled spec + transform plan + validation
+    # stage 3 - compiled spec + transform plan + validation
     causal_spec: CausalSpec | None = None
     data_transformation_plan: TransformPlan | None = None
     working_dataset_frozen: bool = False
     validation_issues: list[ValidationIssueModel] = Field(default_factory=list)
     is_validated: bool = False
 
-    # stage 4 — model selection
+    # stage 4 - model selection
     selected_model: str | None = None
     selection_reasoning: str | None = None
 
-    # stage 5 — training
+    # stage 5 - training
     trained_model_id: UUID | None = None
     training_warnings: list[str] = Field(default_factory=list)
     training_spec: dict[str, Any] | None = None
@@ -129,7 +129,6 @@ class GlobalStateModel(BaseModel):
 class CausalOchestratorState(OchestratorState):
     INIT_DATA_ID = UUID("00000000-0000-0000-0000-000000000000")
     NAME: ClassVar[str] = "CAUSAL_OCHESTRATOR_STATE"
-    
 
     _STAGE_FIELDS: ClassVar[dict[int, tuple[str, ...]]] = {
         1: ("working_dataset_ids", "latest_dataset_summary"),
@@ -195,9 +194,11 @@ class CausalOchestratorState(OchestratorState):
         if key not in GlobalStateModel.model_fields:
             raise KeyError(f"Unknown global state key: {key!r}")
         return deepcopy(getattr(self._model, key))
-    
+
     def get_working_dataset_id_and_frozen_status(self) -> tuple[UUID | None, bool]:
-        dataset_id = self._model.working_dataset_ids[-1] if self._model.working_dataset_ids else None
+        dataset_id = (
+            self._model.working_dataset_ids[-1] if self._model.working_dataset_ids else None
+        )
         return dataset_id, self._model.working_dataset_frozen
 
     def set(self, key: str, value: dict[str, Any]) -> None:  # noqa: C901
@@ -221,10 +222,14 @@ class CausalOchestratorState(OchestratorState):
                 "DATA_MANUPULATION updates must include working_dataset_id and latest_dataset_summary"
             )
 
-        dataset_id = self._parse_dataset_id(value["working_dataset_id"], field_name="working_dataset_id")
+        dataset_id = self._parse_dataset_id(
+            value["working_dataset_id"], field_name="working_dataset_id"
+        )
         latest_dataset_summary = self._parse_dataset_summary(value["latest_dataset_summary"])
         next_ids = list(self._model.working_dataset_ids)
-        revert_requested = value.get("revert_request") is True or value.get("_revert_request") is True
+        revert_requested = (
+            value.get("revert_request") is True or value.get("_revert_request") is True
+        )
         if revert_requested:
             if not next_ids:
                 raise ValueError("No working dataset to revert from")
@@ -242,41 +247,20 @@ class CausalOchestratorState(OchestratorState):
             self._clear_stages_from(2, reason="stage-1 dataset updated")
 
     def _set_protocol_discussion(self, value: dict[str, Any]) -> None:
-        if "protocol_discussion" not in value:
-            raise KeyError("PROTOCOL_DISCUSSION updates must include protocol_discussion")
+        if "causal_spec_draft" not in value:
+            raise KeyError("PROTOCOL_DISCUSSION updates must include causal_spec_draft")
 
         self._require_stage1()
 
-        protocol_discussion = self._parse_optional_text(value["protocol_discussion"])
-        if "protocol_cleaning_instructions" in value:
-            protocol_cleaning_instructions = self._parse_optional_text(
-                value["protocol_cleaning_instructions"]
-            )
-        else:
-            protocol_cleaning_instructions = self._model.protocol_cleaning_instructions
-
-        protocol_changed = (
-            self._model.protocol_discussion != protocol_discussion
-            or self._model.protocol_cleaning_instructions != protocol_cleaning_instructions
+        next_causal_spec_draft = self._parse_causal_spec_draft(value["causal_spec_draft"])
+        cleared_legacy_text = (
+            self._model.protocol_discussion is not None
+            or self._model.protocol_cleaning_instructions is not None
         )
-        next_causal_spec_draft = (
-            self._parse_causal_spec_draft(value["causal_spec_draft"])
-            if "causal_spec_draft" in value
-            else self._model.causal_spec_draft
-        )
+        self._model.protocol_discussion = None
+        self._model.protocol_cleaning_instructions = None
 
-        if protocol_changed:
-            self._model.protocol_discussion = protocol_discussion
-            self._model.protocol_cleaning_instructions = protocol_cleaning_instructions
-            self._model.causal_spec_draft = (
-                self._parse_causal_spec_draft(value["causal_spec_draft"])
-                if "causal_spec_draft" in value
-                else None
-            )
-            self._clear_stages_from(3, reason="stage-2 protocol discussion updated")
-            return
-
-        if self._model.causal_spec_draft == next_causal_spec_draft:
+        if self._model.causal_spec_draft == next_causal_spec_draft and not cleared_legacy_text:
             return
 
         self._model.causal_spec_draft = next_causal_spec_draft
@@ -295,13 +279,17 @@ class CausalOchestratorState(OchestratorState):
 
         self._require_stage2()
 
-        dataset_id = self._parse_dataset_id(value["working_dataset_id"], field_name="working_dataset_id")
+        dataset_id = self._parse_dataset_id(
+            value["working_dataset_id"], field_name="working_dataset_id"
+        )
         latest_dataset_summary = self._parse_dataset_summary(value["latest_dataset_summary"])
         causal_spec_draft = self._parse_causal_spec_draft(value["causal_spec_draft"])
         self._require_matching_causal_spec_draft(causal_spec_draft)
 
         self._set_stage1_fields(
-            working_dataset_ids=self._append_dataset_id_if_needed(self._model.working_dataset_ids, dataset_id),
+            working_dataset_ids=self._append_dataset_id_if_needed(
+                self._model.working_dataset_ids, dataset_id
+            ),
             latest_dataset_summary=latest_dataset_summary,
         )
         self._model.causal_spec_draft = causal_spec_draft
@@ -359,7 +347,9 @@ class CausalOchestratorState(OchestratorState):
 
     def _set_model_train(self, value: dict[str, Any]) -> None:
         if "trained_model_id" not in value or "training_warnings" not in value:
-            raise KeyError("MODEL_TRAIN updates must include trained_model_id and training_warnings")
+            raise KeyError(
+                "MODEL_TRAIN updates must include trained_model_id and training_warnings"
+            )
 
         self._require_stage4()
 
@@ -412,22 +402,29 @@ class CausalOchestratorState(OchestratorState):
     def get_current_node_companion_names(self, node_name: str) -> list[str]:
         match node_name:
             case _ if node_name == DataManupulationNode.NAME:
-                if not self._model.working_dataset_ids or self._model.latest_dataset_summary is None:
+                if (
+                    not self._model.working_dataset_ids
+                    or self._model.latest_dataset_summary is None
+                ):
                     return []
-                return [ProtocolDiscussionNode.NAME, DataStatisticsNode.NAME,GeneralQueriesNode.NAME]
+                return [
+                    ProtocolDiscussionNode.NAME,
+                    DataStatisticsNode.NAME,
+                    GeneralQueriesNode.NAME,
+                ]
             case _ if node_name == ProtocolDiscussionNode.NAME:
-                return [DataManupulationNode.NAME, DataStatisticsNode.NAME,GeneralQueriesNode.NAME]
+                return [DataManupulationNode.NAME, DataStatisticsNode.NAME, GeneralQueriesNode.NAME]
             case _ if node_name == DataCompilationNode.NAME:
-                return [DataStatisticsNode.NAME,GeneralQueriesNode.NAME]
+                return [DataStatisticsNode.NAME, GeneralQueriesNode.NAME]
             case _ if node_name == ModelSelectionNode.NAME:
-                return [DataStatisticsNode.NAME,GeneralQueriesNode.NAME]
+                return [DataStatisticsNode.NAME, GeneralQueriesNode.NAME]
             case _ if node_name == ModelTrainNode.NAME:
                 return []
             case _ if node_name == CausalInferenceNode.NAME:
-                return [DataStatisticsNode.NAME,GeneralQueriesNode.NAME]
+                return [DataStatisticsNode.NAME, GeneralQueriesNode.NAME]
             case _:
                 raise ValueError(f"Unknown node name for companions: {node_name!r}")
-    
+
     def get_completed_and_last_pending_nodes(self) -> list[str]:
         answer_arr: list[str] = []
         if self._is_stage1_complete():
@@ -442,7 +439,7 @@ class CausalOchestratorState(OchestratorState):
             answer_arr.append(ModelTrainNode.NAME)
         if len(answer_arr) < self._MAX_STAGE:
             answer_arr.append(self.get_current_node_name())
-        return answer_arr    
+        return answer_arr
 
     def rocover_failure(self, current_failed_node: str) -> None:
         match current_failed_node:
@@ -504,18 +501,17 @@ class CausalOchestratorState(OchestratorState):
                 pass
             case _:
                 raise ValueError(f"Unknown state name for rollback: {state_name!r}")
-    
+
     def get_ochestration_prompt(self) -> str:
-        return ROUTE_SYSTEM_PROMPT_CAUSAL     
+        return ROUTE_SYSTEM_PROMPT_CAUSAL
 
     def _is_stage1_complete(self) -> bool:
-        return bool(self._model.working_dataset_ids) and self._model.latest_dataset_summary is not None
+        return (
+            bool(self._model.working_dataset_ids) and self._model.latest_dataset_summary is not None
+        )
 
     def _is_stage2_complete(self) -> bool:
-        return self._is_stage1_complete() and (
-            self._model.protocol_discussion is not None
-            and self._model.causal_spec_draft is not None
-        )
+        return self._is_stage1_complete() and self._model.causal_spec_draft is not None
 
     def _is_stage3_complete(self) -> bool:
         return self._is_stage2_complete() and (
@@ -527,8 +523,7 @@ class CausalOchestratorState(OchestratorState):
 
     def _is_stage4_complete(self) -> bool:
         return self._is_stage3_complete() and (
-            self._model.selected_model is not None
-            and self._model.selection_reasoning is not None
+            self._model.selected_model is not None and self._model.selection_reasoning is not None
         )
 
     def _is_stage5_complete(self) -> bool:
@@ -540,7 +535,7 @@ class CausalOchestratorState(OchestratorState):
 
     def _require_stage2(self) -> None:
         if not self._is_stage2_complete():
-            raise ValueError("Stage 2 incomplete: protocol discussion or causal_spec_draft not set")
+            raise ValueError("Stage 2 incomplete: causal_spec_draft not set")
 
     def _require_stage3(self) -> None:
         if not self._is_stage3_complete():
@@ -592,7 +587,9 @@ class CausalOchestratorState(OchestratorState):
     def _parse_dataset_summary(raw: Any) -> DatasetSummaryModel | None:
         if raw is None:
             return None
-        return raw if isinstance(raw, DatasetSummaryModel) else DatasetSummaryModel.model_validate(raw)
+        return (
+            raw if isinstance(raw, DatasetSummaryModel) else DatasetSummaryModel.model_validate(raw)
+        )
 
     @staticmethod
     def _parse_optional_text(raw: Any) -> str | None:
@@ -637,9 +634,11 @@ class CausalOchestratorState(OchestratorState):
         if not isinstance(raw, list):
             raise TypeError("validation_issues must be a list")
         return [
-            issue
-            if isinstance(issue, ValidationIssueModel)
-            else ValidationIssueModel.model_validate(issue)
+            (
+                issue
+                if isinstance(issue, ValidationIssueModel)
+                else ValidationIssueModel.model_validate(issue)
+            )
             for issue in raw
         ]
 
