@@ -55,9 +55,6 @@ from python.implementation.workflows.tools.data_manupulation_tool.data_manipulat
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
 )
-from python.implementation.workflows.tools.simple_data_transformation_tool.simple_data_transformation_tool import (
-    SimpleDataTransformationTool,
-)
 
 
 def _build_dataframe() -> pd.DataFrame:
@@ -296,14 +293,6 @@ class _FakeDataManipulationTool:
 
 
 @dataclass
-class _FakeSimpleDataTransformationTool:
-    NAME: str = SimpleDataTransformationTool.NAME
-
-    def get_tool_info(self) -> str:
-        return "Fake simple data transformation tool for tests."
-
-
-@dataclass
 class _FakeToolFactory(ToolFactory):
     tool_by_name: dict[str, Any]
 
@@ -328,13 +317,17 @@ def _tool_factory() -> _FakeToolFactory:
         tool_by_name={
             DatasetProfilingTool.NAME: DatasetProfilingTool(),
             DataManipulationTool.NAME: _FakeDataManipulationTool(),
-            SimpleDataTransformationTool.NAME: _FakeSimpleDataTransformationTool(),
             EncodingPlanTool.NAME: EncodingPlanTool(),
         }
     )
 
 
-def _build_orchestrator_state(*, dataset_id: UUID, dataset_summary: Any) -> CausalOchestratorState:
+def _build_orchestrator_state(
+    *,
+    dataset_id: UUID,
+    dataset_summary: Any,
+    protocol_cleaning_instructions: str | None = "Normalize only grounded values.",
+) -> CausalOchestratorState:
     state = CausalOchestratorState.init_empty()
     state.set(
         DataManupulationState.NAME,
@@ -347,19 +340,24 @@ def _build_orchestrator_state(*, dataset_id: UUID, dataset_summary: Any) -> Caus
         ProtocolDiscussionState.NAME,
         {
             "protocol_discussion": "Confirmed protocol discussion.",
-            "protocol_cleaning_instructions": "Normalize only grounded values.",
+            "protocol_cleaning_instructions": protocol_cleaning_instructions,
             "causal_spec_draft": _causal_draft(),
         },
     )
     return state
 
 
-def _cleaning_result(dataframe: pd.DataFrame) -> CleaningResult:
+def _cleaning_result(
+    dataframe: pd.DataFrame,
+    *,
+    cleaning_notes: tuple[str, ...] = (),
+) -> CleaningResult:
     return CleaningResult(
         cleaned_data_summary=_build_summary(dataframe),
         pd_cleaned=dataframe.copy(),
         causal=_causal_spec(),
         missingness_decisions=_missingness_decisions(),
+        cleaning_notes=cleaning_notes,
     )
 
 
@@ -475,6 +473,105 @@ def test_data_compilation_node_saves_transformation_suggestions_without_cleaning
     assert review_payload["transformation_suggestions"]["suggestions"][1]["preferred_type"] == (
         "CATEGORICAL"
     )
+
+
+def test_data_compilation_node_reports_default_cleaning_when_instructions_are_absent() -> None:
+    dataframe = _build_dataframe()
+    dataset_summary = _build_summary(dataframe)
+    dataset_id = uuid4()
+    llm = _FakeLLM(
+        json_outputs=[{"assistant_message": "Review the compiled setup."}]
+    )
+    data_repo = _InMemoryDataRepo(dataframes={dataset_id: dataframe.copy()})
+    node = DataCompilationNode(data_repo=data_repo, llm=llm, tools_factory=_tool_factory())
+    orchestrator_state = _build_orchestrator_state(
+        dataset_id=dataset_id,
+        dataset_summary=dataset_summary,
+        protocol_cleaning_instructions=None,
+    )
+
+    with (
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.cleaning",
+            return_value=_cleaning_result(dataframe),
+        ),
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
+            return_value=_transformation_result(transformation_plan=_transform_plan()),
+        ),
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
+            return_value=DataCompilationValidationResult(
+                validation_errors=[],
+                user_suggestion_message=None,
+            ),
+        ),
+    ):
+        result = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=DataCompilationState.init_empty(),
+                orchestrator_state=orchestrator_state,
+                read_only_messages_history=[ChatMessage(role="user", content="compile it")],
+            )
+        )
+
+    actions = result.new_node_state.payload.compilation_actions
+    assert any(
+        "No explicit protocol cleaning instructions were provided" in action
+        for action in actions
+    )
+
+
+def test_data_compilation_node_reports_cleaning_contradiction_notes() -> None:
+    dataframe = _build_dataframe()
+    dataset_summary = _build_summary(dataframe)
+    dataset_id = uuid4()
+    llm = _FakeLLM(json_outputs=[{"assistant_message": "Review the compiled setup."}])
+    data_repo = _InMemoryDataRepo(dataframes={dataset_id: dataframe.copy()})
+    node = DataCompilationNode(data_repo=data_repo, llm=llm, tools_factory=_tool_factory())
+    orchestrator_state = _build_orchestrator_state(
+        dataset_id=dataset_id,
+        dataset_summary=dataset_summary,
+    )
+    contradiction_note = (
+        "Cleaning decision (missingness): Protocol discussion contradicted the cleaning "
+        "instructions on treatment missingness, so the conservative protocol-safe "
+        "interpretation dropped rows with missing treatment."
+    )
+
+    with (
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.cleaning",
+            return_value=_cleaning_result(
+                dataframe,
+                cleaning_notes=(contradiction_note,),
+            ),
+        ),
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
+            return_value=_transformation_result(transformation_plan=_transform_plan()),
+        ),
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
+            return_value=DataCompilationValidationResult(
+                validation_errors=[],
+                user_suggestion_message=None,
+            ),
+        ),
+    ):
+        result = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=DataCompilationState.init_empty(),
+                orchestrator_state=orchestrator_state,
+                read_only_messages_history=[ChatMessage(role="user", content="compile it")],
+            )
+        )
+
+    assert contradiction_note in result.new_node_state.payload.compilation_actions
 
 
 def test_data_compilation_node_auto_retries_validation_on_cleaned_dataset() -> None:

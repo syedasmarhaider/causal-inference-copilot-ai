@@ -59,9 +59,6 @@ from python.implementation.workflows.tools.data_manupulation_tool.data_manipulat
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
     DatasetProfilingTool,
 )
-from python.implementation.workflows.tools.simple_data_transformation_tool.simple_data_transformation_tool import (
-    SimpleDataTransformationTool,
-)
 from python.implementation.workflows.utils.utils import safe_err
 
 log = get_app_logger(__name__, component="data_compilation_node", log_type="node")
@@ -115,10 +112,6 @@ class DataCompilationNode(Node):
         )
         self._data_manipulation_tool = cast(
             DataManipulationTool, tools_factory.get_tool(DataManipulationTool.NAME)
-        )
-        self._simple_data_transformation_tool = cast(
-            SimpleDataTransformationTool,
-            tools_factory.get_tool(SimpleDataTransformationTool.NAME),
         )
         self._encoding_plan_tool = cast(
             EncodingPlanTool, tools_factory.get_tool(EncodingPlanTool.NAME)
@@ -343,7 +336,6 @@ class DataCompilationNode(Node):
             data_summary=deps.dataset_summary,
             to_clean_df=source_df,
             datasetProfilingTool=self._profiling_tool,
-            simpleDataTransformationTool=self._simple_data_transformation_tool,
             dataManipulationTool=self._data_manipulation_tool,
             llm=self._llm,
         )
@@ -370,6 +362,8 @@ class DataCompilationNode(Node):
                 causal_spec=cleaning_result.causal,
                 missingness_decisions=cleaning_result.missingness_decisions,
                 review_recompile_request=review_recompile_request,
+                protocol_cleaning_instructions=deps.protocol_cleaning_instructions,
+                cleaning_notes=cleaning_result.cleaning_notes,
             ),
             warnings=[],
         )
@@ -1134,12 +1128,21 @@ def _summarize_compile_actions(
     causal_spec: CausalSpec,
     missingness_decisions: MissingnessDecisionList,
     review_recompile_request: str | None,
+    protocol_cleaning_instructions: str | None,
+    cleaning_notes: Sequence[str] = (),
 ) -> list[str]:
     actions = [
         "Retained only the confirmed protocol-scope columns for compilation: "
         + ", ".join(_protocol_scope_columns(causal_spec))
     ]
+    if not _normalize_text(protocol_cleaning_instructions):
+        actions.append(
+            "No explicit protocol cleaning instructions were provided, so compilation "
+            "applied conservative protocol-safe cleaning and missingness defaults where "
+            "the dataset state required them; these decisions are reported here."
+        )
     actions.extend(_summarize_missingness_decisions(missingness_decisions))
+    actions.extend(_summarize_cleaning_notes(cleaning_notes))
     if source_summary.n_rows != cleaned_summary.n_rows:
         actions.append(
             f"Row count changed from {source_summary.n_rows} to {cleaned_summary.n_rows} during cleaning."
@@ -1163,6 +1166,15 @@ def _summarize_compile_actions(
 
     actions.append("Recompiled the causal specification on the cleaned dataset summary.")
     return actions
+
+
+def _summarize_cleaning_notes(cleaning_notes: Sequence[str]) -> list[str]:
+    summarized: list[str] = []
+    for note in cleaning_notes:
+        normalized = _normalize_text(note)
+        if normalized and normalized not in summarized:
+            summarized.append(normalized)
+    return summarized
 
 
 def _summarize_missingness_decisions(

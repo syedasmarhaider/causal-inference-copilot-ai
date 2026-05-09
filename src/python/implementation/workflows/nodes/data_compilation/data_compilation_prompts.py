@@ -92,97 +92,149 @@ Output policy:
 """.strip()
 
 
-def data_compilation_simple_transform_prompt() -> str:
+def _data_compilation_cleaning_instruction_output_policy() -> str:
     return """
-You are planning deterministic same-column dataframe transformations before SQL cleaning.
-
-Inputs:
-- confirmed protocol discussion
-- confirmed protocol cleaning instructions
-- optional review_recompile_request
-- source dataset summary before cleaning
-- prepared dataset summary after identifier handling
-- locked causal draft
-- effective identifier column
-- expected_role_by_column
-
-Task:
-- Return a JSON object with a `columns` array.
-- Use an empty `columns` array when no simple deterministic transformation is necessary.
-
-Simple transformation tool scope:
-- Literal same-column replacements.
-- Static same-column value assignment.
-- Simple dtype casts.
-
-Rules:
-- Use only existing prepared dataset columns.
-- Keep all column identities and roles locked.
-- Do not transform the effective identifier column.
-- Do not create, rename, remove, or reorder columns.
-- Do not emit row filters, joins, aggregations, window logic, parsing logic, or complex conditional cleaning.
-- Do not emit drop-column work; final protocol-scope column dropping is handled by the runtime.
-- Do not emit SQL work; a SQL tool runs later for complex cleaning and row filtering.
-- Missingness handling and row dropping must be left for the later SQL tool.
-- Do not use `fill_value`; missing-value imputation belongs to the later SQL tool.
-- The negative-control outcome, when present, is an outcome-like column to preserve and
-  not a baseline adjustment feature.
-- Return JSON only.
+Output JSON exactly:
+{
+  "action": "run_instruction" | "done",
+  "instruction": "<one clear natural-language instruction for the data manipulation tool, or null when done>",
+  "reason": "<short reason grounded in the current protocol and dataset state>"
+}
 """.strip()
 
 
-def data_compilation_data_manipulation_plan_prompt() -> str:
-    return """
-You are planning ordered DuckDB SQL cleaning batches after deterministic same-column cleaning.
+def data_compilation_transformation_instruction_prompt() -> str:
+    return f"""
+You are planning the first adaptive data-manipulation instruction for protocol compilation.
 
 Inputs:
 - confirmed protocol discussion
 - confirmed protocol cleaning instructions
-- optional review_recompile_request
+- optional high_priority_review_recompile_request
 - locked causal draft
 - effective identifier column
 - required final columns
-- source dataset summary before cleaning
-- transformed dataset summary after simple transformations
-- simple transformations already applied
-- required-column missing counts after simple transformations
-- optional sql_retry_feedback with a previous invalid SQL plan and exact failure
+- expected_role_by_column
+- current table name
+- compact current dataset summary
+- prior validation feedback, when present
 
 Task:
-- Return a JSON object with a `batches` array.
-- Use `batches: []` when no SQL data manipulation is necessary.
-- Each batch must have:
-  - `phase`: one of `row_filter`, `conditional_recode`, `missingness`, `final_consistency`
-  - `purpose`: a short explanation of why this batch exists
-  - `statements`: one or more DuckDB SQL statements
-
-Data manipulation scope:
-- Row filtering.
-- Complex conditional recoding.
-- Missingness handling and imputation.
-- SQL-expressible cleaning that is grounded in the protocol and cleaning instructions.
-
-SQL contract:
-- SQL runs against the current dataframe registered as `protocol_scope_df`.
-- The final statement in every batch must return the full current working dataset.
-- Use multiple statements inside a batch when useful.
-- Helper columns and temp tables are allowed.
-- Do not assume helper columns already exist before the statement that creates them.
-- When replacing an existing column, avoid duplicate output names; prefer DuckDB syntax
-  like `* EXCLUDE(column_name)` plus the replacement expression.
+- Return one natural-language instruction for the data manipulation tool, or `done`.
+- This first instruction should handle protocol-grounded transformations before missingness:
+  type normalization, boolean/category recoding, value normalization, same-column replacements,
+  and conditional recoding needed by the protocol.
 
 Rules:
-- Plan all needed batches at once, in execution order.
-- Split unrelated work into separate batches.
-- Prefer this phase order when multiple phases are needed: row_filter, conditional_recode, missingness, final_consistency.
-- Keep all required final columns available.
-- Do not transform, drop, or regenerate the effective identifier column.
-- Do not include final drop-column work; runtime will project to required final columns.
-- Do not create causal roles, new causal columns, new covariates, or new effect modifiers.
-- Preserve the negative-control outcome column when it appears in required final columns.
-- Do not repeat simple deterministic transformations already applied.
-- If sql_retry_feedback is present, revise the full SQL batch plan to fix that exact failure.
-- Return JSON only.
+- The instruction is for a data manipulation tool, not raw SQL output.
+- Ask for one coherent transformation operation only.
+- If high_priority_review_recompile_request is present, treat it as the most important
+  user correction for this recompilation pass while staying within this tool scope.
+- If protocol discussion, cleaning instructions, draft roles, or dataset evidence conflict,
+  follow the highest-priority user requirement that is still compatible with the locked
+  causal draft and dataset evidence. If no compatible interpretation is explicit, choose
+  the most conservative protocol-safe interpretation and name the contradiction in `reason`.
+- If the user did not explicitly describe a needed transformation, still perform
+  conservative protocol-safe normalization when the current dataset state clearly needs it,
+  and explain that dataset-grounded decision in `reason`.
+- Keep all locked causal draft columns and roles available.
+- Do not drop, null, duplicate, or regenerate the effective identifier column.
+- Do not perform missingness handling here unless the high-priority request explicitly
+  requires a transformation that also resolves a missing-code representation.
+- Return `done` if no protocol-grounded transformation is needed.
+
+{_data_compilation_cleaning_instruction_output_policy()}
+""".strip()
+
+
+def data_compilation_missingness_instruction_prompt() -> str:
+    return f"""
+You are planning the mandatory missingness data-manipulation instruction for protocol compilation.
+
+Inputs:
+- confirmed protocol discussion
+- confirmed protocol cleaning instructions
+- optional high_priority_review_recompile_request
+- locked causal draft
+- effective identifier column
+- required final columns
+- expected_role_by_column
+- current table name
+- compact current dataset summary
+- required-column missing counts
+- executed cleaning instructions
+- prior validation feedback, when present
+
+Task:
+- Return one natural-language instruction for the data manipulation tool, or `done`.
+- This instruction should resolve protocol-scope missingness for treatment, outcome,
+  negative-control outcome, covariates, and effect modifiers.
+
+Rules:
+- The instruction is for a data manipulation tool, not raw SQL output.
+- If required-column missing counts are all zero, return `done`.
+- If missingness remains, prefer the user-intended handling from the protocol discussion,
+  cleaning instructions, and high-priority review request when present.
+- If protocol discussion, cleaning instructions, draft roles, or dataset evidence conflict,
+  follow the highest-priority user requirement that is still compatible with the locked
+  causal draft and dataset evidence. If no compatible interpretation is explicit, choose
+  the most conservative protocol-safe missingness handling and name the contradiction in
+  `reason`.
+- If missingness remains and the user gave no explicit missingness rule, choose the
+  conservative protocol-safe handling from the column role and dataset state, and explain
+  that default decision in `reason` so it can be reported to the user.
+- Ask for one coherent missingness operation only.
+- Keep all locked causal draft columns and roles available.
+- Do not drop, null, duplicate, or regenerate the effective identifier column.
+- Do not invent imputation values, row filters, or missingness rules not grounded in the inputs.
+
+{_data_compilation_cleaning_instruction_output_policy()}
+""".strip()
+
+
+def data_compilation_adaptive_cleaning_instruction_prompt() -> str:
+    return f"""
+You are planning one adaptive cleanup data-manipulation instruction for protocol compilation.
+
+Inputs:
+- confirmed protocol discussion
+- confirmed protocol cleaning instructions
+- optional high_priority_review_recompile_request
+- locked causal draft
+- effective identifier column
+- required final columns
+- expected_role_by_column
+- current table name
+- compact current dataset summary
+- required-column missing counts
+- executed cleaning instructions
+- prior validation feedback, when present
+
+Task:
+- Return one natural-language instruction for the data manipulation tool, or `done`.
+- This cleanup instruction should perform the next user-intended cleaning correction that
+  remains after earlier transformation and missingness steps.
+
+Rules:
+- The instruction is for a data manipulation tool, not raw SQL output.
+- Ask for one coherent cleanup operation only.
+- Do not repeat any executed cleaning instruction.
+- If high_priority_review_recompile_request is present, prioritize that correction while
+  preserving the locked protocol scope.
+- If protocol discussion, cleaning instructions, draft roles, or dataset evidence conflict,
+  follow the highest-priority user requirement that is still compatible with the locked
+  causal draft and dataset evidence. If no compatible interpretation is explicit, choose
+  the most conservative protocol-safe cleanup and name the contradiction in `reason`.
+- If the user gave no explicit cleanup instruction, still perform conservative
+  protocol-safe cleanup when the current dataset state clearly needs it, and explain that
+  default decision in `reason` so it can be reported to the user.
+- Keep all locked causal draft columns and roles available.
+- Do not drop, null, duplicate, or regenerate the effective identifier column.
+- Do not invent protocol rules, causal roles, columns, timing assumptions, or unsupported
+  value mappings.
+- Return `done` if no further grounded cleanup is needed.
+
+{_data_compilation_cleaning_instruction_output_policy()}
 """.strip()
 
 
