@@ -195,12 +195,72 @@ class TransformPlan(BaseModel):
 
     SUMMARY_FIELD_NAMES: ClassVar[tuple[str, ...] | None] = None
     SUMMARY_FIELD_KINDS: ClassVar[dict[str, str] | None] = None
+    SUMMARY_FIELD_DTYPES: ClassVar[dict[str, str | None] | None] = None
+    SUMMARY_FIELD_STORED_KINDS: ClassVar[dict[str, str] | None] = None
     SUMMARY_FIELD_DISTINCT_COUNTS: ClassVar[dict[str, int | None] | None] = None
     SUMMARY_KNOWN_VALUES: ClassVar[dict[str, set[str] | None] | None] = None
     ELIGIBLE_COLUMNS: ClassVar[tuple[str, ...] | None] = None
     EXPECTED_ROLE_BY_COLUMN: ClassVar[dict[str, EncodingRole] | None] = None
 
     columns: list[ColumnEncodingPlan] = Field(..., min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_raw_plan_constraints(cls, data: Any) -> Any:
+        summary_field_names = cls.SUMMARY_FIELD_NAMES
+        if summary_field_names is None or not isinstance(data, Mapping):
+            return data
+
+        raw_columns = data.get("columns")
+        if not isinstance(raw_columns, list):
+            return data
+
+        plan_columns: list[str] = []
+        role_by_column: dict[str, str] = {}
+        for raw_column_plan in raw_columns:
+            if not isinstance(raw_column_plan, Mapping):
+                continue
+            column = str(raw_column_plan.get("column", "")).strip()
+            role = str(raw_column_plan.get("role", "")).strip()
+            if column:
+                plan_columns.append(column)
+                role_by_column[column] = role
+
+        summary_field_name_set = set(summary_field_names)
+        unknown_columns = sorted(set(plan_columns) - summary_field_name_set)
+        if unknown_columns:
+            raise ValueError(
+                f"encoding plan references unknown dataset_summary columns: {unknown_columns}"
+            )
+
+        eligible_columns = cls.ELIGIBLE_COLUMNS
+        if eligible_columns is not None:
+            eligible_set = set(eligible_columns)
+            extra_columns = sorted(set(plan_columns) - eligible_set)
+            if extra_columns:
+                raise ValueError(f"encoding plan contains non-eligible columns: {extra_columns}")
+
+            missing_columns = sorted(eligible_set - set(plan_columns))
+            if missing_columns:
+                raise ValueError(f"encoding plan is missing eligible columns: {missing_columns}")
+
+        expected_role_by_column = cls.EXPECTED_ROLE_BY_COLUMN
+        if expected_role_by_column:
+            wrong_roles: list[dict[str, str | None]] = []
+            for column, expected_role in expected_role_by_column.items():
+                actual_role = role_by_column.get(column)
+                if actual_role != expected_role:
+                    wrong_roles.append(
+                        {
+                            "column": column,
+                            "expected_role": expected_role,
+                            "actual_role": actual_role,
+                        }
+                    )
+            if wrong_roles:
+                raise ValueError(f"encoding plan assigned wrong roles: {wrong_roles}")
+
+        return data
 
     @model_validator(mode="after")
     def _validate_plan(self) -> TransformPlan:
@@ -222,6 +282,8 @@ class TransformPlan(BaseModel):
                 plan=self,
                 summary_field_names=summary_field_names,
                 summary_field_kinds=type(self).SUMMARY_FIELD_KINDS or {},
+                summary_field_dtypes=type(self).SUMMARY_FIELD_DTYPES or {},
+                summary_field_stored_kinds=type(self).SUMMARY_FIELD_STORED_KINDS or {},
                 summary_field_distinct_counts=type(self).SUMMARY_FIELD_DISTINCT_COUNTS or {},
                 summary_known_values=type(self).SUMMARY_KNOWN_VALUES or {},
                 eligible_columns=type(self).ELIGIBLE_COLUMNS,
@@ -280,6 +342,10 @@ class TransformPlan(BaseModel):
         )
         dynamic_plan_model.SUMMARY_FIELD_NAMES = field_names
         dynamic_plan_model.SUMMARY_FIELD_KINDS = _extract_summary_field_kinds(dataset_summary)
+        dynamic_plan_model.SUMMARY_FIELD_DTYPES = _extract_summary_field_dtypes(dataset_summary)
+        dynamic_plan_model.SUMMARY_FIELD_STORED_KINDS = _extract_summary_field_stored_kinds(
+            dataset_summary
+        )
         dynamic_plan_model.SUMMARY_FIELD_DISTINCT_COUNTS = _extract_summary_field_distinct_counts(
             dataset_summary
         )
@@ -332,6 +398,8 @@ def _validate_transform_plan_against_constraints(
     plan: TransformPlan,
     summary_field_names: tuple[str, ...],
     summary_field_kinds: dict[str, str],
+    summary_field_dtypes: dict[str, str | None],
+    summary_field_stored_kinds: dict[str, str],
     summary_field_distinct_counts: dict[str, int | None],
     summary_known_values: dict[str, set[str] | None],
     eligible_columns: tuple[str, ...] | None,
@@ -376,24 +444,25 @@ def _validate_transform_plan_against_constraints(
         if wrong_roles:
             raise ValueError(f"encoding plan assigned wrong roles: {wrong_roles}")
 
-    incompatible_presets: list[dict[str, str]] = []
+    incompatible_presets: list[dict[str, str | None]] = []
     for column_plan in plan.columns:
         column = str(column_plan.column).strip()
         inferred_kind = summary_field_kinds.get(column)
-        distinct_count = summary_field_distinct_counts.get(column)
+        dtype = summary_field_dtypes.get(column)
+        stored_kind = summary_field_stored_kinds.get(column)
         preset = str(column_plan.encoding.preset)
-        if inferred_kind is None:
+        if stored_kind is None:
             continue
         if not _is_encoding_preset_compatible_with_kind(
-            inferred_kind=inferred_kind,
+            stored_kind=stored_kind,
             preset=preset,
-            distinct_count=distinct_count,
         ):
             incompatible_presets.append(
                 {
                     "column": column,
+                    "dtype": dtype,
+                    "stored_kind": stored_kind,
                     "inferred_kind": inferred_kind,
-                    "distinct_count": str(distinct_count),
                     "preset": preset,
                 }
             )
@@ -420,7 +489,7 @@ def _validate_mapping_values_against_known_values(
     known_values: set[str],
 ) -> None:
     if isinstance(encoding, MapBinaryParams):
-        mapping_values = {str(value) for value in encoding.mapping.keys()}
+        mapping_values = {str(value) for value in encoding.mapping}
         if encoding.missing == "impute_token" and encoding.missing_token is not None:
             mapping_values.discard(str(encoding.missing_token))
         unsupported = sorted(value for value in mapping_values if value not in known_values)
@@ -444,31 +513,19 @@ def _validate_mapping_values_against_known_values(
 
 def _is_encoding_preset_compatible_with_kind(
     *,
-    inferred_kind: str,
+    stored_kind: str,
     preset: str,
-    distinct_count: int | None = None,
 ) -> bool:
-    if preset in {"drop", "passthrough"}:
-        return True
-    if inferred_kind == "NUMERIC":
-        if preset in {"num_standard", "num_minmax", "num_log1p"}:
-            return True
-        if distinct_count is not None and 0 < distinct_count <= 20:
-            return preset in {"cat_onehot", "map_binary", "map_ordinal"}
-        return False
-    if inferred_kind == "CATEGORICAL":
+    if stored_kind == "NUMERIC":
+        return preset in {"passthrough", "num_standard", "num_minmax", "num_log1p"}
+    if stored_kind == "BOOLEAN":
+        return preset in {"passthrough", "cat_onehot", "map_binary", "map_ordinal"}
+    if stored_kind == "CATEGORICAL":
         return preset in {"cat_onehot", "map_binary", "map_ordinal"}
-    if inferred_kind == "BOOLEAN":
-        return preset in {
-            "cat_onehot",
-            "map_binary",
-            "map_ordinal",
-            "num_standard",
-            "num_minmax",
-            "num_log1p",
-        }
-    if inferred_kind == "DATETIME":
+    if stored_kind == "DATETIME":
         return preset == "datetime_epoch_seconds"
+    if stored_kind == "OTHER":
+        return preset == "drop"
     return False
 
 
@@ -581,6 +638,53 @@ def _extract_summary_field_kinds(dataset_summary: DatasetSummaryModel) -> dict[s
     }
 
 
+def _extract_summary_field_dtypes(dataset_summary: DatasetSummaryModel) -> dict[str, str | None]:
+    return {
+        str(profile.name).strip(): profile.dtype
+        for profile in dataset_summary.profiles
+        if str(profile.name).strip()
+    }
+
+
+def _extract_summary_field_stored_kinds(dataset_summary: DatasetSummaryModel) -> dict[str, str]:
+    return {
+        str(profile.name).strip(): _stored_dtype_kind(profile)
+        for profile in dataset_summary.profiles
+        if str(profile.name).strip()
+    }
+
+
+def _stored_dtype_kind(
+    profile: (
+        NumericColumnProfileModel
+        | DatetimeColumnProfileModel
+        | BooleanColumnProfileModel
+        | CategoricalColumnProfileModel
+        | OtherColumnProfileModel
+    ),
+) -> str:
+    if isinstance(profile, OtherColumnProfileModel):
+        return "OTHER"
+
+    dtype = str(profile.dtype or "").strip().lower()
+    if dtype:
+        if dtype in {"bool", "boolean"} or dtype.startswith("bool"):
+            return "BOOLEAN"
+        if dtype.startswith("datetime") or "datetime64" in dtype or "datetimetz" in dtype:
+            return "DATETIME"
+        if dtype.startswith(("int", "uint", "float", "complex")):
+            return "NUMERIC"
+        if dtype in {"object", "string", "str", "category"} or dtype.startswith(
+            ("string", "category")
+        ):
+            return "CATEGORICAL"
+
+    inferred_kind = str(profile.inferred_kind)
+    if inferred_kind in {"NUMERIC", "CATEGORICAL", "BOOLEAN", "DATETIME", "OTHER"}:
+        return inferred_kind
+    return "OTHER"
+
+
 def _extract_summary_field_distinct_counts(
     dataset_summary: DatasetSummaryModel,
 ) -> dict[str, int | None]:
@@ -611,7 +715,7 @@ def _known_values_from_profile(
     ),
 ) -> set[str] | None:
     if isinstance(profile, BooleanColumnProfileModel):
-        return {str(value) for value in profile.summary.counts.keys()}
+        return {str(value) for value in profile.summary.counts}
 
     if isinstance(profile, CategoricalColumnProfileModel):
         top_values = [str(item.value) for item in profile.summary.top_categories]

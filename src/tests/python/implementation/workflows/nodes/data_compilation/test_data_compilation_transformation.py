@@ -50,6 +50,74 @@ def _build_summary(df: pd.DataFrame) -> DatasetSummaryModel:
     )
 
 
+def _object_mutation_summary(*, inferred_kind: str = "BOOLEAN") -> DatasetSummaryModel:
+    if inferred_kind == "NUMERIC":
+        profile = {
+            "name": "pik3ca_mut",
+            "dtype": "object",
+            "n_rows": 60,
+            "n_missing": 0,
+            "missing_rate": 0.0,
+            "distinct_count": 3,
+            "inferred_kind": "NUMERIC",
+            "summary": {
+                "min": None,
+                "max": None,
+                "mean": None,
+                "std": None,
+                "quantiles": None,
+            },
+        }
+    else:
+        profile = {
+            "name": "pik3ca_mut",
+            "dtype": "object",
+            "n_rows": 60,
+            "n_missing": 0,
+            "missing_rate": 0.0,
+            "distinct_count": 3,
+            "inferred_kind": "BOOLEAN",
+            "summary": {"counts": {"0": 58, "E545K": 1, "H1047R": 1}},
+        }
+    return DatasetSummaryModel.model_validate({"n_rows": 60, "profiles": [profile]})
+
+
+def _cleaned_mutation_summary() -> DatasetSummaryModel:
+    return DatasetSummaryModel.model_validate(
+        {
+            "n_rows": 60,
+            "profiles": [
+                {
+                    "name": "pik3ca_mut",
+                    "dtype": "int64",
+                    "n_rows": 60,
+                    "n_missing": 0,
+                    "missing_rate": 0.0,
+                    "distinct_count": 2,
+                    "inferred_kind": "NUMERIC",
+                    "summary": {
+                        "min": 0.0,
+                        "max": 1.0,
+                        "mean": 0.2,
+                        "std": 0.4,
+                        "quantiles": None,
+                    },
+                },
+                {
+                    "name": "tp53_mut",
+                    "dtype": "bool",
+                    "n_rows": 60,
+                    "n_missing": 0,
+                    "missing_rate": 0.0,
+                    "distinct_count": 2,
+                    "inferred_kind": "BOOLEAN",
+                    "summary": {"counts": {"True": 12, "False": 48}},
+                },
+            ],
+        }
+    )
+
+
 def _causal_spec_payload(
     *,
     covariates: list[str] | None = None,
@@ -69,9 +137,7 @@ def _causal_spec_payload(
             "non_event": "non_event",
         },
         "covariates": covariates if covariates is not None else ["age"],
-        "effect_modifiers": (
-            effect_modifiers if effect_modifiers is not None else ["isex"]
-        ),
+        "effect_modifiers": (effect_modifiers if effect_modifiers is not None else ["isex"]),
         "experiment_type": "OBSERVATIONAL",
         "id_col": "patient_id",
     }
@@ -210,8 +276,7 @@ def test_transform_builds_type_driven_plan_and_saves_preferred_type_suggestions(
     assert result.transformation_suggestions is not None
     assert isinstance(result.transformation_suggestions, ColumnTransformationSuggestionList)
     assert [
-        suggestion.preferred_type
-        for suggestion in result.transformation_suggestions.suggestions
+        suggestion.preferred_type for suggestion in result.transformation_suggestions.suggestions
     ] == ["NUMERIC", "CATEGORICAL"]
 
 
@@ -281,9 +346,7 @@ def test_transform_only_allows_cat_onehot_for_categorical_columns() -> None:
 
     result = transform(
         transformation_instructions="",
-        causal_spec=CausalSpec.model_validate(
-            _causal_spec_payload(effect_modifiers=["segment"])
-        ),
+        causal_spec=CausalSpec.model_validate(_causal_spec_payload(effect_modifiers=["segment"])),
         data_summary=_build_summary(dataframe),
         llm=llm,
     )
@@ -295,7 +358,7 @@ def test_transform_only_allows_cat_onehot_for_categorical_columns() -> None:
     ]
 
 
-def test_transform_converts_text_boolean_passthrough_to_cat_onehot() -> None:
+def test_transform_rejects_object_boolean_passthrough_without_cleaning_cast() -> None:
     dataframe = _build_dataframe()
     dataframe["flag"] = ["Yes" if index % 2 == 0 else "No" for index in range(len(dataframe))]
     llm = _FakeLLM(
@@ -310,26 +373,38 @@ def test_transform_converts_text_boolean_passthrough_to_cat_onehot() -> None:
                         "preferred_type_reason": "Flag is a boolean-like Yes/No indicator.",
                     }
                 ]
-            }
+            },
+            {
+                "columns": [
+                    {
+                        "column": "flag",
+                        "role": "covariate",
+                        "preset": "passthrough",
+                        "preferred_type": "BOOLEAN",
+                        "preferred_type_reason": "Flag is a boolean-like Yes/No indicator.",
+                    }
+                ]
+            },
         ]
     )
 
-    result = transform(
-        transformation_instructions="",
-        causal_spec=CausalSpec.model_validate(
-            _causal_spec_payload(covariates=["flag"], effect_modifiers=[])
-        ),
-        data_summary=_build_summary(dataframe),
-        llm=llm,
-        encoding_plan_tool=EncodingPlanTool(),
-    )
+    with pytest.raises(ValueError, match="current kind 'CATEGORICAL'"):
+        transform(
+            transformation_instructions="",
+            causal_spec=CausalSpec.model_validate(
+                _causal_spec_payload(covariates=["flag"], effect_modifiers=[])
+            ),
+            data_summary=_build_summary(dataframe),
+            llm=llm,
+            encoding_plan_tool=EncodingPlanTool(),
+        )
 
-    assert result.transformation_plan is not None
-    assert result.transformation_plan.columns[0].encoding.preset == "cat_onehot"
+    assert len(llm.generate_json_calls) == 2
 
 
 def test_transform_only_allows_datetime_epoch_seconds_for_datetime_columns() -> None:
     dataframe = _build_dataframe()
+    dataframe["visit_date"] = pd.to_datetime(dataframe["visit_date"])
     llm = _FakeLLM(
         json_outputs=[
             {
@@ -358,6 +433,110 @@ def test_transform_only_allows_datetime_epoch_seconds_for_datetime_columns() -> 
     assert result.transformation_plan is not None
     assert [column.encoding.preset for column in result.transformation_plan.columns] == [
         "datetime_epoch_seconds"
+    ]
+
+
+def test_transform_prompt_payload_uses_stored_kind_and_preserves_inferred_kind() -> None:
+    llm = _FakeLLM(
+        json_outputs=[
+            {
+                "columns": [
+                    {
+                        "column": "pik3ca_mut",
+                        "role": "covariate",
+                        "preset": "cat_onehot",
+                        "preferred_type": "BOOLEAN",
+                        "preferred_type_reason": "Mutation strings are categorical until cleaning casts them.",
+                    }
+                ]
+            }
+        ]
+    )
+
+    result = transform(
+        transformation_instructions="",
+        causal_spec=CausalSpec.model_validate(
+            _causal_spec_payload(covariates=["pik3ca_mut"], effect_modifiers=[])
+        ),
+        data_summary=_object_mutation_summary(),
+        llm=llm,
+    )
+
+    assert result.transformation_plan is not None
+    prompt_payload = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
+    [column_payload] = prompt_payload["scoped_dataset_summary"]["columns"]
+    assert column_payload["name"] == "pik3ca_mut"
+    assert column_payload["dtype"] == "object"
+    assert column_payload["kind"] == "CATEGORICAL"
+    assert column_payload["inferred_kind"] == "BOOLEAN"
+
+
+def test_transform_retries_object_mutation_passthrough_as_stored_kind_incompatibility() -> None:
+    invalid_output = {
+        "columns": [
+            {
+                "column": "pik3ca_mut",
+                "role": "covariate",
+                "preset": "passthrough",
+                "preferred_type": "BOOLEAN",
+                "preferred_type_reason": "Mutation strings look like a present/absent flag.",
+            }
+        ]
+    }
+    llm = _FakeLLM(json_outputs=[invalid_output, invalid_output])
+
+    with pytest.raises(ValueError, match="current kind 'CATEGORICAL'"):
+        transform(
+            transformation_instructions="",
+            causal_spec=CausalSpec.model_validate(
+                _causal_spec_payload(covariates=["pik3ca_mut"], effect_modifiers=[])
+            ),
+            data_summary=_object_mutation_summary(),
+            llm=llm,
+        )
+
+    assert len(llm.generate_json_calls) == 2
+    retry_payload = json.loads(str(llm.generate_json_calls[1]["user_prompt"]))
+    assert "current kind 'CATEGORICAL'" in retry_payload["retry_note"]
+
+
+def test_transform_allows_numeric_and_boolean_presets_after_cleaning_casts_mutations() -> None:
+    llm = _FakeLLM(
+        json_outputs=[
+            {
+                "columns": [
+                    {
+                        "column": "pik3ca_mut",
+                        "role": "covariate",
+                        "preset": "num_standard",
+                        "preferred_type": "NUMERIC",
+                        "preferred_type_reason": "Cleaning recoded the mutation to numeric 0/1.",
+                    },
+                    {
+                        "column": "tp53_mut",
+                        "role": "effect_modifier",
+                        "preset": "passthrough",
+                        "preferred_type": "BOOLEAN",
+                        "preferred_type_reason": "Cleaning recoded the mutation to bool.",
+                    },
+                ]
+            }
+        ]
+    )
+
+    result = transform(
+        transformation_instructions="",
+        causal_spec=CausalSpec.model_validate(
+            _causal_spec_payload(covariates=["pik3ca_mut"], effect_modifiers=["tp53_mut"])
+        ),
+        data_summary=_cleaned_mutation_summary(),
+        llm=llm,
+    )
+
+    assert result.transformation_plan is not None
+    assert [column.encoding.preset for column in result.transformation_plan.columns] == [
+        "num_standard",
+        "passthrough",
     ]
 
 

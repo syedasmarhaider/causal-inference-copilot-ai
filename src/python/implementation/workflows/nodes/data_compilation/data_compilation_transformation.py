@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Sequence, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -117,7 +118,7 @@ def transform(
         data_summary,
         include_columns=list(expected_role_by_column.keys()),
     )
-    
+
     return _generate_batch_result(
         llm=llm,
         transformation_instructions=transformation_instructions,
@@ -194,18 +195,14 @@ def _result_from_draft(
     )
 
     payload = _materialize_transform_plan_payload(
-        planned_columns=[
-            column_drafts_by_name[column] for column in expected_role_by_column
-        ],
+        planned_columns=[column_drafts_by_name[column] for column in expected_role_by_column],
         scoped_summary=scoped_summary,
     )
     covariate_columns = [
         column for column, role in expected_role_by_column.items() if role == "covariate"
     ]
     effect_modifier_columns = [
-        column
-        for column, role in expected_role_by_column.items()
-        if role == "effect_modifier"
+        column for column, role in expected_role_by_column.items() if role == "effect_modifier"
     ]
     model_dict, issues = encoding_plan_tool.validate_encoding_payload_structured(
         payload=payload,
@@ -227,9 +224,7 @@ def _result_from_draft(
     return TransformationResult(
         transformation_plan=validated_plan,
         transformation_suggestions=_build_transformation_suggestions(
-            planned_columns=[
-                column_drafts_by_name[column] for column in expected_role_by_column
-            ]
+            planned_columns=[column_drafts_by_name[column] for column in expected_role_by_column]
         ),
     )
 
@@ -281,7 +276,7 @@ def _validate_draft_presets_by_profile(
         profile = profiles_by_name.get(column)
         if profile is None:
             raise ValueError(f"draft references unknown dataset summary column: {column}")
-        current_kind = _profile_kind(profile)
+        current_kind = _stored_dtype_kind(profile)
         allowed_presets = _ALLOWED_PRESETS_BY_KIND[current_kind]
         if draft.preset not in allowed_presets:
             raise ValueError(
@@ -322,20 +317,13 @@ def _materialize_encoding_payload_from_draft_column(
     draft_column: _DraftColumn,
     profile: ColumnProfile,
 ) -> dict[str, Any]:
-    current_kind = _profile_kind(profile)
+    current_kind = _stored_dtype_kind(profile)
     allowed_presets = _ALLOWED_PRESETS_BY_KIND[current_kind]
     if draft_column.preset not in allowed_presets:
         raise ValueError(
             f"column '{draft_column.column}' has current kind '{current_kind}' so preset "
             f"'{draft_column.preset}' is not allowed"
         )
-
-    if (
-        draft_column.preset == "passthrough"
-        and isinstance(profile, BooleanColumnProfileModel)
-        and not _boolean_passthrough_is_numeric_safe(profile)
-    ):
-        return _cat_onehot_payload()
 
     match draft_column.preset:
         case "drop":
@@ -388,15 +376,6 @@ def _cat_onehot_payload() -> dict[str, Any]:
     }
 
 
-def _boolean_passthrough_is_numeric_safe(profile: BooleanColumnProfileModel) -> bool:
-    dtype = str(profile.dtype or "").strip().lower()
-    if not dtype:
-        return False
-    if dtype in {"bool", "boolean"} or dtype.startswith("bool"):
-        return True
-    return any(token in dtype for token in ("int", "uint", "float"))
-
-
 def _build_transformation_suggestions(
     *,
     planned_columns: Sequence[_DraftColumn],
@@ -414,8 +393,27 @@ def _build_transformation_suggestions(
     )
 
 
-def _profile_kind(profile: ColumnProfile) -> PreferredType:
-    return str(profile.inferred_kind)  # type: ignore[return-value]
+def _stored_dtype_kind(profile: ColumnProfile) -> PreferredType:
+    if isinstance(profile, OtherColumnProfileModel):
+        return "OTHER"
+
+    dtype = str(profile.dtype or "").strip().lower()
+    if dtype:
+        if dtype in {"bool", "boolean"} or dtype.startswith("bool"):
+            return "BOOLEAN"
+        if dtype.startswith("datetime") or "datetime64" in dtype or "datetimetz" in dtype:
+            return "DATETIME"
+        if dtype.startswith(("int", "uint", "float", "complex")):
+            return "NUMERIC"
+        if dtype in {"object", "string", "str", "category"} or dtype.startswith(
+            ("string", "category")
+        ):
+            return "CATEGORICAL"
+
+    inferred_kind = str(profile.inferred_kind)
+    if inferred_kind in {"NUMERIC", "CATEGORICAL", "BOOLEAN", "DATETIME", "OTHER"}:
+        return inferred_kind  # type: ignore[return-value]
+    return "OTHER"
 
 
 def _protocol_scope_role_by_column(
@@ -497,7 +495,8 @@ def _dataset_summary_prompt_payload(summary: DatasetSummaryModel) -> dict[str, A
 def _column_prompt_payload(profile: ColumnProfile) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "name": str(profile.name).strip(),
-        "kind": str(profile.inferred_kind),
+        "kind": _stored_dtype_kind(profile),
+        "inferred_kind": str(profile.inferred_kind),
         "dtype": profile.dtype,
         "missing_rate": profile.missing_rate,
         "distinct_count": profile.distinct_count,

@@ -27,6 +27,20 @@ def _numeric_profile(name: str) -> dict[str, Any]:
     }
 
 
+def _low_cardinality_numeric_profile(name: str) -> dict[str, Any]:
+    profile = _numeric_profile(name)
+    profile["dtype"] = "int64"
+    profile["distinct_count"] = 2
+    profile["summary"] = {
+        "min": 0.0,
+        "max": 1.0,
+        "mean": 0.5,
+        "std": 0.5,
+        "quantiles": None,
+    }
+    return profile
+
+
 def _categorical_profile(name: str, values: list[str]) -> dict[str, Any]:
     return {
         "name": name,
@@ -40,6 +54,32 @@ def _categorical_profile(name: str, values: list[str]) -> dict[str, Any]:
             "top_categories": [{"value": value, "count": 5} for value in values],
             "other_count": 0,
         },
+    }
+
+
+def _object_mutation_profile(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "dtype": "object",
+        "n_rows": 10,
+        "n_missing": 0,
+        "missing_rate": 0.0,
+        "distinct_count": 3,
+        "inferred_kind": "BOOLEAN",
+        "summary": {"counts": {"0": 8, "E545K": 1, "H1047R": 1}},
+    }
+
+
+def _object_numeric_string_profile(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "dtype": "object",
+        "n_rows": 10,
+        "n_missing": 0,
+        "missing_rate": 0.0,
+        "distinct_count": 10,
+        "inferred_kind": "NUMERIC",
+        "summary": {"min": 1.0, "max": 10.0, "mean": 5.5, "std": 3.0, "quantiles": None},
     }
 
 
@@ -103,6 +143,11 @@ def test_build_encoding_schema_binds_eligible_columns_from_roles_without_schema_
         "age": "NUMERIC",
         "segment": "CATEGORICAL",
     }
+    assert schema.SUMMARY_FIELD_STORED_KINDS == {
+        "age": "NUMERIC",
+        "segment": "CATEGORICAL",
+    }
+    assert schema.SUMMARY_FIELD_DTYPES == {"age": "float64", "segment": "object"}
     assert schema.ELIGIBLE_COLUMNS == ("age", "segment")
     assert schema.EXPECTED_ROLE_BY_COLUMN == {
         "age": "covariate",
@@ -289,7 +334,7 @@ def test_validate_encoding_payload_rejects_preset_kind_incompatibility() -> None
                 {
                     "column": "flag",
                     "role": "covariate",
-                    "encoding": {"preset": "num_standard"},
+                    "encoding": {"preset": "passthrough"},
                 },
                 {
                     "column": "visit_time",
@@ -304,6 +349,159 @@ def test_validate_encoding_payload_rejects_preset_kind_incompatibility() -> None
     )
 
     assert [column.column for column in model.columns] == ["flag", "visit_time"]
+
+    with pytest.raises(ValidationError, match=r"type and preset incompatibilities"):
+        tool.validate_encoding_payload(
+            payload=_plan_payload(
+                columns=[
+                    {
+                        "column": "flag",
+                        "role": "covariate",
+                        "encoding": {"preset": "num_standard"},
+                    }
+                ]
+            ),
+            data_summary=summary,
+            covariate_columns=["flag"],
+        )
+
+
+def test_object_mutation_column_uses_stored_categorical_kind_for_presets() -> None:
+    summary = _summary_model(_object_mutation_profile("pik3ca_mut"))
+    tool = EncodingPlanTool()
+
+    model = tool.validate_encoding_payload(
+        payload=_plan_payload(
+            columns=[
+                {
+                    "column": "pik3ca_mut",
+                    "role": "covariate",
+                    "encoding": {"preset": "cat_onehot"},
+                }
+            ]
+        ),
+        data_summary=summary,
+        covariate_columns=["pik3ca_mut"],
+    )
+
+    assert model.columns[0].encoding.preset == "cat_onehot"
+
+    for rejected_preset in ("passthrough", "num_standard"):
+        model_dict, issues = tool.validate_encoding_payload_structured(
+            payload=_plan_payload(
+                columns=[
+                    {
+                        "column": "pik3ca_mut",
+                        "role": "covariate",
+                        "encoding": {"preset": rejected_preset},
+                    }
+                ]
+            ),
+            data_summary=summary,
+            covariate_columns=["pik3ca_mut"],
+        )
+
+        assert model_dict is None
+        assert issues
+        message = str(issues[0]["message"])
+        assert "type and preset incompatibilities" in message
+        assert "'column': 'pik3ca_mut'" in message
+        assert "'dtype': 'object'" in message
+        assert "'stored_kind': 'CATEGORICAL'" in message
+        assert "'inferred_kind': 'BOOLEAN'" in message
+        assert f"'preset': '{rejected_preset}'" in message
+
+
+def test_object_numeric_looking_strings_reject_numeric_presets_until_cast() -> None:
+    summary = _summary_model(_object_numeric_string_profile("score_text"))
+    tool = EncodingPlanTool()
+
+    with pytest.raises(ValidationError, match=r"type and preset incompatibilities"):
+        tool.validate_encoding_payload(
+            payload=_plan_payload(
+                columns=[
+                    {
+                        "column": "score_text",
+                        "role": "covariate",
+                        "encoding": {"preset": "num_standard"},
+                    }
+                ]
+            ),
+            data_summary=summary,
+            covariate_columns=["score_text"],
+        )
+
+    model = tool.validate_encoding_payload(
+        payload=_plan_payload(
+            columns=[
+                {
+                    "column": "score_text",
+                    "role": "covariate",
+                    "encoding": {"preset": "cat_onehot"},
+                }
+            ]
+        ),
+        data_summary=summary,
+        covariate_columns=["score_text"],
+    )
+
+    assert model.columns[0].encoding.preset == "cat_onehot"
+
+
+def test_true_bool_dtype_allows_boolean_presets_and_rejects_numeric_scaling() -> None:
+    summary = _summary_model(_boolean_profile("flag"))
+    tool = EncodingPlanTool()
+
+    for accepted_preset in ("passthrough", "cat_onehot"):
+        model = tool.validate_encoding_payload(
+            payload=_plan_payload(
+                columns=[
+                    {
+                        "column": "flag",
+                        "role": "covariate",
+                        "encoding": {"preset": accepted_preset},
+                    }
+                ]
+            ),
+            data_summary=summary,
+            covariate_columns=["flag"],
+        )
+        assert model.columns[0].encoding.preset == accepted_preset
+
+    with pytest.raises(ValidationError, match=r"type and preset incompatibilities"):
+        tool.validate_encoding_payload(
+            payload=_plan_payload(
+                columns=[
+                    {
+                        "column": "flag",
+                        "role": "covariate",
+                        "encoding": {"preset": "num_minmax"},
+                    }
+                ]
+            ),
+            data_summary=summary,
+            covariate_columns=["flag"],
+        )
+
+
+def test_low_cardinality_numeric_dtype_rejects_categorical_encoding() -> None:
+    summary = _summary_model(_low_cardinality_numeric_profile("binary_score"))
+    tool = EncodingPlanTool()
+
+    with pytest.raises(ValidationError, match=r"type and preset incompatibilities"):
+        tool.validate_encoding_payload(
+            payload=_plan_payload(
+                columns=[
+                    {
+                        "column": "binary_score",
+                        "role": "covariate",
+                        "encoding": {"preset": "cat_onehot"},
+                    }
+                ]
+            ),
+            data_summary=summary,
+            covariate_columns=["binary_score"],
+        )
 
 
 def test_validate_encoding_payload_rejects_mapping_values_not_supported_by_exact_summary() -> None:
