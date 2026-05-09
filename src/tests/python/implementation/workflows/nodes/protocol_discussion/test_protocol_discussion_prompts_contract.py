@@ -48,8 +48,11 @@ def test_protocol_discussion_update_prompt_mentions_identifier_handling_rules() 
     assert "a negative-control outcome is used only for CATE refutation" in prompt
     assert "deterministic cleaning and encoding instructions" in prompt
     assert "validation, and refutation" in prompt
-    assert "covariates are baseline variables used to control or adjust" in prompt
-    assert "effect modifiers are baseline variables that can change the size or direction" in prompt
+    assert 'Do not frame covariates and effect modifiers as "confounders vs subgroup variables."' in prompt
+    assert "Both must be baseline variables, and both can contribute" in prompt
+    assert "covariates (W) are adjustment-only controls" in prompt
+    assert "effect modifiers (X) are baseline features" in prompt
+    assert "place it in effect modifiers instead of duplicating it in covariates" in prompt
 
 
 def test_protocol_discussion_review_prompt_mentions_identifier_handling() -> None:
@@ -61,19 +64,21 @@ def test_protocol_discussion_review_prompt_mentions_identifier_handling() -> Non
     assert "auto_id will be used" in prompt
     assert "negative-control outcome choice" in prompt
     assert "CATE negative-control refutation will not be performed" in prompt
-    assert "baseline adjustment or control variables" in prompt
-    assert "enable heterogeneous treatment effects across subgroups" in prompt
+    assert "baseline adjustment-only controls" in prompt
+    assert "also participate in adjustment" in prompt
+    assert "heterogeneous or individualized treatment-effect estimates" in prompt
 
 
 def test_protocol_discussion_questions_clarify_covariates_and_effect_modifiers() -> None:
     questions = get_questions()
 
     assert any(
-        "used to control or adjust for confounding or prognostic differences" in question
+        "adjustment-only controls for confounding or prognostic differences" in question
         for question in questions
     )
     assert any(
-        "change the size or direction of the treatment effect across subgroups" in question
+        "can also contribute to adjustment" in question
+        and "drive heterogeneity or individualized effects" in question
         for question in questions
     )
 
