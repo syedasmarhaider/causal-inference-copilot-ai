@@ -46,6 +46,22 @@ def _build_dataframe() -> pd.DataFrame:
     )
 
 
+def _build_threshold_missingness_dataframe() -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for index in range(100):
+        rows.append(
+            {
+                "extra": f"drop-{index}",
+                "patient_id": f"p{index + 1}",
+                "isex": None if index < 50 else 1 + (index % 2),
+                "outcome": "event" if index % 2 == 0 else "non_event",
+                "treatment": "drug" if index % 2 == 0 else "control",
+                "age": None if index < 50 else 40 + index,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _build_summary(dataframe: pd.DataFrame) -> DatasetSummaryModel:
     return DatasetProfilingTool().extract_dataset_summary(
         dataframe,
@@ -656,6 +672,236 @@ def test_cleaning_passes_one_instruction_to_data_manipulation() -> None:
         "Create helper flags and use them to impute age while preserving required columns.",
     )
     assert result.pd_cleaned["age"].tolist() == [50, 70]
+
+
+def test_cleaning_adds_missingness_indicators_for_imputed_feature_columns() -> None:
+    dataframe = _build_threshold_missingness_dataframe()
+    imputed = dataframe.assign(
+        age=[50 + index for index in range(len(dataframe))],
+        isex=[1 + (index % 2) for index in range(len(dataframe))],
+        **{ID_COL_AUTO_FILL: list(range(1, len(dataframe) + 1))},
+    )
+    data_manipulation_tool = _FakeDataManipulationTool(
+        responses=[
+            imputed,
+        ]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            _done_instruction(),
+            _run_instruction(
+                "Impute retained covariate and effect modifier missingness.",
+                reason="Resolve retained feature missingness with imputation.",
+            ),
+            _semantic_payload(),
+        ]
+    )
+
+    result = cleaning(
+        protocol_discussion="Age is a covariate and isex is an effect modifier.",
+        cleaning_instructions="Impute retained feature missingness.",
+        review_recompile_request=None,
+        draft_causal_spec=_draft(),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        dataManipulationTool=data_manipulation_tool,
+        llm=llm,
+    )
+
+    assert result.pd_cleaned["age__missing"].tolist() == [1] * 50 + [0] * 50
+    assert result.pd_cleaned["isex__missing"].tolist() == [1] * 50 + [0] * 50
+    assert result.causal.covariates == ["age", "age__missing"]
+    assert result.causal.effect_modifiers == ["isex", "isex__missing"]
+
+
+def test_cleaning_does_not_add_feature_indicator_below_missingness_threshold() -> None:
+    dataframe = _build_dataframe()
+    dataframe.loc[0, "age"] = None
+    imputed = dataframe.assign(
+        age=[50, 61],
+        **{ID_COL_AUTO_FILL: [1, 2]},
+    )
+    data_manipulation_tool = _FakeDataManipulationTool(
+        responses=[
+            imputed,
+        ]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            _done_instruction(),
+            _run_instruction(
+                "Impute retained age missingness.",
+                reason="Resolve retained feature missingness with imputation.",
+            ),
+            _semantic_payload(),
+        ]
+    )
+
+    result = cleaning(
+        protocol_discussion="Age is a covariate.",
+        cleaning_instructions="Impute retained feature missingness.",
+        review_recompile_request=None,
+        draft_causal_spec=_draft(),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        dataManipulationTool=data_manipulation_tool,
+        llm=llm,
+    )
+
+    assert "age__missing" not in result.pd_cleaned.columns
+    assert result.causal.covariates == ["age"]
+
+
+def test_cleaning_does_not_add_feature_indicator_for_protocol_filtered_rows() -> None:
+    dataframe = pd.concat(
+        [
+            pd.DataFrame(
+                [
+                    {
+                        "extra": "drop",
+                        "patient_id": "p0",
+                        "isex": 1,
+                        "outcome": "event",
+                        "treatment": "drug",
+                        "age": None,
+                    }
+                ]
+            ),
+            _build_dataframe(),
+        ],
+        ignore_index=True,
+    )
+    filtered = _build_dataframe().assign(**{ID_COL_AUTO_FILL: [2, 3]})
+    data_manipulation_tool = _FakeDataManipulationTool(
+        responses=[
+            filtered,
+        ]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            _run_instruction(
+                "Apply the protocol population filter before missingness handling.",
+                reason="Protocol excludes the row before missingness handling.",
+            ),
+            _semantic_payload(),
+        ]
+    )
+
+    result = cleaning(
+        protocol_discussion="Exclude the row outside the protocol population.",
+        cleaning_instructions="Filter protocol-ineligible rows before handling missingness.",
+        review_recompile_request=None,
+        draft_causal_spec=_draft(),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        dataManipulationTool=data_manipulation_tool,
+        llm=llm,
+    )
+
+    assert "age__missing" not in result.pd_cleaned.columns
+    assert result.causal.covariates == ["age"]
+
+
+def test_cleaning_does_not_add_feature_indicator_when_missing_feature_rows_are_dropped() -> None:
+    dataframe = pd.concat(
+        [
+            pd.DataFrame(
+                [
+                    {
+                        "extra": "drop",
+                        "patient_id": "p0",
+                        "isex": 1,
+                        "outcome": "event",
+                        "treatment": "drug",
+                        "age": None,
+                    }
+                ]
+            ),
+            _build_dataframe(),
+        ],
+        ignore_index=True,
+    )
+    retained = _build_dataframe().assign(**{ID_COL_AUTO_FILL: [2, 3]})
+    data_manipulation_tool = _FakeDataManipulationTool(
+        responses=[
+            retained,
+        ]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            _done_instruction(),
+            _run_instruction(
+                "Drop retained rows with missing age.",
+                reason="Age missingness is resolved by row filtering.",
+            ),
+            _semantic_payload(),
+        ]
+    )
+
+    result = cleaning(
+        protocol_discussion="Drop rows with unresolved feature missingness.",
+        cleaning_instructions="Drop rows with missing age.",
+        review_recompile_request=None,
+        draft_causal_spec=_draft(),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        dataManipulationTool=data_manipulation_tool,
+        llm=llm,
+    )
+
+    assert "age__missing" not in result.pd_cleaned.columns
+    assert result.causal.covariates == ["age"]
+    age_decision = next(
+        decision for decision in result.missingness_decisions.decisions if decision.column == "age"
+    )
+    assert age_decision.resolution == "drop_rows"
+
+
+def test_cleaning_does_not_add_missingness_indicators_for_treatment_or_outcome() -> None:
+    dataframe = _build_dataframe()
+    dataframe.loc[0, "treatment"] = None
+    dataframe.loc[1, "outcome"] = None
+    imputed = dataframe.assign(
+        treatment=["drug", "control"],
+        outcome=["event", "non_event"],
+        **{ID_COL_AUTO_FILL: [1, 2]},
+    )
+    data_manipulation_tool = _FakeDataManipulationTool(
+        responses=[
+            imputed,
+        ]
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            _done_instruction(),
+            _run_instruction(
+                "Resolve required treatment and outcome missingness.",
+                reason="Treatment and outcome must be observed for compilation.",
+            ),
+            _semantic_payload(),
+        ]
+    )
+
+    result = cleaning(
+        protocol_discussion="Treatment and outcome are required protocol columns.",
+        cleaning_instructions="Resolve treatment and outcome missingness.",
+        review_recompile_request=None,
+        draft_causal_spec=_draft(),
+        data_summary=_build_summary(dataframe),
+        to_clean_df=dataframe,
+        datasetProfilingTool=DatasetProfilingTool(),
+        dataManipulationTool=data_manipulation_tool,
+        llm=llm,
+    )
+
+    assert "treatment__missing" not in result.pd_cleaned.columns
+    assert "outcome__missing" not in result.pd_cleaned.columns
+    assert result.causal.covariates == ["age"]
+    assert result.causal.effect_modifiers == ["isex"]
 
 
 def test_cleaning_feeds_validation_feedback_to_next_instruction_planner() -> None:

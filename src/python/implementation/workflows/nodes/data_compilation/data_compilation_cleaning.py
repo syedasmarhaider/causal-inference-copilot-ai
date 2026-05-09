@@ -67,6 +67,8 @@ CleaningStage = Literal["transformation", "missingness", "cleanup_1", "cleanup_2
 _PROTOCOL_SCOPE_TABLE = "protocol_scope_df"
 _MAX_CLEANING_MANIPULATION_STAGES = 4
 _COMPACT_VALUE_LIMIT = 25
+_MISSINGNESS_INDICATOR_MIN_COUNT = 50
+_MISSINGNESS_INDICATOR_MIN_RATE = 0.01
 
 
 class MissingnessDecision(BaseModel):
@@ -115,6 +117,14 @@ class _ExecutedCleaningInstruction:
     rows_after: int
     missing_counts_before: dict[str, int]
     missing_counts_after: dict[str, int]
+
+
+@dataclass(frozen=True)
+class _MissingnessIndicatorSpec:
+    source_column: str
+    indicator_column: str
+    role: ColumnRole
+    missing_by_id: pd.Series
 
 
 class _TreatmentSemanticsModel(BaseModel):
@@ -226,7 +236,12 @@ def cleaning(
         dataframe=prepared_df,
     )
 
-    cleaned_df, missingness_decisions, cleaning_notes = _clean_with_adaptive_manipulation(
+    (
+        cleaned_df,
+        missingness_decisions,
+        cleaning_notes,
+        indicator_role_by_column,
+    ) = _clean_with_adaptive_manipulation(
         llm=llm,
         prepared_summary=prepared_summary,
         prepared_df=prepared_df,
@@ -247,7 +262,8 @@ def cleaning(
             before_df=prepared_df,
             draft_causal_spec=draft_causal_spec,
             effective_id_col=effective_id_col,
-            required_columns=required_columns,
+            required_columns=list(cleaned_df.columns),
+            indicator_role_by_column=indicator_role_by_column,
             protocol_discussion=protocol_discussion,
             dataset_profiling_tool=datasetProfilingTool,
             data_manipulation_tool=dataManipulationTool,
@@ -271,6 +287,7 @@ def _compile_and_repair_semantic_consistency(
     draft_causal_spec: CausalSpecDraft,
     effective_id_col: str,
     required_columns: Sequence[str],
+    indicator_role_by_column: dict[str, ColumnRole],
     protocol_discussion: str | None,
     dataset_profiling_tool: DatasetProfilingTool,
     data_manipulation_tool: DataManipulationTool,
@@ -281,7 +298,10 @@ def _compile_and_repair_semantic_consistency(
     MissingnessDecisionList,
     tuple[str, ...],
 ]:
-    role_by_column = _expected_role_by_column(draft_causal_spec)
+    role_by_column = {
+        **_expected_role_by_column(draft_causal_spec),
+        **indicator_role_by_column,
+    }
     current_df = cleaned_df
     semantic_notes: list[str] = []
     current_missingness_decisions = _finalize_missingness_decisions(
@@ -301,6 +321,7 @@ def _compile_and_repair_semantic_consistency(
             draft_causal_spec=draft_causal_spec,
             protocol_discussion=protocol_discussion,
             effective_id_col=effective_id_col,
+            indicator_role_by_column=indicator_role_by_column,
         )
         semantic_issues = _compiled_semantic_consistency_issues(
             dataframe=current_df,
@@ -619,18 +640,35 @@ def _clean_with_adaptive_manipulation(
     review_recompile_request: str | None,
     dataset_profiling_tool: DatasetProfilingTool,
     data_manipulation_tool: DataManipulationTool,
-) -> tuple[pd.DataFrame, MissingnessDecisionList, tuple[str, ...]]:
+) -> tuple[
+    pd.DataFrame,
+    MissingnessDecisionList,
+    tuple[str, ...],
+    dict[str, ColumnRole],
+]:
     role_by_column = _expected_role_by_column(draft_causal_spec)
+    current_role_by_column = dict(role_by_column)
+    current_required_columns = list(required_columns)
     current_df = prepared_df.copy()
     current_summary = prepared_summary
     executed_steps: list[_ExecutedCleaningInstruction] = []
     validation_feedback: _CleaningFailure | None = None
+    indicator_role_by_column: dict[str, ColumnRole] = {}
 
     for stage in _cleaning_stage_sequence():
         if stage == "missingness" and not any(
             _missing_counts_by_column(current_df, role_by_column).values()
         ):
             continue
+
+        missingness_indicator_specs: tuple[_MissingnessIndicatorSpec, ...] = ()
+        if stage == "missingness":
+            missingness_indicator_specs = _missingness_indicator_specs(
+                dataframe=current_df,
+                role_by_column=role_by_column,
+                effective_id_col=effective_id_col,
+                reserved_columns=(*current_df.columns, *current_required_columns),
+            )
 
         step = _plan_next_cleaning_instruction(
             llm=llm,
@@ -639,8 +677,8 @@ def _clean_with_adaptive_manipulation(
             current_df=current_df,
             draft_causal_spec=draft_causal_spec,
             effective_id_col=effective_id_col,
-            required_columns=required_columns,
-            role_by_column=role_by_column,
+            required_columns=current_required_columns,
+            role_by_column=current_role_by_column,
             protocol_discussion=protocol_discussion,
             cleaning_instructions=cleaning_instructions,
             review_recompile_request=review_recompile_request,
@@ -676,7 +714,7 @@ def _clean_with_adaptive_manipulation(
             )
             _ensure_columns_present(
                 dataframe=next_df,
-                columns=required_columns,
+                columns=current_required_columns,
                 context=f"{stage} data manipulation output dataframe",
             )
             _ensure_identifier_integrity(
@@ -685,6 +723,17 @@ def _clean_with_adaptive_manipulation(
                 effective_id_col=effective_id_col,
                 context=f"{stage} data manipulation output dataframe",
             )
+            if stage == "missingness":
+                applied_indicators = _apply_missingness_indicators(
+                    dataframe=next_df,
+                    indicator_specs=missingness_indicator_specs,
+                    effective_id_col=effective_id_col,
+                )
+                for indicator_column, role in applied_indicators.items():
+                    if indicator_column not in current_required_columns:
+                        current_required_columns.append(indicator_column)
+                    current_role_by_column[indicator_column] = role
+                    indicator_role_by_column[indicator_column] = role
             next_summary = _profile_dataset(
                 dataset_profiling_tool=dataset_profiling_tool,
                 dataframe=next_df,
@@ -721,12 +770,12 @@ def _clean_with_adaptive_manipulation(
 
     _ensure_columns_present(
         dataframe=current_df,
-        columns=required_columns,
+        columns=current_required_columns,
         context="cleaned dataframe",
     )
     cleaned_df = _project_required_columns(
         dataframe=current_df,
-        columns=required_columns,
+        columns=current_required_columns,
     )
     try:
         missingness_decisions = _finalize_missingness_decisions(
@@ -739,8 +788,11 @@ def _clean_with_adaptive_manipulation(
             "adaptive data manipulation cleaning failed: "
             f"{str(exc).strip() or exc.__class__.__name__}"
         ) from exc
-    return cleaned_df, missingness_decisions, _cleaning_notes_from_executed_steps(
-        executed_steps
+    return (
+        cleaned_df,
+        missingness_decisions,
+        _cleaning_notes_from_executed_steps(executed_steps),
+        indicator_role_by_column,
     )
 
 
@@ -1102,6 +1154,92 @@ def _missing_counts_by_column(
     return counts
 
 
+def _missingness_indicator_specs(
+    *,
+    dataframe: pd.DataFrame,
+    role_by_column: dict[str, ColumnRole],
+    effective_id_col: str,
+    reserved_columns: Sequence[str],
+) -> tuple[_MissingnessIndicatorSpec, ...]:
+    reserved = {str(column) for column in reserved_columns}
+    specs: list[_MissingnessIndicatorSpec] = []
+
+    for source_column, role in role_by_column.items():
+        if role not in {"covariate", "effect_modifier"}:
+            continue
+        if source_column not in dataframe.columns:
+            continue
+        missing_mask = dataframe[source_column].isna()
+        missing_count = int(missing_mask.sum())
+        missing_rate = float(missing_count / len(dataframe)) if len(dataframe) else 0.0
+        if (
+            missing_count < _MISSINGNESS_INDICATOR_MIN_COUNT
+            or missing_rate < _MISSINGNESS_INDICATOR_MIN_RATE
+        ):
+            continue
+        indicator_column = _missingness_indicator_name(
+            source_column=source_column,
+            reserved_columns=reserved,
+        )
+        reserved.add(indicator_column)
+        missing_by_id = pd.Series(
+            missing_mask.to_numpy(dtype=bool),
+            index=dataframe[effective_id_col].tolist(),
+        )
+        specs.append(
+            _MissingnessIndicatorSpec(
+                source_column=source_column,
+                indicator_column=indicator_column,
+                role=role,
+                missing_by_id=missing_by_id,
+            )
+        )
+
+    return tuple(specs)
+
+
+def _missingness_indicator_name(
+    *,
+    source_column: str,
+    reserved_columns: set[str],
+) -> str:
+    base_name = f"{source_column}__missing"
+    if base_name not in reserved_columns:
+        return base_name
+
+    suffix = 2
+    while f"{base_name}_{suffix}" in reserved_columns:
+        suffix += 1
+    return f"{base_name}_{suffix}"
+
+
+def _apply_missingness_indicators(
+    *,
+    dataframe: pd.DataFrame,
+    indicator_specs: Sequence[_MissingnessIndicatorSpec],
+    effective_id_col: str,
+) -> dict[str, ColumnRole]:
+    applied: dict[str, ColumnRole] = {}
+    for spec in indicator_specs:
+        if spec.source_column not in dataframe.columns:
+            continue
+        if int(dataframe[spec.source_column].isna().sum()) > 0:
+            continue
+
+        retained_missing = (
+            dataframe[effective_id_col]
+            .map(spec.missing_by_id)
+            .fillna(False)
+            .astype(bool)
+        )
+        if not bool(retained_missing.any()):
+            continue
+
+        dataframe[spec.indicator_column] = retained_missing.astype("int64")
+        applied[spec.indicator_column] = spec.role
+    return applied
+
+
 def _normalize_text(raw: str | None) -> str:
     if raw is None:
         return ""
@@ -1130,6 +1268,7 @@ def compile_causal_spec_from_cleaned_summary(
     protocol_discussion: str | None,
     retry_feedback: str | None = None,
     effective_id_col: str | None = None,
+    indicator_role_by_column: dict[str, ColumnRole] | None = None,
 ) -> CausalSpec:
     causal_specs_tool = CausalSpecsTool()
     compile_feedback = _normalize_text(retry_feedback) or None
@@ -1150,6 +1289,7 @@ def compile_causal_spec_from_cleaned_summary(
             draft_causal_spec=draft_causal_spec,
             semantics=semantics,
             effective_id_col=resolved_id_col,
+            indicator_role_by_column=indicator_role_by_column or {},
         )
         try:
             return causal_specs_tool.post_validate_backdoor_spec(
@@ -1245,6 +1385,7 @@ def _assemble_causal_spec(
     draft_causal_spec: CausalSpecDraft,
     semantics: _CausalSemanticsModel,
     effective_id_col: str,
+    indicator_role_by_column: dict[str, ColumnRole],
 ) -> CausalSpec:
     treatment_column = str(draft_causal_spec.treatment_column).strip()
     outcome_column = str(draft_causal_spec.outcome_column).strip()
@@ -1276,8 +1417,22 @@ def _assemble_causal_spec(
         treatment_spec=treatment_spec,
         outcome_spec=outcome_spec,
         negative_control_outcome=negative_control_outcome,
-        covariates=[str(column).strip() for column in draft_causal_spec.covariates],
-        effect_modifiers=[str(column).strip() for column in draft_causal_spec.effect_modifiers],
+        covariates=[
+            *[str(column).strip() for column in draft_causal_spec.covariates],
+            *[
+                column
+                for column, role in indicator_role_by_column.items()
+                if role == "covariate"
+            ],
+        ],
+        effect_modifiers=[
+            *[str(column).strip() for column in draft_causal_spec.effect_modifiers],
+            *[
+                column
+                for column, role in indicator_role_by_column.items()
+                if role == "effect_modifier"
+            ],
+        ],
         experiment_type=semantics.experiment_type,
         id_col=effective_id_col,
     )
