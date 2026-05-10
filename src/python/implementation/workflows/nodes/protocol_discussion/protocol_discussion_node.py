@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
-from difflib import get_close_matches
 from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,7 +15,9 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     ProtocolDiscussionDeps,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
+    get_compile_causal_spec_draft_prompt,
     get_protocol_discussion_get_node_info,
+    get_protocol_discussion_response_prompt,
     get_protocol_discussion_update_prompt,
     initial_user_message,
 )
@@ -57,7 +58,40 @@ class _DraftDecisionModel(BaseModel):
 
     draft: ProtocolCausalDraftModel = Field(default_factory=ProtocolCausalDraftModel)
     next_action: NextAction
+
+
+class _DraftResponseModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     assistant_message: str = Field(..., min_length=1)
+
+
+def compile_causal_spec_draft_from_discussion(
+    *,
+    llm: LLMService,
+    protocol_discussion: str,
+    dataset_summary: DatasetSummaryModel,
+    retry_feedback: str | None = None,
+    previous_draft: CausalSpecDraft | None = None,
+) -> CausalSpecDraft:
+    schema = CausalSpecDraft.for_dataset_summary(dataset_summary)
+    user_payload: dict[str, Any] = {
+        "protocol_discussion": protocol_discussion,
+        "dataset_summary": dataset_summary.model_dump(mode="json"),
+    }
+    if previous_draft is not None:
+        user_payload["previous_draft"] = previous_draft.model_dump(mode="json")
+    if retry_feedback is not None:
+        user_payload["retry_feedback"] = retry_feedback
+
+    return llm.generate_json(
+        schema=schema,
+        system_prompt=get_compile_causal_spec_draft_prompt(),
+        user_prompt=json.dumps(user_payload, ensure_ascii=False),
+        config=LLMConfig(model="basic", temperature=0.0),
+        history=None,
+        max_attempts=2,
+    )
 
 
 class ProtocolDiscussionNode(Node):
@@ -105,16 +139,19 @@ class ProtocolDiscussionNode(Node):
                 ),
             )
 
+        previous_draft = payload.draft
+        history = (
+            list(request.read_only_messages_history[-4:])
+            if request.read_only_messages_history
+            else None
+        )
+
         try:
             decision = self._call_update(
-                draft=payload.draft,
+                draft=previous_draft,
                 dataset_summary=deps.dataset_summary,
                 latest_user_message=latest_user_message,
-                history=(
-                    list(request.read_only_messages_history[-4:])
-                    if request.read_only_messages_history
-                    else None
-                ),
+                history=history,
             )
         except Exception as exc:
             log.exception("PROTOCOL_DISCUSSION draft update failure: %s", safe_err(exc))
@@ -132,25 +169,29 @@ class ProtocolDiscussionNode(Node):
             )
 
         draft = decision.draft
-        validation_message = _draft_blocking_message(
+        validation_context = _draft_validation_context(
             draft=draft,
             dataset_summary=deps.dataset_summary,
         )
-        column_notes = _column_structure_notes(
-            draft=draft,
-            dataset_summary=deps.dataset_summary,
+        final_next_action: NextAction = (
+            "confirm"
+            if decision.next_action == "confirm"
+            and not bool(validation_context["has_blocking_issues"])
+            else "continue"
         )
-        population_note = _population_guidance(draft.target_population)
-
-        assistant_message = _compose_assistant_message(
-            decision.assistant_message,
-            validation_message,
-            column_notes,
-            population_note,
+        assistant_message = self._call_response(
+            previous_draft=previous_draft,
+            updated_draft=draft,
+            dataset_summary=deps.dataset_summary,
+            latest_user_message=latest_user_message,
+            requested_next_action=decision.next_action,
+            final_next_action=final_next_action,
+            validation_context=validation_context,
             dataset_changed=dataset_changed,
+            history=history,
         )
 
-        if decision.next_action == "confirm" and validation_message is None:
+        if final_next_action == "confirm":
             causal_spec_draft = _to_causal_spec_draft(draft)
             confirmed_payload = payload.model_copy(
                 update={
@@ -205,6 +246,45 @@ class ProtocolDiscussionNode(Node):
             max_attempts=2,
         )
 
+    def _call_response(
+        self,
+        *,
+        previous_draft: ProtocolCausalDraftModel,
+        updated_draft: ProtocolCausalDraftModel,
+        dataset_summary: DatasetSummaryModel,
+        latest_user_message: str,
+        requested_next_action: NextAction,
+        final_next_action: NextAction,
+        validation_context: dict[str, Any],
+        dataset_changed: bool,
+        history: Sequence[ChatMessage] | None,
+    ) -> str:
+        payload = {
+            "latest_user_message": latest_user_message,
+            "previous_draft": previous_draft.model_dump(mode="json"),
+            "updated_draft": updated_draft.model_dump(mode="json"),
+            "requested_next_action": requested_next_action,
+            "final_next_action": final_next_action,
+            "dataset_changed": dataset_changed,
+            "validation_context": validation_context,
+            "selected_column_context": _selected_column_context(
+                draft=updated_draft,
+                dataset_summary=dataset_summary,
+            ),
+            "population_context": _population_context(updated_draft.target_population),
+            "dataset_summary": _compact_dataset_summary(dataset_summary),
+            "dataset_column_names": _summary_column_names(dataset_summary),
+        }
+        response = self._llm.generate_json(
+            schema=_DraftResponseModel,
+            system_prompt=get_protocol_discussion_response_prompt(),
+            user_prompt=json.dumps(payload, ensure_ascii=False),
+            config=LLMConfig(model="basic", temperature=0.3),
+            history=history,
+            max_attempts=2,
+        )
+        return response.assistant_message
+
     def _needs_input_result(
         self,
         *,
@@ -257,51 +337,25 @@ def _prefix_dataset_reset_message(message: str, *, dataset_changed: bool) -> str
     return f"The active dataset changed, so I reset the causal draft. {message}"
 
 
-def _compose_assistant_message(
-    base_message: str,
-    validation_message: str | None,
-    column_notes: Sequence[str],
-    population_note: str | None,
-    *,
-    dataset_changed: bool,
-) -> str:
-    parts = [_prefix_dataset_reset_message(base_message.strip(), dataset_changed=dataset_changed)]
-    if column_notes:
-        parts.append("Column structure:\n" + "\n".join(f"- {note}" for note in column_notes))
-    if population_note:
-        parts.append(population_note)
-    if validation_message:
-        parts.append(validation_message)
-    return "\n\n".join(part for part in parts if part.strip())
-
-
-def _draft_blocking_message(
+def _draft_validation_context(
     *,
     draft: ProtocolCausalDraftModel,
     dataset_summary: DatasetSummaryModel,
-) -> str | None:
-    issues: list[str] = []
+) -> dict[str, Any]:
     missing_required = _missing_required_fields(draft)
-    if missing_required:
-        issues.append(
-            "Before I can accept the causal draft, I still need: "
-            + ", ".join(missing_required)
-            + "."
-        )
-
     missing_columns = _missing_selected_columns(
         draft=draft,
         dataset_summary=dataset_summary,
     )
-    if missing_columns:
-        issues.append(_missing_columns_message(missing_columns, dataset_summary))
-
-    role_conflicts = _role_conflict_messages(draft)
-    issues.extend(role_conflicts)
-
-    if not issues:
-        return None
-    return "\n".join(issues)
+    role_conflicts = _role_conflicts(draft)
+    return {
+        "has_blocking_issues": bool(missing_required or missing_columns or role_conflicts),
+        "missing_required_fields": missing_required,
+        "missing_selected_columns": [
+            {"role": role, "column": column} for role, column in missing_columns
+        ],
+        "role_conflicts": role_conflicts,
+    }
 
 
 def _missing_required_fields(draft: ProtocolCausalDraftModel) -> list[str]:
@@ -343,49 +397,27 @@ def _missing_selected_columns(
     ]
 
 
-def _missing_columns_message(
-    missing_columns: Sequence[tuple[ColumnRole, str]],
-    dataset_summary: DatasetSummaryModel,
-) -> str:
-    available_columns = _summary_column_names(dataset_summary)
-    lines = [
-        "I cannot accept the draft because these selected variables are not current dataset columns:"
-    ]
-    for role, column in missing_columns:
-        suggestions = _close_column_suggestions(column, available_columns)
-        suggestion_text = (
-            f" Close existing columns: {', '.join(suggestions)}." if suggestions else ""
-        )
-        lines.append(f"- {column} ({role}).{suggestion_text}")
-        if suggestions:
-            lines.append(
-                f"  You can choose an existing column, or say `update dataset and rename {suggestions[0]} to {column}`."
-            )
-            lines.append(
-                f"  If it must be derived, say `update dataset and create {column} from {', '.join(suggestions[:2])} by <rule>`."
-            )
-        else:
-            lines.append(
-                f"  You can choose an existing column, or say `update dataset and create {column} from <existing columns> by <rule>`."
-            )
-    return "\n".join(lines)
-
-
-def _role_conflict_messages(draft: ProtocolCausalDraftModel) -> list[str]:
-    messages: list[str] = []
+def _role_conflicts(draft: ProtocolCausalDraftModel) -> list[dict[str, Any]]:
+    conflicts: list[dict[str, Any]] = []
     treatment = _norm(draft.treatment_column)
     outcome = _norm(draft.outcome_column)
     if treatment and outcome and treatment == outcome:
-        messages.append("Treatment and outcome must be different columns.")
+        conflicts.append(
+            {
+                "type": "treatment_outcome_same_column",
+                "columns": [draft.treatment_column, draft.outcome_column],
+            }
+        )
 
     covariates = {_norm(column): column for column in draft.covariates if _norm(column)}
     effect_modifiers = {_norm(column): column for column in draft.effect_modifiers if _norm(column)}
     overlap = sorted(set(covariates).intersection(effect_modifiers))
     if overlap:
-        messages.append(
-            "Covariates and effect modifiers must not overlap: "
-            + ", ".join(covariates[column] for column in overlap)
-            + "."
+        conflicts.append(
+            {
+                "type": "covariate_effect_modifier_overlap",
+                "columns": [covariates[column] for column in overlap],
+            }
         )
 
     protected = {key for key in (treatment, outcome) if key}
@@ -395,10 +427,11 @@ def _role_conflict_messages(draft: ProtocolCausalDraftModel) -> list[str]:
         if _norm(column) in protected
     ]
     if protected_overlap:
-        messages.append(
-            "Treatment and outcome columns cannot also be covariates or effect modifiers: "
-            + ", ".join(protected_overlap)
-            + "."
+        conflicts.append(
+            {
+                "type": "treatment_or_outcome_reused_as_adjustment_or_modifier",
+                "columns": protected_overlap,
+            }
         )
 
     negative_control = _norm(draft.negative_control_outcome)
@@ -411,43 +444,27 @@ def _role_conflict_messages(draft: ProtocolCausalDraftModel) -> list[str]:
             if _norm(column) == negative_control
         ]
         if other_roles:
-            messages.append(
-                f"{draft.negative_control_outcome} cannot be the negative-control outcome "
-                f"and also used as {', '.join(other_roles)}."
+            conflicts.append(
+                {
+                    "type": "negative_control_outcome_reused_in_other_role",
+                    "column": draft.negative_control_outcome,
+                    "other_roles": other_roles,
+                }
             )
-    return messages
+    return conflicts
 
 
 def _norm(value: str | None) -> str:
     return value.strip().casefold() if value else ""
 
 
-def _close_column_suggestions(
-    column: str, available_columns: Sequence[str], *, limit: int = 3
-) -> list[str]:
-    matches = get_close_matches(column, list(available_columns), n=limit, cutoff=0.55)
-    if matches:
-        return matches
-
-    normalized = re.sub(r"[^a-z0-9]+", " ", column.casefold()).strip()
-    tokens = [token for token in normalized.split() if len(token) >= 3]
-    token_matches: list[str] = []
-    for candidate in available_columns:
-        candidate_normalized = re.sub(r"[^a-z0-9]+", " ", candidate.casefold())
-        if any(token in candidate_normalized for token in tokens):
-            token_matches.append(candidate)
-        if len(token_matches) >= limit:
-            break
-    return token_matches
-
-
-def _column_structure_notes(
+def _selected_column_context(
     *,
     draft: ProtocolCausalDraftModel,
     dataset_summary: DatasetSummaryModel,
-) -> list[str]:
+) -> list[dict[str, Any]]:
     profiles_by_name = {str(profile.name): profile for profile in dataset_summary.profiles}
-    notes: list[str] = []
+    selected: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for role, column in _selected_role_columns(draft):
         key = (role, column)
@@ -456,29 +473,33 @@ def _column_structure_notes(
         seen.add(key)
         profile = profiles_by_name.get(column)
         if profile is None:
+            selected.append({"role": role, "column": column, "exists": False})
             continue
-        notes.append(_column_structure_note(profile=profile, role=role))
-    return notes
+        selected.append(
+            {
+                "role": role,
+                "column": column,
+                "exists": True,
+                "profile": _compact_column_profile(profile),
+                "may_need_next_step": _profile_may_need_next_step(
+                    profile=profile,
+                    role=role,
+                ),
+            }
+        )
+    return selected
 
 
-def _column_structure_note(*, profile: ColumnProfileModel, role: ColumnRole) -> str:
-    missing_rate_pct = profile.missing_rate * 100
-    pieces = [
-        f"{profile.name} as {role}",
-        f"{profile.inferred_kind.lower()}",
-    ]
-    if profile.dtype:
-        pieces.append(f"dtype {profile.dtype}")
-    pieces.append(f"{profile.n_missing} missing ({missing_rate_pct:.1f}%)")
-    if profile.distinct_count is not None:
-        pieces.append(f"{profile.distinct_count} distinct")
-    structure = ", ".join(pieces)
-    visible = _visible_profile_values(profile)
-    plausibility = _role_plausibility(profile=profile, role=role)
-    note = f"{structure}. {visible} {plausibility}".strip()
-    if _profile_may_need_next_step(profile=profile, role=role):
-        note += " Don't worry, we can figure this out in the next step."
-    return note
+def _compact_column_profile(profile: ColumnProfileModel) -> dict[str, Any]:
+    return {
+        "name": profile.name,
+        "dtype": profile.dtype,
+        "kind": profile.inferred_kind,
+        "missing": profile.n_missing,
+        "missing_rate": profile.missing_rate,
+        "distinct_count": profile.distinct_count,
+        "visible_values": _visible_profile_values(profile),
+    }
 
 
 def _visible_profile_values(profile: ColumnProfileModel) -> str:
@@ -508,22 +529,6 @@ def _visible_profile_values(profile: ColumnProfileModel) -> str:
     return ""
 
 
-def _role_plausibility(*, profile: ColumnProfileModel, role: ColumnRole) -> str:
-    if role == "treatment":
-        if profile.distinct_count == 2:
-            return "This looks plausible for a binary treatment column."
-        return "This may be risky for treatment because treatment must become binary."
-    if role == "outcome":
-        if isinstance(profile, NumericColumnProfileModel):
-            return "This can be plausible for a binary or continuous outcome depending on the target endpoint."
-        return "This can be plausible for an outcome if it represents the endpoint after time zero."
-    if role == "covariate":
-        return "This is plausible as a covariate if it is measured before time zero."
-    if role == "effect modifier":
-        return "This is plausible as an effect modifier if it is baseline and clinically relevant for heterogeneity."
-    return "This is plausible as a negative-control outcome only if treatment should not affect it."
-
-
 def _profile_may_need_next_step(*, profile: ColumnProfileModel, role: ColumnRole) -> bool:
     if profile.n_missing > 0:
         return True
@@ -551,17 +556,26 @@ def _looks_unknown_like(value: str) -> bool:
     }
 
 
-def _population_guidance(target_population: str | None) -> str | None:
+def _population_context(target_population: str | None) -> dict[str, Any]:
     if not target_population:
-        return None
+        return {
+            "target_population": None,
+            "specific_population": False,
+            "possible_filter_command": None,
+        }
     normalized = target_population.strip().casefold()
     if normalized in {"all rows", "all patients", "entire dataset", "all observations", "everyone"}:
-        return None
+        return {
+            "target_population": target_population,
+            "specific_population": False,
+            "possible_filter_command": None,
+        }
     command = _population_filter_command(target_population)
-    return (
-        "Target population can stay as draft text. If you want the dataset physically "
-        f"filtered first, say `{command}`."
-    )
+    return {
+        "target_population": target_population,
+        "specific_population": True,
+        "possible_filter_command": command,
+    }
 
 
 def _population_filter_command(target_population: str) -> str:
@@ -616,7 +630,5 @@ def _compact_dataset_summary(summary: DatasetSummaryModel) -> dict[str, Any]:
 
 __all__ = [
     "ProtocolDiscussionNode",
-    "_column_structure_notes",
-    "_draft_blocking_message",
-    "_population_guidance",
+    "compile_causal_spec_draft_from_discussion",
 ]

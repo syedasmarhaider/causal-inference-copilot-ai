@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
-from typing import Any, ClassVar, Literal
+from typing import ClassVar, Literal
 
 import pandas as pd
-from litellm import ConfigDict
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from python.domain.models.models import NonEmptyStr
 from python.domain.models.validation import ValidationIssueModel
-from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
 
 ID_COL_AUTO_FILL = "auto_id"
@@ -166,73 +163,6 @@ class CausalSpecDraft(BaseModel):
         return None
 
 
-def compile_causal_spec_draft_from_discussion(
-    *,
-    llm: LLMService,
-    protocol_discussion: str,
-    dataset_summary: DatasetSummaryModel,
-    retry_feedback: str | None = None,
-    previous_draft: CausalSpecDraft | None = None,
-) -> CausalSpecDraft:
-    schema = CausalSpecDraft.for_dataset_summary(dataset_summary)
-    user_payload: dict[str, Any] = {
-        "protocol_discussion": protocol_discussion,
-        "dataset_summary": dataset_summary.model_dump(mode="json"),
-    }
-    if previous_draft is not None:
-        user_payload["previous_draft"] = previous_draft.model_dump(mode="json")
-    if retry_feedback is not None:
-        user_payload["retry_feedback"] = retry_feedback
-
-    return llm.generate_json(
-        schema=schema,
-        system_prompt=get_compile_causal_spec_draft_prompt(),
-        user_prompt=json.dumps(user_payload, ensure_ascii=False),
-        config=LLMConfig(model="basic", temperature=0.0),
-        history=None,
-        max_attempts=2,
-    )
-
-
-def get_compile_causal_spec_draft_prompt() -> str:
-    return """
-You are compiling a strict causal draft from a confirmed protocol discussion.
-
-Inputs:
-- protocol_discussion: authoritative confirmed protocol text
-- dataset_summary: authoritative dataset metadata summary with exact column names
-- previous_draft: optional prior draft that failed dataframe validation
-- retry_feedback: optional validation feedback that must be fixed
-
-Task:
-- Return the best grounded CausalSpecDraft using exact dataset_summary column names.
-
-Rules:
-- Use only columns that appear exactly in dataset_summary.
-- Never invent, rename, normalize, or paraphrase column names.
-- treatment_column and outcome_column must be explicit and different.
-- negative_control_outcome is optional and must be null when no clinically valid candidate
-  is provided or strongly identified.
-- covariates and effect_modifiers are optional but must be grounded in the confirmed protocol discussion.
-- If the protocol names a clinically valid negative-control outcome candidate, copy that
-  exact dataset column into negative_control_outcome.
-- If the user does not provide one, only suggest a negative_control_outcome when there is
-  strong evidence from column names, metadata, or time ordering that the column is an
-  outcome-like variable that should not be affected by the treatment.
-- If no valid candidate is provided or strongly identified, set negative_control_outcome to null.
-- Do not use the treatment, primary outcome, identifier, covariate, or effect modifier
-  column as negative_control_outcome.
-- Remove duplicates.
-- Do not place treatment or outcome inside covariates or effect_modifiers.
-- Do not let covariates and effect_modifiers overlap.
-- If retry_feedback is present, fix that issue directly in the next draft.
-- Prefer an empty list over guessing an unclear covariate or effect modifier.
-
-Output:
-Return only JSON matching the CausalSpecDraft schema.
-""".strip()
-
-
 def _extract_summary_field_names(dataset_summary: DatasetSummaryModel) -> tuple[str, ...]:
     names: list[str] = []
     seen: set[str] = set()
@@ -257,7 +187,6 @@ def _find_duplicates(values: Sequence[str]) -> list[str]:
 
 
 __all__ = [
+    "ID_COL_AUTO_FILL",
     "CausalSpecDraft",
-    "compile_causal_spec_draft_from_discussion",
-    "get_compile_causal_spec_draft_prompt",
 ]

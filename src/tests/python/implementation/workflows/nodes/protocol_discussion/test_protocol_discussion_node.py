@@ -181,8 +181,10 @@ def test_protocol_discussion_updates_structured_draft_from_user_answer() -> None
             {
                 "draft": _complete_draft(target_population=None, time_zero=None),
                 "next_action": "continue",
-                "assistant_message": "I added the treatment and outcome. What target population and time zero should anchor the target trial?",
-            }
+            },
+            {
+                "assistant_message": "I added the treatment and outcome. What target population and time zero should anchor the target trial?"
+            },
         ]
     )
     node, request, _ = _request(dataset_summary=summary, llm=llm)
@@ -196,6 +198,8 @@ def test_protocol_discussion_updates_structured_draft_from_user_answer() -> None
     assert result.new_node_state.payload.draft.outcome_column == "DIED"
     assert "current_draft" in prompt_payload
     assert "dataset_column_names" in prompt_payload
+    assert len(llm.generate_json_calls) == 2
+    assert "validation_context" in json.loads(llm.generate_json_calls[1]["user_prompt"])
 
 
 def test_protocol_discussion_reports_selected_column_structure_and_missingness() -> None:
@@ -214,21 +218,29 @@ def test_protocol_discussion_reports_selected_column_structure_and_missingness()
             {
                 "draft": _complete_draft(),
                 "next_action": "continue",
-                "assistant_message": "The draft is filled. Please confirm if this is the causal draft you want.",
-            }
+            },
+            {
+                "assistant_message": (
+                    "The selected columns look usable. RXASP is the treatment, DIED is the "
+                    "outcome, AGE has 1 missing value, and SEX includes Unknown; those "
+                    "cleanup details can be handled in the next step."
+                )
+            },
         ]
     )
     node, request, _ = _request(dataset_summary=summary, llm=llm)
 
     result = node.run(request=request)
     message = result.response_messages[0].content
+    response_payload = json.loads(llm.generate_json_calls[1]["user_prompt"])
 
-    assert "Column structure:" in message
-    assert "RXASP as treatment" in message
-    assert "AGE as covariate" in message
+    assert "The selected columns look usable" in message
     assert "1 missing" in message
-    assert "Don't worry, we can figure this out in the next step." in message
-    assert "plausible" in message.lower() or "risky" in message.lower()
+    assert response_payload["selected_column_context"][0]["column"] == "RXASP"
+    assert any(
+        column["column"] == "AGE" and column["profile"]["missing"] == 1
+        for column in response_payload["selected_column_context"]
+    )
 
 
 def test_protocol_discussion_gives_population_filter_command_without_filtering() -> None:
@@ -250,8 +262,13 @@ def test_protocol_discussion_gives_population_filter_command_without_filtering()
                     target_population="patients where age >= 18",
                 ),
                 "next_action": "continue",
-                "assistant_message": "I saved that as the target population.",
-            }
+            },
+            {
+                "assistant_message": (
+                    "I saved that as the target population. It can remain conceptual for "
+                    "the draft, or you can ask to update the dataset with an age filter."
+                )
+            },
         ]
     )
     node, request, orchestrator_state = _request(dataset_summary=summary, llm=llm)
@@ -259,8 +276,12 @@ def test_protocol_discussion_gives_population_filter_command_without_filtering()
     result = node.run(request=request)
 
     assert result.status == "PENDING"
-    assert "Target population can stay as draft text" in result.response_messages[0].content
-    assert "update dataset and filter rows where age >= 18" in result.response_messages[0].content
+    response_payload = json.loads(llm.generate_json_calls[1]["user_prompt"])
+    assert "target population" in result.response_messages[0].content
+    assert (
+        response_payload["population_context"]["possible_filter_command"]
+        == "update dataset and filter rows where age >= 18"
+    )
     assert orchestrator_state.set_calls == []
 
 
@@ -279,20 +300,29 @@ def test_protocol_discussion_blocks_missing_selected_columns_with_update_command
             {
                 "draft": _complete_draft(treatment_column="treated", effect_modifiers=[]),
                 "next_action": "confirm",
-                "assistant_message": "I can accept this draft.",
-            }
+            },
+            {
+                "assistant_message": (
+                    "I cannot accept the draft yet because treated is not a current "
+                    "dataset column. Use an existing column such as RXASP, or ask to "
+                    "create/rename treated before confirming."
+                )
+            },
         ]
     )
     node, request, orchestrator_state = _request(dataset_summary=summary, llm=llm)
 
     result = node.run(request=request)
     message = result.response_messages[0].content
+    response_payload = json.loads(llm.generate_json_calls[1]["user_prompt"])
 
     assert result.status == "PENDING"
     assert result.action == "NEEDS_INPUT"
-    assert "treated (treatment)" in message
-    assert "not current dataset columns" in message
-    assert "update dataset and create treated" in message
+    assert "treated is not a current" in message
+    assert response_payload["final_next_action"] == "continue"
+    assert response_payload["validation_context"]["missing_selected_columns"] == [
+        {"role": "treatment", "column": "treated"}
+    ]
     assert orchestrator_state.set_calls == []
 
 
@@ -313,8 +343,8 @@ def test_protocol_discussion_accepts_valid_draft_and_writes_only_causal_spec_dra
             {
                 "draft": _complete_draft(negative_control_outcome="NEGCTRL"),
                 "next_action": "confirm",
-                "assistant_message": "Accepted. I stored the causal draft.",
-            }
+            },
+            {"assistant_message": "Accepted. I stored the causal draft."},
         ]
     )
     node, request, orchestrator_state = _request(
@@ -359,8 +389,13 @@ def test_protocol_discussion_blocks_negative_control_role_conflict() -> None:
                     negative_control_outcome="AGE",
                 ),
                 "next_action": "confirm",
-                "assistant_message": "I can accept this draft.",
-            }
+            },
+            {
+                "assistant_message": (
+                    "I cannot accept AGE as the negative-control outcome because it is "
+                    "already selected as a covariate."
+                )
+            },
         ]
     )
     node, request, orchestrator_state = _request(dataset_summary=summary, llm=llm)
@@ -368,5 +403,13 @@ def test_protocol_discussion_blocks_negative_control_role_conflict() -> None:
     result = node.run(request=request)
 
     assert result.status == "PENDING"
-    assert "cannot be the negative-control outcome" in result.response_messages[0].content
+    assert "negative-control outcome" in result.response_messages[0].content
+    response_payload = json.loads(llm.generate_json_calls[1]["user_prompt"])
+    assert response_payload["validation_context"]["role_conflicts"] == [
+        {
+            "type": "negative_control_outcome_reused_in_other_role",
+            "column": "AGE",
+            "other_roles": ["covariate"],
+        }
+    ]
     assert orchestrator_state.set_calls == []

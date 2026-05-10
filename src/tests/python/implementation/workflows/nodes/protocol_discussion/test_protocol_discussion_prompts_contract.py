@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
     get_protocol_discussion_get_node_info,
+    get_protocol_discussion_response_prompt,
     get_protocol_discussion_update_prompt,
     initial_user_message,
 )
@@ -43,6 +44,16 @@ def test_protocol_discussion_update_prompt_keeps_target_trial_guidance_without_c
         "Do not ask imputation, missingness, category-handling, recoding, or cleaning questions."
         in prompt
     )
+
+
+def test_protocol_discussion_response_prompt_makes_suggestions_llm_owned() -> None:
+    prompt = get_protocol_discussion_response_prompt()
+
+    assert "user-facing response" in prompt
+    assert "validation_context" in prompt
+    assert "selected_column_context" in prompt
+    assert "Suggestions and wording must be generated" in prompt
+    assert "Treat validation_context as authoritative" in prompt
 
 
 def test_initial_user_message_mentions_only_draft_fields() -> None:

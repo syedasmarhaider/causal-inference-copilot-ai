@@ -208,8 +208,6 @@ class _SemanticConsistencyIssue:
 
 def cleaning(
     *,
-    protocol_discussion: str | None,
-    cleaning_instructions: str,
     review_recompile_request: str | None,
     draft_causal_spec: CausalSpecDraft,
     data_summary: DatasetSummaryModel,
