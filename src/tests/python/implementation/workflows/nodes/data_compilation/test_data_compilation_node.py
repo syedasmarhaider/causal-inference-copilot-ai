@@ -492,9 +492,10 @@ def test_node_reject_reverts_preview_dataset() -> None:
             )
         )
 
-    assert second.status == "ABORTED"
-    assert second.new_node_state.payload.phase == "FAILED"
-    assert second.new_node_state.payload.hard_failure is False
+    assert second.status == "PENDING"
+    assert second.action == "NEEDS_INPUT"
+    assert second.new_node_state.payload.phase == "REVIEW_READY"
+    assert second.new_node_state.payload.hard_failure is True
     assert state.get("working_dataset_id") == source_dataset_id
     assert state.get("latest_dataset_summary").model_dump(mode="json") == source_summary.model_dump(
         mode="json"
@@ -565,7 +566,7 @@ def test_node_nonrepairable_validation_failure_does_not_publish_preview() -> Non
     dataframe = _dataframe()
     source_dataset_id = uuid4()
     data_repo = _InMemoryDataRepo(dataframes={source_dataset_id: dataframe})
-    llm = _FakeLLM()
+    llm = _FakeLLM(json_outputs=[{"assistant_message": "Validation is blocked."}])
     state = _orchestrator_state(source_dataset_id, _summary(dataframe))
     issue = ValidationIssueModel(
         severity="FAIL",
@@ -597,8 +598,378 @@ def test_node_nonrepairable_validation_failure_does_not_publish_preview() -> Non
             )
         )
 
-    assert result.status == "ABORTED"
-    assert result.new_node_state.payload.phase == "FAILED"
+    assert result.status == "PENDING"
+    assert result.action == "NEEDS_INPUT"
+    assert result.new_node_state.payload.phase == "REVIEW_READY"
+    assert result.new_node_state.payload.hard_failure is True
+    assert data_repo.save_csv_data_calls == []
+    assert state.get("working_dataset_id") == source_dataset_id
+
+
+def test_node_does_not_process_same_latest_user_message_twice() -> None:
+    dataframe = _dataframe()
+    source_dataset_id = uuid4()
+    data_repo = _InMemoryDataRepo(dataframes={source_dataset_id: dataframe})
+    llm = _FakeLLM(json_outputs=[{"assistant_message": "Review the compiled preview."}])
+    state = _orchestrator_state(source_dataset_id, _summary(dataframe))
+    message = ChatMessage(role="user", content="compile", id="message-1")
+    node = _node(data_repo, llm)
+
+    with (
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.clean",
+            return_value=_cleaning_result(dataframe),
+        ) as clean_mock,
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
+            return_value=_transformation_result(),
+        ) as transform_mock,
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
+            return_value=DataCompilationValidationResult([], None),
+        ),
+    ):
+        first = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=DataCompilationState.init_empty(),
+                orchestrator_state=state,
+                read_only_messages_history=[message],
+            )
+        )
+        second = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=first.new_node_state,
+                orchestrator_state=state,
+                read_only_messages_history=[message],
+            )
+        )
+
+    assert second.status == "PENDING"
+    assert second.action == "NEEDS_INPUT"
+    assert second.new_node_state.payload.compiled_dataset_id == first.new_node_state.payload.compiled_dataset_id
+    assert clean_mock.call_count == 1
+    assert transform_mock.call_count == 1
+    assert llm.json_outputs == []
+
+
+def test_node_review_question_answers_without_orchestrator_mutation() -> None:
+    dataframe = _dataframe()
+    source_dataset_id = uuid4()
+    data_repo = _InMemoryDataRepo(dataframes={source_dataset_id: dataframe})
+    llm = _FakeLLM(
+        json_outputs=[
+            {"assistant_message": "Review the compiled preview."},
+            {"action": "answer_query", "assistant_message": "I will answer."},
+            {"assistant_message": "Rows changed because cleaning retained the target cohort."},
+        ]
+    )
+    state = _orchestrator_state(source_dataset_id, _summary(dataframe))
+    node = _node(data_repo, llm)
+
+    with (
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.clean",
+            return_value=_cleaning_result(dataframe),
+        ),
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
+            return_value=_transformation_result(),
+        ),
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
+            return_value=DataCompilationValidationResult([], None),
+        ),
+    ):
+        first = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=DataCompilationState.init_empty(),
+                orchestrator_state=state,
+                read_only_messages_history=[ChatMessage(role="user", content="compile")],
+            )
+        )
+        dataset_ids_after_preview = state.get("working_dataset_ids")
+        second = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=first.new_node_state,
+                orchestrator_state=state,
+                read_only_messages_history=[
+                    ChatMessage(role="user", content="compile"),
+                    ChatMessage(role="user", content="why did rows change?", id="question-1"),
+                ],
+            )
+        )
+
+    assert second.status == "PENDING"
+    assert second.action == "NEEDS_INPUT"
+    assert second.new_node_state.payload.phase == "REVIEW_READY"
+    assert second.new_node_state.payload.hard_failure is False
+    assert state.get("working_dataset_ids") == dataset_ids_after_preview
+    assert state.get("working_dataset_frozen") is False
+    assert second.response_messages is not None
+    assert second.response_messages[0].content == "Rows changed because cleaning retained the target cohort."
+
+
+def test_node_confirm_is_blocked_for_hard_failure_review() -> None:
+    dataframe = _dataframe()
+    source_dataset_id = uuid4()
+    data_repo = _InMemoryDataRepo(dataframes={source_dataset_id: dataframe})
+    llm = _FakeLLM(
+        json_outputs=[
+            {"assistant_message": "Validation is blocked."},
+            {"action": "confirm", "assistant_message": "Confirmed."},
+            {"assistant_message": "Confirmation is blocked because validation failed."},
+        ]
+    )
+    state = _orchestrator_state(source_dataset_id, _summary(dataframe))
+    issue = ValidationIssueModel(
+        severity="FAIL",
+        message="The selected treatment column is missing.",
+        fix_hint="Revise the treatment column in the causal draft.",
+    )
+    node = _node(data_repo, llm)
+
+    with (
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.clean",
+            return_value=_cleaning_result(dataframe),
+        ),
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
+            return_value=_transformation_result(),
+        ),
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
+            return_value=DataCompilationValidationResult([issue], None),
+        ),
+    ):
+        first = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=DataCompilationState.init_empty(),
+                orchestrator_state=state,
+                read_only_messages_history=[ChatMessage(role="user", content="compile")],
+            )
+        )
+        second = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=first.new_node_state,
+                orchestrator_state=state,
+                read_only_messages_history=[
+                    ChatMessage(role="user", content="compile"),
+                    ChatMessage(role="user", content="yes", id="confirm-blocked"),
+                ],
+            )
+        )
+
+    assert second.status == "PENDING"
+    assert second.action == "NEEDS_INPUT"
+    assert second.new_node_state.payload.phase == "REVIEW_READY"
+    assert second.new_node_state.payload.hard_failure is True
+    assert state.get("working_dataset_id") == source_dataset_id
+    assert state.get("working_dataset_frozen") is False
+
+
+def test_node_review_recompile_reloads_original_source_dataset() -> None:
+    dataframe = _dataframe()
+    source_dataset_id = uuid4()
+    data_repo = _InMemoryDataRepo(dataframes={source_dataset_id: dataframe})
+    llm = _FakeLLM(
+        json_outputs=[
+            {"assistant_message": "Review the compiled preview."},
+            {
+                "action": "recompile",
+                "assistant_message": "I will recompile.",
+                "recompile_request": "drop rows with impossible age values",
+            },
+            {"assistant_message": "Review the revised preview."},
+        ]
+    )
+    state = _orchestrator_state(source_dataset_id, _summary(dataframe))
+    node = _node(data_repo, llm)
+
+    with (
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.clean",
+            side_effect=[_cleaning_result(dataframe), _cleaning_result(dataframe, suffix=" revised")],
+        ) as clean_mock,
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
+            return_value=_transformation_result(),
+        ),
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
+            return_value=DataCompilationValidationResult([], None),
+        ),
+    ):
+        first = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=DataCompilationState.init_empty(),
+                orchestrator_state=state,
+                read_only_messages_history=[ChatMessage(role="user", content="compile")],
+            )
+        )
+        first_preview_dataset_id = first.new_node_state.payload.compiled_dataset_id
+        second = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=first.new_node_state,
+                orchestrator_state=state,
+                read_only_messages_history=[
+                    ChatMessage(role="user", content="compile"),
+                    ChatMessage(
+                        role="user",
+                        content="please drop rows with impossible age values",
+                        id="recompile-1",
+                    ),
+                ],
+            )
+        )
+
+    assert second.status == "PENDING"
+    assert second.new_node_state.payload.phase == "REVIEW_READY"
+    assert second.new_node_state.payload.compiled_dataset_id != first_preview_dataset_id
+    assert data_repo.get_csv_data_calls == [source_dataset_id, source_dataset_id]
+    assert clean_mock.call_count == 2
+    assert clean_mock.call_args_list[1].kwargs["revised_instructions"] == (
+        "drop rows with impossible age values"
+    )
+    assert state.get("working_dataset_id") == second.new_node_state.payload.compiled_dataset_id
+
+
+def test_node_validation_warn_preview_can_be_confirmed() -> None:
+    dataframe = _dataframe()
+    source_dataset_id = uuid4()
+    data_repo = _InMemoryDataRepo(dataframes={source_dataset_id: dataframe})
+    llm = _FakeLLM(
+        json_outputs=[
+            {"assistant_message": "Review warning preview."},
+            {"action": "confirm", "assistant_message": "Confirmed with warning."},
+        ]
+    )
+    state = _orchestrator_state(source_dataset_id, _summary(dataframe))
+    warning = ValidationIssueModel(
+        severity="WARN",
+        message="A covariate has a sparse category.",
+        fix_hint="Review sparse categories before modeling.",
+    )
+    node = _node(data_repo, llm)
+
+    with (
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.clean",
+            return_value=_cleaning_result(dataframe),
+        ),
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
+            return_value=_transformation_result(),
+        ),
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.validate_data_compilation",
+            return_value=DataCompilationValidationResult([warning], None),
+        ),
+    ):
+        first = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=DataCompilationState.init_empty(),
+                orchestrator_state=state,
+                read_only_messages_history=[ChatMessage(role="user", content="compile")],
+            )
+        )
+        second = node.run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=first.new_node_state,
+                orchestrator_state=state,
+                read_only_messages_history=[
+                    ChatMessage(role="user", content="compile"),
+                    ChatMessage(role="user", content="confirm", id="confirm-warn"),
+                ],
+            )
+        )
+
+    assert first.new_node_state.payload.validation_status == "WARN"
+    assert second.status == "DONE"
+    assert second.new_node_state.payload.phase == "CONFIRMED"
+    assert state.get("working_dataset_frozen") is True
+    assert state.get("is_validated") is True
+
+
+def test_node_clean_exception_returns_reviewable_hard_failure() -> None:
+    dataframe = _dataframe()
+    source_dataset_id = uuid4()
+    data_repo = _InMemoryDataRepo(dataframes={source_dataset_id: dataframe})
+    llm = _FakeLLM(json_outputs=[{"assistant_message": "Cleaning is blocked."}])
+    state = _orchestrator_state(source_dataset_id, _summary(dataframe))
+
+    with patch(
+        "python.implementation.workflows.nodes.data_compilation.data_compilation_node.clean",
+        side_effect=ValueError("cleaning exploded"),
+    ):
+        result = _node(data_repo, llm).run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=DataCompilationState.init_empty(),
+                orchestrator_state=state,
+                read_only_messages_history=[ChatMessage(role="user", content="compile")],
+            )
+        )
+
+    assert result.status == "PENDING"
+    assert result.action == "NEEDS_INPUT"
+    assert result.new_node_state.payload.phase == "REVIEW_READY"
+    assert result.new_node_state.payload.hard_failure is True
+    assert data_repo.save_csv_data_calls == []
+    assert state.get("working_dataset_id") == source_dataset_id
+
+
+def test_node_transform_exception_returns_reviewable_hard_failure() -> None:
+    dataframe = _dataframe()
+    source_dataset_id = uuid4()
+    data_repo = _InMemoryDataRepo(dataframes={source_dataset_id: dataframe})
+    llm = _FakeLLM(json_outputs=[{"assistant_message": "Transformation is blocked."}])
+    state = _orchestrator_state(source_dataset_id, _summary(dataframe))
+
+    with (
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.clean",
+            return_value=_cleaning_result(dataframe),
+        ),
+        patch(
+            "python.implementation.workflows.nodes.data_compilation.data_compilation_node.transform",
+            side_effect=ValueError("transform exploded"),
+        ),
+    ):
+        result = _node(data_repo, llm).run(
+            request=NodeRequest(
+                user_id=uuid4(),
+                conversation_id=uuid4(),
+                node_state=DataCompilationState.init_empty(),
+                orchestrator_state=state,
+                read_only_messages_history=[ChatMessage(role="user", content="compile")],
+            )
+        )
+
+    assert result.status == "PENDING"
+    assert result.action == "NEEDS_INPUT"
+    assert result.new_node_state.payload.phase == "REVIEW_READY"
     assert result.new_node_state.payload.hard_failure is True
     assert data_repo.save_csv_data_calls == []
     assert state.get("working_dataset_id") == source_dataset_id

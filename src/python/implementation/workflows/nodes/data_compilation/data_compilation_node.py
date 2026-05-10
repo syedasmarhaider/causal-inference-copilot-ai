@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import ClassVar, Literal, cast
-from uuid import UUID, uuid4
+from typing import Any, ClassVar, Literal, cast
+from uuid import uuid4
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,42 +15,37 @@ from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node, NodeExecutionResult, NodeRequest
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_app_logger
-from python.implementation.workflows.nodes.data_compilation.data_compilation_cleaning import (
-    CleaningResult,
-    clean,
-)
+from python.implementation.workflows.nodes.data_compilation.data_compilation_cleaning import clean
 from python.implementation.workflows.nodes.data_compilation.data_compilation_deps import (
     DataCompilationDeps,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
+    data_compilation_cannot_confirm_message_prompt,
+    data_compilation_clarify_fallback_message_prompt,
+    data_compilation_hard_failure_message_prompt,
+    data_compilation_message_generation_repair_prompt,
     data_compilation_node_info,
     data_compilation_review_decision_prompt,
     data_compilation_review_query_prompt,
     data_compilation_review_summary_prompt,
     data_compilation_transformation_retry_guidance_prompt,
+    data_compilation_validation_failure_message_prompt,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_state import (
     DataCompilationPayloadModel,
     DataCompilationState,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_transformation import (
-    ColumnTransformationSuggestionList,
     transform,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_valiation import (
-    DataCompilationValidationResult,
     validate_data_compilation,
 )
-from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
 from python.implementation.workflows.tools.causal.encoding.encoding_plan_tool import (
     EncodingPlanTool,
 )
-from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.causal.specs.causal_spec_draft import (
     CausalSpecDraft,
-)
-from python.implementation.workflows.tools.common.model.data_summary import (
-    DatasetSummaryModel,
 )
 from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import (
     DataManipulationTool,
@@ -75,24 +70,6 @@ class _ReviewDecision(BaseModel):
     action: Literal["confirm", "recompile", "answer_query", "reject", "clarify"]
     assistant_message: str = Field(..., min_length=1)
     recompile_request: str | None = None
-
-
-@dataclass(frozen=True)
-class _CompiledArtifacts:
-    dataset_id: UUID
-    dataframe: pd.DataFrame
-    summary: DatasetSummaryModel
-    causal_spec: CausalSpec
-    effective_draft: CausalSpecDraft
-    cleaning_summary: str
-    actions: list[str]
-    warnings: list[str]
-
-
-@dataclass(frozen=True)
-class _ValidationRepairGuidance:
-    issue: str
-    fix_hint: str | None
 
 
 class DataCompilationNode(Node):
@@ -137,173 +114,206 @@ class DataCompilationNode(Node):
             )
 
         payload = request.node_state.payload.model_copy(deep=True)
+        latest_user_message = _latest_user_message(request.read_only_messages_history)
+
         try:
             deps = DataCompilationDeps.from_request(request)
         except Exception as exc:
-            log.exception("data compilation dependencies missing", error=safe_err(exc))
-            return self._needs_data_result(
-                request=request,
-                user_message=(
-                    "The compilation stage is missing the active dataset or causal draft. "
-                    "Please complete those earlier steps first."
-                ),
+            error = safe_err(exc)
+            log.exception("data compilation dependencies missing", error=error)
+            message = self._generate_user_message(
+                "hard_failure",
+                {
+                    "step": "dependency loading",
+                    "error": error,
+                    "hard_failure": True,
+                    "payload": payload,
+                    "messages_history": request.read_only_messages_history,
+                },
+                latest_user_message=latest_user_message,
+            )
+            blocked_payload = payload.model_copy(
+                update={
+                    "phase": "REVIEW_READY",
+                    "hard_failure": True,
+                    "assistant_message": message,
+                    "system_message": "DATA_COMPILATION_BLOCKED",
+                    "error_message": f"dependency loading failed: {error}",
+                    "last_handled_user_message_fingerprint": (
+                        latest_user_message["fingerprint"] if latest_user_message else None
+                    ),
+                }
+            )
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(blocked_payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="PENDING",
+                action="NEEDS_INPUT",
+                response_messages=[ChatMessage(role="assistant", content=message)],
             )
 
-        payload, source_changed = self._bind_payload_to_source(payload=payload, deps=deps)
-        latest_user_message = _latest_user_message(request.read_only_messages_history)
+        source_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "dataset_id": str(deps.dataset_id),
+                    "dataset_summary": deps.dataset_summary.model_dump(mode="json"),
+                    "causal_spec_draft": deps.causal_spec_draft.model_dump(mode="json"),
+                },
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
 
-        if payload.phase == "REVIEW_READY":
-            if not self._review_payload_complete(payload):
-                log.warning("data compilation review payload incomplete; recompiling")
-            elif latest_user_message is None:
-                return self._needs_input_result(
-                    request=request,
-                    payload=payload,
-                    user_message=payload.assistant_message
-                    or "Please review the compiled dataset preview and confirm or revise it.",
-                )
-            else:
-                return self._handle_review_response(
-                    request=request,
-                    payload=payload,
-                    latest_user_message=latest_user_message,
-                )
-
-        if payload.phase == "CONFIRMED" and not source_changed:
-            return self._done_result(
-                request=request,
-                payload=payload,
-                user_message=payload.assistant_message
-                or "The compiled setup is already confirmed.",
-            )
-
-        if payload.phase == "FAILED" and not source_changed:
-            return self._aborted_result(
-                request=request,
-                payload=payload,
-                user_message=payload.assistant_message
-                or (
-                    "The compilation step hit a hard blocker and needs upstream revision."
-                    if payload.hard_failure
-                    else "The compilation step is blocked and needs upstream revision."
-                ),
-            )
-
-        try:
-            source_df = self._data_repo.get_csv_data(
-                user_id=request.user_id,
-                conversation_id=request.conversation_id,
-                dataset_id=deps.dataset_id,
-                limit=1_000_000,
-            )
-        except Exception as exc:
-            log.exception(
-                "failed to load data compilation source dataset",
-                dataset_id=str(deps.dataset_id),
-                error=safe_err(exc),
-            )
-            return self._needs_data_result(
-                request=request,
-                user_message=(
-                    "I could not load the active working dataset for compilation. Please "
-                    "re-upload or reselect the dataset and try again."
-                ),
-            )
-
-        return self._run_pipeline_from_source(
-            request=request,
-            payload=payload,
-            deps=deps,
-            source_df=source_df,
-            source_changed=source_changed,
-            encoding_plan_tool=self._encoding_plan_tool,
+        active_dataset_id = deps.dataset_id
+        active_is_source = (
+            payload.source_dataset_id is not None
+            and active_dataset_id == payload.source_dataset_id
+        )
+        active_is_preview = (
+            payload.compiled_dataset_id is not None
+            and active_dataset_id == payload.compiled_dataset_id
+        )
+        active_is_unknown = not active_is_source and not active_is_preview
+        new_user_message = (
+            latest_user_message is not None
+            and latest_user_message["fingerprint"]
+            != payload.last_handled_user_message_fingerprint
         )
 
-    def _bind_payload_to_source(
-        self,
-        *,
-        payload: DataCompilationPayloadModel,
-        deps: DataCompilationDeps,
-    ) -> tuple[DataCompilationPayloadModel, bool]:
-        if (
-            payload.phase in {"REVIEW_READY", "CONFIRMED"}
-            and payload.compiled_dataset_id == deps.dataset_id
-            and _same_draft(payload.source_causal_spec_draft, deps.causal_spec_draft)
-        ):
-            return payload, False
-
-        if (
-            payload.source_dataset_id == deps.dataset_id
-            and _same_draft(payload.source_causal_spec_draft, deps.causal_spec_draft)
-        ):
-            return payload, False
-
-        if (
-            payload.source_dataset_id is None
-            and payload.source_dataset_summary is None
-            and payload.source_causal_spec_draft is None
-            and payload.phase == "INIT"
-        ):
-            return payload.bind_source(
-                dataset_id=deps.dataset_id,
-                dataset_summary=deps.dataset_summary,
-                causal_spec_draft=deps.causal_spec_draft,
-            ), False
-
-        return payload.reset_for_recompile(
-            dataset_id=deps.dataset_id,
-            dataset_summary=deps.dataset_summary,
-            causal_spec_draft=deps.causal_spec_draft,
-        ), True
-
-    def _run_pipeline_from_source(
-        self,
-        *,
-        encoding_plan_tool: EncodingPlanTool,
-        request: NodeRequest,
-        payload: DataCompilationPayloadModel,
-        deps: DataCompilationDeps,
-        source_df: pd.DataFrame,
-        source_changed: bool,
-        review_recompile_request: str | None = None,
-    ) -> NodeExecutionResult:
-        try:
-            compiled_artifacts = self._compile_from_source(
-                deps=deps,
-                source_df=source_df,
-                review_recompile_request=review_recompile_request,
+        source_fields_exist = (
+            payload.source_dataset_id is not None
+            and payload.source_dataset_summary is not None
+            and payload.source_causal_spec_draft is not None
+        )
+        source_changed = False
+        if not source_fields_exist:
+            source_changed = True
+        elif active_is_preview:
+            source_changed = not _same_draft(
+                payload.source_causal_spec_draft, deps.causal_spec_draft
             )
-        except Exception as exc:
-            log.exception("data compilation full compile failed", error=safe_err(exc))
-            return self._failed_result(
-                request=request,
-                payload=payload,
-                user_message=_build_compile_failure_message(error=safe_err(exc)),
-                error_message=f"full compile failed: {safe_err(exc)}",
+        elif active_is_source:
+            source_changed = (
+                payload.source_fingerprint not in {None, source_fingerprint}
+                or not _same_draft(payload.source_causal_spec_draft, deps.causal_spec_draft)
+            )
+            if payload.source_fingerprint is None:
+                source_changed = (
+                    payload.source_dataset_id != deps.dataset_id
+                    or payload.source_dataset_summary.model_dump(mode="json")
+                    != deps.dataset_summary.model_dump(mode="json")
+                    or not _same_draft(payload.source_causal_spec_draft, deps.causal_spec_draft)
+                )
+        elif payload.phase != "INIT":
+            source_changed = True
+
+        compiled_review_complete = (
+            payload.hard_failure
+            or (
+                payload.compiled_dataset_id is not None
+                and payload.compiled_dataset_summary is not None
+                and payload.compiled_causal_spec is not None
+                and payload.transformation_plan is not None
+                and payload.validation_status is not None
+            )
+        )
+        if compiled_review_complete and not payload.hard_failure:
+            compiled_review_fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        "compiled_dataset_id": str(payload.compiled_dataset_id),
+                        "compiled_dataset_summary": payload.compiled_dataset_summary.model_dump(
+                            mode="json"
+                        ),
+                        "compiled_causal_spec": payload.compiled_causal_spec.model_dump(
+                            mode="json"
+                        ),
+                        "transformation_plan": payload.transformation_plan.model_dump(
+                            mode="json"
+                        ),
+                        "validation_status": payload.validation_status,
+                        "validation_issues": [
+                            issue.model_dump(mode="json", exclude_none=True)
+                            for issue in payload.validation_issues
+                        ],
+                    },
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+            compiled_review_complete = (
+                payload.compiled_fingerprint == compiled_review_fingerprint
+            )
+        current_review_state = (
+            payload.phase == "REVIEW_READY"
+            and source_fields_exist
+            and (active_is_source or active_is_preview)
+            and not source_changed
+            and compiled_review_complete
+        )
+        if current_review_state:
+            if new_user_message and latest_user_message is not None:
+                return self._handle_review_message(
+                    request=request,
+                    payload=payload,
+                    deps=deps,
+                    latest_user_message=latest_user_message,
+                )
+            message = (
+                payload.assistant_message
+                or "Please review the compiled dataset preview and confirm or request changes."
+            )
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="PENDING",
+                action="NEEDS_INPUT",
+                response_messages=[ChatMessage(role="assistant", content=message)],
             )
 
-        compiled_payload = payload.model_copy(
+        confirmed_complete = (
+            payload.compiled_dataset_id is not None
+            and payload.compiled_dataset_summary is not None
+            and payload.compiled_causal_spec is not None
+            and payload.transformation_plan is not None
+            and payload.validation_status in {"PASS", "WARN"}
+        )
+        if (
+            payload.phase == "CONFIRMED"
+            and active_is_preview
+            and confirmed_complete
+            and not source_changed
+        ):
+            message = payload.assistant_message or "The compiled setup is already confirmed."
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="DONE",
+                action="NONE",
+                response_messages=[ChatMessage(role="assistant", content=message)],
+            )
+
+        compile_deps = deps
+        compile_payload = payload.model_copy(
             update={
                 "source_dataset_id": deps.dataset_id,
                 "source_dataset_summary": deps.dataset_summary,
                 "source_causal_spec_draft": deps.causal_spec_draft,
-                "compiled_dataset_id": compiled_artifacts.dataset_id,
-                "compiled_dataset_summary": compiled_artifacts.summary,
-                "compiled_causal_spec": compiled_artifacts.causal_spec,
-                "effective_causal_spec_draft": compiled_artifacts.effective_draft,
-                "cleaning_summary": compiled_artifacts.cleaning_summary,
+                "source_fingerprint": source_fingerprint,
+                "compiled_dataset_id": None,
+                "compiled_dataset_summary": None,
+                "compiled_causal_spec": None,
+                "effective_causal_spec_draft": None,
+                "compiled_fingerprint": None,
+                "cleaning_summary": None,
                 "transformation_plan": None,
                 "transformation_suggestions": None,
-                "compilation_actions": _merge_unique_text_items(
-                    payload.compilation_actions,
-                    compiled_artifacts.actions,
-                ),
-                "compilation_warnings": _merge_unique_text_items(
-                    payload.compilation_warnings,
-                    compiled_artifacts.warnings,
-                ),
+                "compilation_actions": [],
+                "compilation_warnings": [],
                 "validation_issues": [],
                 "validation_status": None,
+                "retry_count": 0,
+                "retry_reason": None,
                 "phase": "INIT",
                 "hard_failure": False,
                 "assistant_message": None,
@@ -311,403 +321,961 @@ class DataCompilationNode(Node):
                 "error_message": None,
             }
         )
-
-        return self._run_pipeline_from_compiled_dataset(
-            request=request,
-            payload=compiled_payload,
-            deps=deps,
-            compiled_artifacts=compiled_artifacts,
-            source_changed=source_changed,
-            encoding_plan_tool=encoding_plan_tool,
-        )
-
-    def _compile_from_source(
-        self,
-        *,
-        deps: DataCompilationDeps,
-        source_df: pd.DataFrame,
-        review_recompile_request: str | None = None,
-    ) -> _CompiledArtifacts:
-        cleaning_result: CleaningResult = clean(
-            data=source_df,
-            data_summary=deps.dataset_summary,
-            draft=deps.causal_spec_draft,
-            data_maupulation_tools=self._data_manipulation_tool,
-            data_profiling_tools=self._profiling_tool,
-            llm=self._llm,
-            revised_instructions=review_recompile_request,
-        )
-
-        effective_draft = cleaning_result.effective_draft or deps.causal_spec_draft
-        return _CompiledArtifacts(
-            dataset_id=uuid4(),
-            dataframe=cleaning_result.pd_cleaned,
-            summary=cleaning_result.cleaned_data_summary,
-            causal_spec=cleaning_result.causal,
-            effective_draft=effective_draft,
-            cleaning_summary=cleaning_result.summary_str,
-            actions=_summarize_compile_actions(
-                source_summary=deps.dataset_summary,
-                cleaned_summary=cleaning_result.cleaned_data_summary,
-                causal_spec=cleaning_result.causal,
-                review_recompile_request=review_recompile_request,
-                cleaning_summary=cleaning_result.summary_str,
-                cleaning_notes=cleaning_result.cleaning_notes,
-            ),
-            warnings=[],
-        )
-
-    def _run_pipeline_from_compiled_dataset(
-        self,
-        *,
-        encoding_plan_tool: EncodingPlanTool,
-        request: NodeRequest,
-        payload: DataCompilationPayloadModel,
-        deps: DataCompilationDeps,
-        compiled_artifacts: _CompiledArtifacts,
-        source_changed: bool,
-    ) -> NodeExecutionResult:
-        try:
-            transformation_result = transform(
-                transformation_instructions=self._build_transformation_instructions(
-                    retry_feedback=payload.retry_feedback,
-                ),
-                causal_spec=compiled_artifacts.causal_spec,
-                data_summary=compiled_artifacts.summary,
-                llm=self._llm,
-                encoding_plan_tool=encoding_plan_tool,
+        if active_is_preview and source_fields_exist:
+            compile_deps = DataCompilationDeps(
+                dataset_id=payload.source_dataset_id,
+                dataset_summary=payload.source_dataset_summary,
+                causal_spec_draft=deps.causal_spec_draft,
             )
-        except Exception as exc:
-            log.exception("data compilation transformation failed", error=safe_err(exc))
-            return self._failed_result(
-                request=request,
-                payload=payload,
-                user_message=(
-                    "I cleaned and compiled the dataset, but I could not build a safe "
-                    f"baseline transformation plan. Error: {safe_err(exc)}"
-                ),
-                error_message=f"transformation failed: {safe_err(exc)}",
+            compile_source_fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        "dataset_id": str(compile_deps.dataset_id),
+                        "dataset_summary": compile_deps.dataset_summary.model_dump(mode="json"),
+                        "causal_spec_draft": compile_deps.causal_spec_draft.model_dump(
+                            mode="json"
+                        ),
+                    },
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+            compile_payload = payload.model_copy(
+                update={
+                    "source_dataset_id": compile_deps.dataset_id,
+                    "source_dataset_summary": compile_deps.dataset_summary,
+                    "source_causal_spec_draft": compile_deps.causal_spec_draft,
+                    "source_fingerprint": compile_source_fingerprint,
+                    "compiled_dataset_id": None,
+                    "compiled_dataset_summary": None,
+                    "compiled_causal_spec": None,
+                    "effective_causal_spec_draft": None,
+                    "compiled_fingerprint": None,
+                    "cleaning_summary": None,
+                    "transformation_plan": None,
+                    "transformation_suggestions": None,
+                    "compilation_actions": [],
+                    "compilation_warnings": [],
+                    "validation_issues": [],
+                    "validation_status": None,
+                    "retry_count": 0,
+                    "retry_reason": None,
+                    "phase": "INIT",
+                    "hard_failure": False,
+                    "assistant_message": None,
+                    "system_message": None,
+                    "error_message": None,
+                }
             )
-
-        if transformation_result.transformation_plan is None:
-            return self._failed_result(
-                request=request,
-                payload=payload,
-                user_message=(
-                    "I could not produce a usable baseline transformation plan for the "
-                    "compiled dataset."
-                ),
-                error_message="transformation plan missing after successful transform stage",
-            )
-
-        transformation_suggestion_warnings = _summarize_transformation_suggestions(
-            summary=compiled_artifacts.summary,
-            transformation_suggestions=transformation_result.transformation_suggestions,
-        )
-        validation_result = validate_data_compilation(
-            candidate_df=compiled_artifacts.dataframe,
-            causal_spec=compiled_artifacts.causal_spec,
-            transform_plan=transformation_result.transformation_plan,
-        )
-        validation_status = _validation_status(validation_result.validation_errors)
-        validated_payload = payload.model_copy(
-            update={
-                "compiled_causal_spec": compiled_artifacts.causal_spec,
-                "transformation_plan": transformation_result.transformation_plan,
-                "transformation_suggestions": transformation_result.transformation_suggestions,
-                "compilation_warnings": _merge_unique_text_items(
-                    payload.compilation_warnings,
-                    transformation_suggestion_warnings,
-                ),
-                "validation_issues": validation_result.validation_errors,
-                "validation_status": validation_status,
-            }
-        )
-
-        if validation_status == "FAIL":
-            return self._handle_validation_failure(
-                request=request,
-                payload=validated_payload,
-                deps=deps,
-                validation_result=validation_result,
-                source_changed=source_changed,
-                encoding_plan_tool=encoding_plan_tool,
-            )
+            try:
+                request.orchestrator_state.set(
+                    request.node_state.name(),
+                    {
+                        "working_dataset_id": compile_deps.dataset_id,
+                        "latest_dataset_summary": compile_deps.dataset_summary,
+                        "revert_request": True,
+                    },
+                )
+            except Exception as exc:
+                error = safe_err(exc)
+                log.exception("failed to restore data compilation source", error=error)
+                message = self._generate_user_message(
+                    "hard_failure",
+                    {
+                        "step": "source restore before recompilation",
+                        "error": error,
+                        "hard_failure": True,
+                        "source_dataset_id": compile_deps.dataset_id,
+                        "messages_history": request.read_only_messages_history,
+                    },
+                    latest_user_message=latest_user_message,
+                )
+                blocked_payload = compile_payload.model_copy(
+                    update={
+                        "phase": "REVIEW_READY",
+                        "hard_failure": True,
+                        "assistant_message": message,
+                        "system_message": "DATA_COMPILATION_BLOCKED",
+                        "error_message": f"source restore failed: {error}",
+                        "last_handled_user_message_fingerprint": (
+                            latest_user_message["fingerprint"]
+                            if latest_user_message is not None
+                            else payload.last_handled_user_message_fingerprint
+                        ),
+                    }
+                )
+                return NodeExecutionResult(
+                    new_node_state=DataCompilationState(blocked_payload),
+                    new_orchestrator_state=request.orchestrator_state,
+                    status="PENDING",
+                    action="NEEDS_INPUT",
+                    response_messages=[ChatMessage(role="assistant", content=message)],
+                )
+        elif active_is_unknown and payload.phase != "INIT":
+            log.warning("data compilation active dataset is neither source nor preview")
 
         try:
-            self._publish_preview_dataset(
-                request=request,
-                payload=validated_payload,
-                compiled_artifacts=compiled_artifacts,
-            )
-        except Exception as exc:
-            log.exception("data compilation preview publish failed", error=safe_err(exc))
-            return self._failed_result(
-                request=request,
-                payload=validated_payload,
-                user_message=(
-                    "I cleaned, transformed, and validated the dataset, but I could not "
-                    f"publish the compiled preview dataset. Error: {safe_err(exc)}"
-                ),
-                error_message=f"preview publish failed: {safe_err(exc)}",
-            )
-
-        return self._build_review_ready_result(
-            request=request,
-            payload=validated_payload,
-            compiled_artifacts=compiled_artifacts,
-            transformation_plan=transformation_result.transformation_plan,
-            transformation_suggestions=transformation_result.transformation_suggestions,
-            validation_result=validation_result,
-            source_changed=source_changed,
-        )
-
-    def _handle_validation_failure(
-        self,
-        *,
-        encoding_plan_tool: EncodingPlanTool,
-        request: NodeRequest,
-        payload: DataCompilationPayloadModel,
-        deps: DataCompilationDeps,
-        validation_result: DataCompilationValidationResult,
-        source_changed: bool,
-    ) -> NodeExecutionResult:
-        if validation_result.user_suggestion_message is None:
-            return self._failed_result(
-                request=request,
-                payload=payload,
-                user_message=_build_hard_validation_message(
-                    issues=validation_result.validation_errors
-                ),
-                error_message="hard validation failure without repairable guidance",
-            )
-
-        if payload.validation_retry_count >= 1:
-            return self._failed_result(
-                request=request,
-                payload=payload,
-                user_message=_build_validation_retry_exhausted_message(
-                    validation_message=validation_result.user_suggestion_message
-                ),
-                error_message="repairable validation failure persisted after automatic retry",
-            )
-
-        retry_feedback = _build_validation_retry_feedback(
-            validation_result.user_suggestion_message
-        )
-        try:
-            source_deps = _source_deps_from_payload(payload=payload, fallback=deps)
             source_df = self._data_repo.get_csv_data(
                 user_id=request.user_id,
                 conversation_id=request.conversation_id,
-                dataset_id=source_deps.dataset_id,
+                dataset_id=compile_deps.dataset_id,
                 limit=1_000_000,
             )
         except Exception as exc:
+            error = safe_err(exc)
             log.exception(
-                "data compilation validation retry source reload failed",
-                error=safe_err(exc),
+                "failed to load data compilation source dataset",
+                dataset_id=str(compile_deps.dataset_id),
+                error=error,
             )
-            return self._failed_result(
-                request=request,
-                payload=payload,
-                user_message=(
-                    "Validation found a repairable issue, but I could not reload the "
-                    f"original source dataset for the automatic retry. Error: {safe_err(exc)}"
-                ),
-                error_message=f"validation retry source reload failed: {safe_err(exc)}",
+            message = self._generate_user_message(
+                "hard_failure",
+                {
+                    "step": "source dataset loading",
+                    "error": error,
+                    "source_dataset_id": compile_deps.dataset_id,
+                    "hard_failure": True,
+                    "messages_history": request.read_only_messages_history,
+                },
+                latest_user_message=latest_user_message,
+            )
+            blocked_payload = compile_payload.model_copy(
+                update={
+                    "phase": "REVIEW_READY",
+                    "hard_failure": True,
+                    "assistant_message": message,
+                    "system_message": "DATA_COMPILATION_BLOCKED",
+                    "error_message": f"source load failed: {error}",
+                    "last_handled_user_message_fingerprint": (
+                        latest_user_message["fingerprint"]
+                        if latest_user_message is not None
+                        else payload.last_handled_user_message_fingerprint
+                    ),
+                }
+            )
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(blocked_payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="PENDING",
+                action="NEEDS_INPUT",
+                response_messages=[ChatMessage(role="assistant", content=message)],
             )
 
-        retry_payload = payload.reset_for_recompile(
-            dataset_id=source_deps.dataset_id,
-            dataset_summary=source_deps.dataset_summary,
-            causal_spec_draft=source_deps.causal_spec_draft,
-        ).model_copy(
+        return self._compile_pipeline(
+            request=request,
+            payload=compile_payload,
+            deps=compile_deps,
+            source_df=source_df,
+            retry_count=0,
+            recompile_instruction=None,
+            trigger_message_fingerprint=(
+                latest_user_message["fingerprint"] if latest_user_message else None
+            ),
+        )
+
+    def _compile_pipeline(
+        self,
+        *,
+        request: NodeRequest,
+        payload: DataCompilationPayloadModel,
+        deps: DataCompilationDeps,
+        source_df: pd.DataFrame,
+        retry_count: int,
+        recompile_instruction: str | None,
+        trigger_message_fingerprint: str | None = None,
+    ) -> NodeExecutionResult:
+        source_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "dataset_id": str(deps.dataset_id),
+                    "dataset_summary": deps.dataset_summary.model_dump(mode="json"),
+                    "causal_spec_draft": deps.causal_spec_draft.model_dump(mode="json"),
+                },
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        base_payload = payload.model_copy(
             update={
-                "validation_retry_count": payload.validation_retry_count + 1,
-                "retry_feedback": retry_feedback,
-                "compilation_actions": [
-                    *payload.compilation_actions,
-                    "Applied one automatic full retry after repairable validation feedback.",
-                ],
-                "compilation_warnings": [
-                    *payload.compilation_warnings,
-                    "A repairable validation issue triggered one automatic clean-transform retry from the original source dataset.",
-                ],
+                "source_dataset_id": deps.dataset_id,
+                "source_dataset_summary": deps.dataset_summary,
+                "source_causal_spec_draft": deps.causal_spec_draft,
+                "source_fingerprint": source_fingerprint,
+                "retry_count": retry_count,
+                "retry_reason": recompile_instruction,
             }
         )
-        return self._run_pipeline_from_source(
-            request=request,
-            payload=retry_payload,
-            deps=source_deps,
-            source_df=source_df,
-            source_changed=source_changed,
-            review_recompile_request=retry_feedback,
-            encoding_plan_tool=encoding_plan_tool,
-        )
 
-    def _publish_preview_dataset(
-        self,
-        *,
-        request: NodeRequest,
-        payload: DataCompilationPayloadModel,
-        compiled_artifacts: _CompiledArtifacts,
-    ) -> None:
-        if payload.source_causal_spec_draft is None:
-            raise ValueError("source causal draft is missing for preview publish")
-
-        self._data_repo.save_csv_data(
-            user_id=request.user_id,
-            conversation_id=request.conversation_id,
-            dataset_id=compiled_artifacts.dataset_id,
-            df=compiled_artifacts.dataframe,
-            overwrite=True,
-            include_index=False,
-        )
-        request.orchestrator_state.set(
-            request.node_state.name(),
-            {
-                "working_dataset_id": compiled_artifacts.dataset_id,
-                "latest_dataset_summary": compiled_artifacts.summary,
-                "causal_spec_draft": payload.source_causal_spec_draft,
-            },
-        )
-
-    def _build_review_ready_result(
-        self,
-        *,
-        request: NodeRequest,
-        payload: DataCompilationPayloadModel,
-        compiled_artifacts: _CompiledArtifacts,
-        transformation_plan: TransformPlan,
-        transformation_suggestions: ColumnTransformationSuggestionList | None,
-        validation_result: DataCompilationValidationResult,
-        source_changed: bool,
-    ) -> NodeExecutionResult:
-        validation_status = payload.validation_status or _validation_status(
-            validation_result.validation_errors
-        )
         try:
-            review_message = self._build_review_summary_message(
-                compiled_causal_spec=compiled_artifacts.causal_spec,
-                compiled_dataset_summary=compiled_artifacts.summary,
-                cleaning_summary=compiled_artifacts.cleaning_summary,
-                transformation_plan=transformation_plan,
-                transformation_suggestions=transformation_suggestions,
-                compilation_actions=payload.compilation_actions,
-                compilation_warnings=payload.compilation_warnings,
-                validation_status=validation_status,
-                validation_issues=validation_result.validation_errors,
-                messages_history=request.read_only_messages_history,
+            cleaning_result = clean(
+                data=source_df,
+                data_summary=deps.dataset_summary,
+                draft=deps.causal_spec_draft,
+                data_maupulation_tools=self._data_manipulation_tool,
+                data_profiling_tools=self._profiling_tool,
+                llm=self._llm,
+                revised_instructions=recompile_instruction,
+            )
+            cleaned_df = cleaning_result.pd_cleaned
+            cleaned_summary = cleaning_result.cleaned_data_summary
+            causal_spec = cleaning_result.causal
+            effective_draft = cleaning_result.effective_draft or deps.causal_spec_draft
+            cleaning_summary = cleaning_result.summary_str
+            cleaning_notes = list(cleaning_result.cleaning_notes)
+        except Exception as exc:
+            error = safe_err(exc)
+            log.exception("data compilation clean stage failed", error=error)
+            message = self._generate_user_message(
+                "hard_failure",
+                {
+                    "step": "cleaning",
+                    "error": error,
+                    "source_dataset_id": deps.dataset_id,
+                    "source_dataset_summary": deps.dataset_summary,
+                    "hard_failure": True,
+                    "retry_count": retry_count,
+                    "retry_reason": recompile_instruction,
+                    "messages_history": request.read_only_messages_history,
+                },
+            )
+            blocked_payload = base_payload.model_copy(
+                update={
+                    "compiled_dataset_id": None,
+                    "compiled_dataset_summary": None,
+                    "compiled_causal_spec": None,
+                    "effective_causal_spec_draft": None,
+                    "compiled_fingerprint": None,
+                    "cleaning_summary": None,
+                    "transformation_plan": None,
+                    "transformation_suggestions": None,
+                    "validation_status": None,
+                    "validation_issues": [],
+                    "phase": "REVIEW_READY",
+                    "hard_failure": True,
+                    "assistant_message": message,
+                    "system_message": "DATA_COMPILATION_BLOCKED",
+                    "error_message": f"cleaning failed: {error}",
+                    "last_handled_user_message_fingerprint": trigger_message_fingerprint,
+                }
+            )
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(blocked_payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="PENDING",
+                action="NEEDS_INPUT",
+                response_messages=[ChatMessage(role="assistant", content=message)],
+            )
+
+        guard_error: str | None = None
+        if not isinstance(cleaned_df, pd.DataFrame):
+            guard_error = "cleaning did not return a dataframe"
+        elif cleaned_df.empty:
+            guard_error = "cleaning produced an empty dataframe"
+        else:
+            treatment_column = str(causal_spec.treatment_spec.column).strip()
+            outcome_column = str(causal_spec.outcome_spec.column).strip()
+            missing_required_columns = [
+                column
+                for column in [treatment_column, outcome_column]
+                if column and column not in cleaned_df.columns
+            ]
+            if missing_required_columns:
+                guard_error = (
+                    "cleaning output is missing required causal column(s): "
+                    + ", ".join(missing_required_columns)
+                )
+
+        if guard_error is not None:
+            message = self._generate_user_message(
+                "hard_failure",
+                {
+                    "step": "cleaning output guard",
+                    "error": guard_error,
+                    "source_dataset_id": deps.dataset_id,
+                    "compiled_dataset_summary": cleaned_summary,
+                    "compiled_causal_spec": causal_spec,
+                    "cleaning_summary": cleaning_summary,
+                    "hard_failure": True,
+                    "retry_count": retry_count,
+                    "retry_reason": recompile_instruction,
+                    "messages_history": request.read_only_messages_history,
+                },
+            )
+            blocked_payload = base_payload.model_copy(
+                update={
+                    "compiled_dataset_id": None,
+                    "compiled_dataset_summary": cleaned_summary,
+                    "compiled_causal_spec": causal_spec,
+                    "effective_causal_spec_draft": effective_draft,
+                    "compiled_fingerprint": None,
+                    "cleaning_summary": cleaning_summary,
+                    "transformation_plan": None,
+                    "transformation_suggestions": None,
+                    "validation_status": "FAIL",
+                    "validation_issues": [
+                        ValidationIssueModel(
+                            severity="FAIL",
+                            message=guard_error,
+                            fix_hint=(
+                                "Revise cleaning or preprocessing so the compiled dataset "
+                                "contains rows and the locked treatment and outcome columns."
+                            ),
+                        )
+                    ],
+                    "phase": "REVIEW_READY",
+                    "hard_failure": True,
+                    "assistant_message": message,
+                    "system_message": "DATA_COMPILATION_BLOCKED",
+                    "error_message": guard_error,
+                    "last_handled_user_message_fingerprint": trigger_message_fingerprint,
+                }
+            )
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(blocked_payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="PENDING",
+                action="NEEDS_INPUT",
+                response_messages=[ChatMessage(role="assistant", content=message)],
+            )
+
+        try:
+            transformation_result = transform(
+                transformation_instructions=(recompile_instruction or "").strip(),
+                causal_spec=causal_spec,
+                data_summary=cleaned_summary,
+                llm=self._llm,
+                encoding_plan_tool=self._encoding_plan_tool,
             )
         except Exception as exc:
-            log.exception("data compilation review summary failed", error=safe_err(exc))
-            review_message = _build_review_summary_fallback(
-                compiled_dataset_summary=compiled_artifacts.summary,
-                compiled_causal_spec=compiled_artifacts.causal_spec,
-                cleaning_summary=compiled_artifacts.cleaning_summary,
-                transformation_plan=transformation_plan,
-                transformation_suggestions=transformation_suggestions,
-                compilation_actions=payload.compilation_actions,
-                compilation_warnings=payload.compilation_warnings,
-                validation_status=validation_status,
-                validation_issues=validation_result.validation_errors,
-            )
-
-        if source_changed:
-            review_message = (
-                "The active dataset or causal draft changed, so I rebuilt the compiled "
-                f"preview before this review. {review_message}"
-            )
-
-        review_payload = payload.model_copy(
-            update={
-                "compiled_causal_spec": compiled_artifacts.causal_spec,
-                "compiled_dataset_summary": compiled_artifacts.summary,
-                "effective_causal_spec_draft": compiled_artifacts.effective_draft,
-                "cleaning_summary": compiled_artifacts.cleaning_summary,
-                "transformation_plan": transformation_plan,
-                "transformation_suggestions": transformation_suggestions,
-                "validation_issues": validation_result.validation_errors,
-                "validation_status": validation_status,
-                "phase": "REVIEW_READY",
-                "assistant_message": review_message,
-                "system_message": None,
-                "error_message": None,
-            }
-        )
-        return self._needs_input_result(
-            request=request,
-            payload=review_payload,
-            user_message=review_message,
-        )
-
-    def _handle_review_response(
-        self,
-        *,
-        request: NodeRequest,
-        payload: DataCompilationPayloadModel,
-        latest_user_message: str,
-    ) -> NodeExecutionResult:
-        if not self._review_payload_complete(payload):
-            return self._failed_result(
-                request=request,
-                payload=DataCompilationPayloadModel(),
-                user_message=(
-                    "The stored compilation review state is incomplete, so this step "
-                    "needs to be recompiled from the latest dataset and causal draft."
-                ),
-                error_message="review payload incomplete",
-            )
-
-        decision = self._llm.generate_json(
-            schema=_ReviewDecision,
-            system_prompt=data_compilation_review_decision_prompt(),
-            user_prompt=json.dumps(
+            error = safe_err(exc)
+            log.exception("data compilation transform stage failed", error=error)
+            message = self._generate_user_message(
+                "hard_failure",
                 {
-                    "compiled_dataset_summary": payload.compiled_dataset_summary.model_dump(
-                        mode="json"
-                    ),
-                    "compiled_causal_spec": payload.compiled_causal_spec.model_dump(
-                        mode="json"
-                    ),
-                    "cleaning_summary": payload.cleaning_summary,
-                    "transformation_plan": payload.transformation_plan.model_dump(
-                        mode="json"
-                    ),
-                    "transformation_suggestions": payload.transformation_suggestions.model_dump(
-                        mode="json"
-                    ),
-                    "compilation_actions": list(payload.compilation_actions),
-                    "compilation_warnings": list(payload.compilation_warnings),
-                    "validation_status": payload.validation_status,
-                    "validation_issues": [
-                        issue.model_dump(mode="json", exclude_none=True)
-                        for issue in payload.validation_issues
-                    ],
-                    "latest_user_message": latest_user_message,
+                    "step": "transformation planning",
+                    "error": error,
+                    "source_dataset_id": deps.dataset_id,
+                    "compiled_dataset_summary": cleaned_summary,
+                    "compiled_causal_spec": causal_spec,
+                    "cleaning_summary": cleaning_summary,
+                    "hard_failure": True,
+                    "retry_count": retry_count,
+                    "retry_reason": recompile_instruction,
+                    "messages_history": request.read_only_messages_history,
                 },
-                ensure_ascii=False,
-            ),
-            config=LLMConfig(model="basic", temperature=0.7),
-            history=None,
-            max_attempts=3,
-        )
+            )
+            blocked_payload = base_payload.model_copy(
+                update={
+                    "compiled_dataset_id": None,
+                    "compiled_dataset_summary": cleaned_summary,
+                    "compiled_causal_spec": causal_spec,
+                    "effective_causal_spec_draft": effective_draft,
+                    "compiled_fingerprint": None,
+                    "cleaning_summary": cleaning_summary,
+                    "transformation_plan": None,
+                    "transformation_suggestions": None,
+                    "validation_status": None,
+                    "validation_issues": [],
+                    "phase": "REVIEW_READY",
+                    "hard_failure": True,
+                    "assistant_message": message,
+                    "system_message": "DATA_COMPILATION_BLOCKED",
+                    "error_message": f"transformation failed: {error}",
+                    "last_handled_user_message_fingerprint": trigger_message_fingerprint,
+                }
+            )
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(blocked_payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="PENDING",
+                action="NEEDS_INPUT",
+                response_messages=[ChatMessage(role="assistant", content=message)],
+            )
 
-        if decision.action == "confirm":
+        transformation_plan = transformation_result.transformation_plan
+        transformation_suggestions = transformation_result.transformation_suggestions
+        transform_guard_issues: list[ValidationIssueModel] = []
+        if transformation_plan is None:
+            transform_guard_issues.append(
+                ValidationIssueModel(
+                    severity="FAIL",
+                    message="No usable baseline transformation plan was produced.",
+                    fix_hint="Rebuild the transformation plan for the compiled covariates.",
+                )
+            )
+        else:
+            seen_columns: set[str] = set()
+            duplicate_columns: set[str] = set()
+            missing_columns: list[str] = []
+            for column_plan in transformation_plan.columns:
+                column = str(column_plan.column).strip()
+                if column in seen_columns:
+                    duplicate_columns.add(column)
+                seen_columns.add(column)
+                if column not in cleaned_df.columns:
+                    missing_columns.append(column)
+            if duplicate_columns:
+                transform_guard_issues.append(
+                    ValidationIssueModel(
+                        severity="FAIL",
+                        message=(
+                            "Transformation plan contains duplicate column entries: "
+                            + ", ".join(sorted(duplicate_columns))
+                        ),
+                        fix_hint="Include each transform column exactly once.",
+                    )
+                )
+            if missing_columns:
+                transform_guard_issues.append(
+                    ValidationIssueModel(
+                        severity="FAIL",
+                        message=(
+                            "Transformation plan references missing compiled column(s): "
+                            + ", ".join(sorted(set(missing_columns)))
+                        ),
+                        fix_hint=(
+                            "Revise the transformation plan so it only references columns "
+                            "present in the cleaned dataset."
+                        ),
+                    )
+                )
+
+        if transform_guard_issues:
+            message = self._generate_user_message(
+                "validation_failure",
+                {
+                    "step": "transformation output guard",
+                    "source_dataset_id": deps.dataset_id,
+                    "compiled_dataset_summary": cleaned_summary,
+                    "compiled_causal_spec": causal_spec,
+                    "cleaning_summary": cleaning_summary,
+                    "transformation_plan": transformation_plan,
+                    "transformation_suggestions": transformation_suggestions,
+                    "validation_status": "FAIL",
+                    "validation_issues": transform_guard_issues,
+                    "hard_failure": True,
+                    "retry_count": retry_count,
+                    "retry_reason": recompile_instruction,
+                    "messages_history": request.read_only_messages_history,
+                },
+            )
+            blocked_payload = base_payload.model_copy(
+                update={
+                    "compiled_dataset_id": None,
+                    "compiled_dataset_summary": cleaned_summary,
+                    "compiled_causal_spec": causal_spec,
+                    "effective_causal_spec_draft": effective_draft,
+                    "compiled_fingerprint": None,
+                    "cleaning_summary": cleaning_summary,
+                    "transformation_plan": transformation_plan,
+                    "transformation_suggestions": transformation_suggestions,
+                    "validation_status": "FAIL",
+                    "validation_issues": transform_guard_issues,
+                    "phase": "REVIEW_READY",
+                    "hard_failure": True,
+                    "assistant_message": message,
+                    "system_message": "DATA_COMPILATION_BLOCKED",
+                    "error_message": "transformation output guard failed",
+                    "last_handled_user_message_fingerprint": trigger_message_fingerprint,
+                }
+            )
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(blocked_payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="PENDING",
+                action="NEEDS_INPUT",
+                response_messages=[ChatMessage(role="assistant", content=message)],
+            )
+
+        validation_result = validate_data_compilation(
+            candidate_df=cleaned_df,
+            causal_spec=causal_spec,
+            transform_plan=transformation_plan,
+        )
+        validation_issues = validation_result.validation_errors
+        validation_status: ValidationStatus = "PASS"
+        if any(issue.severity == "FAIL" for issue in validation_issues):
+            validation_status = "FAIL"
+        elif any(issue.severity == "WARN" for issue in validation_issues):
+            validation_status = "WARN"
+
+        if (
+            validation_status == "FAIL"
+            and retry_count == 0
+            and validation_result.user_suggestion_message
+        ):
+            retry_instruction = "\n\n".join(
+                [
+                    data_compilation_transformation_retry_guidance_prompt(),
+                    validation_result.user_suggestion_message.strip(),
+                ]
+            ).strip()
+            return self._compile_pipeline(
+                request=request,
+                payload=base_payload,
+                deps=deps,
+                source_df=source_df,
+                retry_count=1,
+                recompile_instruction=retry_instruction,
+                trigger_message_fingerprint=trigger_message_fingerprint,
+            )
+
+        if validation_status == "FAIL":
+            message = self._generate_user_message(
+                "validation_failure",
+                {
+                    "step": "validation",
+                    "source_dataset_id": deps.dataset_id,
+                    "source_dataset_summary": deps.dataset_summary,
+                    "compiled_dataset_summary": cleaned_summary,
+                    "compiled_causal_spec": causal_spec,
+                    "effective_causal_spec_draft": effective_draft,
+                    "cleaning_summary": cleaning_summary,
+                    "transformation_plan": transformation_plan,
+                    "transformation_suggestions": transformation_suggestions,
+                    "validation_status": validation_status,
+                    "validation_issues": validation_issues,
+                    "hard_failure": True,
+                    "retry_count": retry_count,
+                    "retry_reason": recompile_instruction,
+                    "messages_history": request.read_only_messages_history,
+                },
+            )
+            blocked_payload = base_payload.model_copy(
+                update={
+                    "compiled_dataset_id": None,
+                    "compiled_dataset_summary": cleaned_summary,
+                    "compiled_causal_spec": causal_spec,
+                    "effective_causal_spec_draft": effective_draft,
+                    "compiled_fingerprint": None,
+                    "cleaning_summary": cleaning_summary,
+                    "transformation_plan": transformation_plan,
+                    "transformation_suggestions": transformation_suggestions,
+                    "validation_status": validation_status,
+                    "validation_issues": validation_issues,
+                    "phase": "REVIEW_READY",
+                    "hard_failure": True,
+                    "assistant_message": message,
+                    "system_message": "DATA_COMPILATION_BLOCKED",
+                    "error_message": "validation failed",
+                    "last_handled_user_message_fingerprint": trigger_message_fingerprint,
+                }
+            )
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(blocked_payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="PENDING",
+                action="NEEDS_INPUT",
+                response_messages=[ChatMessage(role="assistant", content=message)],
+            )
+
+        preview_dataset_id = uuid4()
+        try:
+            self._data_repo.save_csv_data(
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                dataset_id=preview_dataset_id,
+                df=cleaned_df,
+                overwrite=True,
+                include_index=False,
+            )
+        except Exception as exc:
+            error = safe_err(exc)
+            log.exception("data compilation preview save failed", error=error)
+            message = self._generate_user_message(
+                "hard_failure",
+                {
+                    "step": "preview dataset save",
+                    "error": error,
+                    "source_dataset_id": deps.dataset_id,
+                    "compiled_dataset_summary": cleaned_summary,
+                    "compiled_causal_spec": causal_spec,
+                    "cleaning_summary": cleaning_summary,
+                    "transformation_plan": transformation_plan,
+                    "validation_status": validation_status,
+                    "validation_issues": validation_issues,
+                    "hard_failure": True,
+                    "retry_count": retry_count,
+                    "retry_reason": recompile_instruction,
+                    "messages_history": request.read_only_messages_history,
+                },
+            )
+            blocked_payload = base_payload.model_copy(
+                update={
+                    "compiled_dataset_id": None,
+                    "compiled_dataset_summary": cleaned_summary,
+                    "compiled_causal_spec": causal_spec,
+                    "effective_causal_spec_draft": effective_draft,
+                    "compiled_fingerprint": None,
+                    "cleaning_summary": cleaning_summary,
+                    "transformation_plan": transformation_plan,
+                    "transformation_suggestions": transformation_suggestions,
+                    "validation_status": validation_status,
+                    "validation_issues": validation_issues,
+                    "phase": "REVIEW_READY",
+                    "hard_failure": True,
+                    "assistant_message": message,
+                    "system_message": "DATA_COMPILATION_BLOCKED",
+                    "error_message": f"preview save failed: {error}",
+                    "last_handled_user_message_fingerprint": trigger_message_fingerprint,
+                }
+            )
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(blocked_payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="PENDING",
+                action="NEEDS_INPUT",
+                response_messages=[ChatMessage(role="assistant", content=message)],
+            )
+
+        try:
             request.orchestrator_state.set(
                 request.node_state.name(),
                 {
-                    "working_dataset_id": payload.compiled_dataset_id,
-                    "latest_dataset_summary": payload.compiled_dataset_summary,
-                    "causal_spec_draft": payload.source_causal_spec_draft,
-                    "causal_spec": payload.compiled_causal_spec,
-                    "data_transformation_plan": payload.transformation_plan,
-                    "working_dataset_frozen": True,
-                    "validation_issues": payload.validation_issues,
-                    "is_validated": True,
+                    "working_dataset_id": preview_dataset_id,
+                    "latest_dataset_summary": cleaned_summary,
                 },
             )
+        except Exception as exc:
+            error = safe_err(exc)
+            log.exception("data compilation preview activation failed", error=error)
+            message = self._generate_user_message(
+                "hard_failure",
+                {
+                    "step": "preview activation",
+                    "error": error,
+                    "source_dataset_id": deps.dataset_id,
+                    "compiled_dataset_id": preview_dataset_id,
+                    "compiled_dataset_summary": cleaned_summary,
+                    "compiled_causal_spec": causal_spec,
+                    "cleaning_summary": cleaning_summary,
+                    "transformation_plan": transformation_plan,
+                    "validation_status": validation_status,
+                    "validation_issues": validation_issues,
+                    "hard_failure": True,
+                    "retry_count": retry_count,
+                    "retry_reason": recompile_instruction,
+                    "messages_history": request.read_only_messages_history,
+                },
+            )
+            blocked_payload = base_payload.model_copy(
+                update={
+                    "compiled_dataset_id": None,
+                    "compiled_dataset_summary": cleaned_summary,
+                    "compiled_causal_spec": causal_spec,
+                    "effective_causal_spec_draft": effective_draft,
+                    "compiled_fingerprint": None,
+                    "cleaning_summary": cleaning_summary,
+                    "transformation_plan": transformation_plan,
+                    "transformation_suggestions": transformation_suggestions,
+                    "validation_status": validation_status,
+                    "validation_issues": validation_issues,
+                    "phase": "REVIEW_READY",
+                    "hard_failure": True,
+                    "assistant_message": message,
+                    "system_message": "DATA_COMPILATION_BLOCKED",
+                    "error_message": f"preview activation failed: {error}",
+                    "last_handled_user_message_fingerprint": trigger_message_fingerprint,
+                }
+            )
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(blocked_payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="PENDING",
+                action="NEEDS_INPUT",
+                response_messages=[ChatMessage(role="assistant", content=message)],
+            )
+
+        compiled_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "compiled_dataset_id": str(preview_dataset_id),
+                    "compiled_dataset_summary": cleaned_summary.model_dump(mode="json"),
+                    "compiled_causal_spec": causal_spec.model_dump(mode="json"),
+                    "transformation_plan": transformation_plan.model_dump(mode="json"),
+                    "validation_status": validation_status,
+                    "validation_issues": [
+                        issue.model_dump(mode="json", exclude_none=True)
+                        for issue in validation_issues
+                    ],
+                },
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        compilation_actions = [
+            "Published a compiled dataset preview after cleaning, transformation planning, and validation.",
+            f"Row count changed from {deps.dataset_summary.n_rows} to {cleaned_summary.n_rows}.",
+        ]
+        if cleaning_summary:
+            compilation_actions.append(cleaning_summary)
+        compilation_actions.extend(note for note in cleaning_notes if note)
+        if recompile_instruction:
+            compilation_actions.append(
+                "Applied recompilation or retry instruction: " + recompile_instruction
+            )
+
+        review_context = {
+            "source_dataset_id": deps.dataset_id,
+            "compiled_dataset_id": preview_dataset_id,
+            "source_dataset_summary": deps.dataset_summary,
+            "compiled_dataset_summary": cleaned_summary,
+            "compiled_causal_spec": causal_spec,
+            "effective_causal_spec_draft": effective_draft,
+            "cleaning_summary": cleaning_summary,
+            "transformation_plan": transformation_plan,
+            "transformation_suggestions": transformation_suggestions,
+            "compilation_actions": compilation_actions,
+            "compilation_warnings": [],
+            "validation_status": validation_status,
+            "validation_issues": validation_issues,
+            "retry_count": retry_count,
+            "retry_reason": recompile_instruction,
+            "messages_history": request.read_only_messages_history,
+        }
+        review_message = self._generate_user_message("review_summary", review_context)
+        review_payload = base_payload.model_copy(
+            update={
+                "compiled_dataset_id": preview_dataset_id,
+                "compiled_dataset_summary": cleaned_summary,
+                "compiled_causal_spec": causal_spec,
+                "effective_causal_spec_draft": effective_draft,
+                "compiled_fingerprint": compiled_fingerprint,
+                "cleaning_summary": cleaning_summary,
+                "transformation_plan": transformation_plan,
+                "transformation_suggestions": transformation_suggestions,
+                "compilation_actions": compilation_actions,
+                "compilation_warnings": [],
+                "validation_status": validation_status,
+                "validation_issues": validation_issues,
+                "phase": "REVIEW_READY",
+                "hard_failure": False,
+                "assistant_message": review_message,
+                "system_message": None,
+                "error_message": None,
+                "last_handled_user_message_fingerprint": trigger_message_fingerprint,
+            }
+        )
+        return NodeExecutionResult(
+            new_node_state=DataCompilationState(review_payload),
+            new_orchestrator_state=request.orchestrator_state,
+            status="PENDING",
+            action="NEEDS_INPUT",
+            response_messages=[ChatMessage(role="assistant", content=review_message)],
+        )
+
+    def _handle_review_message(
+        self,
+        *,
+        request: NodeRequest,
+        payload: DataCompilationPayloadModel,
+        deps: DataCompilationDeps,
+        latest_user_message: dict[str, Any],
+    ) -> NodeExecutionResult:
+        latest_fingerprint = str(latest_user_message["fingerprint"])
+        try:
+            decision = self._llm.generate_json(
+                schema=_ReviewDecision,
+                system_prompt=data_compilation_review_decision_prompt(),
+                user_prompt=json.dumps(
+                    {
+                        "latest_user_message": latest_user_message["content"],
+                        "hard_failure": payload.hard_failure,
+                        "validation_status": payload.validation_status,
+                        "validation_issues": [
+                            issue.model_dump(mode="json", exclude_none=True)
+                            for issue in payload.validation_issues
+                        ],
+                        "compiled_dataset_summary": (
+                            payload.compiled_dataset_summary.model_dump(mode="json")
+                            if payload.compiled_dataset_summary is not None
+                            else None
+                        ),
+                        "compiled_causal_spec": (
+                            payload.compiled_causal_spec.model_dump(mode="json")
+                            if payload.compiled_causal_spec is not None
+                            else None
+                        ),
+                        "cleaning_summary": payload.cleaning_summary,
+                        "transformation_plan": (
+                            payload.transformation_plan.model_dump(mode="json")
+                            if payload.transformation_plan is not None
+                            else None
+                        ),
+                        "confirmation_eligibility_facts": {
+                            "active_dataset_id": str(deps.dataset_id),
+                            "compiled_dataset_id": (
+                                str(payload.compiled_dataset_id)
+                                if payload.compiled_dataset_id is not None
+                                else None
+                            ),
+                            "hard_failure": payload.hard_failure,
+                            "validation_status": payload.validation_status,
+                            "source_draft_unchanged": _same_draft(
+                                payload.source_causal_spec_draft, deps.causal_spec_draft
+                            ),
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                config=LLMConfig(model="basic", temperature=0.7),
+                history=None,
+                max_attempts=3,
+            )
+        except Exception as exc:
+            error = safe_err(exc)
+            log.exception("data compilation review decision failed", error=error)
+            message = self._generate_user_message(
+                "clarify_fallback",
+                {"error": error, "latest_user_message": latest_user_message["content"]},
+                latest_user_message=latest_user_message,
+            )
+            clarified_payload = payload.model_copy(
+                update={
+                    "assistant_message": message,
+                    "system_message": None,
+                    "error_message": f"review decision failed: {error}",
+                    "last_handled_user_message_fingerprint": latest_fingerprint,
+                }
+            )
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(clarified_payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="PENDING",
+                action="NEEDS_INPUT",
+                response_messages=[ChatMessage(role="assistant", content=message)],
+            )
+
+        if decision.action == "confirm":
+            blockers: list[str] = []
+            if payload.hard_failure:
+                blockers.append("the current review state is blocked by a hard failure")
+            if payload.compiled_dataset_id is None:
+                blockers.append("there is no active compiled preview dataset")
+            if payload.compiled_dataset_summary is None:
+                blockers.append("the compiled dataset summary is missing")
+            if payload.compiled_causal_spec is None:
+                blockers.append("the compiled causal specification is missing")
+            if payload.transformation_plan is None:
+                blockers.append("the transformation plan is missing")
+            if payload.validation_status not in {"PASS", "WARN"}:
+                blockers.append("validation has not passed or produced only warnings")
+            if payload.compiled_dataset_id is not None and deps.dataset_id != payload.compiled_dataset_id:
+                blockers.append("the active dataset is not the compiled preview")
+            if not _same_draft(payload.source_causal_spec_draft, deps.causal_spec_draft):
+                blockers.append("the upstream causal draft changed after this preview")
+            if payload.compiled_fingerprint is None:
+                blockers.append("the compiled preview fingerprint is missing")
+            elif (
+                payload.compiled_dataset_id is not None
+                and payload.compiled_dataset_summary is not None
+                and payload.compiled_causal_spec is not None
+                and payload.transformation_plan is not None
+                and payload.validation_status is not None
+            ):
+                current_compiled_fingerprint = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "compiled_dataset_id": str(payload.compiled_dataset_id),
+                            "compiled_dataset_summary": payload.compiled_dataset_summary.model_dump(
+                                mode="json"
+                            ),
+                            "compiled_causal_spec": payload.compiled_causal_spec.model_dump(
+                                mode="json"
+                            ),
+                            "transformation_plan": payload.transformation_plan.model_dump(
+                                mode="json"
+                            ),
+                            "validation_status": payload.validation_status,
+                            "validation_issues": [
+                                issue.model_dump(mode="json", exclude_none=True)
+                                for issue in payload.validation_issues
+                            ],
+                        },
+                        sort_keys=True,
+                        default=str,
+                    ).encode("utf-8")
+                ).hexdigest()
+                if current_compiled_fingerprint != payload.compiled_fingerprint:
+                    blockers.append("the compiled preview state fingerprint no longer matches")
+
+            if blockers:
+                message = self._generate_user_message(
+                    "cannot_confirm",
+                    {
+                        "confirmation_blockers": blockers,
+                        "validation_status": payload.validation_status,
+                        "validation_issues": payload.validation_issues,
+                        "hard_failure": payload.hard_failure,
+                    },
+                    latest_user_message=latest_user_message,
+                )
+                blocked_payload = payload.model_copy(
+                    update={
+                        "assistant_message": message,
+                        "system_message": None,
+                        "error_message": "confirmation blocked: " + "; ".join(blockers),
+                        "last_handled_user_message_fingerprint": latest_fingerprint,
+                    }
+                )
+                return NodeExecutionResult(
+                    new_node_state=DataCompilationState(blocked_payload),
+                    new_orchestrator_state=request.orchestrator_state,
+                    status="PENDING",
+                    action="NEEDS_INPUT",
+                    response_messages=[ChatMessage(role="assistant", content=message)],
+                )
+
+            try:
+                request.orchestrator_state.set(
+                    request.node_state.name(),
+                    {
+                        "working_dataset_id": payload.compiled_dataset_id,
+                        "latest_dataset_summary": payload.compiled_dataset_summary,
+                        "causal_spec_draft": (
+                            payload.effective_causal_spec_draft
+                            or payload.source_causal_spec_draft
+                        ),
+                        "causal_spec": payload.compiled_causal_spec,
+                        "data_transformation_plan": payload.transformation_plan,
+                        "working_dataset_frozen": True,
+                        "validation_issues": payload.validation_issues,
+                        "is_validated": True,
+                    },
+                )
+            except Exception as exc:
+                error = safe_err(exc)
+                log.exception("data compilation acceptance publish failed", error=error)
+                message = self._generate_user_message(
+                    "hard_failure",
+                    {
+                        "step": "acceptance update",
+                        "error": error,
+                        "compiled_dataset_id": payload.compiled_dataset_id,
+                        "validation_status": payload.validation_status,
+                        "validation_issues": payload.validation_issues,
+                        "hard_failure": True,
+                    },
+                    latest_user_message=latest_user_message,
+                )
+                blocked_payload = payload.model_copy(
+                    update={
+                        "phase": "REVIEW_READY",
+                        "hard_failure": True,
+                        "assistant_message": message,
+                        "system_message": "DATA_COMPILATION_BLOCKED",
+                        "error_message": f"acceptance update failed: {error}",
+                        "last_handled_user_message_fingerprint": latest_fingerprint,
+                    }
+                )
+                return NodeExecutionResult(
+                    new_node_state=DataCompilationState(blocked_payload),
+                    new_orchestrator_state=request.orchestrator_state,
+                    status="PENDING",
+                    action="NEEDS_INPUT",
+                    response_messages=[ChatMessage(role="assistant", content=message)],
+                )
+
             confirmed_payload = payload.model_copy(
                 update={
                     "phase": "CONFIRMED",
@@ -715,410 +1283,369 @@ class DataCompilationNode(Node):
                     "assistant_message": decision.assistant_message,
                     "system_message": None,
                     "error_message": None,
+                    "last_handled_user_message_fingerprint": latest_fingerprint,
                 }
             )
-            return self._done_result(
-                request=request,
-                payload=confirmed_payload,
-                user_message=decision.assistant_message,
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(confirmed_payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="DONE",
+                action="NONE",
+                response_messages=[
+                    ChatMessage(role="assistant", content=decision.assistant_message)
+                ],
             )
 
         if decision.action == "answer_query":
-            try:
-                answer_message = self._build_review_query_answer_message(
-                    compiled_causal_spec=payload.compiled_causal_spec,
-                    compiled_dataset_summary=payload.compiled_dataset_summary,
-                    cleaning_summary=payload.cleaning_summary or "",
-                    transformation_plan=payload.transformation_plan,
-                    transformation_suggestions=payload.transformation_suggestions,
-                    compilation_actions=payload.compilation_actions,
-                    compilation_warnings=payload.compilation_warnings,
-                    validation_status=payload.validation_status or "WARN",
-                    validation_issues=payload.validation_issues,
-                    latest_user_message=latest_user_message,
-                    messages_history=request.read_only_messages_history,
-                )
-            except Exception as exc:
-                log.exception("data compilation review query answer failed", error=safe_err(exc))
-                answer_message = _build_review_query_answer_fallback(
-                    latest_user_message=latest_user_message,
-                    compiled_dataset_summary=payload.compiled_dataset_summary,
-                    compiled_causal_spec=payload.compiled_causal_spec,
-                    cleaning_summary=payload.cleaning_summary or "",
-                    transformation_plan=payload.transformation_plan,
-                    compilation_actions=payload.compilation_actions,
-                    validation_status=payload.validation_status or "WARN",
-                )
+            message = self._generate_user_message(
+                "answer_query",
+                {
+                    "compiled_dataset_summary": payload.compiled_dataset_summary,
+                    "compiled_causal_spec": payload.compiled_causal_spec,
+                    "cleaning_summary": payload.cleaning_summary,
+                    "transformation_plan": payload.transformation_plan,
+                    "transformation_suggestions": payload.transformation_suggestions,
+                    "compilation_actions": payload.compilation_actions,
+                    "compilation_warnings": payload.compilation_warnings,
+                    "validation_status": payload.validation_status,
+                    "validation_issues": payload.validation_issues,
+                    "hard_failure": payload.hard_failure,
+                    "latest_user_message": latest_user_message["content"],
+                    "messages_history": request.read_only_messages_history,
+                },
+                latest_user_message=latest_user_message,
+            )
             answered_payload = payload.model_copy(
                 update={
-                    "assistant_message": answer_message,
+                    "assistant_message": message,
+                    "system_message": None,
+                    "error_message": None,
+                    "last_handled_user_message_fingerprint": latest_fingerprint,
+                }
+            )
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(answered_payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="PENDING",
+                action="NEEDS_INPUT",
+                response_messages=[ChatMessage(role="assistant", content=message)],
+            )
+
+        if decision.action == "recompile":
+            recompile_request = (decision.recompile_request or "").strip()
+            if not recompile_request:
+                message = (
+                    "I understood that you want changes before accepting, but I need one "
+                    "clear sentence describing the same-column cleaning, filtering, "
+                    "missingness, preprocessing, or encoding change to apply."
+                )
+                clarified_payload = payload.model_copy(
+                    update={
+                        "assistant_message": message,
+                        "system_message": None,
+                        "error_message": None,
+                        "last_handled_user_message_fingerprint": latest_fingerprint,
+                    }
+                )
+                return NodeExecutionResult(
+                    new_node_state=DataCompilationState(clarified_payload),
+                    new_orchestrator_state=request.orchestrator_state,
+                    status="PENDING",
+                    action="NEEDS_INPUT",
+                    response_messages=[ChatMessage(role="assistant", content=message)],
+                )
+
+            if (
+                payload.source_dataset_id is None
+                or payload.source_dataset_summary is None
+                or payload.source_causal_spec_draft is None
+            ):
+                message = self._generate_user_message(
+                    "hard_failure",
+                    {
+                        "step": "review-time source reload",
+                        "error": "source dataset state is missing",
+                        "hard_failure": True,
+                    },
+                    latest_user_message=latest_user_message,
+                )
+                blocked_payload = payload.model_copy(
+                    update={
+                        "phase": "REVIEW_READY",
+                        "hard_failure": True,
+                        "assistant_message": message,
+                        "system_message": "DATA_COMPILATION_BLOCKED",
+                        "error_message": "source dataset state is missing for recompile",
+                        "last_handled_user_message_fingerprint": latest_fingerprint,
+                    }
+                )
+                return NodeExecutionResult(
+                    new_node_state=DataCompilationState(blocked_payload),
+                    new_orchestrator_state=request.orchestrator_state,
+                    status="PENDING",
+                    action="NEEDS_INPUT",
+                    response_messages=[ChatMessage(role="assistant", content=message)],
+                )
+
+            try:
+                active_dataset_id = request.orchestrator_state.get("working_dataset_id")
+                if active_dataset_id != payload.source_dataset_id:
+                    request.orchestrator_state.set(
+                        request.node_state.name(),
+                        {
+                            "working_dataset_id": payload.source_dataset_id,
+                            "latest_dataset_summary": payload.source_dataset_summary,
+                            "revert_request": True,
+                        },
+                    )
+                source_df = self._data_repo.get_csv_data(
+                    user_id=request.user_id,
+                    conversation_id=request.conversation_id,
+                    dataset_id=payload.source_dataset_id,
+                    limit=1_000_000,
+                )
+            except Exception as exc:
+                error = safe_err(exc)
+                log.exception("review-time data compilation recompile setup failed", error=error)
+                message = self._generate_user_message(
+                    "hard_failure",
+                    {
+                        "step": "review-time source restore/reload",
+                        "error": error,
+                        "source_dataset_id": payload.source_dataset_id,
+                        "hard_failure": True,
+                    },
+                    latest_user_message=latest_user_message,
+                )
+                blocked_payload = payload.model_copy(
+                    update={
+                        "phase": "REVIEW_READY",
+                        "hard_failure": True,
+                        "assistant_message": message,
+                        "system_message": "DATA_COMPILATION_BLOCKED",
+                        "error_message": f"review-time recompile setup failed: {error}",
+                        "last_handled_user_message_fingerprint": latest_fingerprint,
+                    }
+                )
+                return NodeExecutionResult(
+                    new_node_state=DataCompilationState(blocked_payload),
+                    new_orchestrator_state=request.orchestrator_state,
+                    status="PENDING",
+                    action="NEEDS_INPUT",
+                    response_messages=[ChatMessage(role="assistant", content=message)],
+                )
+
+            source_deps = DataCompilationDeps(
+                dataset_id=payload.source_dataset_id,
+                dataset_summary=payload.source_dataset_summary,
+                causal_spec_draft=payload.source_causal_spec_draft,
+            )
+            reset_payload = payload.model_copy(
+                update={
+                    "compiled_dataset_id": None,
+                    "compiled_dataset_summary": None,
+                    "compiled_causal_spec": None,
+                    "effective_causal_spec_draft": None,
+                    "compiled_fingerprint": None,
+                    "cleaning_summary": None,
+                    "transformation_plan": None,
+                    "transformation_suggestions": None,
+                    "compilation_actions": [],
+                    "compilation_warnings": [],
+                    "validation_issues": [],
+                    "validation_status": None,
+                    "retry_count": 0,
+                    "retry_reason": recompile_request,
+                    "phase": "INIT",
                     "hard_failure": False,
+                    "assistant_message": None,
                     "system_message": None,
                     "error_message": None,
                 }
             )
-            return self._needs_input_result(
+            return self._compile_pipeline(
                 request=request,
-                payload=answered_payload,
-                user_message=answer_message,
-            )
-
-        if decision.action == "recompile":
-            normalized_recompile_request = _normalize_text(decision.recompile_request)
-            if not normalized_recompile_request:
-                clarified_payload = payload.model_copy(
-                    update={
-                        "assistant_message": (
-                            "I understood that you want changes before accepting, but I "
-                            "still need one clear sentence describing the same-column "
-                            "cleaning or preprocessing change to apply."
-                        ),
-                        "hard_failure": False,
-                        "system_message": None,
-                        "error_message": None,
-                    }
-                )
-                return self._needs_input_result(
-                    request=request,
-                    payload=clarified_payload,
-                    user_message=clarified_payload.assistant_message or "",
-                )
-
-            try:
-                self._revert_preview_dataset(request=request, payload=payload)
-                deps = _source_deps_from_payload(
-                    payload=payload,
-                    fallback=DataCompilationDeps.from_request(request),
-                )
-                source_df = self._data_repo.get_csv_data(
-                    user_id=request.user_id,
-                    conversation_id=request.conversation_id,
-                    dataset_id=deps.dataset_id,
-                    limit=1_000_000,
-                )
-            except Exception as exc:
-                log.exception(
-                    "failed to reload original source dataset for recompilation",
-                    error=safe_err(exc),
-                )
-                return self._failed_result(
-                    request=request,
-                    payload=payload,
-                    user_message=(
-                        "I understood the requested same-column changes, but I could not "
-                        "restore and reload the original source dataset to recompile from "
-                        f"scratch. Error: {safe_err(exc)}"
-                    ),
-                    error_message=(
-                        "review-time recompilation source restore/reload failed: "
-                        f"{safe_err(exc)}"
-                    ),
-                )
-
-            recompiling_payload = payload.reset_for_recompile(
-                dataset_id=deps.dataset_id,
-                dataset_summary=deps.dataset_summary,
-                causal_spec_draft=deps.causal_spec_draft,
-            )
-            return self._run_pipeline_from_source(
-                request=request,
-                payload=recompiling_payload,
-                deps=deps,
+                payload=reset_payload,
+                deps=source_deps,
                 source_df=source_df,
-                source_changed=False,
-                review_recompile_request=normalized_recompile_request,
-                encoding_plan_tool=self._encoding_plan_tool,
+                retry_count=0,
+                recompile_instruction=recompile_request,
+                trigger_message_fingerprint=latest_fingerprint,
             )
 
         if decision.action == "reject":
             try:
-                self._revert_preview_dataset(request=request, payload=payload)
+                if (
+                    payload.source_dataset_id is not None
+                    and payload.source_dataset_summary is not None
+                    and request.orchestrator_state.get("working_dataset_id")
+                    != payload.source_dataset_id
+                ):
+                    request.orchestrator_state.set(
+                        request.node_state.name(),
+                        {
+                            "working_dataset_id": payload.source_dataset_id,
+                            "latest_dataset_summary": payload.source_dataset_summary,
+                            "revert_request": True,
+                        },
+                    )
             except Exception as exc:
-                log.exception("failed to revert data compilation preview", error=safe_err(exc))
-                return self._failed_result(
-                    request=request,
-                    payload=payload,
-                    user_message=(
-                        "I understood that you do not accept this compiled preview, but I "
-                        f"could not restore the previous dataset version. Error: {safe_err(exc)}"
-                    ),
-                    error_message=f"preview revert failed: {safe_err(exc)}",
+                error = safe_err(exc)
+                log.exception("data compilation reject source restore failed", error=error)
+                decision_message = (
+                    "I understood that you do not accept this preview, but I could not "
+                    f"restore the source dataset. Error: {error}"
                 )
+            else:
+                decision_message = decision.assistant_message
 
-            revised_payload = payload.model_copy(
+            rejected_payload = payload.model_copy(
                 update={
-                    "phase": "FAILED",
-                    "hard_failure": False,
-                    "assistant_message": decision.assistant_message,
-                    "system_message": "DATA_COMPILATION_REVISION_REQUESTED",
-                    "error_message": "user requested revision after review",
+                    "phase": "REVIEW_READY",
+                    "hard_failure": True,
+                    "assistant_message": decision_message,
+                    "system_message": "DATA_COMPILATION_REJECTED",
+                    "error_message": "user rejected compiled preview",
+                    "last_handled_user_message_fingerprint": latest_fingerprint,
                 }
             )
-            return self._aborted_result(
-                request=request,
-                payload=revised_payload,
-                user_message=decision.assistant_message,
+            return NodeExecutionResult(
+                new_node_state=DataCompilationState(rejected_payload),
+                new_orchestrator_state=request.orchestrator_state,
+                status="PENDING",
+                action="NEEDS_INPUT",
+                response_messages=[ChatMessage(role="assistant", content=decision_message)],
             )
 
         clarified_payload = payload.model_copy(
             update={
                 "assistant_message": decision.assistant_message,
-                "hard_failure": False,
                 "system_message": None,
                 "error_message": None,
+                "last_handled_user_message_fingerprint": latest_fingerprint,
             }
         )
-        return self._needs_input_result(
-            request=request,
-            payload=clarified_payload,
-            user_message=decision.assistant_message,
-        )
-
-    def _revert_preview_dataset(
-        self,
-        *,
-        request: NodeRequest,
-        payload: DataCompilationPayloadModel,
-    ) -> None:
-        if (
-            payload.source_dataset_id is None
-            or payload.source_dataset_summary is None
-            or payload.source_causal_spec_draft is None
-        ):
-            raise ValueError("source dataset state is missing for preview revert")
-
-        active_dataset_id = request.orchestrator_state.get("working_dataset_id")
-        if active_dataset_id == payload.source_dataset_id:
-            return
-
-        request.orchestrator_state.set(
-            request.node_state.name(),
-            {
-                "working_dataset_id": payload.source_dataset_id,
-                "latest_dataset_summary": payload.source_dataset_summary,
-                "causal_spec_draft": payload.source_causal_spec_draft,
-                "revert_request": True,
-            },
-        )
-
-    def _build_review_summary_message(
-        self,
-        *,
-        compiled_causal_spec: CausalSpec,
-        compiled_dataset_summary: DatasetSummaryModel,
-        cleaning_summary: str,
-        transformation_plan: TransformPlan,
-        transformation_suggestions: ColumnTransformationSuggestionList | None,
-        compilation_actions: Sequence[str],
-        compilation_warnings: Sequence[str],
-        validation_status: ValidationStatus,
-        validation_issues: Sequence[ValidationIssueModel],
-        messages_history: Sequence[ChatMessage] | None,
-    ) -> str:
-        history = list(messages_history[-4:]) if messages_history else None
-        review_summary = self._llm.generate_json(
-            schema=_ReviewSummary,
-            system_prompt=data_compilation_review_summary_prompt(),
-            user_prompt=json.dumps(
-                {
-                    "compiled_causal_spec": compiled_causal_spec.model_dump(mode="json"),
-                    "compiled_dataset_summary": {
-                        "n_rows": compiled_dataset_summary.n_rows,
-                        "columns": [
-                            str(profile.name).strip()
-                            for profile in compiled_dataset_summary.profiles
-                        ],
-                    },
-                    "cleaning_summary": cleaning_summary,
-                    "transformation_plan": transformation_plan.model_dump(mode="json"),
-                    "transformation_suggestions": (
-                        transformation_suggestions.model_dump(mode="json")
-                        if transformation_suggestions is not None
-                        else {"suggestions": []}
-                    ),
-                    "compilation_actions": list(compilation_actions),
-                    "compilation_warnings": list(compilation_warnings),
-                    "validation_status": validation_status,
-                    "validation_issues": [
-                        issue.model_dump(mode="json", exclude_none=True)
-                        for issue in validation_issues
-                    ],
-                },
-                ensure_ascii=False,
-            ),
-            config=LLMConfig(model="mini", temperature=0.6),
-            history=history,
-            max_attempts=2,
-        )
-        return review_summary.assistant_message
-
-    def _build_review_query_answer_message(
-        self,
-        *,
-        compiled_causal_spec: CausalSpec,
-        compiled_dataset_summary: DatasetSummaryModel,
-        cleaning_summary: str,
-        transformation_plan: TransformPlan,
-        transformation_suggestions: ColumnTransformationSuggestionList | None,
-        compilation_actions: Sequence[str],
-        compilation_warnings: Sequence[str],
-        validation_status: ValidationStatus,
-        validation_issues: Sequence[ValidationIssueModel],
-        latest_user_message: str,
-        messages_history: Sequence[ChatMessage] | None,
-    ) -> str:
-        history = list(messages_history[-4:]) if messages_history else None
-        review_answer = self._llm.generate_json(
-            schema=_ReviewSummary,
-            system_prompt=data_compilation_review_query_prompt(),
-            user_prompt=json.dumps(
-                {
-                    "compiled_causal_spec": compiled_causal_spec.model_dump(mode="json"),
-                    "compiled_dataset_summary": {
-                        "n_rows": compiled_dataset_summary.n_rows,
-                        "columns": [
-                            str(profile.name).strip()
-                            for profile in compiled_dataset_summary.profiles
-                        ],
-                    },
-                    "cleaning_summary": cleaning_summary,
-                    "transformation_plan": transformation_plan.model_dump(mode="json"),
-                    "transformation_suggestions": (
-                        transformation_suggestions.model_dump(mode="json")
-                        if transformation_suggestions is not None
-                        else {"suggestions": []}
-                    ),
-                    "compilation_actions": list(compilation_actions),
-                    "compilation_warnings": list(compilation_warnings),
-                    "validation_status": validation_status,
-                    "validation_issues": [
-                        issue.model_dump(mode="json", exclude_none=True)
-                        for issue in validation_issues
-                    ],
-                    "latest_user_message": latest_user_message,
-                },
-                ensure_ascii=False,
-            ),
-            config=LLMConfig(model="mini", temperature=0.6),
-            history=history,
-            max_attempts=2,
-        )
-        return review_answer.assistant_message
-
-    def _review_payload_complete(self, payload: DataCompilationPayloadModel) -> bool:
-        return (
-            payload.source_dataset_id is not None
-            and payload.source_dataset_summary is not None
-            and payload.source_causal_spec_draft is not None
-            and payload.compiled_dataset_id is not None
-            and payload.compiled_dataset_summary is not None
-            and payload.compiled_causal_spec is not None
-            and payload.effective_causal_spec_draft is not None
-            and payload.cleaning_summary is not None
-            and payload.transformation_plan is not None
-            and payload.transformation_suggestions is not None
-            and payload.validation_status is not None
-        )
-
-    def _build_transformation_instructions(
-        self,
-        *,
-        retry_feedback: str | None,
-    ) -> str:
-        return _normalize_text(retry_feedback)
-
-    def _needs_input_result(
-        self,
-        *,
-        request: NodeRequest,
-        payload: DataCompilationPayloadModel,
-        user_message: str,
-    ) -> NodeExecutionResult:
         return NodeExecutionResult(
-            new_node_state=DataCompilationState(payload),
+            new_node_state=DataCompilationState(clarified_payload),
             new_orchestrator_state=request.orchestrator_state,
             status="PENDING",
             action="NEEDS_INPUT",
-            response_messages=[ChatMessage(role="assistant", content=user_message)],
+            response_messages=[ChatMessage(role="assistant", content=decision.assistant_message)],
         )
 
-    def _needs_data_result(
+    def _generate_user_message(
         self,
-        *,
-        request: NodeRequest,
-        user_message: str,
-    ) -> NodeExecutionResult:
-        return NodeExecutionResult(
-            new_node_state=DataCompilationState.init_empty(),
-            new_orchestrator_state=request.orchestrator_state,
-            status="PENDING",
-            action="NEEDS_DATA",
-            response_messages=[ChatMessage(role="assistant", content=user_message)],
-        )
+        mode: str,
+        context: dict[str, Any],
+        latest_user_message: dict[str, Any] | None = None,
+    ) -> str:
+        history_raw = context.get("messages_history")
+        history = list(history_raw[-4:]) if history_raw else None
 
-    def _done_result(
-        self,
-        *,
-        request: NodeRequest,
-        payload: DataCompilationPayloadModel,
-        user_message: str,
-    ) -> NodeExecutionResult:
-        return NodeExecutionResult(
-            new_node_state=DataCompilationState(payload),
-            new_orchestrator_state=request.orchestrator_state,
-            status="DONE",
-            action="NONE",
-            response_messages=[ChatMessage(role="assistant", content=user_message)],
-        )
+        prompt_context: dict[str, Any] = {}
+        for key, value in context.items():
+            if key == "messages_history":
+                continue
+            if hasattr(value, "model_dump"):
+                prompt_context[key] = value.model_dump(mode="json")
+            elif isinstance(value, list):
+                prompt_context[key] = [
+                    item.model_dump(mode="json", exclude_none=True)
+                    if hasattr(item, "model_dump")
+                    else item
+                    for item in value
+                ]
+            else:
+                prompt_context[key] = value
+        if latest_user_message is not None:
+            prompt_context["latest_user_message"] = latest_user_message["content"]
 
-    def _aborted_result(
-        self,
-        *,
-        request: NodeRequest,
-        payload: DataCompilationPayloadModel,
-        user_message: str,
-    ) -> NodeExecutionResult:
-        return NodeExecutionResult(
-            new_node_state=DataCompilationState(payload),
-            new_orchestrator_state=request.orchestrator_state,
-            status="ABORTED",
-            action="NONE",
-            response_messages=[ChatMessage(role="assistant", content=user_message)],
-        )
+        if mode == "review_summary":
+            system_prompt = data_compilation_review_summary_prompt()
+            config = LLMConfig(model="mini", temperature=0.6)
+        elif mode == "answer_query":
+            system_prompt = data_compilation_review_query_prompt()
+            config = LLMConfig(model="mini", temperature=0.6)
+        elif mode == "validation_failure":
+            system_prompt = data_compilation_validation_failure_message_prompt()
+            config = LLMConfig(model="mini", temperature=0.5)
+        elif mode == "hard_failure":
+            system_prompt = data_compilation_hard_failure_message_prompt()
+            config = LLMConfig(model="mini", temperature=0.5)
+        elif mode == "cannot_confirm":
+            system_prompt = data_compilation_cannot_confirm_message_prompt()
+            config = LLMConfig(model="mini", temperature=0.4)
+        elif mode == "clarify_fallback":
+            system_prompt = data_compilation_clarify_fallback_message_prompt()
+            config = LLMConfig(model="mini", temperature=0.5)
+        else:
+            system_prompt = data_compilation_message_generation_repair_prompt()
+            config = LLMConfig(model="mini", temperature=0.5)
 
-    def _failed_result(
-        self,
-        *,
-        request: NodeRequest,
-        payload: DataCompilationPayloadModel,
-        user_message: str,
-        error_message: str,
-    ) -> NodeExecutionResult:
-        failed_payload = payload.model_copy(
-            update={
-                "phase": "FAILED",
-                "hard_failure": True,
-                "assistant_message": user_message,
-                "system_message": "DATA_COMPILATION_HARD_FAILED",
-                "error_message": error_message,
+        try:
+            message = self._llm.generate_json(
+                schema=_ReviewSummary,
+                system_prompt=system_prompt,
+                user_prompt=json.dumps(prompt_context, ensure_ascii=False, default=str),
+                config=config,
+                history=history,
+                max_attempts=2,
+            )
+            return message.assistant_message
+        except Exception as exc:
+            first_error = safe_err(exc)
+            log.exception("data compilation user message generation failed", error=first_error)
+            repair_context = {
+                "mode": mode,
+                "step": prompt_context.get("step"),
+                "error": prompt_context.get("error") or first_error,
+                "validation_status": prompt_context.get("validation_status"),
+                "validation_issues": prompt_context.get("validation_issues"),
+                "hard_failure": prompt_context.get("hard_failure"),
             }
-        )
-        return self._aborted_result(
-            request=request,
-            payload=failed_payload,
-            user_message=user_message,
-        )
+            repair_message = self._llm.generate_json(
+                schema=_ReviewSummary,
+                system_prompt=data_compilation_message_generation_repair_prompt(),
+                user_prompt=json.dumps(repair_context, ensure_ascii=False, default=str),
+                config=LLMConfig(model="mini", temperature=0.3),
+                history=None,
+                max_attempts=2,
+            )
+            return repair_message.assistant_message
 
 
-def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> str | None:
+def _latest_user_message(messages_history: Sequence[ChatMessage] | None) -> dict[str, Any] | None:
     if not messages_history:
         return None
-    for message in reversed(messages_history):
+    for index in range(len(messages_history) - 1, -1, -1):
+        message = messages_history[index]
         if message.role != "user":
             continue
         content = message.content.strip()
-        if content:
-            return content
+        if not content:
+            continue
+        if message.id:
+            fingerprint = f"id:{message.id}"
+        else:
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        "index": index,
+                        "role": message.role,
+                        "content": content,
+                        "created_at_utc": message.created_at_utc,
+                    },
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+        return {
+            "content": content,
+            "message_id": message.id,
+            "created_at_utc": message.created_at_utc,
+            "index": index,
+            "fingerprint": fingerprint,
+        }
     return None
 
 
@@ -1126,409 +1653,3 @@ def _same_draft(left: CausalSpecDraft | None, right: CausalSpecDraft | None) -> 
     if left is None or right is None:
         return left is right
     return left.model_dump(mode="json") == right.model_dump(mode="json")
-
-
-def _source_deps_from_payload(
-    *,
-    payload: DataCompilationPayloadModel,
-    fallback: DataCompilationDeps,
-) -> DataCompilationDeps:
-    if (
-        payload.source_dataset_id is None
-        or payload.source_dataset_summary is None
-        or payload.source_causal_spec_draft is None
-    ):
-        return fallback
-    return DataCompilationDeps(
-        dataset_id=payload.source_dataset_id,
-        dataset_summary=payload.source_dataset_summary,
-        causal_spec_draft=payload.source_causal_spec_draft,
-    )
-
-
-def _normalize_text(raw: str | None) -> str:
-    if raw is None:
-        return ""
-    return raw.strip()
-
-
-def _protocol_scope_columns(causal_spec: CausalSpec) -> list[str]:
-    ordered_columns = [
-        str(causal_spec.id_col).strip(),
-        str(causal_spec.treatment_spec.column).strip(),
-        str(causal_spec.outcome_spec.column).strip(),
-        *(
-            [str(causal_spec.negative_control_outcome.column).strip()]
-            if causal_spec.negative_control_outcome is not None
-            else []
-        ),
-        *(str(column).strip() for column in causal_spec.covariates),
-        *(str(column).strip() for column in causal_spec.effect_modifiers),
-    ]
-    deduped: list[str] = []
-    for column in ordered_columns:
-        if column and column not in deduped:
-            deduped.append(column)
-    return deduped
-
-
-def _summary_column_names(summary: DatasetSummaryModel) -> list[str]:
-    return [str(profile.name).strip() for profile in summary.profiles if str(profile.name).strip()]
-
-
-def _summarize_compile_actions(
-    *,
-    source_summary: DatasetSummaryModel,
-    cleaned_summary: DatasetSummaryModel,
-    causal_spec: CausalSpec,
-    review_recompile_request: str | None,
-    cleaning_summary: str,
-    cleaning_notes: Sequence[str] = (),
-) -> list[str]:
-    actions = [
-        "Published a compiled dataset preview after cleaning, transformation planning, and validation.",
-        "Retained draft-scope columns for compilation: "
-        + ", ".join(_protocol_scope_columns(causal_spec)),
-    ]
-    normalized_summary = _normalize_text(cleaning_summary)
-    if normalized_summary:
-        actions.append(normalized_summary)
-    actions.extend(_summarize_cleaning_notes(cleaning_notes))
-
-    if source_summary.n_rows != cleaned_summary.n_rows:
-        actions.append(
-            f"Row count changed from {source_summary.n_rows} to {cleaned_summary.n_rows} during cleaning."
-        )
-
-    source_columns = _summary_column_names(source_summary)
-    cleaned_columns = _summary_column_names(cleaned_summary)
-    removed_columns = [column for column in source_columns if column not in cleaned_columns]
-    added_columns = [column for column in cleaned_columns if column not in source_columns]
-    if removed_columns:
-        actions.append("Removed columns outside the draft scope: " + ", ".join(removed_columns))
-    if added_columns:
-        actions.append("Added derived compilation column(s): " + ", ".join(added_columns))
-
-    normalized_review_recompile_request = _normalize_text(review_recompile_request)
-    if normalized_review_recompile_request:
-        actions.append(
-            "Applied recompilation feedback on the original working dataset: "
-            + normalized_review_recompile_request
-        )
-
-    actions.append("Compiled the causal specification on the cleaned dataset summary.")
-    return actions
-
-
-def _summarize_cleaning_notes(cleaning_notes: Sequence[str]) -> list[str]:
-    summarized: list[str] = []
-    for note in cleaning_notes:
-        normalized = _normalize_text(note)
-        if normalized and normalized not in summarized:
-            summarized.append(normalized)
-    return summarized
-
-
-def _merge_unique_text_items(
-    existing_items: Sequence[str],
-    new_items: Sequence[str],
-) -> list[str]:
-    merged = list(existing_items)
-    for item in new_items:
-        if item not in merged:
-            merged.append(item)
-    return merged
-
-
-def _summarize_transformation_suggestions(
-    *,
-    summary: DatasetSummaryModel,
-    transformation_suggestions: ColumnTransformationSuggestionList | None,
-) -> list[str]:
-    if transformation_suggestions is None:
-        return []
-
-    current_kind_by_column = {
-        str(profile.name).strip(): str(profile.inferred_kind)
-        for profile in summary.profiles
-        if str(profile.name).strip()
-    }
-    warnings: list[str] = []
-    for suggestion in transformation_suggestions.suggestions:
-        current_kind = current_kind_by_column.get(suggestion.column)
-        if current_kind is None or suggestion.preferred_type == current_kind:
-            continue
-        warnings.append(
-            f"Column '{suggestion.column}' is currently stored as {current_kind}; "
-            f"preferred future raw type is {suggestion.preferred_type}. "
-            f"{suggestion.preferred_type_reason}"
-        )
-    return warnings
-
-
-def _build_validation_retry_feedback(validation_message: str) -> str:
-    return "\n\n".join(
-        [
-            data_compilation_transformation_retry_guidance_prompt(),
-            validation_message.strip(),
-        ]
-    ).strip()
-
-
-def _validation_status(issues: Sequence[ValidationIssueModel]) -> ValidationStatus:
-    if any(issue.severity == "FAIL" for issue in issues):
-        return "FAIL"
-    if any(issue.severity == "WARN" for issue in issues):
-        return "WARN"
-    return "PASS"
-
-
-def _format_issue_lines(issues: Sequence[ValidationIssueModel]) -> list[str]:
-    lines: list[str] = []
-    for issue in issues:
-        lines.append(f"- {issue.severity}: {issue.message}")
-        if issue.fix_hint:
-            lines.append(f"  Suggested fix: {issue.fix_hint}")
-    return lines
-
-
-def _build_compile_failure_message(
-    *,
-    error: str,
-) -> str:
-    return (
-        "I could not clean and compile the current dataset into a stable causal setup. "
-        f"Error: {error}"
-    )
-
-
-def _build_validation_retry_exhausted_message(
-    *,
-    validation_message: str,
-) -> str:
-    guidance = _parse_validation_retry_guidance(validation_message)
-    if not guidance:
-        return "\n".join(
-            [
-                "I applied one automatic full retry after validation, but the compiled setup still has a remaining transformation or encoding problem.",
-                "",
-                "Please adjust the dataset preprocessing or encoding choices and rerun compilation. You only need to revise the causal draft if you want different variables or roles.",
-            ]
-        ).strip()
-
-    if len(guidance) == 1:
-        item = guidance[0]
-        lines = [
-            "I applied one automatic full retry after validation, but one transformation or encoding issue still remains.",
-            "",
-            f"Remaining issue: {item.issue}",
-        ]
-        if item.fix_hint:
-            lines.extend(["", f"Most direct fix: {item.fix_hint}"])
-        lines.extend(
-            [
-                "",
-                "Please keep the same locked treatment, outcome, covariate, and effect-modifier roles, adjust the preprocessing or encoding accordingly, and rerun compilation.",
-            ]
-        )
-        return "\n".join(lines).strip()
-
-    lines = [
-        "I applied one automatic full retry after validation, but a few transformation or encoding issues still remain.",
-        "",
-        "Remaining issues:",
-    ]
-    for item in guidance:
-        lines.append(f"- {item.issue}")
-        if item.fix_hint:
-            lines.append(f"  Most direct fix: {item.fix_hint}")
-    lines.extend(
-        [
-            "",
-            "Please keep the same locked treatment, outcome, covariate, and effect-modifier roles, adjust the preprocessing or encoding accordingly, and rerun compilation.",
-        ]
-    )
-    return "\n".join(lines).strip()
-
-
-def _build_hard_validation_message(
-    *,
-    issues: Sequence[ValidationIssueModel],
-) -> str:
-    lines = [
-        "Validation found blocking problems that cannot be repaired automatically in this step.",
-        "",
-        "Blocking issues:",
-        *_format_issue_lines([issue for issue in issues if issue.severity == "FAIL"]),
-    ]
-    lines.extend(
-        [
-            "",
-            "Please revise the causal draft roles or the upstream dataset preparation before trying again.",
-        ]
-    )
-    return "\n".join(lines).strip()
-
-
-def _build_review_summary_fallback(
-    *,
-    compiled_dataset_summary: DatasetSummaryModel,
-    compiled_causal_spec: CausalSpec,
-    cleaning_summary: str,
-    transformation_plan: TransformPlan,
-    transformation_suggestions: ColumnTransformationSuggestionList | None,
-    compilation_actions: Sequence[str],
-    compilation_warnings: Sequence[str],
-    validation_status: ValidationStatus,
-    validation_issues: Sequence[ValidationIssueModel],
-) -> str:
-    retained_columns = [str(profile.name).strip() for profile in compiled_dataset_summary.profiles]
-    preferred_type_notes = _preferred_type_note_by_column(
-        summary=compiled_dataset_summary,
-        transformation_suggestions=transformation_suggestions,
-    )
-    transform_lines = []
-    for column in transformation_plan.columns:
-        line = f"{column.column}: {column.encoding.preset}"
-        note = preferred_type_notes.get(column.column)
-        if note:
-            line = f"{line} ({note})"
-        transform_lines.append(line)
-    warning_text = (
-        "No non-blocking warnings remain."
-        if not compilation_warnings and not validation_issues
-        else "; ".join(
-            [
-                *list(compilation_warnings),
-                *[
-                    f"{issue.severity}: {issue.message}"
-                    for issue in validation_issues
-                    if issue.severity == "WARN"
-                ],
-            ]
-        )
-    )
-    recommendation = (
-        "I recommend accepting this preview now."
-        if validation_status == "PASS"
-        else "I think this preview is usable, but only if you are comfortable with the cautions listed below."
-    )
-    return (
-        "I prepared and published a compiled dataset preview for causal modeling. "
-        f"The preview has {compiled_dataset_summary.n_rows} rows and "
-        f"{len(compiled_dataset_summary.profiles)} columns: "
-        f"{', '.join(retained_columns) if retained_columns else 'none'}. "
-        f"Cleaning changes: {cleaning_summary}. "
-        f"The treatment column is {compiled_causal_spec.treatment_spec.column}, the "
-        f"outcome column is {compiled_causal_spec.outcome_spec.column}, the baseline "
-        f"covariates are {', '.join(compiled_causal_spec.covariates) if compiled_causal_spec.covariates else 'none'}, "
-        f"and the effect modifiers are {', '.join(compiled_causal_spec.effect_modifiers) if compiled_causal_spec.effect_modifiers else 'none'}. "
-        f"Planned baseline transformations: {'; '.join(transform_lines)}. "
-        f"Validation status: {validation_status}. "
-        f"Warnings and cautions: {warning_text}. "
-        f"Data preparation steps: {'; '.join(compilation_actions) if compilation_actions else 'none recorded'}. "
-        f"{recommendation} Please confirm this compiled preview, or tell me what should change."
-    )
-
-
-def _build_review_query_answer_fallback(
-    *,
-    latest_user_message: str,
-    compiled_dataset_summary: DatasetSummaryModel,
-    compiled_causal_spec: CausalSpec,
-    cleaning_summary: str,
-    transformation_plan: TransformPlan,
-    compilation_actions: Sequence[str],
-    validation_status: ValidationStatus,
-) -> str:
-    retained_columns = [
-        str(profile.name).strip() for profile in compiled_dataset_summary.profiles
-    ]
-    transform_text = "; ".join(
-        f"{column.column}: {column.encoding.preset}" for column in transformation_plan.columns
-    )
-    return (
-        f"Your question was: {latest_user_message.strip()} "
-        f"The compiled preview currently has {compiled_dataset_summary.n_rows} rows and "
-        f"{len(retained_columns)} columns: {', '.join(retained_columns) if retained_columns else 'none'}. "
-        f"Treatment is {compiled_causal_spec.treatment_spec.column}, outcome is "
-        f"{compiled_causal_spec.outcome_spec.column}, covariates are "
-        f"{', '.join(compiled_causal_spec.covariates) if compiled_causal_spec.covariates else 'none'}, "
-        f"and effect modifiers are "
-        f"{', '.join(compiled_causal_spec.effect_modifiers) if compiled_causal_spec.effect_modifiers else 'none'}. "
-        f"Cleaning changes: {cleaning_summary}. "
-        f"Planned transformations: {transform_text}. "
-        f"Data preparation steps: {'; '.join(compilation_actions) if compilation_actions else 'none recorded'}. "
-        f"Validation status is {validation_status}. Please confirm this setup or tell me what should change."
-    )
-
-
-def _preferred_type_note_by_column(
-    *,
-    summary: DatasetSummaryModel,
-    transformation_suggestions: ColumnTransformationSuggestionList | None,
-) -> dict[str, str]:
-    if transformation_suggestions is None:
-        return {}
-
-    current_kind_by_column = {
-        str(profile.name).strip(): str(profile.inferred_kind)
-        for profile in summary.profiles
-        if str(profile.name).strip()
-    }
-    notes: dict[str, str] = {}
-    for suggestion in transformation_suggestions.suggestions:
-        current_kind = current_kind_by_column.get(suggestion.column)
-        if current_kind is None or suggestion.preferred_type == current_kind:
-            continue
-        notes[suggestion.column] = (
-            f"preferred future raw type {suggestion.preferred_type}: "
-            f"{suggestion.preferred_type_reason}"
-        )
-    return notes
-
-
-def _parse_validation_retry_guidance(
-    validation_message: str,
-) -> list[_ValidationRepairGuidance]:
-    guidance: list[_ValidationRepairGuidance] = []
-    current_issue: str | None = None
-    current_fix_hint: str | None = None
-    in_repair_section = False
-
-    for raw_line in validation_message.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        if line == "Repairable validation errors:":
-            in_repair_section = True
-            continue
-
-        if not in_repair_section:
-            continue
-
-        if line.startswith("- "):
-            if current_issue is not None:
-                guidance.append(
-                    _ValidationRepairGuidance(
-                        issue=current_issue,
-                        fix_hint=current_fix_hint,
-                    )
-                )
-            current_issue = line[2:].strip()
-            current_fix_hint = None
-            continue
-
-        if line.startswith("What to fix:") and current_issue is not None:
-            current_fix_hint = line.removeprefix("What to fix:").strip() or None
-
-    if current_issue is not None:
-        guidance.append(
-            _ValidationRepairGuidance(
-                issue=current_issue,
-                fix_hint=current_fix_hint,
-            )
-        )
-
-    return guidance

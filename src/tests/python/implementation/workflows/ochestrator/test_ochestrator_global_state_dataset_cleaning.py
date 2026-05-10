@@ -173,8 +173,6 @@ def test_data_compilation_dataset_only_publish_allows_partial_payload() -> None:
         {
             "working_dataset_id": repaired_dataset_id,
             "latest_dataset_summary": _summary(48),
-            "causal_spec_draft": _causal_draft(),
-            "publish_dataset_only": True,
         },
     )
 
@@ -186,7 +184,7 @@ def test_data_compilation_dataset_only_publish_allows_partial_payload() -> None:
     assert state.get("data_transformation_plan") is None
 
 
-def test_data_compilation_full_publish_still_requires_full_payload() -> None:
+def test_data_compilation_acceptance_still_requires_full_payload() -> None:
     state = CausalOchestratorState.init_empty()
     source_dataset_id = uuid4()
 
@@ -202,12 +200,14 @@ def test_data_compilation_full_publish_still_requires_full_payload() -> None:
         {"causal_spec_draft": _causal_draft()},
     )
 
-    with pytest.raises(KeyError, match="DATA_COMPILATION updates must include"):
+    with pytest.raises(KeyError, match="DATA_COMPILATION acceptance updates must include"):
         state.set(
             DataCompilationState.NAME,
             {
                 "working_dataset_id": uuid4(),
                 "latest_dataset_summary": _summary(24),
+                "causal_spec_draft": _causal_draft(),
+                "causal_spec": _causal_spec(),
             },
         )
 

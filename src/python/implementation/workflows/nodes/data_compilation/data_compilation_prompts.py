@@ -244,6 +244,10 @@ Task:
 Decision rules:
 - Choose `confirm` only when the user is clearly accepting the compiled dataset preview,
   transformation plan, and validation result as-is.
+- If the user says yes/continue but also asks for any change, choose `recompile`, not
+  `confirm`.
+- If the user asks a question and says to continue afterward, choose `answer_query`.
+  Do not auto-confirm after answering.
 - Choose `answer_query` when the user is asking an explanatory question about the cached
   compiled setup and is not asking to change it.
 - Choose `recompile` when the user wants same-column preprocessing, cleaning, missingness
@@ -259,6 +263,8 @@ Style rules:
 - If `clarify`, ask one focused follow-up question.
 - If `recompile`, summarize the requested same-column changes briefly in `recompile_request`.
 - If the reply is a question, do not choose `clarify`; choose `answer_query`.
+- Treat "looks okay?", "is this okay?", and similar uncertain acceptance as
+  `answer_query` or `clarify`, not `confirm`.
 - Do not invent new draft content.
 
 Output JSON exactly:
@@ -299,5 +305,98 @@ Style rules:
 Output JSON exactly:
 {
   "assistant_message": "<specific answer to the user's review-time question>"
+}
+""".strip()
+
+
+def data_compilation_validation_failure_message_prompt() -> str:
+    return """
+You are explaining a blocked data-compilation validation state to a clinician.
+
+Task:
+- Explain what failed, why confirmation is blocked, whether an automatic retry was attempted,
+  and what the user can change next.
+- Use only the provided context.
+- Say the user can ask questions, request a specific same-column change, or go back.
+- Do not invent dataset facts.
+- Do not mention internal JSON, validators, or workflow implementation details.
+
+Output JSON exactly:
+{
+  "assistant_message": "<plain user-facing blocked validation explanation>"
+}
+""".strip()
+
+
+def data_compilation_hard_failure_message_prompt() -> str:
+    return """
+You are explaining a blocked data-compilation system state to a clinician.
+
+Task:
+- Explain which step failed and give a short error summary.
+- State that no confirmed compiled setup was produced and confirmation is blocked.
+- Say the user can ask a question, request a specific same-column change, or go back.
+- Use only the provided context.
+- Do not invent dataset facts.
+- Do not mention internal JSON, validators, or workflow implementation details.
+
+Output JSON exactly:
+{
+  "assistant_message": "<plain user-facing blocked-state explanation>"
+}
+""".strip()
+
+
+def data_compilation_cannot_confirm_message_prompt() -> str:
+    return """
+You are explaining why a data-compilation review cannot be confirmed yet.
+
+Task:
+- Explain that confirmation is blocked.
+- Use the provided confirmation_blockers as the reasons.
+- Tell the user they can ask about the issue, request a specific same-column change,
+  or go back to revise the previous step.
+- Do not invent dataset facts.
+- Do not mention internal JSON, validators, fingerprints, or workflow implementation details.
+
+Output JSON exactly:
+{
+  "assistant_message": "<plain user-facing cannot-confirm explanation>"
+}
+""".strip()
+
+
+def data_compilation_clarify_fallback_message_prompt() -> str:
+    return """
+You are asking for clarification during a data-compilation review.
+
+Task:
+- Explain that the latest review response could not be safely interpreted.
+- Ask the user to either confirm the preview as-is, ask a question, request a specific
+  same-column preprocessing change, or go back.
+- Keep it concise and user-facing.
+- Do not invent dataset facts.
+
+Output JSON exactly:
+{
+  "assistant_message": "<plain clarification request>"
+}
+""".strip()
+
+
+def data_compilation_message_generation_repair_prompt() -> str:
+    return """
+You are writing a short emergency data-compilation review message after the first message
+generation attempt failed.
+
+Task:
+- Use only the provided mode, step, error, validation_status, and validation_issues.
+- Explain the current state in one short paragraph.
+- Tell the user they can ask a question, request a specific same-column change, or go back.
+- Do not invent dataset facts.
+
+Output JSON exactly:
+{
+  "assistant_message": "<short user-facing message>"
 }
 """.strip()

@@ -255,14 +255,10 @@ class CausalOchestratorState(OchestratorState):
         self._clear_stages_from(3, reason="stage-2 causal spec draft updated")
 
     def _set_data_compilation(self, value: dict[str, Any]) -> None:
-        if (
-            "working_dataset_id" not in value
-            or "latest_dataset_summary" not in value
-            or "causal_spec_draft" not in value
-        ):
+        if "working_dataset_id" not in value or "latest_dataset_summary" not in value:
             raise KeyError(
                 "DATA_COMPILATION updates must include working_dataset_id, "
-                "latest_dataset_summary and causal_spec_draft"
+                "latest_dataset_summary"
             )
 
         self._require_stage2()
@@ -271,8 +267,17 @@ class CausalOchestratorState(OchestratorState):
             value["working_dataset_id"], field_name="working_dataset_id"
         )
         latest_dataset_summary = self._parse_dataset_summary(value["latest_dataset_summary"])
-        causal_spec_draft = self._parse_causal_spec_draft(value["causal_spec_draft"])
-        self._require_matching_causal_spec_draft(causal_spec_draft)
+        has_stage3_payload = any(field in value for field in self._STAGE_FIELDS[3])
+        causal_spec_draft = (
+            self._parse_causal_spec_draft(value["causal_spec_draft"])
+            if "causal_spec_draft" in value
+            else self._model.causal_spec_draft
+        )
+        if has_stage3_payload:
+            if causal_spec_draft is None:
+                raise ValueError("DATA_COMPILATION causal_spec_draft must not be None")
+        else:
+            self._require_matching_causal_spec_draft(causal_spec_draft)
 
         next_ids = list(self._model.working_dataset_ids)
         revert_requested = (
@@ -295,35 +300,35 @@ class CausalOchestratorState(OchestratorState):
         )
         self._model.causal_spec_draft = causal_spec_draft
 
-        has_stage3_payload = any(field in value for field in self._STAGE_FIELDS[3])
         if not has_stage3_payload:
             self._clear_stages_from(3, reason="stage-3 dataset refreshed")
             return
 
-        self._model.causal_spec = (
-            self._parse_causal_spec(value["causal_spec"])
-            if "causal_spec" in value
-            else self._model.causal_spec
+        required_stage3_fields = {
+            "causal_spec_draft",
+            "causal_spec",
+            "data_transformation_plan",
+            "working_dataset_frozen",
+            "validation_issues",
+            "is_validated",
+        }
+        missing_stage3_fields = sorted(required_stage3_fields - set(value))
+        if missing_stage3_fields:
+            raise KeyError(
+                "DATA_COMPILATION acceptance updates must include: "
+                + ", ".join(missing_stage3_fields)
+            )
+
+        self._model.causal_spec = self._parse_causal_spec(value["causal_spec"])
+        self._model.data_transformation_plan = self._parse_transform_plan(
+            value["data_transformation_plan"]
         )
-        self._model.data_transformation_plan = (
-            self._parse_transform_plan(value["data_transformation_plan"])
-            if "data_transformation_plan" in value
-            else self._model.data_transformation_plan
+        self._model.working_dataset_frozen = self._parse_bool(
+            value["working_dataset_frozen"], field_name="working_dataset_frozen"
         )
-        self._model.working_dataset_frozen = (
-            self._parse_bool(value["working_dataset_frozen"], field_name="working_dataset_frozen")
-            if "working_dataset_frozen" in value
-            else self._model.working_dataset_frozen
-        )
-        self._model.validation_issues = (
-            self._parse_validation_issues(value["validation_issues"])
-            if "validation_issues" in value
-            else []
-        )
-        self._model.is_validated = (
-            self._parse_bool(value["is_validated"], field_name="is_validated")
-            if "is_validated" in value
-            else False
+        self._model.validation_issues = self._parse_validation_issues(value["validation_issues"])
+        self._model.is_validated = self._parse_bool(
+            value["is_validated"], field_name="is_validated"
         )
         self._clear_stages_from(4, reason="stage-3 compilation updated")
 
