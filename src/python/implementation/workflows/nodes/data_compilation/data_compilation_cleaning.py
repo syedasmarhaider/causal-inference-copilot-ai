@@ -286,36 +286,6 @@ def clean(
 
     raise RuntimeError("cleaning pipeline exited without returning a result")
 
-
-def cleaning(
-    *,
-    protocol_discussion: str | None,
-    cleaning_instructions: str | None,
-    review_recompile_request: str | None,
-    draft_causal_spec: CausalSpecDraft,
-    data_summary: DatasetSummaryModel,
-    to_clean_df: pd.DataFrame,
-    datasetProfilingTool: DatasetProfilingTool,
-    dataManipulationTool: DataManipulationTool,
-    llm: LLMService,
-) -> CleaningResult:
-    revised_parts = [
-        str(value).strip()
-        for value in [cleaning_instructions, review_recompile_request]
-        if value is not None and str(value).strip()
-    ]
-    return clean(
-        data=to_clean_df,
-        data_summary=data_summary,
-        draft=draft_causal_spec,
-        data_maupulation_tools=dataManipulationTool,
-        data_profiling_tools=datasetProfilingTool,
-        llm=llm,
-        protocol_discussion=protocol_discussion or "",
-        revised_instructions="\n".join(revised_parts) or None,
-    )
-
-
 def _ensure_effective_id(
     data: pd.DataFrame,
     draft: CausalSpecDraft,
@@ -910,24 +880,6 @@ def compile_causal_spec_from_draft(
         "id_col": str(previous_draft.id_col),
     }
     return CausalSpec.for_dataset_summary(dataset_summary).model_validate(payload)
-
-
-def compile_causal_spec_from_cleaned_summary(
-    *,
-    llm: LLMService,
-    cleaned_summary: DatasetSummaryModel,
-    draft_causal_spec: CausalSpecDraft,
-    protocol_discussion: str,
-    retry_feedback: str | None = None,
-) -> CausalSpec:
-    _ = llm
-    return compile_causal_spec_from_draft(
-        protocol_discussion=protocol_discussion,
-        dataset_summary=cleaned_summary,
-        previous_draft=draft_causal_spec,
-        retry_feedback=retry_feedback,
-    )
-
 
 def _validate(
     causal_spec: object,
