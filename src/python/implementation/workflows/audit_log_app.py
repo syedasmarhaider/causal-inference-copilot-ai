@@ -576,10 +576,8 @@ class AuditLogHtmlRenderer:
             cards.extend(
                 [
                     self.render_stage_card(
-                        "Protocol Discussion",
+                        "Causal Draft",
                         {
-                            "Final Protocol": payload.get("protocol_discussion"),
-                            "Cleaning Instructions": payload.get("protocol_cleaning_instructions"),
                             "Causal Spec Draft": payload.get("causal_spec_draft"),
                         },
                     ),

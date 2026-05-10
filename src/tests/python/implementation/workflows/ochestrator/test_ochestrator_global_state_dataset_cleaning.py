@@ -133,8 +133,10 @@ def test_data_compilation_dataset_only_publish_preserves_draft_and_invalidates_d
     assert state.get("latest_dataset_summary").model_dump(mode="json") == _summary(88).model_dump(
         mode="json"
     )
-    assert state.get("protocol_discussion") is None
-    assert state.get("protocol_cleaning_instructions") is None
+    with pytest.raises(KeyError):
+        state.get("protocol_discussion")
+    with pytest.raises(KeyError):
+        state.get("protocol_cleaning_instructions")
     assert state.get("causal_spec_draft").model_dump(mode="json") == _causal_draft().model_dump(
         mode="json"
     )

@@ -68,8 +68,6 @@ class GlobalStateModel(BaseModel):
     latest_dataset_summary: DatasetSummaryModel | None = None
 
     # stage 2 - causal draft
-    protocol_discussion: str | None = None
-    protocol_cleaning_instructions: str | None = None
     causal_spec_draft: CausalSpecDraft | None = None
 
     # stage 3 - compiled spec + transform plan + validation
@@ -132,11 +130,7 @@ class CausalOchestratorState(OchestratorState):
 
     _STAGE_FIELDS: ClassVar[dict[int, tuple[str, ...]]] = {
         1: ("working_dataset_ids", "latest_dataset_summary"),
-        2: (
-            "protocol_discussion",
-            "protocol_cleaning_instructions",
-            "causal_spec_draft",
-        ),
+        2: ("causal_spec_draft",),
         3: (
             "causal_spec",
             "data_transformation_plan",
@@ -253,14 +247,8 @@ class CausalOchestratorState(OchestratorState):
         self._require_stage1()
 
         next_causal_spec_draft = self._parse_causal_spec_draft(value["causal_spec_draft"])
-        cleared_legacy_text = (
-            self._model.protocol_discussion is not None
-            or self._model.protocol_cleaning_instructions is not None
-        )
-        self._model.protocol_discussion = None
-        self._model.protocol_cleaning_instructions = None
 
-        if self._model.causal_spec_draft == next_causal_spec_draft and not cleared_legacy_text:
+        if self._model.causal_spec_draft == next_causal_spec_draft:
             return
 
         self._model.causal_spec_draft = next_causal_spec_draft
