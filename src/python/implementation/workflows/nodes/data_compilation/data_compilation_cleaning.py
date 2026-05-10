@@ -63,6 +63,13 @@ def clean(
             )
 
         working_data, working_draft = _ensure_effective_id(data=data, draft=draft)
+        working_summary = data_profiling_tools.extract_dataset_summary(
+            working_data,
+            max_categories=200,
+            sample_distinct=200,
+            compute_quantiles=False,
+            strict=True,
+        )
         if working_draft.id_col != draft.id_col:
             cleaning_notes.append(
                 f"Identifier column changed from '{draft.id_col}' to "
@@ -77,7 +84,7 @@ def clean(
                     table_name=table_name,
                     data=working_data,
                     draft=working_draft,
-                    summary=data_summary,
+                    summary=working_summary,
                     data_maupulation_tools=data_maupulation_tools,
                     llm=llm,
                     revised_instructions=filter_instructions,
@@ -179,6 +186,7 @@ def clean(
                     draft=working_draft,
                     summary=typed_summary,
                     data_maupulation_tools=data_maupulation_tools,
+                    data_profiling_tools=data_profiling_tools,
                     llm=llm,
                     revised_instructions=imputation_instructions,
                 )
@@ -218,14 +226,13 @@ def clean(
             compute_quantiles=False,
             strict=True,
         )
-        causal_spec = compile_causal_spec_from_draft(
-            protocol_discussion=protocol_discussion,
-            dataset_summary=final_summary,
-            previous_draft=filled_draft,
-            retry_feedback=validation_retry_instructions,
-        )
-
         try:
+            causal_spec = compile_causal_spec_from_draft(
+                protocol_discussion=protocol_discussion,
+                dataset_summary=final_summary,
+                previous_draft=filled_draft,
+                retry_feedback=validation_retry_instructions,
+            )
             _validate(
                 causal_spec=causal_spec,
                 causal_spec_draft=filled_draft,
@@ -235,7 +242,8 @@ def clean(
         except Exception as exc:
             if pipeline_attempt == 1:
                 raise ValueError(
-                    "final validation failed after full cleaning retry: " + str(exc)
+                    "final spec compilation/validation failed after full cleaning retry: "
+                    + str(exc)
                 ) from exc
             last_validation_error = exc
             validation_retry_instructions = "\n\n".join(
@@ -243,8 +251,8 @@ def clean(
                 for part in [
                     revised_instructions,
                     (
-                        "Full cleaning retry feedback from final validation: the cleaned "
-                        f"data/spec failed validation with: {exc}. Rerun all LLM-planned "
+                        "Full cleaning retry feedback from final spec compilation/validation: "
+                        f"the cleaned data/spec failed with: {exc}. Rerun all LLM-planned "
                         "cleaning stages from the original data and correct the issue while "
                         "preserving draft-required columns."
                     ),
@@ -252,7 +260,7 @@ def clean(
                 if part
             )
             carried_notes = cleaning_notes + [
-                "Full cleaning pipeline retry triggered by final validation error: "
+                "Full cleaning pipeline retry triggered by final spec compilation/validation error: "
                 + str(exc)
             ]
             continue
@@ -517,6 +525,7 @@ def _impute_missing_values(
     draft: CausalSpecDraft,
     summary: DatasetSummaryModel,
     data_maupulation_tools: DataManipulationTool,
+    data_profiling_tools: DatasetProfilingTool,
     llm: LLMService,
     revised_instructions: str | None = None,
 ) -> pd.DataFrame:
@@ -574,6 +583,7 @@ def _impute_missing_values(
         feature_batches = [[]]
 
     imputed_data = data.copy()
+    current_summary = summary
     for batch_number, feature_batch in enumerate(feature_batches, start=1):
         batch_columns = [
             column
@@ -596,7 +606,7 @@ def _impute_missing_values(
 
         planner_payload = {
             "draft": draft.model_dump(mode="json"),
-            "dataset_summary": summary.model_dump(mode="json"),
+            "dataset_summary": current_summary.model_dump(mode="json"),
             "current_dataframe_columns": [str(column) for column in imputed_data.columns],
             "required_columns": required_columns,
             "role_by_column": role_by_column,
@@ -619,7 +629,7 @@ def _impute_missing_values(
         imputed_data = data_maupulation_tools.manipulate(
             dataframe=imputed_data,
             table_name=table_name,
-            data_summary=summary.model_dump_json(),
+            data_summary=current_summary.model_dump_json(),
             instructions=imputation_plan_text,
         )
 
@@ -631,6 +641,14 @@ def _impute_missing_values(
                 "missing-value imputation output dataframe is missing required column(s): "
                 + ", ".join(missing_columns)
             )
+
+        current_summary = data_profiling_tools.extract_dataset_summary(
+            imputed_data,
+            max_categories=200,
+            sample_distinct=200,
+            compute_quantiles=False,
+            strict=True,
+        )
 
     return imputed_data
 
