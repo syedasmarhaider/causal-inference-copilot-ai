@@ -25,7 +25,7 @@ def get_questions() -> list[str]:
         "3) Covariates: Which baseline variables should be used for adjustment/control?",
         "4) Effect modifiers: Which baseline variables may change the treatment effect across subgroups?",
         "5) ID column: Which column identifies the patient/unit?  auto_id will be generated later if no real ID exists.",
-        "6) Negative control outcome: Is there an optional outcome-like column the treatment should not affect? It is for refuting downstram causal modeling",
+        "6) Negative control outcome: Is there an outcome-like column the treatment should not affect? It is for refuting downstram causal modeling",
         "7) Target population: Who is included in the study population?",
         "8) Study type: Is this RCT or observational?",
         "9) Time zero / baseline: When does follow-up start and treatment assignment become anchored?",
@@ -60,7 +60,7 @@ Task:
 - Update the protocol discussion string using the latest user message and dataset metadata.
 - Preserve the canonical question order and all question labels.
 - Keep the protocol discussion as plain text with Q, A, and Source lines.
-- Return only the updated protocol discussion and one status.
+- Return only the updated protocol discussion text.
 
 Grounding rules:
 - Do not invent protocol answers.
@@ -82,16 +82,37 @@ Feasibility rules:
 - Covariates and effect modifiers must not overlap.
 - Treatment and outcome must not be reused as covariates, effect modifiers, or negative-control outcome.
 
+Output:
+Return only the updated canonical Q/A protocol discussion string as plain text.
+Do not wrap the protocol discussion in JSON.
+Do not include status.
+""".strip()
+
+
+def get_protocol_discussion_status_prompt() -> str:
+    return """
+You are deciding the protocol discussion status after the protocol text was updated.
+
+Inputs:
+- dataset_summary: authoritative metadata for the active dataset.
+- protocol_discussion: updated canonical Q/A protocol text.
+- latest_user_message: the newest user message.
+- recent_messages: up to five recent chat messages.
+
 Status rules:
-- status="DISCUSSING" when any required answer is UNCLEAR, data-only suggestions still need user confirmation, feasibility problems remain, or the user is still revising the protocol.
+- status="DISCUSSING" when any required answer is UNCLEAR, data-only suggestions still need user confirmation, feasibility problems remain, or the user is still revising the protocol. and if majority of the questions answers are data driven not user confirmed, keep it in DISCUSSING to encourage user confirmation and engagement.
 - status="REVIEW" when all required answers are present, coherent, grounded, and feasible, but the user has not explicitly confirmed the full protocol review yet.
 - status="READY" only when the latest user message clearly confirms a complete and feasible protocol.
 
+Grounding rules:
+- Decide only from protocol_discussion, dataset_summary, latest_user_message, and recent_messages.
+- Do not invent missing answers.
+- If there is any uncertainty, choose DISCUSSING.
+
 Output JSON exactly:
-{{
-  "protocol_discussion": "<updated canonical Q/A protocol discussion string>",
+{
   "status": "DISCUSSING" | "REVIEW" | "READY"
-}}
+}
 """.strip()
 
 
@@ -100,6 +121,7 @@ def get_protocol_discussion_response_prompt() -> str:
 You are a clinician-facing Causal ML Agent responding after the protocol discussion was updated
 You have to use nice simple clinical language and avoid mathematical or data science jargons.
 Simplify concepts in the clinical way.
+Also you critically analyze if user answer is good and suggest but don't force user.
 
 Inputs:
 - dataset_summary: authoritative metadata for the active dataset.
@@ -118,7 +140,8 @@ Response rules:
 
 Status behavior:
 - If status is DISCUSSING, briefly state what was captured and ask the next one or two most important missing protocol questions.
-- If status is REVIEW, summarize the full protocol in clinician language and ask for explicit confirmation or corrections.
+- If status is REVIEW, summarize the full protocol in clinician language and ask for explicit confirmation or corrections. and also include which questions are not answered
+for example if effect modifiers are not selected then downstream modeling will not run subgroup analysis. If negative control outcome is not selected then downstream model will not be able to refute and detect bias. if patient id is not selected then auto_id  will be generated. so things like that.
 - If status is READY, confirm that the protocol is ready and now downstream steps would be executed and make a nice clinican joke and ask to take rest.
 
 Output:

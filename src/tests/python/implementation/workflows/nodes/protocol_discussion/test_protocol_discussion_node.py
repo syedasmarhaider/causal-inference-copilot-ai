@@ -205,12 +205,12 @@ def test_protocol_discussion_starts_with_welcome_without_llm_call() -> None:
 def test_protocol_discussion_updates_string_and_uses_plain_text_response() -> None:
     llm = _FakeLLM(
         json_outputs=[
-            {
-                "protocol_discussion": "PROTOCOL DISCUSSION\nQ1: Treatment\nA: RXASP\nSource: user",
-                "status": "DISCUSSING",
-            }
+            {"status": "DISCUSSING"}
         ],
-        text_outputs=["I captured RXASP. What outcome should we use?"],
+        text_outputs=[
+            "PROTOCOL DISCUSSION\nQ1: Treatment\nA: RXASP\nSource: user",
+            "I captured RXASP. What outcome should we use?",
+        ],
     )
     summary = _summary(_categorical_profile("RXASP"), _categorical_profile("DIED"))
     messages = [
@@ -224,17 +224,19 @@ def test_protocol_discussion_updates_string_and_uses_plain_text_response() -> No
     )
 
     result = node.run(request=request)
-    compile_payload = json.loads(llm.generate_json_calls[0]["user_prompt"])
-    response_payload = json.loads(llm.generate_calls[0]["user_prompt"])
+    compile_payload = json.loads(llm.generate_calls[0]["user_prompt"])
+    status_payload = json.loads(llm.generate_json_calls[0]["user_prompt"])
+    response_payload = json.loads(llm.generate_calls[1]["user_prompt"])
 
     assert result.status == "PENDING"
     assert result.action == "NEEDS_INPUT"
     assert result.new_node_state.payload.protocol_discussion.startswith("PROTOCOL DISCUSSION")
     assert result.new_node_state.payload.status == "DISCUSSING"
     assert len(compile_payload["recent_messages"]) == 5
+    assert status_payload["protocol_discussion"].startswith("PROTOCOL DISCUSSION")
     assert "protocol_discussion" in response_payload
     assert len(llm.generate_json_calls) == 1
-    assert len(llm.generate_calls) == 1
+    assert len(llm.generate_calls) == 2
     assert orchestrator_state.set_calls == []
 
 
@@ -242,10 +244,10 @@ def test_ready_valid_binary_outcome_writes_causal_spec_draft(monkeypatch: Any) -
     _install_fake_pandas(monkeypatch)
     llm = _FakeLLM(
         json_outputs=[
-            {"protocol_discussion": "PROTOCOL DISCUSSION", "status": "READY"},
+            {"status": "READY"},
             _draft_payload(negative_control_outcome="NEGCTRL"),
         ],
-        text_outputs=["The protocol is ready."],
+        text_outputs=["PROTOCOL DISCUSSION", "The protocol is ready."],
     )
     summary = _summary(
         _categorical_profile("RXASP"),
@@ -293,10 +295,13 @@ def test_ready_invalid_treatment_cardinality_blocks_and_suggests_update_dataset(
     _install_fake_pandas(monkeypatch)
     llm = _FakeLLM(
         json_outputs=[
-            {"protocol_discussion": "PROTOCOL DISCUSSION", "status": "READY"},
+            {"status": "READY"},
             _draft_payload(),
         ],
-        text_outputs=["update dataset and create a cleaned binary treatment column from RXASP"],
+        text_outputs=[
+            "PROTOCOL DISCUSSION",
+            "update dataset and create a cleaned binary treatment column from RXASP",
+        ],
     )
     summary = _summary(
         _categorical_profile("RXASP", distinct_count=3),
@@ -313,7 +318,7 @@ def test_ready_invalid_treatment_cardinality_blocks_and_suggests_update_dataset(
     assert result.new_node_state.payload.status == "DISCUSSING"
     assert result.response_messages[0].content.startswith("update dataset")
     assert orchestrator_state.set_calls == []
-    suggestion_payload = json.loads(llm.generate_calls[0]["user_prompt"])
+    suggestion_payload = json.loads(llm.generate_calls[1]["user_prompt"])
     assert suggestion_payload["validation_issues"][0]["role"] == "treatment"
 
 

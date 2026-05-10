@@ -4,6 +4,7 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     get_protocol_discussion_causal_draft_prompt,
     get_protocol_discussion_get_node_info,
     get_protocol_discussion_response_prompt,
+    get_protocol_discussion_status_prompt,
     get_protocol_discussion_template,
     get_protocol_discussion_update_prompt,
     get_protocol_discussion_validation_suggestion_prompt,
@@ -26,9 +27,20 @@ def test_protocol_discussion_update_prompt_uses_protocol_string_contract() -> No
     assert "latest_user_message" in prompt
     assert "Source: user" in prompt
     assert "Source: data" in prompt
-    assert "status" in prompt
+    assert "Do not include status" in prompt
+    assert "Do not wrap the protocol discussion in JSON" in prompt
+    assert "Output JSON exactly" not in prompt
     assert "Treatment must be binary" in prompt
     assert "Outcome must be binary or continuous" in prompt
+
+
+def test_protocol_discussion_status_prompt_returns_only_status() -> None:
+    prompt = get_protocol_discussion_status_prompt()
+
+    assert "protocol_discussion" in prompt
+    assert "latest_user_message" in prompt
+    assert '"status": "DISCUSSING" | "REVIEW" | "READY"' in prompt
+    assert "Output JSON exactly" in prompt
 
 
 def test_protocol_discussion_template_uses_expected_questions_and_auto_id() -> None:

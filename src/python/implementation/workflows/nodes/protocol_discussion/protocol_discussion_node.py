@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMService
 from python.domain.workflows.node import Node, NodeExecutionResult, NodeRequest
@@ -18,6 +18,7 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
     get_protocol_discussion_compilation_prompt,
     get_protocol_discussion_get_node_info,
     get_protocol_discussion_response_prompt,
+    get_protocol_discussion_status_prompt,
     get_protocol_discussion_template,
     get_protocol_discussion_validation_suggestion_prompt,
     initial_user_message,
@@ -36,10 +37,9 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
-class ProtocolDiscussionCompilationResult(BaseModel):
+class ProtocolDiscussionStatusResult(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    protocol_discussion: str = Field(..., min_length=1)
     status: ProtocolDiscussionStatus
 
 
@@ -131,21 +131,27 @@ class ProtocolDiscussionNode(Node):
         )
 
         try:
-            compilation = self.protocol_discussion_compilation(
+            updated_protocol_discussion = self.protocol_discussion_compilation(
                 dataset_summary=deps.dataset_summary,
                 previous_protocol_discussion=previous_protocol_discussion,
                 latest_user_message=latest_user_message,
                 recent_messages=recent_messages,
             )
+            status = self.protocol_discussion_status(
+                dataset_summary=deps.dataset_summary,
+                protocol_discussion=updated_protocol_discussion,
+                latest_user_message=latest_user_message,
+                recent_messages=recent_messages,
+            )
             causal_draft_result: ProtocolDiscussionCausalDraftResult | None = None
-            if compilation.status == "READY":
+            if status == "READY":
                 causal_draft_result = self.protocol_discussion_causal_draft(
-                    protocol_discussion=compilation.protocol_discussion,
+                    protocol_discussion=updated_protocol_discussion,
                     dataset_summary=deps.dataset_summary,
                 )
                 if causal_draft_result.validation_issues:
                     assistant_message = self.protocol_discussion_validation_suggestion(
-                        protocol_discussion=compilation.protocol_discussion,
+                        protocol_discussion=updated_protocol_discussion,
                         causal_draft=causal_draft_result.draft,
                         validation_issues=causal_draft_result.validation_issues,
                         dataset_summary=deps.dataset_summary,
@@ -153,7 +159,7 @@ class ProtocolDiscussionNode(Node):
                     next_payload = payload.model_copy(
                         update={
                             "dataset_id": deps.dataset_id,
-                            "protocol_discussion": compilation.protocol_discussion,
+                            "protocol_discussion": updated_protocol_discussion,
                             "status": "DISCUSSING",
                             "assistant_message": assistant_message,
                         }
@@ -170,8 +176,8 @@ class ProtocolDiscussionNode(Node):
 
             assistant_message = self.protocol_discussion_response(
                 dataset_summary=deps.dataset_summary,
-                protocol_discussion=compilation.protocol_discussion,
-                status=compilation.status,
+                protocol_discussion=updated_protocol_discussion,
+                status=status,
                 latest_user_message=latest_user_message,
                 recent_messages=recent_messages,
             )
@@ -199,12 +205,12 @@ class ProtocolDiscussionNode(Node):
         next_payload = payload.model_copy(
             update={
                 "dataset_id": deps.dataset_id,
-                "protocol_discussion": compilation.protocol_discussion,
-                "status": compilation.status,
+                "protocol_discussion": updated_protocol_discussion,
+                "status": status,
                 "assistant_message": assistant_message,
             }
         )
-        if compilation.status == "READY":
+        if status == "READY":
             request.orchestrator_state.set(
                 request.node_state.name(),
                 {"causal_spec_draft": causal_draft_result.draft if causal_draft_result else None},
@@ -231,9 +237,8 @@ class ProtocolDiscussionNode(Node):
         previous_protocol_discussion: str,
         latest_user_message: str,
         recent_messages: Sequence[ChatMessage] | None,
-    ) -> ProtocolDiscussionCompilationResult:
-        return self._llm.generate_json(
-            schema=ProtocolDiscussionCompilationResult,
+    ) -> str:
+        response = self._llm.generate(
             system_prompt=get_protocol_discussion_compilation_prompt(),
             user_prompt=json.dumps(
                 {
@@ -249,8 +254,37 @@ class ProtocolDiscussionNode(Node):
             ),
             config=LLMConfig(model="pro", temperature=0.2),
             history=recent_messages,
+        )
+        return response.content.strip()
+
+    def protocol_discussion_status(
+        self,
+        *,
+        dataset_summary: DatasetSummaryModel,
+        protocol_discussion: str,
+        latest_user_message: str,
+        recent_messages: Sequence[ChatMessage] | None,
+    ) -> ProtocolDiscussionStatus:
+        result = self._llm.generate_json(
+            schema=ProtocolDiscussionStatusResult,
+            system_prompt=get_protocol_discussion_status_prompt(),
+            user_prompt=json.dumps(
+                {
+                    "dataset_summary": dataset_summary.model_dump(mode="json"),
+                    "protocol_discussion": protocol_discussion,
+                    "latest_user_message": latest_user_message,
+                    "recent_messages": [
+                        {"role": message.role, "content": message.content}
+                        for message in recent_messages or []
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            config=LLMConfig(model="basic", temperature=0.0),
+            history=recent_messages,
             max_attempts=2,
         )
+        return result.status
 
     def protocol_discussion_response(
         self,
@@ -573,6 +607,6 @@ class ProtocolDiscussionNode(Node):
 
 __all__ = [
     "ProtocolDiscussionCausalDraftResult",
-    "ProtocolDiscussionCompilationResult",
     "ProtocolDiscussionNode",
+    "ProtocolDiscussionStatusResult",
 ]
