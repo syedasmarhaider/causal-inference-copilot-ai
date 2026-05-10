@@ -632,3 +632,40 @@ __all__ = [
     "ProtocolDiscussionNode",
     "compile_causal_spec_draft_from_discussion",
 ]
+
+
+
+
+
+
+
+
+
+
+
+def _question_to_ask(
+    *,
+    draft: ProtocolCausalDraftModel,
+    dataset_summary: DatasetSummaryModel,
+    last_5_messages: Sequence[ChatMessage],
+) -> str:
+    # Implementation for determining the next question to ask based on the draft,
+    # dataset summary, and recent messages.
+    pass
+
+
+
+
+
+
+
+
+
+
+def _fill_protocol_causal_draft_model(
+    *,
+    pre_draft: ProtocolCausalDraftModel,
+    dataset_summary: DatasetSummaryModel,
+    last_5_messages: Sequence[ChatMessage],) -> ProtocolCausalDraftModel:
+    
+    

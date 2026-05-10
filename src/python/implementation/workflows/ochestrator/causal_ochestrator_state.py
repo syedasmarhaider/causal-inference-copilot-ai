@@ -274,9 +274,22 @@ class CausalOchestratorState(OchestratorState):
         causal_spec_draft = self._parse_causal_spec_draft(value["causal_spec_draft"])
         self._require_matching_causal_spec_draft(causal_spec_draft)
 
+        next_ids = list(self._model.working_dataset_ids)
+        revert_requested = (
+            value.get("revert_request") is True or value.get("_revert_request") is True
+        )
+        if revert_requested:
+            if not next_ids:
+                raise ValueError("No working dataset to revert from")
+            if len(next_ids) == 1:
+                raise ValueError("Cannot revert from initial dataset")
+            if next_ids[-2] != dataset_id:
+                raise ValueError(f"Dataset ID mismatch: expected {next_ids[-2]}, got {dataset_id}")
+            next_ids = next_ids[:-1]
+
         self._set_stage1_fields(
             working_dataset_ids=self._append_dataset_id_if_needed(
-                self._model.working_dataset_ids, dataset_id
+                next_ids, dataset_id
             ),
             latest_dataset_summary=latest_dataset_summary,
         )

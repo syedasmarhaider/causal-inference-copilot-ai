@@ -8,6 +8,7 @@ from python.implementation.workflows.nodes.data_compilation.data_compilation_nod
     DataCompilationNode,
 )
 from python.implementation.workflows.nodes.data_compilation.data_compilation_state import (
+    DataCompilationPayloadModel,
     DataCompilationState,
 )
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_state import (
@@ -209,3 +210,118 @@ def test_data_compilation_full_publish_still_requires_full_payload() -> None:
                 "latest_dataset_summary": _summary(24),
             },
         )
+
+
+def test_data_compilation_confirmation_does_not_duplicate_preview_dataset_id() -> None:
+    state = CausalOchestratorState.init_empty()
+    source_dataset_id = uuid4()
+    preview_dataset_id = uuid4()
+
+    state.set(
+        DataManupulationState.NAME,
+        {
+            "working_dataset_id": source_dataset_id,
+            "latest_dataset_summary": _summary(100),
+        },
+    )
+    state.set(ProtocolDiscussionState.NAME, {"causal_spec_draft": _causal_draft()})
+    state.set(
+        DataCompilationState.NAME,
+        {
+            "working_dataset_id": preview_dataset_id,
+            "latest_dataset_summary": _summary(90),
+            "causal_spec_draft": _causal_draft(),
+        },
+    )
+
+    dataset_ids_after_preview = state.get("working_dataset_ids")
+    assert dataset_ids_after_preview[-2:] == [source_dataset_id, preview_dataset_id]
+    assert state.get_current_node_name() == DataCompilationNode.NAME
+
+    state.set(
+        DataCompilationState.NAME,
+        {
+            "working_dataset_id": preview_dataset_id,
+            "latest_dataset_summary": _summary(90),
+            "causal_spec_draft": _causal_draft(),
+            "causal_spec": _causal_spec(),
+            "data_transformation_plan": _transform_plan(),
+            "working_dataset_frozen": True,
+            "validation_issues": [],
+            "is_validated": True,
+        },
+    )
+
+    assert state.get("working_dataset_ids") == dataset_ids_after_preview
+    assert state.get("working_dataset_id") == preview_dataset_id
+    assert state.get("working_dataset_frozen") is True
+    assert state.get("is_validated") is True
+
+
+def test_data_compilation_revert_request_pops_preview_dataset_id() -> None:
+    state = CausalOchestratorState.init_empty()
+    source_dataset_id = uuid4()
+    preview_dataset_id = uuid4()
+    source_summary = _summary(100)
+
+    state.set(
+        DataManupulationState.NAME,
+        {
+            "working_dataset_id": source_dataset_id,
+            "latest_dataset_summary": source_summary,
+        },
+    )
+    state.set(ProtocolDiscussionState.NAME, {"causal_spec_draft": _causal_draft()})
+    state.set(
+        DataCompilationState.NAME,
+        {
+            "working_dataset_id": preview_dataset_id,
+            "latest_dataset_summary": _summary(90),
+            "causal_spec_draft": _causal_draft(),
+        },
+    )
+
+    state.set(
+        DataCompilationState.NAME,
+        {
+            "working_dataset_id": source_dataset_id,
+            "latest_dataset_summary": source_summary,
+            "causal_spec_draft": _causal_draft(),
+            "revert_request": True,
+        },
+    )
+
+    assert state.get("working_dataset_id") == source_dataset_id
+    assert state.get("working_dataset_ids")[-1] == source_dataset_id
+    assert preview_dataset_id not in state.get("working_dataset_ids")
+    assert state.get("latest_dataset_summary").model_dump(mode="json") == source_summary.model_dump(
+        mode="json"
+    )
+    assert state.get("causal_spec") is None
+    assert state.get("data_transformation_plan") is None
+    assert state.get("working_dataset_frozen") is False
+    assert state.get_current_node_name() == DataCompilationNode.NAME
+
+
+def test_data_compilation_payload_tracks_source_and_drops_stale_fields() -> None:
+    source_dataset_id = uuid4()
+    preview_dataset_id = uuid4()
+    payload = DataCompilationPayloadModel.model_validate(
+        {
+            "source_dataset_id": source_dataset_id,
+            "source_dataset_summary": _summary(100),
+            "source_causal_spec_draft": _causal_draft().model_dump(mode="json"),
+            "compiled_dataset_id": preview_dataset_id,
+            "compiled_dataset_summary": _summary(90),
+            "cleaning_summary": "Cleaning summary",
+            "source_protocol_discussion": "old field",
+            "source_protocol_cleaning_instructions": "old field",
+            "missingness_decisions": {"decisions": []},
+        }
+    )
+
+    assert payload.source_dataset_id == source_dataset_id
+    assert payload.source_dataset_summary is not None
+    assert payload.source_causal_spec_draft is not None
+    assert payload.compiled_dataset_id == preview_dataset_id
+    assert payload.cleaning_summary == "Cleaning summary"

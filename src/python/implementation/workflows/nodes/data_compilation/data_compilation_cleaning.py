@@ -46,7 +46,6 @@ def clean(
     data_maupulation_tools: DataManipulationTool,
     data_profiling_tools: DatasetProfilingTool,
     llm: LLMService,
-    protocol_discussion: str = "",
     revised_instructions: str | None = None,
     table_name: str = "protocol_scope_df",
 ) -> CleaningResult:
@@ -228,7 +227,6 @@ def clean(
         )
         try:
             causal_spec = compile_causal_spec_from_draft(
-                protocol_discussion=protocol_discussion,
                 dataset_summary=final_summary,
                 previous_draft=filled_draft,
                 retry_feedback=validation_retry_instructions,
@@ -753,7 +751,6 @@ def _fill_miginess(
 
 
 def compile_causal_spec_from_draft(
-    protocol_discussion: str,
     dataset_summary: DatasetSummaryModel,
     previous_draft: CausalSpecDraft | None = None,
     retry_feedback: str | None = None,
@@ -761,7 +758,6 @@ def compile_causal_spec_from_draft(
     """
     Compile causal specs from causal drafht
     """
-    _ = protocol_discussion
     _ = retry_feedback
     if previous_draft is None:
         raise ValueError("previous_draft is required to compile causal spec from draft")
