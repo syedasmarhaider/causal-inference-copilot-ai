@@ -162,6 +162,47 @@ Output policy:
 """.strip()
 
 
+def data_compilation_imputation_plan_prompt() -> str:
+    return """
+You are devising a missing-value imputation or missingness-resolution plan for a tabular
+causal-analysis dataset.
+
+Inputs:
+- locked causal draft
+- authoritative dataset summary
+- current dataframe columns
+- required columns and their causal roles
+- columns_to_impute_this_batch
+- missing_count_by_column for this batch
+- batch_number and total_batches
+- revised_instructions text, when present (priority)
+
+Task:
+- Write one complete natural-language instruction for a data manipulation tool to resolve
+  missing values in the listed batch while preserving every required causal column.
+
+Rules:
+- Use the dataset summary and missing counts to ground the plan.
+- Treatment, outcome, and negative-control outcome missingness should be resolved
+  conservatively, usually by dropping rows or applying only a user-grounded rule.
+- Covariate and effect-modifier missingness may be imputed using conservative ML and
+  causal-inference practice when grounded by the dataset state.
+- Preserve all required draft-selected columns and their names.
+- Do not rename, drop, duplicate, or regenerate required columns.
+- Do not perform target-population filtering, datatype normalization unrelated to
+  missingness, or causal role changes here.
+- If revised_instructions are present, incorporate them into the missingness plan and
+  give them priority when compatible with the draft and dataset evidence.
+- The instruction is for a data manipulation tool, not raw SQL.
+
+Output policy:
+- Output text only.
+- Do not output JSON.
+- Do not output SQL.
+- Do not use markdown or code fences.
+""".strip()
+
+
 def _data_compilation_cleaning_instruction_output_policy() -> str:
     return """
 Output JSON exactly:
