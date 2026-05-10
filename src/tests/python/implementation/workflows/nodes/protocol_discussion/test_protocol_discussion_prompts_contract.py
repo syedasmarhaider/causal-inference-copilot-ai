@@ -1,68 +1,76 @@
 from __future__ import annotations
 
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
+    get_protocol_discussion_causal_draft_prompt,
     get_protocol_discussion_get_node_info,
     get_protocol_discussion_response_prompt,
+    get_protocol_discussion_template,
     get_protocol_discussion_update_prompt,
+    get_protocol_discussion_validation_suggestion_prompt,
     initial_user_message,
 )
 
 
-def test_protocol_discussion_info_describes_draft_only_node() -> None:
+def test_protocol_discussion_info_describes_discussion_and_final_draft_compile() -> None:
     info = get_protocol_discussion_get_node_info()
 
-    assert "Draft-only causal specification node" in info
-    assert "accepted causal draft artifact" in info
+    assert "protocol discussion string" in info
+    assert "DISCUSSING, REVIEW, and READY" in info
+    assert "causal specification draft" in info
 
 
-def test_protocol_discussion_update_prompt_uses_structured_draft_as_source_of_truth() -> None:
+def test_protocol_discussion_update_prompt_uses_protocol_string_contract() -> None:
     prompt = get_protocol_discussion_update_prompt()
 
-    assert "current_draft" in prompt
-    assert "authoritative in-progress causal draft" in prompt
-    assert "treatment_column" in prompt
-    assert "outcome_column" in prompt
-    assert "covariates" in prompt
-    assert "effect_modifiers" in prompt
-    assert "target_population" in prompt
-    assert "study_type" in prompt
-    assert "negative_control_outcome" in prompt
-    assert "time_zero" in prompt
+    assert "previous_protocol_discussion" in prompt
+    assert "latest_user_message" in prompt
+    assert "Source: user" in prompt
+    assert "Source: data" in prompt
+    assert "status" in prompt
+    assert "Treatment must be binary" in prompt
+    assert "Outcome must be binary or continuous" in prompt
 
 
-def test_protocol_discussion_update_prompt_keeps_target_trial_guidance_without_cleaning_questions() -> (
-    None
-):
-    prompt = get_protocol_discussion_update_prompt()
+def test_protocol_discussion_template_uses_expected_questions_and_auto_id() -> None:
+    template = get_protocol_discussion_template()
 
-    assert "Ask about time zero conceptually" in prompt
-    assert "when follow-up starts and treatment assignment is anchored" in prompt
-    assert "Covariates are baseline adjustment variables" in prompt
-    assert "Effect modifiers are baseline variables used for heterogeneity" in prompt
-    assert "Do not ask treatment/outcome value mapping questions." in prompt
-    assert (
-        "Do not ask imputation, missingness, category-handling, recoding, or cleaning questions."
-        in prompt
-    )
+    assert "Q1: Treatment" in template
+    assert "Q2: Outcome" in template
+    assert "Q5: ID column" in template
+    assert "auto_id" in template
+    assert "Source: unclear" in template
 
 
-def test_protocol_discussion_response_prompt_makes_suggestions_llm_owned() -> None:
+def test_protocol_discussion_response_prompt_is_plain_text_not_json() -> None:
     prompt = get_protocol_discussion_response_prompt()
 
-    assert "user-facing response" in prompt
-    assert "validation_context" in prompt
-    assert "selected_column_context" in prompt
-    assert "Suggestions and wording must be generated" in prompt
-    assert "Treat validation_context as authoritative" in prompt
+    assert "Return only the user-facing assistant message as plain text" in prompt
+    assert "Do not wrap the message in JSON" in prompt
+    assert "Output JSON exactly" not in prompt
 
 
-def test_initial_user_message_mentions_only_draft_fields() -> None:
+def test_protocol_discussion_causal_draft_prompt_is_grounded() -> None:
+    prompt = get_protocol_discussion_causal_draft_prompt()
+
+    assert "signed-off protocol discussion" in prompt
+    assert "exact dataset column names" in prompt
+    assert "auto_id" in prompt
+    assert "Return only JSON matching the requested causal draft schema" in prompt
+
+
+def test_protocol_discussion_validation_suggestion_prompt_requires_update_dataset() -> None:
+    prompt = get_protocol_discussion_validation_suggestion_prompt()
+
+    assert "validation_issues" in prompt
+    assert "Every dataset-change suggestion must start" in prompt
+    assert "update dataset" in prompt
+    assert "Return plain text only" in prompt
+
+
+def test_initial_user_message_starts_protocol_discussion() -> None:
     message = initial_user_message()
 
-    assert "causal draft" in message
-    assert "treatment column" in message
-    assert "outcome column" in message
-    assert "target population" in message
-    assert "study type" in message
-    assert "time zero" in message
-    assert "cleaning" not in message.lower()
+    assert "Welcome" in message
+    assert "treatment" in message
+    assert "outcome" in message
+    assert "negative-control outcome" in message

@@ -1,110 +1,105 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
+from types import ModuleType
 from typing import Any
 from uuid import uuid4
 
-import pandas as pd
-
-from python.domain.service.llm_service import ChatMessage, LLMConfig
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMResponse
 from python.domain.workflows.node import NodeRequest
-from python.domain.workflows.ochestrator_state import OchestratorState
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import (
+    ProtocolDiscussionCausalDraftResult,
     ProtocolDiscussionNode,
 )
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionState,
 )
-from python.implementation.workflows.tools.causal.specs.causal_spec_draft import (
-    CausalSpecDraft,
-)
-from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
-    DatasetProfilingTool,
+from python.implementation.workflows.tools.common.model.data_summary import (
+    CategoricalColumnProfileModel,
+    CategoricalSummaryModel,
+    CategoryCountModel,
     DatasetSummaryModel,
+    NumericColumnProfileModel,
+    NumericSummaryModel,
 )
 
 
-def _summary_for_df(df: pd.DataFrame) -> DatasetSummaryModel:
-    return DatasetProfilingTool().extract_dataset_summary(
-        df,
-        max_categories=10,
-        sample_distinct=10,
-        compute_quantiles=False,
-        strict=True,
+def _categorical_profile(
+    name: str,
+    *,
+    distinct_count: int = 2,
+    n_missing: int = 0,
+) -> CategoricalColumnProfileModel:
+    return CategoricalColumnProfileModel(
+        name=name,
+        dtype="object",
+        n_rows=10,
+        n_missing=n_missing,
+        missing_rate=n_missing / 10,
+        distinct_count=distinct_count,
+        inferred_kind="CATEGORICAL",
+        summary=CategoricalSummaryModel(
+            top_categories=[
+                CategoryCountModel(value=f"value_{index}", count=1)
+                for index in range(distinct_count)
+            ],
+            other_count=0,
+        ),
     )
 
 
-class _FakeOrchestratorState(OchestratorState):
+def _numeric_profile(
+    name: str,
+    *,
+    distinct_count: int = 5,
+    n_missing: int = 0,
+) -> NumericColumnProfileModel:
+    return NumericColumnProfileModel(
+        name=name,
+        dtype="float64",
+        n_rows=10,
+        n_missing=n_missing,
+        missing_rate=n_missing / 10,
+        distinct_count=distinct_count,
+        inferred_kind="NUMERIC",
+        summary=NumericSummaryModel(min=0, max=10, mean=5, std=1),
+    )
+
+
+def _summary(*profiles: Any) -> DatasetSummaryModel:
+    return DatasetSummaryModel(n_rows=10, profiles=list(profiles))
+
+
+def _install_fake_pandas(monkeypatch: Any) -> None:
+    pandas_module = ModuleType("pandas")
+    pandas_module.DataFrame = object
+    monkeypatch.setitem(sys.modules, "pandas", pandas_module)
+
+
+class _FakeOrchestratorState:
     def __init__(self, *, dataset_summary: DatasetSummaryModel) -> None:
-        self._values: dict[str, Any] = {
-            "working_dataset_id": uuid4(),
-            "latest_dataset_summary": dataset_summary,
-        }
+        self.dataset_id = uuid4()
+        self.dataset_summary = dataset_summary
         self.set_calls: list[tuple[str, dict[str, Any]]] = []
 
-    def name(self) -> str:
-        return "FAKE_ORCHESTRATOR"
-
-    def get_update_counter(self) -> int:
-        return 0
-
-    def set_update_counter(self, value: int) -> None:
-        del value
-
     def get(self, key: str) -> Any:
-        return self._values.get(key)
+        return {
+            "working_dataset_id": self.dataset_id,
+            "latest_dataset_summary": self.dataset_summary,
+        }.get(key)
 
     def set(self, key: str, value: dict[str, Any]) -> None:
         self.set_calls.append((key, value))
-        if "protocol_discussion" in value or "protocol_cleaning_instructions" in value:
-            raise AssertionError("protocol node must not write legacy protocol artifacts")
-        self._values.update(value)
-
-    def get_current_node_name(self) -> str:
-        return "PROTOCOL_DISCUSSION"
-
-    def get_current_node_companion_names(self, node_name: str) -> list[str]:
-        del node_name
-        return []
-
-    def get_completed_and_last_pending_nodes(self) -> list[str]:
-        return []
-
-    def rocover_failure(self, current_failed_node: str) -> None:
-        del current_failed_node
-
-    def get_forward_states_after_node(self, node_name: str) -> list[str]:
-        del node_name
-        return []
-
-    def roll_back_to_state(self, state_name: str) -> None:
-        del state_name
-
-    def get_working_dataset_id_and_frozen_status(self) -> tuple[Any, bool]:
-        return self._values.get("working_dataset_id"), False
-
-    def get_ochestration_prompt(self) -> str:
-        return ""
-
-    def to_json_dict(self) -> dict[str, Any]:
-        return dict(self._values)
-
-    @classmethod
-    def from_json_dict(cls, payload: dict[str, Any]) -> _FakeOrchestratorState:
-        instance = cls(dataset_summary=payload["latest_dataset_summary"])
-        instance._values = dict(payload)
-        return instance
-
-    @classmethod
-    def init_empty(cls) -> _FakeOrchestratorState:
-        raise NotImplementedError
 
 
 @dataclass
 class _FakeLLM:
     json_outputs: list[Any] = field(default_factory=list)
+    text_outputs: list[str] = field(default_factory=list)
     generate_json_calls: list[dict[str, Any]] = field(default_factory=list)
+    generate_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def generate_json(
         self,
@@ -126,232 +121,140 @@ class _FakeLLM:
                 "max_attempts": max_attempts,
             }
         )
-        next_output = self.json_outputs.pop(0)
-        if isinstance(next_output, dict):
-            return schema.model_validate(next_output)
-        return next_output
+        output = self.json_outputs.pop(0)
+        if isinstance(output, dict):
+            return schema.model_validate(output)
+        return output
+
+    def generate(
+        self,
+        *,
+        system_prompt: str | None,
+        user_prompt: str,
+        config: LLMConfig,
+        history: list[ChatMessage] | None,
+    ) -> LLMResponse:
+        self.generate_calls.append(
+            {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "config": config,
+                "history": history,
+            }
+        )
+        return LLMResponse(content=self.text_outputs.pop(0))
 
 
 def _request(
     *,
     dataset_summary: DatasetSummaryModel,
     llm: _FakeLLM,
-    user_message: str = "Use RXASP as treatment and DIED as outcome.",
+    node: ProtocolDiscussionNode | None = None,
+    messages: list[ChatMessage] | None = None,
 ) -> tuple[ProtocolDiscussionNode, NodeRequest, _FakeOrchestratorState]:
-    node = ProtocolDiscussionNode(llm=llm)
     orchestrator_state = _FakeOrchestratorState(dataset_summary=dataset_summary)
     request = NodeRequest(
         user_id=uuid4(),
         conversation_id=uuid4(),
         node_state=ProtocolDiscussionState.init_empty(),
-        orchestrator_state=orchestrator_state,
-        read_only_messages_history=[ChatMessage(role="user", content=user_message)],
+        orchestrator_state=orchestrator_state,  # type: ignore[arg-type]
+        read_only_messages_history=(
+            messages
+            if messages is not None
+            else [ChatMessage(role="user", content="Use RXASP as treatment and DIED as outcome.")]
+        ),
     )
-    return node, request, orchestrator_state
+    return node or ProtocolDiscussionNode(llm=llm), request, orchestrator_state
 
 
-def _complete_draft(**overrides: Any) -> dict[str, Any]:
-    draft = {
+def _draft_payload(**overrides: Any) -> dict[str, Any]:
+    payload = {
+        "id_col": "auto_id",
         "treatment_column": "RXASP",
         "outcome_column": "DIED",
+        "negative_control_outcome": None,
         "covariates": ["AGE"],
         "effect_modifiers": ["SEX"],
         "target_population": "all rows",
         "study_type": "OBSERVATIONAL",
-        "negative_control_outcome": None,
-        "time_zero": "baseline treatment decision at cohort entry",
+        "time_zero": "baseline treatment decision",
     }
-    draft.update(overrides)
-    return draft
+    payload.update(overrides)
+    return payload
 
 
-def test_protocol_discussion_updates_structured_draft_from_user_answer() -> None:
-    summary = _summary_for_df(
-        pd.DataFrame(
-            {
-                "RXASP": ["Y", "N"],
-                "DIED": [1, 0],
-                "AGE": [70, 65],
-                "SEX": ["F", "M"],
-            }
-        )
-    )
-    llm = _FakeLLM(
-        json_outputs=[
-            {
-                "draft": _complete_draft(target_population=None, time_zero=None),
-                "next_action": "continue",
-            },
-            {
-                "assistant_message": "I added the treatment and outcome. What target population and time zero should anchor the target trial?"
-            },
-        ]
-    )
-    node, request, _ = _request(dataset_summary=summary, llm=llm)
-
-    result = node.run(request=request)
-    prompt_payload = json.loads(llm.generate_json_calls[0]["user_prompt"])
-
-    assert result.status == "PENDING"
-    assert result.action == "NEEDS_INPUT"
-    assert result.new_node_state.payload.draft.treatment_column == "RXASP"
-    assert result.new_node_state.payload.draft.outcome_column == "DIED"
-    assert "current_draft" in prompt_payload
-    assert "dataset_column_names" in prompt_payload
-    assert len(llm.generate_json_calls) == 2
-    assert "validation_context" in json.loads(llm.generate_json_calls[1]["user_prompt"])
-
-
-def test_protocol_discussion_reports_selected_column_structure_and_missingness() -> None:
-    summary = _summary_for_df(
-        pd.DataFrame(
-            {
-                "RXASP": ["Y", "N", "Y"],
-                "DIED": [1, 0, 1],
-                "AGE": [70.0, None, 65.0],
-                "SEX": ["F", "M", "Unknown"],
-            }
-        )
-    )
-    llm = _FakeLLM(
-        json_outputs=[
-            {
-                "draft": _complete_draft(),
-                "next_action": "continue",
-            },
-            {
-                "assistant_message": (
-                    "The selected columns look usable. RXASP is the treatment, DIED is the "
-                    "outcome, AGE has 1 missing value, and SEX includes Unknown; those "
-                    "cleanup details can be handled in the next step."
-                )
-            },
-        ]
-    )
-    node, request, _ = _request(dataset_summary=summary, llm=llm)
-
-    result = node.run(request=request)
-    message = result.response_messages[0].content
-    response_payload = json.loads(llm.generate_json_calls[1]["user_prompt"])
-
-    assert "The selected columns look usable" in message
-    assert "1 missing" in message
-    assert response_payload["selected_column_context"][0]["column"] == "RXASP"
-    assert any(
-        column["column"] == "AGE" and column["profile"]["missing"] == 1
-        for column in response_payload["selected_column_context"]
-    )
-
-
-def test_protocol_discussion_gives_population_filter_command_without_filtering() -> None:
-    summary = _summary_for_df(
-        pd.DataFrame(
-            {
-                "RXASP": ["Y", "N"],
-                "DIED": [1, 0],
-                "age": [20, 17],
-            }
-        )
-    )
-    llm = _FakeLLM(
-        json_outputs=[
-            {
-                "draft": _complete_draft(
-                    covariates=[],
-                    effect_modifiers=[],
-                    target_population="patients where age >= 18",
-                ),
-                "next_action": "continue",
-            },
-            {
-                "assistant_message": (
-                    "I saved that as the target population. It can remain conceptual for "
-                    "the draft, or you can ask to update the dataset with an age filter."
-                )
-            },
-        ]
-    )
-    node, request, orchestrator_state = _request(dataset_summary=summary, llm=llm)
-
-    result = node.run(request=request)
-
-    assert result.status == "PENDING"
-    response_payload = json.loads(llm.generate_json_calls[1]["user_prompt"])
-    assert "target population" in result.response_messages[0].content
-    assert (
-        response_payload["population_context"]["possible_filter_command"]
-        == "update dataset and filter rows where age >= 18"
-    )
-    assert orchestrator_state.set_calls == []
-
-
-def test_protocol_discussion_blocks_missing_selected_columns_with_update_command() -> None:
-    summary = _summary_for_df(
-        pd.DataFrame(
-            {
-                "RXASP": ["Y", "N"],
-                "DIED": [1, 0],
-                "AGE": [70, 65],
-            }
-        )
-    )
-    llm = _FakeLLM(
-        json_outputs=[
-            {
-                "draft": _complete_draft(treatment_column="treated", effect_modifiers=[]),
-                "next_action": "confirm",
-            },
-            {
-                "assistant_message": (
-                    "I cannot accept the draft yet because treated is not a current "
-                    "dataset column. Use an existing column such as RXASP, or ask to "
-                    "create/rename treated before confirming."
-                )
-            },
-        ]
-    )
-    node, request, orchestrator_state = _request(dataset_summary=summary, llm=llm)
-
-    result = node.run(request=request)
-    message = result.response_messages[0].content
-    response_payload = json.loads(llm.generate_json_calls[1]["user_prompt"])
-
-    assert result.status == "PENDING"
-    assert result.action == "NEEDS_INPUT"
-    assert "treated is not a current" in message
-    assert response_payload["final_next_action"] == "continue"
-    assert response_payload["validation_context"]["missing_selected_columns"] == [
-        {"role": "treatment", "column": "treated"}
-    ]
-    assert orchestrator_state.set_calls == []
-
-
-def test_protocol_discussion_accepts_valid_draft_and_writes_only_causal_spec_draft() -> None:
-    summary = _summary_for_df(
-        pd.DataFrame(
-            {
-                "RXASP": ["Y", "N"],
-                "DIED": [1, 0],
-                "AGE": [70, 65],
-                "SEX": ["F", "M"],
-                "NEGCTRL": [0, 1],
-            }
-        )
-    )
-    llm = _FakeLLM(
-        json_outputs=[
-            {
-                "draft": _complete_draft(negative_control_outcome="NEGCTRL"),
-                "next_action": "confirm",
-            },
-            {"assistant_message": "Accepted. I stored the causal draft."},
-        ]
-    )
+def test_protocol_discussion_starts_with_welcome_without_llm_call() -> None:
+    llm = _FakeLLM()
+    summary = _summary(_categorical_profile("RXASP"), _categorical_profile("DIED"))
     node, request, orchestrator_state = _request(
         dataset_summary=summary,
         llm=llm,
-        user_message="confirm",
+        messages=[],
     )
+
+    result = node.run(request=request)
+
+    assert result.status == "PENDING"
+    assert result.action == "NEEDS_INPUT"
+    assert "Welcome" in result.response_messages[0].content
+    assert llm.generate_json_calls == []
+    assert llm.generate_calls == []
+    assert orchestrator_state.set_calls == []
+
+
+def test_protocol_discussion_updates_string_and_uses_plain_text_response() -> None:
+    llm = _FakeLLM(
+        json_outputs=[
+            {
+                "protocol_discussion": "PROTOCOL DISCUSSION\nQ1: Treatment\nA: RXASP\nSource: user",
+                "status": "DISCUSSING",
+            }
+        ],
+        text_outputs=["I captured RXASP. What outcome should we use?"],
+    )
+    summary = _summary(_categorical_profile("RXASP"), _categorical_profile("DIED"))
+    messages = [
+        ChatMessage(role="user", content=f"message {index}")
+        for index in range(6)
+    ]
+    node, request, orchestrator_state = _request(
+        dataset_summary=summary,
+        llm=llm,
+        messages=messages,
+    )
+
+    result = node.run(request=request)
+    compile_payload = json.loads(llm.generate_json_calls[0]["user_prompt"])
+    response_payload = json.loads(llm.generate_calls[0]["user_prompt"])
+
+    assert result.status == "PENDING"
+    assert result.action == "NEEDS_INPUT"
+    assert result.new_node_state.payload.protocol_discussion.startswith("PROTOCOL DISCUSSION")
+    assert result.new_node_state.payload.status == "DISCUSSING"
+    assert len(compile_payload["recent_messages"]) == 5
+    assert "protocol_discussion" in response_payload
+    assert len(llm.generate_json_calls) == 1
+    assert len(llm.generate_calls) == 1
+    assert orchestrator_state.set_calls == []
+
+
+def test_ready_valid_binary_outcome_writes_causal_spec_draft(monkeypatch: Any) -> None:
+    _install_fake_pandas(monkeypatch)
+    llm = _FakeLLM(
+        json_outputs=[
+            {"protocol_discussion": "PROTOCOL DISCUSSION", "status": "READY"},
+            _draft_payload(negative_control_outcome="NEGCTRL"),
+        ],
+        text_outputs=["The protocol is ready."],
+    )
+    summary = _summary(
+        _categorical_profile("RXASP"),
+        _categorical_profile("DIED"),
+        _numeric_profile("AGE"),
+        _categorical_profile("SEX"),
+        _categorical_profile("NEGCTRL"),
+    )
+    node, request, orchestrator_state = _request(dataset_summary=summary, llm=llm)
 
     result = node.run(request=request)
 
@@ -360,56 +263,130 @@ def test_protocol_discussion_accepts_valid_draft_and_writes_only_causal_spec_dra
     assert len(orchestrator_state.set_calls) == 1
     _, payload = orchestrator_state.set_calls[0]
     assert list(payload.keys()) == ["causal_spec_draft"]
-    draft = payload["causal_spec_draft"]
-    assert isinstance(draft, CausalSpecDraft)
-    assert draft.treatment_column == "RXASP"
-    assert draft.outcome_column == "DIED"
-    assert draft.negative_control_outcome == "NEGCTRL"
-    assert draft.target_population == "all rows"
-    assert draft.study_type == "OBSERVATIONAL"
-    assert draft.time_zero == "baseline treatment decision at cohort entry"
+    assert payload["causal_spec_draft"].treatment_column == "RXASP"
+    assert payload["causal_spec_draft"].outcome_column == "DIED"
+    assert payload["causal_spec_draft"].negative_control_outcome == "NEGCTRL"
 
 
-def test_protocol_discussion_blocks_negative_control_role_conflict() -> None:
-    summary = _summary_for_df(
-        pd.DataFrame(
-            {
-                "RXASP": ["Y", "N"],
-                "DIED": [1, 0],
-                "AGE": [70, 65],
-            }
-        )
+def test_causal_draft_accepts_continuous_numeric_outcome(monkeypatch: Any) -> None:
+    _install_fake_pandas(monkeypatch)
+    llm = _FakeLLM(json_outputs=[_draft_payload(outcome_column="SCORE")])
+    summary = _summary(
+        _categorical_profile("RXASP"),
+        _numeric_profile("SCORE", distinct_count=8),
+        _numeric_profile("AGE"),
+        _categorical_profile("SEX"),
     )
+
+    result = ProtocolDiscussionNode(llm=llm).protocol_discussion_causal_draft(
+        protocol_discussion="PROTOCOL DISCUSSION",
+        dataset_summary=summary,
+    )
+
+    assert result.validation_issues == []
+    assert result.draft.outcome_column == "SCORE"
+
+
+def test_ready_invalid_treatment_cardinality_blocks_and_suggests_update_dataset(
+    monkeypatch: Any,
+) -> None:
+    _install_fake_pandas(monkeypatch)
     llm = _FakeLLM(
         json_outputs=[
-            {
-                "draft": _complete_draft(
-                    covariates=["AGE"],
-                    effect_modifiers=[],
-                    negative_control_outcome="AGE",
-                ),
-                "next_action": "confirm",
-            },
-            {
-                "assistant_message": (
-                    "I cannot accept AGE as the negative-control outcome because it is "
-                    "already selected as a covariate."
-                )
-            },
-        ]
+            {"protocol_discussion": "PROTOCOL DISCUSSION", "status": "READY"},
+            _draft_payload(),
+        ],
+        text_outputs=["update dataset and create a cleaned binary treatment column from RXASP"],
+    )
+    summary = _summary(
+        _categorical_profile("RXASP", distinct_count=3),
+        _categorical_profile("DIED"),
+        _numeric_profile("AGE"),
+        _categorical_profile("SEX"),
     )
     node, request, orchestrator_state = _request(dataset_summary=summary, llm=llm)
 
     result = node.run(request=request)
 
     assert result.status == "PENDING"
-    assert "negative-control outcome" in result.response_messages[0].content
-    response_payload = json.loads(llm.generate_json_calls[1]["user_prompt"])
-    assert response_payload["validation_context"]["role_conflicts"] == [
-        {
-            "type": "negative_control_outcome_reused_in_other_role",
-            "column": "AGE",
-            "other_roles": ["covariate"],
-        }
-    ]
+    assert result.action == "NEEDS_INPUT"
+    assert result.new_node_state.payload.status == "DISCUSSING"
+    assert result.response_messages[0].content.startswith("update dataset")
     assert orchestrator_state.set_calls == []
+    suggestion_payload = json.loads(llm.generate_calls[0]["user_prompt"])
+    assert suggestion_payload["validation_issues"][0]["role"] == "treatment"
+
+
+def test_invalid_categorical_outcome_cardinality_is_validation_issue(
+    monkeypatch: Any,
+) -> None:
+    _install_fake_pandas(monkeypatch)
+    llm = _FakeLLM(json_outputs=[_draft_payload(outcome_column="DIED")])
+    summary = _summary(
+        _categorical_profile("RXASP"),
+        _categorical_profile("DIED", distinct_count=4),
+        _numeric_profile("AGE"),
+        _categorical_profile("SEX"),
+    )
+
+    result = ProtocolDiscussionNode(llm=llm).protocol_discussion_causal_draft(
+        protocol_discussion="PROTOCOL DISCUSSION",
+        dataset_summary=summary,
+    )
+
+    assert result.draft is not None
+    assert any(issue["role"] == "outcome" for issue in result.validation_issues)
+
+
+def test_negative_control_and_missingness_are_validation_issues(monkeypatch: Any) -> None:
+    _install_fake_pandas(monkeypatch)
+    llm = _FakeLLM(
+        json_outputs=[
+            _draft_payload(
+                id_col="PATIENT_ID",
+                negative_control_outcome="NEGCTRL",
+            )
+        ]
+    )
+    summary = _summary(
+        _categorical_profile("RXASP", n_missing=1),
+        _categorical_profile("DIED", n_missing=2),
+        _numeric_profile("AGE"),
+        _categorical_profile("SEX"),
+        _categorical_profile("PATIENT_ID", distinct_count=10, n_missing=1),
+        _categorical_profile("NEGCTRL", distinct_count=3, n_missing=1),
+    )
+
+    result = ProtocolDiscussionNode(llm=llm).protocol_discussion_causal_draft(
+        protocol_discussion="PROTOCOL DISCUSSION",
+        dataset_summary=summary,
+    )
+
+    roles = [issue["role"] for issue in result.validation_issues]
+    assert "treatment" in roles
+    assert "outcome" in roles
+    assert "id" in roles
+    assert "negative_control_outcome" in roles
+    assert all(
+        suggestion.startswith("update dataset")
+        for issue in result.validation_issues
+        for suggestion in issue["suggestions"]
+    )
+
+
+def test_auto_id_skips_id_existence_and_missingness_validation(monkeypatch: Any) -> None:
+    _install_fake_pandas(monkeypatch)
+    llm = _FakeLLM(json_outputs=[_draft_payload(id_col="auto_id")])
+    summary = _summary(
+        _categorical_profile("RXASP"),
+        _categorical_profile("DIED"),
+        _numeric_profile("AGE"),
+        _categorical_profile("SEX"),
+    )
+
+    result = ProtocolDiscussionNode(llm=llm).protocol_discussion_causal_draft(
+        protocol_discussion="PROTOCOL DISCUSSION",
+        dataset_summary=summary,
+    )
+
+    assert result.validation_issues == []
