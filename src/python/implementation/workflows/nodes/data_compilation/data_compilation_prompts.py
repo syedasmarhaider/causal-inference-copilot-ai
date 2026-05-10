@@ -92,6 +92,39 @@ Output policy:
 """.strip()
 
 
+def data_compilation_filter_plan_prompt() -> str:
+    return """
+You are devising a target-population filtering plan for a tabular causal-analysis dataset.
+
+Inputs:
+- target_population text from the locked causal draft
+- locked causal draft
+- authoritative dataset summary
+- current dataframe columns
+- revised_instructions text from the latest user review feedback, when present
+
+Task:
+- Write one complete natural-language instruction for a data manipulation tool to filter
+  the dataframe to the target population.
+
+Rules:
+- Use the dataset summary to ground the filter plan in actual available columns, kinds,
+  missingness, and observed values.
+- Do not invent columns, values, timing rules, or cohort criteria that are not supported
+  by the target population text and dataset summary.
+- Preserve all draft-selected causal columns: treatment, outcome, negative-control outcome
+  when present, covariates, effect modifiers, and an existing identifier column.
+- If revised_instructions are present, incorporate them into the filtering plan and give them priority.
+- The instruction is for a data manipulation tool, not raw SQL.
+
+Output policy:
+- Output text only.
+- Do not output JSON.
+- Do not output SQL.
+- Do not use markdown or code fences.
+""".strip()
+
+
 def _data_compilation_cleaning_instruction_output_policy() -> str:
     return """
 Output JSON exactly:
