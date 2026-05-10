@@ -36,8 +36,6 @@ class DataCompilationPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     source_dataset_id: UUID | None = None
-    source_protocol_discussion: str | None = None
-    source_protocol_cleaning_instructions: str | None = None
     source_causal_spec_draft: CausalSpecDraft | None = None
     compiled_dataset_id: UUID | None = None
     compiled_dataset_summary: DatasetSummaryModel | None = None
@@ -63,8 +61,6 @@ class DataCompilationPayloadModel(BaseModel):
         return uuid_from_any(value)
 
     @field_validator(
-        "source_protocol_discussion",
-        "source_protocol_cleaning_instructions",
         "retry_feedback",
         "assistant_message",
         "system_message",
@@ -84,15 +80,11 @@ class DataCompilationPayloadModel(BaseModel):
         self,
         *,
         dataset_id: UUID,
-        protocol_discussion: str,
-        protocol_cleaning_instructions: str | None,
         causal_spec_draft: CausalSpecDraft,
     ) -> DataCompilationPayloadModel:
         return self.model_copy(
             update={
                 "source_dataset_id": dataset_id,
-                "source_protocol_discussion": protocol_discussion,
-                "source_protocol_cleaning_instructions": protocol_cleaning_instructions,
                 "source_causal_spec_draft": causal_spec_draft,
             }
         )
@@ -101,15 +93,11 @@ class DataCompilationPayloadModel(BaseModel):
         self,
         *,
         dataset_id: UUID,
-        protocol_discussion: str,
-        protocol_cleaning_instructions: str | None,
         causal_spec_draft: CausalSpecDraft,
     ) -> DataCompilationPayloadModel:
         return self.model_copy(
             update={
                 "source_dataset_id": dataset_id,
-                "source_protocol_discussion": protocol_discussion,
-                "source_protocol_cleaning_instructions": protocol_cleaning_instructions,
                 "source_causal_spec_draft": causal_spec_draft,
                 "compiled_dataset_id": None,
                 "compiled_dataset_summary": None,
