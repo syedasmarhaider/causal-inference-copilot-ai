@@ -125,6 +125,43 @@ Output policy:
 """.strip()
 
 
+def data_compilation_data_type_plan_prompt() -> str:
+    return """
+You are devising a datatype normalization plan for a tabular causal-analysis dataset.
+
+Inputs:
+- locked causal draft
+- authoritative dataset summary
+- current dataframe columns and pandas dtypes
+- required columns and their causal roles
+- revised_instructions text, when present (priority)
+
+Task:
+- Write one complete natural-language instruction for a data manipulation tool to convert
+  datatype representations needed for robust causal inference and downstream machine
+  learning preprocessing.
+
+Rules:
+- Use the dataset summary and current dtypes to ground the datatype plan.
+- Preserve all required draft-selected columns and their names.
+- Do not rename, drop, duplicate, or regenerate treatment, outcome, negative-control
+  outcome, covariate, effect-modifier, or existing identifier columns.
+- Analyze what describe best for the given column profile given values and change add in instructions to change datatype.]
+
+- For example if there is sex and it is 1 2 and 3 numneric, then it should be converted into cateogircal like numeric to string
+- Do not perform missingness imputation, row filtering, or causal role changes here.
+- If revised_instructions are present, incorporate them into the datatype plan and give
+  them priority when compatible with the draft and dataset evidence.
+- The instruction is for a data manipulation tool, not raw SQL.
+
+Output policy:
+- Output text only.
+- Do not output JSON.
+- Do not output SQL.
+- Do not use markdown or code fences.
+""".strip()
+
+
 def _data_compilation_cleaning_instruction_output_policy() -> str:
     return """
 Output JSON exactly:

@@ -6,6 +6,7 @@ import pandas as pd
 
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
+    data_compilation_data_type_plan_prompt,
     data_compilation_filter_plan_prompt,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec_draft import (
@@ -33,6 +34,7 @@ def clean(
 
 
 def _filter_data(
+    table_name: str,
     data: pd.DataFrame,
     draft: CausalSpecDraft,
     summary: DatasetSummaryModel,
@@ -65,10 +67,11 @@ def _filter_data(
         *draft.covariates,
         *draft.effect_modifiers,
     ]:
-
-    normalized_column = str(column).strip()
-    if normalized_column and normalized_column not in required_columns:
-        required_columns.append(normalized_column)
+        if column is None:
+            continue
+        normalized_column = str(column).strip()
+        if normalized_column and normalized_column not in required_columns:
+            required_columns.append(normalized_column)
 
     id_col = str(draft.id_col or "").strip()
     if id_col and id_col in data.columns and id_col not in required_columns:
@@ -95,23 +98,19 @@ def _filter_data(
 
     filtered_data = data_maupulation_tools.manipulate(
         dataframe=data,
-        table_name="protocol_scope_df",
+        table_name=table_name,
         data_summary=summary.model_dump_json(),
         instructions=filter_plan_text,
     )
-    if not isinstance(filtered_data, pd.DataFrame):
-        raise TypeError(
-            "target population filter manipulation must return a pandas DataFrame"
-        )
-
     missing_columns = [
         column for column in required_columns if column not in filtered_data.columns
     ]
+    
     if missing_columns:
         raise ValueError(
             "target population filter output dataframe is missing required column(s): "
             + ", ".join(missing_columns)
-        )
+    )
 
     return filtered_data
 
@@ -130,9 +129,13 @@ def _drop_irrelevant_columns(
 
 
 def _data_type_change(
+    table_name: str,
     data: pd.DataFrame,
     draft: CausalSpecDraft,
+    summary: DatasetSummaryModel,
     data_maupulation_tools: DataManipulationTool,
+    llm: LLMService,
+    revised_instructions: str | None = None,
 ) -> pd.DataFrame:
     """
     generate string plan by calling LLM to convert datatypes for best of the knowlwdge and best practices according to machine learning
@@ -140,7 +143,69 @@ def _data_type_change(
     give instruction to data manipulation tool and get the data with changed datatypes.
     validate if cols does not change w.r.t draft and return data frame.
     """
-    raise NotImplementedError("_data_type_change is not implemented yet")
+    required_columns: list[str] = []
+    role_by_column: dict[str, str] = {}
+    for column, role in [
+        (draft.treatment_column, "treatment"),
+        (draft.outcome_column, "outcome"),
+        (draft.negative_control_outcome, "negative_control_outcome"),
+        *((covariate, "covariate") for covariate in draft.covariates),
+        *((effect_modifier, "effect_modifier") for effect_modifier in draft.effect_modifiers),
+    ]:
+        if column is None:
+            continue
+        normalized_column = str(column).strip()
+        if not normalized_column:
+            continue
+        if normalized_column not in required_columns:
+            required_columns.append(normalized_column)
+        role_by_column[normalized_column] = role
+
+    id_col = str(draft.id_col or "").strip()
+    if id_col and id_col in data.columns and id_col not in required_columns:
+        required_columns.insert(0, id_col)
+        role_by_column[id_col] = "identifier"
+
+    current_dtype_by_column = {
+        str(column): str(dtype) for column, dtype in data.dtypes.to_dict().items()
+    }
+    planner_payload = {
+        "draft": draft.model_dump(mode="json"),
+        "dataset_summary": summary.model_dump(mode="json"),
+        "current_dataframe_columns": [str(column) for column in data.columns],
+        "current_dataframe_dtypes": current_dtype_by_column,
+        "required_columns": required_columns,
+        "role_by_column": role_by_column,
+        "revised_instructions": revised_instructions,
+    }
+
+    data_type_plan_response = llm.generate(
+        system_prompt=data_compilation_data_type_plan_prompt(),
+        user_prompt=json.dumps(planner_payload, ensure_ascii=False),
+        config=LLMConfig(model="basic", temperature=0.4),
+        history=None,
+    )
+    data_type_plan_text = str(data_type_plan_response.content or "").strip()
+    if not data_type_plan_text:
+        raise ValueError("datatype conversion planning returned an empty instruction")
+
+    changed_data = data_maupulation_tools.manipulate(
+        dataframe=data,
+        table_name=table_name,
+        data_summary=summary.model_dump_json(),
+        instructions=data_type_plan_text,
+    )
+    
+    missing_columns = [
+        column for column in required_columns if column not in changed_data.columns
+    ]
+    if missing_columns:
+        raise ValueError(
+            "datatype conversion output dataframe is missing required column(s): "
+            + ", ".join(missing_columns)
+        )
+
+    return changed_data
 
 
 def _impute_missing_values(
