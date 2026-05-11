@@ -727,7 +727,7 @@ def _fill_miginess(
         if column not in draft.covariates and column not in draft.effect_modifiers:
             continue
 
-        indicator_column = f"{column}__missing"
+        indicator_column = f"{column}_missing"
         if indicator_column not in updated_data.columns:
             missing_ids = missingness.get("missing_ids") or []
             missing_index = missingness.get("missing_index") or []

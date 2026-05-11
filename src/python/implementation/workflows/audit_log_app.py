@@ -4,6 +4,7 @@ import html
 import json
 import re
 from collections.abc import Callable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -32,7 +33,7 @@ class AuditGraph:
 class AuditArtifact:
     label: str
     href: str | None
-    graph: AuditGraph | None = None
+    graphs: list[AuditGraph] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,13 @@ class AuditReport:
     orchestrator_update_counter: int | None
     orchestrator_payload: dict[str, Any]
     messages: list[AuditMessage]
+
+
+@dataclass(frozen=True)
+class _GraphCandidate:
+    title: str | None
+    spec: dict[str, Any] | None = None
+    error: str | None = None
 
 
 class AuditLogApp:
@@ -172,15 +180,17 @@ class AuditLogApp:
             for artifact_ref in message.artifact_refs or ():
                 if _is_graph_artifact_ref(artifact_ref):
                     graph_counter += 1
+                    label = _artifact_label(artifact_ref, default=f"Graph {graph_counter}")
                     artifacts.append(
                         AuditArtifact(
-                            label=_artifact_label(artifact_ref, default=f"Graph {graph_counter}"),
+                            label=label,
                             href=None,
-                            graph=self._load_graph(
+                            graphs=self._load_graphs(
                                 user_id=user_id,
                                 conversation=conversation,
                                 artifact_ref=artifact_ref,
-                                element_id=f"audit-graph-{msg_index}-{graph_counter}",
+                                element_id_prefix=f"audit-graph-{msg_index}-{graph_counter}",
+                                title=label,
                             ),
                         )
                     )
@@ -208,15 +218,15 @@ class AuditLogApp:
 
         return audit_messages
 
-    def _load_graph(
+    def _load_graphs(
         self,
         *,
         user_id: UUID,
         conversation: Conversation,
         artifact_ref: ArtifactRef,
-        element_id: str,
-    ) -> AuditGraph:
-        title = _artifact_label(artifact_ref, default="Graph")
+        element_id_prefix: str,
+        title: str,
+    ) -> list[AuditGraph]:
         try:
             artifact = self._dataflow.get_artifact(
                 user_id=user_id,
@@ -227,11 +237,19 @@ class AuditLogApp:
                 artifact_format=artifact_ref["format"],
             )
             payload = json.loads(artifact.content.decode("utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("Graph artifact JSON must be an object.")
-            return AuditGraph(element_id=element_id, title=title, spec=payload)
+            return _build_audit_graphs(
+                payload=payload,
+                element_id_prefix=element_id_prefix,
+                fallback_title=title,
+            )
         except Exception as exc:
-            return AuditGraph(element_id=element_id, title=title, error=str(exc))
+            return [
+                AuditGraph(
+                    element_id=f"{element_id_prefix}-1",
+                    title=title,
+                    error=str(exc),
+                )
+            ]
 
 
 class AuditLogHtmlRenderer:
@@ -273,7 +291,8 @@ class AuditLogHtmlRenderer:
             graph.element_id: graph.spec
             for message in report.messages
             for artifact in message.artifacts
-            if artifact.graph is not None and (graph := artifact.graph).spec is not None
+            for graph in artifact.graphs
+            if graph.spec is not None
         }
 
     def _header(self, report: AuditReport) -> str:
@@ -308,10 +327,10 @@ class AuditLogHtmlRenderer:
         payload = report.orchestrator_payload
         dataset_ids = _coerce_uuid_list(report.orchestrator_payload.get("working_dataset_ids"))
         graph_count = sum(
-            1
+            len(artifact.graphs)
             for message in report.messages
             for artifact in message.artifacts
-            if artifact.graph is not None
+            if artifact.graphs
         )
         data_artifact_count = sum(
             1
@@ -521,26 +540,26 @@ class AuditLogHtmlRenderer:
         graph_items: list[str] = []
         link_items: list[str] = []
         for artifact in message.artifacts:
-            if artifact.graph is not None:
-                graph = artifact.graph
-                if graph.spec is None:
-                    graph_items.append(
-                        '<div class="graph-card graph-error">'
-                        f"<h3>{_e(graph.title)}</h3>"
-                        f"<p>{_e(graph.error or 'Graph artifact could not be rendered.')}</p>"
-                        "</div>"
-                    )
-                else:
-                    graph_items.append(
-                        '<div class="graph-card">'
-                        '<div class="graph-card-header">'
-                        f"<h3>{_e(graph.title)}</h3>"
-                        "</div>"
-                        '<div class="graph-viewport">'
-                        f'<div id="{_e(graph.element_id)}" class="graph"></div>'
-                        "</div>"
-                        "</div>"
-                    )
+            if artifact.graphs:
+                for graph in artifact.graphs:
+                    if graph.spec is None:
+                        graph_items.append(
+                            '<div class="graph-card graph-error">'
+                            f"<h3>{_e(graph.title)}</h3>"
+                            f"<p>{_e(graph.error or 'Graph artifact could not be rendered.')}</p>"
+                            "</div>"
+                        )
+                    else:
+                        graph_items.append(
+                            '<div class="graph-card">'
+                            '<div class="graph-card-header">'
+                            f"<h3>{_e(graph.title)}</h3>"
+                            "</div>"
+                            '<div class="graph-viewport">'
+                            f'<div id="{_e(graph.element_id)}" class="graph"></div>'
+                            "</div>"
+                            "</div>"
+                        )
                 continue
 
             if artifact.href is not None:
@@ -700,10 +719,7 @@ class AuditLogHtmlRenderer:
 
     def _graph_script(self, graph_specs: dict[str, dict[str, Any]]) -> str:
         safe_json = _safe_script_json(graph_specs)
-        return (
-            "<script>\n"
-            f"const auditGraphSpecs = {safe_json};\n"
-            """
+        return "<script>\n" f"const auditGraphSpecs = {safe_json};\n" """
 const AUDIT_GRAPH_MIN_PLOT_WIDTH = 760;
 const AUDIT_GRAPH_MAX_PLOT_WIDTH = 2200;
 
@@ -728,6 +744,37 @@ function auditLooksLikeVegaLite(spec) {
     'hconcat' in spec ||
     'vconcat' in spec ||
     'repeat' in spec;
+}
+
+function auditUsesCompositeLayout(spec) {
+  return auditPlainObject(spec) && (
+    'facet' in spec ||
+    'repeat' in spec ||
+    Array.isArray(spec.concat) ||
+    Array.isArray(spec.hconcat) ||
+    Array.isArray(spec.vconcat)
+  );
+}
+
+function auditAutosizeType(autosize) {
+  if (typeof autosize === 'string') return autosize.toLowerCase();
+  if (auditPlainObject(autosize) && typeof autosize.type === 'string') {
+    return autosize.type.toLowerCase();
+  }
+  return '';
+}
+
+function auditApplyAutosize(prepared) {
+  if (auditUsesCompositeLayout(prepared)) {
+    if (auditAutosizeType(prepared.autosize).startsWith('fit')) {
+      prepared.autosize = {type: 'pad', contains: 'padding'};
+    }
+    return;
+  }
+
+  if (!prepared.autosize) {
+    prepared.autosize = {type: 'fit-x', contains: 'padding'};
+  }
 }
 
 function auditClamp(value, min, max) {
@@ -1118,7 +1165,7 @@ function auditPrepareGraphSpec(spec, target) {
     prepared.config.legend || {}
   );
 
-  if (!prepared.autosize) prepared.autosize = {type: 'fit-x', contains: 'padding'};
+  auditApplyAutosize(prepared);
   auditWrapTitle(prepared, target);
   auditApplyResponsiveGraphSpec(prepared, target);
   return prepared;
@@ -1138,7 +1185,6 @@ for (const [id, spec] of Object.entries(auditGraphSpecs)) {
 }
 </script>
 """.strip()
-        )
 
     @staticmethod
     def _style() -> str:
@@ -1497,6 +1543,220 @@ def _training_fit_logs(value: Any) -> Any:
         return None
     fit = value.get("fit")
     return fit if isinstance(fit, dict) else None
+
+
+_GRAPH_COLLECTION_KEYS = ("charts", "specs", "chart_specs")
+_GRAPH_SPLIT_COMPOSITION_KEYS = ("concat", "hconcat", "vconcat")
+_GRAPH_VISUAL_KEYS = ("mark", "layer", "facet", "repeat", "concat", "hconcat", "vconcat")
+_GRAPH_INHERITED_SPEC_KEYS = ("$schema", "data", "config", "datasets", "params", "transform")
+
+
+def _build_audit_graphs(
+    *,
+    payload: Any,
+    element_id_prefix: str,
+    fallback_title: str,
+) -> list[AuditGraph]:
+    candidates = _graph_candidates_from_payload(payload)
+    if not candidates:
+        candidates = [
+            _GraphCandidate(title=None, error="Graph artifact did not contain any chart specs.")
+        ]
+
+    total = len(candidates)
+    return [
+        AuditGraph(
+            element_id=f"{element_id_prefix}-{index}",
+            title=_audit_graph_title(
+                candidate, fallback_title=fallback_title, index=index, total=total
+            ),
+            spec=candidate.spec,
+            error=candidate.error,
+        )
+        for index, candidate in enumerate(candidates, start=1)
+    ]
+
+
+def _graph_candidates_from_payload(payload: Any) -> list[_GraphCandidate]:
+    if isinstance(payload, list):
+        return _graph_candidates_from_items(payload)
+
+    if not isinstance(payload, dict):
+        return [
+            _GraphCandidate(
+                title=None,
+                error="Graph artifact JSON must be an object or a list of chart specs.",
+            )
+        ]
+
+    collection_key = next((key for key in _GRAPH_COLLECTION_KEYS if key in payload), None)
+    if collection_key is not None:
+        items = payload.get(collection_key)
+        if not isinstance(items, list):
+            return [
+                _GraphCandidate(
+                    title=_extract_graph_title(payload),
+                    error=f"Graph artifact field '{collection_key}' must be a list.",
+                )
+            ]
+        candidates = _graph_candidates_from_items(items)
+        root_title = _extract_graph_title(payload)
+        if root_title and len(candidates) == 1 and candidates[0].title is None:
+            return [
+                _GraphCandidate(
+                    title=root_title,
+                    spec=candidates[0].spec,
+                    error=candidates[0].error,
+                )
+            ]
+        return candidates
+
+    return _graph_candidates_from_item(payload)
+
+
+def _graph_candidates_from_items(items: list[Any]) -> list[_GraphCandidate]:
+    if not items:
+        return [
+            _GraphCandidate(title=None, error="Graph artifact did not contain any chart specs.")
+        ]
+
+    candidates: list[_GraphCandidate] = []
+    for item in items:
+        candidates.extend(_graph_candidates_from_item(item))
+    return candidates
+
+
+def _graph_candidates_from_item(item: Any) -> list[_GraphCandidate]:
+    title = _extract_graph_title(item)
+    spec_payload = item
+    if isinstance(item, dict) and "spec" in item and not _has_audit_graph_visual_definition(item):
+        spec_payload = item.get("spec")
+    return _graph_candidates_from_spec(spec_payload, title=title)
+
+
+def _graph_candidates_from_spec(spec_payload: Any, *, title: str | None) -> list[_GraphCandidate]:
+    if isinstance(spec_payload, list):
+        candidates = _graph_candidates_from_items(spec_payload)
+        if title and len(candidates) == 1 and candidates[0].title is None:
+            return [
+                _GraphCandidate(
+                    title=title,
+                    spec=candidates[0].spec,
+                    error=candidates[0].error,
+                )
+            ]
+        return candidates
+
+    if not isinstance(spec_payload, dict):
+        return [_GraphCandidate(title=title, error="Graph spec must be a JSON object.")]
+
+    split_candidates = _split_top_level_composition(spec_payload)
+    if split_candidates is not None:
+        if title and len(split_candidates) == 1 and split_candidates[0].title is None:
+            return [
+                _GraphCandidate(
+                    title=title,
+                    spec=split_candidates[0].spec,
+                    error=split_candidates[0].error,
+                )
+            ]
+        return split_candidates
+
+    spec = deepcopy(spec_payload)
+    if not _has_audit_graph_visual_definition(spec):
+        return [
+            _GraphCandidate(
+                title=title,
+                error="Graph spec must define a Vega-Lite visual grammar.",
+            )
+        ]
+    return [_GraphCandidate(title=title, spec=spec)]
+
+
+def _split_top_level_composition(spec: dict[str, Any]) -> list[_GraphCandidate] | None:
+    composition_key = next(
+        (key for key in _GRAPH_SPLIT_COMPOSITION_KEYS if key in spec),
+        None,
+    )
+    if composition_key is None:
+        return None
+
+    children = spec.get(composition_key)
+    if not isinstance(children, list):
+        return [
+            _GraphCandidate(
+                title=_extract_graph_title(spec),
+                error=f"Graph composition '{composition_key}' must be a list.",
+            )
+        ]
+    if not children:
+        return [
+            _GraphCandidate(
+                title=_extract_graph_title(spec),
+                error=f"Graph composition '{composition_key}' must contain at least one chart.",
+            )
+        ]
+
+    candidates: list[_GraphCandidate] = []
+    for child in children:
+        child_title = _extract_graph_title(child)
+        if not isinstance(child, dict):
+            candidates.append(
+                _GraphCandidate(title=child_title, error="Graph spec must be a JSON object.")
+            )
+            continue
+
+        child_spec = deepcopy(child)
+        for inherited_key in _GRAPH_INHERITED_SPEC_KEYS:
+            if inherited_key in spec and inherited_key not in child_spec:
+                child_spec[inherited_key] = deepcopy(spec[inherited_key])
+
+        if not _has_audit_graph_visual_definition(child_spec):
+            candidates.append(
+                _GraphCandidate(
+                    title=child_title,
+                    error="Graph spec must define a Vega-Lite visual grammar.",
+                )
+            )
+            continue
+
+        candidates.append(_GraphCandidate(title=child_title, spec=child_spec))
+    return candidates
+
+
+def _audit_graph_title(
+    candidate: _GraphCandidate,
+    *,
+    fallback_title: str,
+    index: int,
+    total: int,
+) -> str:
+    candidate_title = candidate.title or _extract_graph_title(candidate.spec)
+    if candidate_title:
+        return candidate_title
+    if total == 1 and fallback_title:
+        return fallback_title
+    return f"Graph {index}"
+
+
+def _extract_graph_title(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    title = value.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    if isinstance(title, dict):
+        text = title.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+        if isinstance(text, list):
+            parts = [str(part).strip() for part in text if str(part).strip()]
+            return " ".join(parts) if parts else None
+    return None
+
+
+def _has_audit_graph_visual_definition(spec: dict[str, Any]) -> bool:
+    return any(key in spec for key in _GRAPH_VISUAL_KEYS)
 
 
 def _stage_status(values: dict[str, Any]) -> str:

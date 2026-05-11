@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
@@ -107,7 +108,7 @@ class _FakeWorkflowRepo:
 
 @dataclass
 class _FakeDataflowApp:
-    graph_payloads: dict[UUID, dict[str, Any]]
+    graph_payloads: dict[UUID, Any]
     calls: list[dict[str, Any]] = field(default_factory=list)
 
     def get_artifact(
@@ -138,6 +139,64 @@ class _FakeDataflowApp:
             mime="application/json",
             content=json.dumps(payload).encode("utf-8"),
         )
+
+
+def _render_html_for_graph_payload(payload: Any) -> str:
+    user_id = uuid4()
+    conversation_id = uuid4()
+    graph_id = uuid4()
+    conversation = Conversation(
+        conversation_id=conversation_id,
+        conversation_type="causal",
+        name="Graph audit",
+        last_updated_at_utc=1712345678.123,
+    )
+    repo = _FakeWorkflowRepo(
+        conversation=conversation,
+        orchestrator_state=_FakeOrchestratorState(payload={"working_dataset_ids": []}),
+        messages=[
+            ChatMessage(
+                role="assistant",
+                content="graph",
+                artifact_refs=[
+                    {
+                        "id": graph_id,
+                        "kind": "data",
+                        "format": "json",
+                        "artifact_meta": {"kind": "chart_spec"},
+                    }
+                ],
+            )
+        ],
+    )
+    dataflow = _FakeDataflowApp(graph_payloads={graph_id: payload})
+    app = AuditLogApp(repo=repo, dataflow=dataflow)  # type: ignore[arg-type]
+    return app.render_html(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        conversation_type="causal",
+    )
+
+
+def _audit_graph_specs(html: str) -> dict[str, dict[str, Any]]:
+    match = re.search(r"const auditGraphSpecs = (.*?);\n", html)
+    assert match is not None
+    return json.loads(match.group(1))
+
+
+def _simple_spec(*, title: str | None = None, mark: str = "bar") -> dict[str, Any]:
+    spec: dict[str, Any] = {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "mark": mark,
+        "data": {"values": [{"x": "a", "y": 1}]},
+        "encoding": {
+            "x": {"field": "x", "type": "nominal"},
+            "y": {"field": "y", "type": "quantitative"},
+        },
+    }
+    if title is not None:
+        spec["title"] = title
+    return spec
 
 
 def test_audit_log_html_uses_full_history_escapes_text_and_renders_graph() -> None:
@@ -254,11 +313,14 @@ def test_audit_log_html_uses_full_history_escapes_text_and_renders_graph() -> No
     assert ".graph { min-height: 420px; min-width: 760px; }" in html
     assert ".graph-card-header h3 { overflow-wrap: anywhere; color: var(--teal); }" in html
     assert ".graph .vega-embed .vega-actions a { color: var(--teal) !important; }" in html
-    assert ".graph .vega-embed summary svg path { fill: currentColor !important; stroke: currentColor !important; }" in html
+    assert (
+        ".graph .vega-embed summary svg path { fill: currentColor !important; stroke: currentColor !important; }"
+        in html
+    )
     assert ".graph svg, .graph canvas { display: block; max-width: none; }" in html
     assert '<div class="graph-card-header"><h3>ATE graph</h3></div>' in html
     assert (
-        '<div class="graph-viewport"><div id="audit-graph-2-1" class="graph"></div></div>' in html
+        '<div class="graph-viewport"><div id="audit-graph-2-1-1" class="graph"></div></div>' in html
     )
     assert "ATE graph" in html
     training_section = html.split("<h3>Model Training</h3>", maxsplit=1)[1].split(
@@ -279,6 +341,142 @@ def test_audit_log_html_uses_full_history_escapes_text_and_renders_graph() -> No
             "artifact_format": "json",
         }
     ]
+
+
+def test_audit_log_html_renders_raw_list_of_chart_specs_as_separate_cards() -> None:
+    html = _render_html_for_graph_payload([_simple_spec(), _simple_spec(mark="point")])
+
+    graph_specs = _audit_graph_specs(html)
+
+    assert sorted(graph_specs) == ["audit-graph-1-1-1", "audit-graph-1-1-2"]
+    assert '<div class="graph-card-header"><h3>Graph 1</h3></div>' in html
+    assert '<div class="graph-card-header"><h3>Graph 2</h3></div>' in html
+    assert graph_specs["audit-graph-1-1-1"]["mark"] == "bar"
+    assert graph_specs["audit-graph-1-1-2"]["mark"] == "point"
+    assert '<div class="graph-card graph-error">' not in html
+
+
+def test_audit_log_html_renders_wrapped_chart_specs_with_wrapper_titles() -> None:
+    html = _render_html_for_graph_payload(
+        {
+            "charts": [
+                {"title": "Age distribution", "spec": _simple_spec()},
+                {"title": "Outcome points", "spec": _simple_spec(mark="point")},
+            ]
+        }
+    )
+
+    graph_specs = _audit_graph_specs(html)
+
+    assert sorted(graph_specs) == ["audit-graph-1-1-1", "audit-graph-1-1-2"]
+    assert '<div class="graph-card-header"><h3>Age distribution</h3></div>' in html
+    assert '<div class="graph-card-header"><h3>Outcome points</h3></div>' in html
+    assert graph_specs["audit-graph-1-1-1"]["mark"] == "bar"
+    assert graph_specs["audit-graph-1-1-2"]["mark"] == "point"
+
+
+def test_audit_log_html_keeps_faceted_chart_as_single_renderable_graph() -> None:
+    payload = {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "title": "Forest Plot of Subgroup Treatment Effects (CATE)",
+        "facet": {"row": {"field": "subgroup_category", "type": "nominal"}},
+        "spec": {
+            "layer": [
+                {
+                    "mark": {"type": "rule"},
+                    "encoding": {
+                        "x": {"field": "mean_cate_lower", "type": "quantitative"},
+                        "x2": {"field": "mean_cate_upper"},
+                        "y": {"field": "subgroup_value", "type": "nominal"},
+                    },
+                },
+                {
+                    "mark": {"type": "point", "filled": True},
+                    "encoding": {
+                        "x": {"field": "mean_cate", "type": "quantitative"},
+                        "y": {"field": "subgroup_value", "type": "nominal"},
+                    },
+                },
+            ]
+        },
+        "data": {
+            "values": [
+                {
+                    "subgroup_category": "Overall",
+                    "subgroup_value": "All Patients",
+                    "mean_cate_lower": -0.15,
+                    "mean_cate_upper": 0.22,
+                    "mean_cate": 0.03,
+                }
+            ]
+        },
+    }
+
+    html = _render_html_for_graph_payload(payload)
+    graph_specs = _audit_graph_specs(html)
+
+    assert sorted(graph_specs) == ["audit-graph-1-1-1"]
+    assert (
+        '<div class="graph-card-header"><h3>Forest Plot of Subgroup Treatment Effects (CATE)</h3></div>'
+        in html
+    )
+    assert graph_specs["audit-graph-1-1-1"]["facet"] == payload["facet"]
+    assert graph_specs["audit-graph-1-1-1"]["spec"] == payload["spec"]
+    assert '<div class="graph-card graph-error">' not in html
+    assert "function auditUsesCompositeLayout" in html
+    assert "auditAutosizeType(prepared.autosize).startsWith('fit')" in html
+    assert "auditApplyAutosize(prepared)" in html
+
+
+def test_audit_log_html_keeps_valid_sibling_when_bundled_chart_spec_is_invalid() -> None:
+    html = _render_html_for_graph_payload(
+        [_simple_spec(title="Valid graph"), {"title": "Broken graph", "encoding": {}}]
+    )
+
+    graph_specs = _audit_graph_specs(html)
+
+    assert sorted(graph_specs) == ["audit-graph-1-1-1"]
+    assert '<div class="graph-card-header"><h3>Valid graph</h3></div>' in html
+    assert '<div class="graph-card graph-error"><h3>Broken graph</h3>' in html
+    assert "must define a Vega-Lite visual grammar" in html
+
+
+def test_audit_log_html_splits_top_level_vconcat_and_inherits_root_spec_fields() -> None:
+    payload = {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "data": {"values": [{"x": "a", "y": 1}]},
+        "config": {"view": {"stroke": None}},
+        "vconcat": [
+            {
+                "title": "First panel",
+                "mark": "bar",
+                "encoding": {
+                    "x": {"field": "x", "type": "nominal"},
+                    "y": {"field": "y", "type": "quantitative"},
+                },
+            },
+            {
+                "mark": "point",
+                "encoding": {
+                    "x": {"field": "x", "type": "nominal"},
+                    "y": {"field": "y", "type": "quantitative"},
+                },
+            },
+        ],
+    }
+
+    html = _render_html_for_graph_payload(payload)
+    graph_specs = _audit_graph_specs(html)
+
+    assert sorted(graph_specs) == ["audit-graph-1-1-1", "audit-graph-1-1-2"]
+    assert '<div class="graph-card-header"><h3>First panel</h3></div>' in html
+    assert '<div class="graph-card-header"><h3>Graph 2</h3></div>' in html
+    assert "vconcat" not in graph_specs["audit-graph-1-1-1"]
+    assert "vconcat" not in graph_specs["audit-graph-1-1-2"]
+    assert graph_specs["audit-graph-1-1-1"]["data"] == payload["data"]
+    assert graph_specs["audit-graph-1-1-2"]["data"] == payload["data"]
+    assert graph_specs["audit-graph-1-1-1"]["config"] == payload["config"]
+    assert graph_specs["audit-graph-1-1-2"]["config"] == payload["config"]
 
 
 def test_audit_log_html_handles_missing_graph_without_failing_report() -> None:

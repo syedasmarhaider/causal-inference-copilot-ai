@@ -160,11 +160,12 @@ def test_clean_adds_missingness_indicator_for_imputed_feature_column() -> None:
         llm=llm,
     )
 
-    assert "age__missing" in result.pd_cleaned.columns
-    assert result.pd_cleaned["age__missing"].tolist() == [1, 0]
+    assert "age_missing" in result.pd_cleaned.columns
+    assert "age__missing" not in result.pd_cleaned.columns
+    assert result.pd_cleaned["age_missing"].tolist() == [1, 0]
     assert result.effective_draft is not None
-    assert "age__missing" in result.effective_draft.covariates
-    assert "age__missing" in result.summary_str
+    assert "age_missing" in result.effective_draft.covariates
+    assert "age_missing" in result.summary_str
     assert len(manipulation_tool.calls) == 2
 
 
