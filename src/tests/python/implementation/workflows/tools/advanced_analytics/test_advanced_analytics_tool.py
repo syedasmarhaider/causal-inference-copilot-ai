@@ -135,8 +135,48 @@ def test_propensity_score_accepts_string_binary_treatment_and_reports_mapping() 
     assert result.analysis_type == "propensity_score"
     assert result.tables["treatment_levels"] == {"0": "control", "1": "treated"}
     assert result.metrics["treatment_levels"] == {"0": "control", "1": "treated"}
+    assert result.metrics["treatment"] == "istatus"
+    assert result.metrics["covariates"] == ["age", "sex"]
+    assert result.metrics["n_obs"] == len(dataframe)
     assert 0.0 <= result.metrics["auc"] <= 1.0
     assert "positive class='treated'" in result.summary
+    assert "using covariates: age, sex" in result.summary
+
+
+def test_propensity_score_rejects_treatment_as_covariate() -> None:
+    dataframe = pd.DataFrame(
+        [
+            {"istatus": "control", "age": 23, "sex": "F"},
+            {"istatus": "treated", "age": 25, "sex": "M"},
+            {"istatus": "control", "age": 28, "sex": "F"},
+            {"istatus": "treated", "age": 31, "sex": "M"},
+        ]
+    )
+    summary = _summary_model(
+        _categorical_profile("istatus", n_rows=len(dataframe), distinct_count=2),
+        _numeric_profile("age", n_rows=len(dataframe)),
+        _categorical_profile("sex", n_rows=len(dataframe), distinct_count=2),
+        n_rows=len(dataframe),
+    )
+    llm = _FakeLLMService(
+        plans=[
+            {
+                "analysis_type": "propensity_score",
+                "treatment": "istatus",
+                "covariates": ["age", "istatus"],
+            }
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"Treatment column 'istatus' cannot also be used as a propensity score covariate",
+    ):
+        _ = AdvancedAnalyticsTool(llm=llm).analyze(
+            dataframe=dataframe,
+            data_summary=summary,
+            user_request="Estimate propensity scores for istatus using age.",
+        )
 
 
 def test_propensity_score_rejects_non_binary_treatment_with_clear_error() -> None:

@@ -25,6 +25,7 @@ from python.implementation.workflows.nodes.data_statistics.data_statistics_deps 
     DataStatisticsDeps,
 )
 from python.implementation.workflows.nodes.data_statistics.data_statistics_prompts import (
+    data_statistics_advanced_analytics_request_prompt,
     data_statistics_final_response_system_prompt,
     data_statistics_intent_classification_system_prompt,
     data_statistics_node_info,
@@ -243,7 +244,7 @@ class DataStatisticsNode(Node):
                     summary_model=working_summary,
                     summary_json=working_summary_json,
                     instructions=intent.intent_analytics_brief or latest_user_message,
-                    prepare_followup_data=(intent.intent_chart or intent.intent_advanced_analytics),
+                    prepare_followup_data=intent.intent_chart,
                 )
             except Exception as exc:
                 log.exception("analytics query failed", error=safe_err(exc))
@@ -286,12 +287,17 @@ class DataStatisticsNode(Node):
         # ── intent_advanced_analytics → AdvancedAnalyticsTool + PlotTool ──
         if intent.intent_advanced_analytics:
             try:
+                advanced_instructions = self._build_advanced_analytics_request(
+                    instructions=intent.intent_advanced_analytics_brief or latest_user_message,
+                    latest_user_message=latest_user_message,
+                    chat_history=history_text,
+                )
                 adv_result, adv_chart_refs = self._run_advanced_analytics_intent(
                     user_id=request.user_id,
                     conversation_id=request.conversation_id,
-                    dataframe=working_df,
-                    summary_model=working_summary,
-                    instructions=intent.intent_advanced_analytics_brief or latest_user_message,
+                    dataframe=current_df,
+                    summary_model=current_summary,
+                    instructions=advanced_instructions,
                 )
                 advanced_analytics_result = adv_result
                 chart_artifact_refs.extend(adv_chart_refs)
@@ -498,6 +504,22 @@ class DataStatisticsNode(Node):
         )
 
     # ── intent_advanced_analytics → AdvancedAnalyticsTool + PlotTool ──
+
+    def _build_advanced_analytics_request(
+        self,
+        *,
+        instructions: str,
+        latest_user_message: str,
+        chat_history: str | None,
+    ) -> str:
+        template = data_statistics_advanced_analytics_request_prompt()
+        return template.format(
+            resolved_request=instructions.strip() or latest_user_message.strip(),
+            latest_user_message=latest_user_message.strip(),
+            chat_history=(
+                chat_history.strip() if chat_history and chat_history.strip() else "(none)"
+            ),
+        )
 
     def _run_advanced_analytics_intent(
         self,
