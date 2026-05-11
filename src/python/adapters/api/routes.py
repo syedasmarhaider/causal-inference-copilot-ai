@@ -252,16 +252,16 @@ async def create_state_reversion(
 @api_router.get(
     f"{_CONVERSATION_SCOPE_PATH}/audit-log",
     tags=["conversations"],
-    summary="Get an HTML conversation audit log",
+    summary="Download a zipped conversation audit log",
     description=(
-        "Returns a static HTML audit report built from the full message history and "
-        "current orchestration state. CSV datasets are linked, while Vega-Lite graph "
-        "artifacts referenced by messages are rendered inline."
+        "Returns a zip package containing a static HTML audit report plus linked CSV/JSON "
+        "data artifacts. Vega-Lite graph artifacts referenced by messages remain rendered "
+        "inline in the HTML. Trained model objects are not included in this export."
     ),
     response_class=Response,
-    response_description="HTML audit report.",
+    response_description="Zip package containing the HTML audit report and data artifacts.",
     responses={
-        200: {"content": {"text/html": {}}},
+        200: {"content": {"application/zip": {}}},
         401: {"description": "Missing or invalid Bearer token."},
         404: {"description": "Conversation not found for this authenticated user and type."},
         422: {"description": "Invalid conversation type."},
@@ -275,15 +275,18 @@ async def get_audit_log(
     audit_log: AuditLogApp = AUDIT_LOG_APP_DEP,
 ) -> Response:
     content = await asyncio.to_thread(
-        audit_log.render_html,
+        audit_log.render_zip,
         user_id=authenticated_user.uid,
         conversation_id=conversation_id,
         conversation_type=conversation_type,
     )
     return Response(
         content=content,
-        media_type="text/html; charset=utf-8",
-        headers={"Cache-Control": "private, max-age=60"},
+        media_type="application/zip",
+        headers={
+            "Cache-Control": "private, max-age=60",
+            "Content-Disposition": f'attachment; filename="audit-log-{conversation_id}.zip"',
+        },
     )
 
 

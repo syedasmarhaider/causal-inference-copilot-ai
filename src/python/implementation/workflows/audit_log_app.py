@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import html
+import io
 import json
 import re
+import zipfile
 from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlencode
 from uuid import UUID
 
 from python.domain.models.errors import ConversationNotFoundError
-from python.domain.models.models import ArtifactRef, ChatMessage
+from python.domain.models.models import ArtifactFormat, ArtifactRef, ChatMessage
 from python.domain.repo.workflow_state_repo import Conversation, ConversationType, WorkflowStateRepo
 from python.domain.workflows.ochestrator_state import OchestratorState
 from python.implementation.workflows.dataflow_app import DataflowApp
@@ -33,6 +35,7 @@ class AuditGraph:
 class AuditArtifact:
     label: str
     href: str | None
+    artifact_ref: ArtifactRef | None = None
     graphs: list[AuditGraph] = field(default_factory=list)
 
 
@@ -89,6 +92,65 @@ class AuditLogApp:
         conversation_id: UUID,
         conversation_type: ConversationType,
     ) -> str:
+        return AuditLogHtmlRenderer().render(
+            self._build_report(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                conversation_type=conversation_type,
+            )
+        )
+
+    def render_zip(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        conversation_type: ConversationType,
+    ) -> bytes:
+        report = self._build_report(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+        )
+        artifact_refs = _collect_package_artifact_refs(report)
+        artifact_paths = {
+            _artifact_key(artifact_ref): _package_artifact_path(artifact_ref)
+            for artifact_ref in artifact_refs
+        }
+        artifact_contents: dict[tuple[UUID, str, str], bytes] = {}
+
+        for artifact_ref in artifact_refs:
+            artifact = self._dataflow.get_artifact(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                conversation_type=conversation_type,
+                artifact_id=artifact_ref["id"],
+                artifact_kind=artifact_ref["kind"],
+                artifact_format=artifact_ref["format"],
+            )
+            artifact_contents[_artifact_key(artifact_ref)] = artifact.content
+
+        html_content = _rewrite_packaged_artifact_links(
+            html_content=AuditLogHtmlRenderer().render(report),
+            report=report,
+            artifact_paths=artifact_paths,
+        )
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("audit-log.html", html_content.encode("utf-8"))
+            for artifact_ref in artifact_refs:
+                key = _artifact_key(artifact_ref)
+                archive.writestr(artifact_paths[key], artifact_contents[key])
+        return buffer.getvalue()
+
+    def _build_report(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        conversation_type: ConversationType,
+    ) -> AuditReport:
         conversation = self._get_conversation(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -140,7 +202,7 @@ class AuditLogApp:
                 messages=messages,
             ),
         )
-        return AuditLogHtmlRenderer().render(report)
+        return report
 
     def _get_conversation(
         self,
@@ -185,6 +247,7 @@ class AuditLogApp:
                         AuditArtifact(
                             label=label,
                             href=None,
+                            artifact_ref=artifact_ref,
                             graphs=self._load_graphs(
                                 user_id=user_id,
                                 conversation=conversation,
@@ -204,6 +267,7 @@ class AuditLogApp:
                             conversation_type=conversation.conversation_type,
                             artifact_ref=artifact_ref,
                         ),
+                        artifact_ref=artifact_ref,
                     )
                 )
 
@@ -629,8 +693,12 @@ class AuditLogHtmlRenderer:
                                 value=payload.get("all_row_cate_dataset_id"),
                             ),
                             "All Row CATE Summary": payload.get("all_row_cate_summary"),
-                            "Negative Control Refutation Artifact": payload.get(
-                                "negative_control_refutation_artifact_id"
+                            "Negative Control Refutation Artifact": _artifact_link_or_value(
+                                conversation_id=report.conversation.conversation_id,
+                                conversation_type=report.conversation.conversation_type,
+                                value=payload.get("negative_control_refutation_artifact_id"),
+                                artifact_format="json",
+                                link_text="Open JSON",
                             ),
                             "Negative Control Refutation Vectors Dataset": _dataset_link_or_value(
                                 conversation_id=report.conversation.conversation_id,
@@ -662,6 +730,14 @@ class AuditLogHtmlRenderer:
         parts: list[str] = []
         for label, value in values.items():
             parts.append(self._stage_field(label, value))
+        disclaimer = (
+            '<p class="audit-disclaimer">'
+            "The trained model object is not included in this audit export. "
+            "It can be exported separately on request."
+            "</p>"
+            if title == "Model Training"
+            else ""
+        )
         return (
             '<article class="stage-card">'
             '<div class="stage-card-header">'
@@ -669,6 +745,7 @@ class AuditLogHtmlRenderer:
             f"{status_badge}"
             "</div>"
             f"{''.join(parts)}"
+            f"{disclaimer}"
             "</article>"
         )
 
@@ -1281,6 +1358,7 @@ a:hover { text-decoration: underline; }
 .graph-error { color: var(--error); }
 .stage-field { margin: 12px 0; }
 .stage-field p { margin: 0; overflow-wrap: anywhere; }
+.audit-disclaimer { margin: 14px 0 0; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 8px; color: var(--muted); background: var(--soft); overflow-wrap: anywhere; }
 .appendix-meta { display: grid; grid-template-columns: 180px 1fr; gap: 12px; margin-bottom: 12px; }
 .appendix-meta span, .muted { color: var(--muted); font-weight: 600; }
 details { margin-top: 6px; }
@@ -1526,15 +1604,38 @@ def _dataset_link_or_value(
     conversation_type: ConversationType,
     value: Any,
 ) -> AuditHtml | None:
+    return _artifact_link_or_value(
+        conversation_id=conversation_id,
+        conversation_type=conversation_type,
+        value=value,
+        artifact_format="csv",
+        link_text="Open CSV",
+    )
+
+
+def _artifact_link_or_value(
+    *,
+    conversation_id: UUID,
+    conversation_type: ConversationType,
+    value: Any,
+    artifact_format: ArtifactFormat,
+    link_text: str,
+) -> AuditHtml | None:
     if _is_missing(value):
         return None
     try:
-        dataset_id = value if isinstance(value, UUID) else UUID(str(value))
+        artifact_id = value if isinstance(value, UUID) else UUID(str(value))
     except (TypeError, ValueError):
         return AuditHtml(_e(str(value)))
+    artifact_ref = _data_artifact_ref(artifact_id=artifact_id, artifact_format=artifact_format)
+    href = _artifact_href(
+        conversation_id=conversation_id,
+        conversation_type=conversation_type,
+        artifact_ref=artifact_ref,
+    )
     return AuditHtml(
-        f"<code>{_e(str(dataset_id))}</code> "
-        f"{_dataset_csv_link(conversation_id=conversation_id, conversation_type=conversation_type, dataset_id=dataset_id)}"
+        f"<code>{_e(str(artifact_id))}</code> "
+        f'<a href="{_attr(href)}">{_e(link_text)}</a>'
     )
 
 
@@ -1844,6 +1945,110 @@ def _dataset_csv_link(
         artifact_ref=artifact_ref,
     )
     return f'<a href="{_attr(href)}">Open CSV</a>'
+
+
+def _collect_package_artifact_refs(report: AuditReport) -> list[ArtifactRef]:
+    refs: list[ArtifactRef] = []
+    if report.current_dataset_id is not None:
+        refs.append(
+            _data_artifact_ref(artifact_id=report.current_dataset_id, artifact_format="csv")
+        )
+
+    for dataset_id in _coerce_uuid_list(report.orchestrator_payload.get("working_dataset_ids")):
+        refs.append(_data_artifact_ref(artifact_id=dataset_id, artifact_format="csv"))
+
+    for message in report.messages:
+        for artifact in message.artifacts:
+            if artifact.graphs or artifact.artifact_ref is None:
+                continue
+            if artifact.artifact_ref["kind"] == "data":
+                refs.append(artifact.artifact_ref)
+
+    _append_payload_artifact_ref(
+        refs,
+        value=report.orchestrator_payload.get("all_row_cate_dataset_id"),
+        artifact_format="csv",
+    )
+    _append_payload_artifact_ref(
+        refs,
+        value=report.orchestrator_payload.get("negative_control_refutation_artifact_id"),
+        artifact_format="json",
+    )
+    _append_payload_artifact_ref(
+        refs,
+        value=report.orchestrator_payload.get(
+            "negative_control_refutation_vectors_dataset_id"
+        ),
+        artifact_format="csv",
+    )
+    return _dedupe_artifact_refs(refs)
+
+
+def _append_payload_artifact_ref(
+    refs: list[ArtifactRef],
+    *,
+    value: Any,
+    artifact_format: ArtifactFormat,
+) -> None:
+    if _is_missing(value):
+        return
+    try:
+        artifact_id = value if isinstance(value, UUID) else UUID(str(value))
+    except (TypeError, ValueError):
+        return
+    refs.append(_data_artifact_ref(artifact_id=artifact_id, artifact_format=artifact_format))
+
+
+def _dedupe_artifact_refs(refs: Sequence[ArtifactRef]) -> list[ArtifactRef]:
+    deduped: dict[tuple[UUID, str, str], ArtifactRef] = {}
+    for artifact_ref in refs:
+        key = _artifact_key(artifact_ref)
+        if key not in deduped:
+            deduped[key] = artifact_ref
+    return list(deduped.values())
+
+
+def _rewrite_packaged_artifact_links(
+    *,
+    html_content: str,
+    report: AuditReport,
+    artifact_paths: dict[tuple[UUID, str, str], str],
+) -> str:
+    rewritten = html_content
+    for key, local_path in artifact_paths.items():
+        artifact_ref = _data_artifact_ref(
+            artifact_id=key[0],
+            artifact_format=key[2],
+        )
+        original_href = _artifact_href(
+            conversation_id=report.conversation.conversation_id,
+            conversation_type=report.conversation.conversation_type,
+            artifact_ref=artifact_ref,
+        )
+        rewritten = rewritten.replace(_attr(original_href), _attr(local_path))
+    return rewritten
+
+
+def _package_artifact_path(artifact_ref: ArtifactRef) -> str:
+    return f"artifacts/data-{_artifact_key(artifact_ref)[0]}.{artifact_ref['format']}"
+
+
+def _artifact_key(artifact_ref: ArtifactRef) -> tuple[UUID, str, str]:
+    artifact_id = artifact_ref["id"]
+    artifact_uuid = artifact_id if isinstance(artifact_id, UUID) else UUID(str(artifact_id))
+    return (artifact_uuid, str(artifact_ref["kind"]), str(artifact_ref["format"]))
+
+
+def _data_artifact_ref(
+    *,
+    artifact_id: UUID,
+    artifact_format: ArtifactFormat | str,
+) -> ArtifactRef:
+    return {
+        "id": artifact_id,
+        "kind": "data",
+        "format": cast(ArtifactFormat, artifact_format),
+    }
 
 
 def _coerce_uuid_list(value: Any) -> list[UUID]:

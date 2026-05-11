@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import io
 import json
 import re
+import zipfile
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
+
+import pytest
 
 from python.domain.models.models import ChatMessage
 from python.domain.repo.workflow_state_repo import Conversation
@@ -109,6 +113,9 @@ class _FakeWorkflowRepo:
 @dataclass
 class _FakeDataflowApp:
     graph_payloads: dict[UUID, Any]
+    artifact_payloads: dict[tuple[UUID, str, str], DataflowArtifactResponse] = field(
+        default_factory=dict
+    )
     calls: list[dict[str, Any]] = field(default_factory=list)
 
     def get_artifact(
@@ -131,11 +138,14 @@ class _FakeDataflowApp:
                 "artifact_format": artifact_format,
             }
         )
+        key = (artifact_id, artifact_kind, artifact_format)
+        if key in self.artifact_payloads:
+            return self.artifact_payloads[key]
         payload = self.graph_payloads[artifact_id]
         return DataflowArtifactResponse(
             id=artifact_id,
-            kind="data",
-            format="json",
+            kind=artifact_kind,  # type: ignore[arg-type]
+            format=artifact_format,  # type: ignore[arg-type]
             mime="application/json",
             content=json.dumps(payload).encode("utf-8"),
         )
@@ -341,6 +351,168 @@ def test_audit_log_html_uses_full_history_escapes_text_and_renders_graph() -> No
             "artifact_format": "json",
         }
     ]
+
+
+def test_audit_log_zip_packages_data_artifacts_and_rewrites_links() -> None:
+    user_id = uuid4()
+    conversation_id = uuid4()
+    dataset_id = uuid4()
+    graph_id = uuid4()
+    all_row_cate_id = uuid4()
+    refutation_id = uuid4()
+    refutation_vectors_id = uuid4()
+    trained_model_id = uuid4()
+    conversation = Conversation(
+        conversation_id=conversation_id,
+        conversation_type="causal",
+        name="Packaged audit",
+        last_updated_at_utc=1712345678.123,
+    )
+    repo = _FakeWorkflowRepo(
+        conversation=conversation,
+        orchestrator_state=_FakeOrchestratorState(
+            payload={
+                "working_dataset_ids": [str(dataset_id)],
+                "working_dataset_frozen": True,
+                "trained_model_id": str(trained_model_id),
+                "all_row_cate_dataset_id": str(all_row_cate_id),
+                "all_row_cate_summary": {"row_count": 2},
+                "negative_control_refutation_artifact_id": str(refutation_id),
+                "negative_control_refutation_vectors_dataset_id": str(refutation_vectors_id),
+                "negative_control_refutation_summary": {"status": "COMPLETED"},
+            }
+        ),
+        messages=[
+            ChatMessage(
+                role="assistant",
+                content="packaged outputs",
+                artifact_refs=[
+                    {
+                        "id": graph_id,
+                        "kind": "data",
+                        "format": "json",
+                        "artifact_meta": {"kind": "chart_spec", "title": "Embedded chart"},
+                    },
+                    {
+                        "id": all_row_cate_id,
+                        "kind": "data",
+                        "format": "csv",
+                        "artifact_meta": {"title": "All row CATE"},
+                    },
+                ],
+            )
+        ],
+    )
+    dataflow = _FakeDataflowApp(
+        graph_payloads={graph_id: _simple_spec(title="Embedded chart")},
+        artifact_payloads={
+            (dataset_id, "data", "csv"): DataflowArtifactResponse(
+                id=dataset_id,
+                kind="data",
+                format="csv",
+                mime="text/csv",
+                content=b"id,outcome\n1,10\n",
+            ),
+            (all_row_cate_id, "data", "csv"): DataflowArtifactResponse(
+                id=all_row_cate_id,
+                kind="data",
+                format="csv",
+                mime="text/csv",
+                content=b"id,cate\n1,0.2\n2,0.3\n",
+            ),
+            (refutation_id, "data", "json"): DataflowArtifactResponse(
+                id=refutation_id,
+                kind="data",
+                format="json",
+                mime="application/json",
+                content=b'{"status":"COMPLETED"}',
+            ),
+            (refutation_vectors_id, "data", "csv"): DataflowArtifactResponse(
+                id=refutation_vectors_id,
+                kind="data",
+                format="csv",
+                mime="text/csv",
+                content=b"id,primary_cate,negative_control_cate\n1,0.2,0.01\n",
+            ),
+        },
+    )
+    app = AuditLogApp(repo=repo, dataflow=dataflow)  # type: ignore[arg-type]
+
+    zip_bytes = app.render_zip(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        conversation_type="causal",
+    )
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+        names = archive.namelist()
+        html = archive.read("audit-log.html").decode("utf-8")
+        assert archive.read(f"artifacts/data-{dataset_id}.csv") == b"id,outcome\n1,10\n"
+        assert (
+            archive.read(f"artifacts/data-{all_row_cate_id}.csv")
+            == b"id,cate\n1,0.2\n2,0.3\n"
+        )
+        assert archive.read(f"artifacts/data-{refutation_id}.json") == b'{"status":"COMPLETED"}'
+        assert (
+            archive.read(f"artifacts/data-{refutation_vectors_id}.csv")
+            == b"id,primary_cate,negative_control_cate\n1,0.2,0.01\n"
+        )
+
+    assert names == [
+        "audit-log.html",
+        f"artifacts/data-{dataset_id}.csv",
+        f"artifacts/data-{all_row_cate_id}.csv",
+        f"artifacts/data-{refutation_id}.json",
+        f"artifacts/data-{refutation_vectors_id}.csv",
+    ]
+    assert f"artifacts/data-{dataset_id}.csv" in html
+    assert f"artifacts/data-{all_row_cate_id}.csv" in html
+    assert f"artifacts/data-{refutation_id}.json" in html
+    assert f"artifacts/data-{refutation_vectors_id}.csv" in html
+    assert f"/artifacts/{dataset_id}?artifact_kind=data" not in html
+    assert f"/artifacts/{all_row_cate_id}?artifact_kind=data" not in html
+    assert f"artifacts/data-{graph_id}.json" not in html
+    assert "auditGraphSpecs" in html
+    assert "https://cdn.jsdelivr.net/npm/vega-lite@5" in html
+    assert str(trained_model_id) in html
+    assert (
+        "The trained model object is not included in this audit export. "
+        "It can be exported separately on request."
+    ) in html
+    assert all(str(trained_model_id) not in name for name in names)
+
+    fetched_ids = [call["artifact_id"] for call in dataflow.calls]
+    assert fetched_ids.count(graph_id) == 1
+    assert fetched_ids.count(all_row_cate_id) == 1
+    assert trained_model_id not in fetched_ids
+
+
+def test_audit_log_zip_fails_when_packaged_artifact_is_missing() -> None:
+    user_id = uuid4()
+    conversation_id = uuid4()
+    dataset_id = uuid4()
+    conversation = Conversation(
+        conversation_id=conversation_id,
+        conversation_type="causal",
+        name="Incomplete package",
+        last_updated_at_utc=1712345678.123,
+    )
+    repo = _FakeWorkflowRepo(
+        conversation=conversation,
+        orchestrator_state=_FakeOrchestratorState(
+            payload={"working_dataset_ids": [str(dataset_id)]}
+        ),
+        messages=[],
+    )
+    dataflow = _FakeDataflowApp(graph_payloads={})
+    app = AuditLogApp(repo=repo, dataflow=dataflow)  # type: ignore[arg-type]
+
+    with pytest.raises(KeyError):
+        app.render_zip(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            conversation_type="causal",
+        )
 
 
 def test_audit_log_html_renders_raw_list_of_chart_specs_as_separate_cards() -> None:

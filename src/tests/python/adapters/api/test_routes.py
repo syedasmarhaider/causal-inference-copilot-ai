@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import zipfile
 from collections.abc import Generator
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -275,20 +277,26 @@ class _StubDataflowApp:
 class _StubAuditLogApp:
     def __init__(self) -> None:
         self.render_calls: list[dict[str, object]] = []
-        self.render_result = (
-            "<!doctype html><html><body>"
-            "<h1>Conversation Audit Log</h1>"
-            "<p>Escaped &lt;message&gt;</p>"
-            "</body></html>"
-        )
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "audit-log.html",
+                (
+                    "<!doctype html><html><body>"
+                    "<h1>Conversation Audit Log</h1>"
+                    "<p>Escaped &lt;message&gt;</p>"
+                    "</body></html>"
+                ),
+            )
+        self.render_result = buffer.getvalue()
 
-    def render_html(
+    def render_zip(
         self,
         *,
         user_id: UUID,
         conversation_id: UUID,
         conversation_type: str,
-    ) -> str:
+    ) -> bytes:
         self.render_calls.append(
             {
                 "user_id": user_id,
@@ -479,7 +487,7 @@ def test_get_conversation_returns_snapshot(
     assert dataflow.artifact_calls == []
 
 
-def test_get_audit_log_returns_html(
+def test_get_audit_log_returns_zip(
     api_client: tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser],
 ) -> None:
     client, workflow, dataflow, user = api_client
@@ -489,9 +497,15 @@ def test_get_audit_log_returns_html(
     response = client.get(f"/v1/conversations/{conversation_id}/types/causal/audit-log")
 
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/html")
-    assert "Conversation Audit Log" in response.text
-    assert "Escaped &lt;message&gt;" in response.text
+    assert response.headers["content-type"].startswith("application/zip")
+    assert (
+        response.headers["content-disposition"]
+        == f'attachment; filename="audit-log-{conversation_id}.zip"'
+    )
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        html = archive.read("audit-log.html").decode("utf-8")
+    assert "Conversation Audit Log" in html
+    assert "Escaped &lt;message&gt;" in html
     assert audit_log.render_calls == [
         {
             "user_id": user.uid,
@@ -884,6 +898,12 @@ def test_openapi_mentions_scoped_paths_and_enums() -> None:
     artifact_parameters = {param["name"]: param for param in artifact_operation["parameters"]}
     assert artifact_parameters["artifact_kind"]["schema"]["enum"] == ["graph", "data"]
     assert artifact_parameters["artifact_format"]["schema"]["enum"] == ["json", "csv"]
+
+    audit_operation = schema["paths"][
+        "/v1/conversations/{conversation_id}/types/{conversation_type}/audit-log"
+    ]["get"]
+    assert "application/zip" in audit_operation["responses"]["200"]["content"]
+    assert "Trained model objects are not included" in audit_operation["description"]
 
     diff_operation = schema["paths"][
         "/v1/conversations/{conversation_id}/types/{conversation_type}/dataset-diffs"
