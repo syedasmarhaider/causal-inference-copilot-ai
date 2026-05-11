@@ -831,6 +831,14 @@ def test_node_review_recompile_reloads_original_source_dataset() -> None:
                 read_only_messages_history=[
                     ChatMessage(role="user", content="compile"),
                     ChatMessage(
+                        role="assistant",
+                        content="The preview includes age_missing and isex_missing indicators.",
+                    ),
+                    ChatMessage(
+                        role="user",
+                        content="Can we simplify the effect modifiers?",
+                    ),
+                    ChatMessage(
                         role="user",
                         content="please drop rows with impossible age values",
                         id="recompile-1",
@@ -844,9 +852,14 @@ def test_node_review_recompile_reloads_original_source_dataset() -> None:
     assert second.new_node_state.payload.compiled_dataset_id != first_preview_dataset_id
     assert data_repo.get_csv_data_calls == [source_dataset_id, source_dataset_id]
     assert clean_mock.call_count == 2
-    assert clean_mock.call_args_list[1].kwargs["revised_instructions"] == (
-        "drop rows with impossible age values"
-    )
+    review_decision_history = llm.generate_json_calls[1]["history"]
+    assert [message.content for message in review_decision_history] == [
+        "The preview includes age_missing and isex_missing indicators.",
+        "Can we simplify the effect modifiers?",
+        "please drop rows with impossible age values",
+    ]
+    revised_instructions = clean_mock.call_args_list[1].kwargs["revised_instructions"]
+    assert revised_instructions == "drop rows with impossible age values"
     assert state.get("working_dataset_id") == second.new_node_state.payload.compiled_dataset_id
 
 

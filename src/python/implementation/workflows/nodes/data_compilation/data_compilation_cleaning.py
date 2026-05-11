@@ -5,9 +5,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
+from pydantic import BaseModel, ConfigDict, Field
 
 from python.domain.service.llm_service import LLMConfig, LLMService
 from python.implementation.workflows.nodes.data_compilation.data_compilation_prompts import (
+    data_compilation_binary_role_selection_prompt,
     data_compilation_data_type_plan_prompt,
     data_compilation_filter_plan_prompt,
     data_compilation_imputation_plan_prompt,
@@ -28,7 +30,6 @@ from python.implementation.workflows.tools.data_profiling.data_profiling_tool im
 )
 
 
-
 @dataclass(frozen=True)
 class CleaningResult:
     causal: CausalSpec
@@ -37,6 +38,17 @@ class CleaningResult:
     summary_str: str
     cleaning_notes: tuple[str, ...] = ()
     effective_draft: CausalSpecDraft | None = None
+
+
+class _BinaryRoleSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    treatment_treated: str = Field(..., min_length=1)
+    treatment_control: str = Field(..., min_length=1)
+    outcome_event: str | None = None
+    outcome_non_event: str | None = None
+    negative_control_event: str | None = None
+    negative_control_non_event: str | None = None
 
 
 def clean(
@@ -216,6 +228,7 @@ def clean(
             draft=working_draft,
             data=imputed_data,
             col_missingess=col_missingess,
+            auto_add_missing_indicators=revised_instructions is None,
         )
         final_data = _drop_irrelevant_columns(filled_data, filled_draft)
         final_summary = data_profiling_tools.extract_dataset_summary(
@@ -230,6 +243,7 @@ def clean(
                 dataset_summary=final_summary,
                 previous_draft=filled_draft,
                 retry_feedback=validation_retry_instructions,
+                llm=llm,
             )
             _validate(
                 causal_spec=causal_spec,
@@ -613,6 +627,9 @@ def _impute_missing_values(
             "total_batches": len(feature_batches),
             "missing_count_by_column": batch_missing_counts,
             "revised_instructions": revised_instructions,
+            "missing_indicator_policy": _missing_indicator_policy_text(
+                revised_instructions=revised_instructions
+            ),
         }
         imputation_plan_response = llm.generate(
             system_prompt=data_compilation_imputation_plan_prompt(),
@@ -706,6 +723,8 @@ def _fill_miginess(
     draft: CausalSpecDraft,
     data: pd.DataFrame,
     col_missingess: dict[str, dict[str, Any]],
+    *,
+    auto_add_missing_indicators: bool,
 ) -> tuple[pd.DataFrame, CausalSpecDraft]:
     """
      check before and after msingness values and then add mossinges col in dataframe and in draft and return datasframe and new draft.
@@ -729,6 +748,8 @@ def _fill_miginess(
 
         indicator_column = f"{column}_missing"
         if indicator_column not in updated_data.columns:
+            if not auto_add_missing_indicators:
+                continue
             missing_ids = missingness.get("missing_ids") or []
             missing_index = missingness.get("missing_index") or []
             if id_col and id_col in updated_data.columns and missing_ids:
@@ -750,150 +771,207 @@ def _fill_miginess(
     return updated_data, updated_draft
 
 
-def compile_causal_spec_from_draft(
-    dataset_summary: DatasetSummaryModel,
-    previous_draft: CausalSpecDraft | None = None,
-    retry_feedback: str | None = None,
-) -> CausalSpec:
-    """
-    Compile causal specs from causal drafht
-    """
-    _ = retry_feedback
-    if previous_draft is None:
-        raise ValueError("previous_draft is required to compile causal spec from draft")
+def _missing_indicator_policy_text(*, revised_instructions: str | None) -> str:
+    if revised_instructions is None:
+        return (
+            "Initial compilation: after this LLM-planned imputation stage, the pipeline "
+            "will automatically add <column>_missing indicators for imputed covariates "
+            "and effect modifiers."
+        )
+    return (
+        "Revision compilation: missingness indicators are not added automatically after "
+        "this LLM-planned imputation stage. If the revised instructions or dataset "
+        "evidence justify keeping or adding an indicator, explicitly create the "
+        "<column>_missing column in this imputation output; otherwise omit it."
+    )
 
+
+def _validated_binary_role_specs(
+    *,
+    dataset_summary: DatasetSummaryModel,
+    previous_draft: CausalSpecDraft,
+    retry_feedback: str | None,
+    llm: LLMService,
+) -> dict[str, Any]:
     profile_by_column = {
         str(profile.name).strip(): profile for profile in dataset_summary.profiles
     }
-
-    treatment_profile = profile_by_column.get(str(previous_draft.treatment_column).strip())
-    outcome_profile = profile_by_column.get(str(previous_draft.outcome_column).strip())
-    if treatment_profile is None:
-        raise ValueError(
-            f"dataset summary is missing treatment column: {previous_draft.treatment_column}"
-        )
-    if outcome_profile is None:
-        raise ValueError(
-            f"dataset summary is missing outcome column: {previous_draft.outcome_column}"
-        )
-
-    treatment_values: list[str] = []
-    treatment_profile_dump = treatment_profile.model_dump(mode="json")
-    treatment_summary = treatment_profile_dump.get("summary", {})
-    if "top_categories" in treatment_summary:
-        treatment_values = [
-            str(item["value"]) for item in treatment_summary.get("top_categories", [])
-        ]
-    elif "counts" in treatment_summary:
-        treatment_values = [str(value) for value in treatment_summary.get("counts", {}).keys()]
-    elif "distinct_values_sample" in treatment_summary:
-        treatment_values = [
-            str(value) for value in treatment_summary.get("distinct_values_sample", [])
-        ]
-    elif str(treatment_profile.inferred_kind) == "NUMERIC":
-        treatment_values = ["1", "0"]
-    if len(treatment_values) < 2:
-        raise ValueError(
-            f"treatment column '{previous_draft.treatment_column}' needs at least two observed values"
-        )
-
-    outcome_profile_dump = outcome_profile.model_dump(mode="json")
-    outcome_summary = outcome_profile_dump.get("summary", {})
-    outcome_values: list[str] = []
-    if "top_categories" in outcome_summary:
-        outcome_values = [
-            str(item["value"]) for item in outcome_summary.get("top_categories", [])
-        ]
-    elif "counts" in outcome_summary:
-        outcome_values = [str(value) for value in outcome_summary.get("counts", {}).keys()]
-    elif "distinct_values_sample" in outcome_summary:
-        outcome_values = [
-            str(value) for value in outcome_summary.get("distinct_values_sample", [])
-        ]
-
-    if str(outcome_profile.inferred_kind) == "NUMERIC" and (
-        outcome_profile.distinct_count is None or outcome_profile.distinct_count > 2
-    ):
-        outcome_spec: dict[str, Any] = {
-            "kind": "continuous",
-            "column": str(previous_draft.outcome_column),
-            "unit": None,
-            "clip_min": None,
-            "clip_max": None,
-        }
-    else:
-        if len(outcome_values) < 2:
-            outcome_values = ["1", "0"]
-        outcome_spec = {
-            "kind": "binary",
-            "column": str(previous_draft.outcome_column),
-            "event": outcome_values[0],
-            "non_event": outcome_values[1],
-        }
-
-    negative_control_outcome_spec: dict[str, Any] | None = None
+    role_columns = {
+        "treatment": str(previous_draft.treatment_column).strip(),
+        "outcome": str(previous_draft.outcome_column).strip(),
+    }
     if previous_draft.negative_control_outcome is not None:
-        negative_control_column = str(previous_draft.negative_control_outcome).strip()
-        negative_control_profile = profile_by_column.get(negative_control_column)
-        if negative_control_profile is None:
-            raise ValueError(
-                "dataset summary is missing negative-control outcome column: "
-                + negative_control_column
-            )
-        negative_control_dump = negative_control_profile.model_dump(mode="json")
-        negative_control_summary = negative_control_dump.get("summary", {})
-        negative_control_values: list[str] = []
-        if "top_categories" in negative_control_summary:
-            negative_control_values = [
-                str(item["value"])
-                for item in negative_control_summary.get("top_categories", [])
-            ]
-        elif "counts" in negative_control_summary:
-            negative_control_values = [
-                str(value) for value in negative_control_summary.get("counts", {}).keys()
-            ]
-        elif "distinct_values_sample" in negative_control_summary:
-            negative_control_values = [
-                str(value)
-                for value in negative_control_summary.get("distinct_values_sample", [])
-            ]
+        role_columns["negative_control_outcome"] = str(
+            previous_draft.negative_control_outcome
+        ).strip()
 
-        if str(negative_control_profile.inferred_kind) == "NUMERIC" and (
-            negative_control_profile.distinct_count is None
-            or negative_control_profile.distinct_count > 2
+    missing_columns = [
+        column for column in role_columns.values() if column not in profile_by_column
+    ]
+    if missing_columns:
+        raise ValueError(
+            "dataset summary is missing causal role column(s): "
+            + ", ".join(missing_columns)
+        )
+
+    binary_roles: dict[str, dict[str, Any]] = {}
+    continuous_specs: dict[str, dict[str, Any]] = {}
+    for role, column in role_columns.items():
+        profile = profile_by_column[column]
+        if role != "treatment" and str(profile.inferred_kind) == "NUMERIC" and (
+            profile.distinct_count is None or profile.distinct_count > 2
         ):
-            negative_control_outcome_spec = {
+            continuous_specs[role] = {
                 "kind": "continuous",
-                "column": negative_control_column,
+                "column": column,
                 "unit": None,
                 "clip_min": None,
                 "clip_max": None,
             }
-        else:
-            if len(negative_control_values) < 2:
-                negative_control_values = ["1", "0"]
+            continue
+
+        summary = profile.model_dump(mode="json").get("summary", {})
+        values: list[str] = []
+        if "top_categories" in summary:
+            values = [str(item["value"]) for item in summary.get("top_categories", [])]
+        elif "counts" in summary:
+            values = [str(value) for value in summary.get("counts", {})]
+        elif "distinct_values_sample" in summary:
+            values = [str(value) for value in summary.get("distinct_values_sample", [])]
+        elif str(profile.inferred_kind) == "NUMERIC" and profile.distinct_count == 2:
+            values = [
+                (
+                    str(int(value))
+                    if isinstance(value, float) and value.is_integer()
+                    else str(value)
+                )
+                for value in [summary.get("min"), summary.get("max")]
+                if value is not None
+            ]
+        values = list(dict.fromkeys(value for value in values if value))
+        if len(values) != 2:
+            raise ValueError(f"{role} column '{column}' must have exactly two observed values")
+        binary_roles[role] = {"column": column, "values": values}
+
+    role_selection = llm.generate_json(
+        schema=_BinaryRoleSelection,
+        system_prompt=data_compilation_binary_role_selection_prompt(),
+        user_prompt=json.dumps(
+            {
+                "draft": previous_draft.model_dump(mode="json"),
+                "dataset_summary": dataset_summary.model_dump(mode="json"),
+                "binary_roles": binary_roles,
+                "retry_feedback": retry_feedback,
+            },
+            ensure_ascii=False,
+        ),
+        config=LLMConfig(model="pro", temperature=0.0),
+        history=None,
+        max_attempts=2,
+    )
+
+    selected_pairs = {
+        "treatment": (
+            "treated",
+            "control",
+            role_selection.treatment_treated,
+            role_selection.treatment_control,
+        ),
+        "outcome": (
+            "event",
+            "non_event",
+            role_selection.outcome_event,
+            role_selection.outcome_non_event,
+        ),
+        "negative_control_outcome": (
+            "event",
+            "non_event",
+            role_selection.negative_control_event,
+            role_selection.negative_control_non_event,
+        ),
+    }
+    validated: dict[str, tuple[str, str]] = {}
+    for role, (first_label, second_label, first_raw, second_raw) in selected_pairs.items():
+        if role not in binary_roles:
+            continue
+        if first_raw is None or second_raw is None:
+            raise ValueError(f"LLM role selection did not return both {role} values")
+        first = str(first_raw).strip()
+        second = str(second_raw).strip()
+        if not first or not second:
+            raise ValueError(f"LLM role selection returned empty {role} values")
+        if first == second:
+            raise ValueError(f"LLM role selection used the same value for both {role} roles")
+        observed = set(binary_roles[role]["values"])
+        missing = [
+            f"{label}={value!r}"
+            for label, value in [(first_label, first), (second_label, second)]
+            if value not in observed
+        ]
+        if missing:
+            raise ValueError(
+                f"LLM role selection used value(s) not observed for {role}: "
+                + ", ".join(missing)
+            )
+        validated[role] = (first, second)
+
+    outcome_spec: dict[str, Any] = continuous_specs.get("outcome") or {
+        "kind": "binary",
+        "column": role_columns["outcome"],
+        "event": validated["outcome"][0],
+        "non_event": validated["outcome"][1],
+    }
+    negative_control_outcome_spec: dict[str, Any] | None = None
+    if "negative_control_outcome" in role_columns:
+        negative_control_outcome_spec = continuous_specs.get("negative_control_outcome")
+        if negative_control_outcome_spec is None:
             negative_control_outcome_spec = {
                 "kind": "binary",
-                "column": negative_control_column,
-                "event": negative_control_values[0],
-                "non_event": negative_control_values[1],
+                "column": role_columns["negative_control_outcome"],
+                "event": validated["negative_control_outcome"][0],
+                "non_event": validated["negative_control_outcome"][1],
             }
 
-    payload = {
+    return {
         "treatment_spec": {
             "kind": "binary",
-            "column": str(previous_draft.treatment_column),
-            "treated": treatment_values[0],
-            "control": treatment_values[1],
+            "column": role_columns["treatment"],
+            "treated": validated["treatment"][0],
+            "control": validated["treatment"][1],
         },
         "outcome_spec": outcome_spec,
         "negative_control_outcome": negative_control_outcome_spec,
+    }
+
+
+def compile_causal_spec_from_draft(
+    dataset_summary: DatasetSummaryModel,
+    previous_draft: CausalSpecDraft | None = None,
+    retry_feedback: str | None = None,
+    *,
+    llm: LLMService,
+) -> CausalSpec:
+    """
+    Compile causal specs from causal drafht
+    """
+    if previous_draft is None:
+        raise ValueError("previous_draft is required to compile causal spec from draft")
+
+    role_specs = _validated_binary_role_specs(
+        dataset_summary=dataset_summary,
+        previous_draft=previous_draft,
+        retry_feedback=retry_feedback,
+        llm=llm,
+    )
+    payload = {
+        **role_specs,
         "covariates": [str(column) for column in previous_draft.covariates],
         "effect_modifiers": [str(column) for column in previous_draft.effect_modifiers],
         "experiment_type": previous_draft.study_type or "OBSERVATIONAL",
         "id_col": str(previous_draft.id_col),
     }
     return CausalSpec.for_dataset_summary(dataset_summary).model_validate(payload)
+
 
 def _validate(
     causal_spec: object,

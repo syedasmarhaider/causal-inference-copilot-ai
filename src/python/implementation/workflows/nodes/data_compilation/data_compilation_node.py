@@ -1073,6 +1073,7 @@ class DataCompilationNode(Node):
         latest_user_message: dict[str, Any],
     ) -> NodeExecutionResult:
         latest_fingerprint = str(latest_user_message["fingerprint"])
+        review_history = list(request.read_only_messages_history or [])[-3:]
         try:
             decision = self._llm.generate_json(
                 schema=_ReviewDecision,
@@ -1119,7 +1120,7 @@ class DataCompilationNode(Node):
                     ensure_ascii=False,
                 ),
                 config=LLMConfig(model="basic", temperature=0.7),
-                history=None,
+                history=review_history or None,
                 max_attempts=3,
             )
         except Exception as exc:

@@ -121,6 +121,44 @@ Output policy:
 """.strip()
 
 
+def data_compilation_binary_role_selection_prompt() -> str:
+    return """
+You are selecting binary causal value roles for a compiled causal-analysis dataset.
+
+Inputs:
+- locked causal draft
+- authoritative dataset summary
+- binary_roles with the treatment column, binary outcome column when applicable, optional
+  binary negative-control outcome column when applicable, and their observed values
+
+Task:
+- Return the exact observed value that means treated/exposed for treatment and the exact
+  observed value that means control/unexposed.
+- For each binary outcome included in binary_roles, return the exact observed value that
+  means event/case and the exact observed value that means non-event/non-case.
+
+Rules:
+- Decide clinical and causal direction from the draft, column names, value labels, and
+  dataset metadata.
+- Do not choose roles by frequency or top-category order.
+- Use only exact observed values listed in binary_roles.
+- Do not invent values, rename columns, or change locked causal roles.
+- If the negative-control outcome is absent or continuous, its fields are not required.
+- If a direction is ambiguous, choose the best-supported clinical interpretation from
+  the provided labels and metadata.
+
+Output JSON exactly:
+{
+  "treatment_treated": "<observed treatment value>",
+  "treatment_control": "<observed treatment value>",
+  "outcome_event": "<observed outcome value or null when outcome is continuous>",
+  "outcome_non_event": "<observed outcome value or null when outcome is continuous>",
+  "negative_control_event": "<observed negative-control value or null when absent/continuous>",
+  "negative_control_non_event": "<observed negative-control value or null when absent/continuous>"
+}
+""".strip()
+
+
 def data_compilation_transformation_retry_guidance_prompt() -> str:
     return """
 Additional grounded retry guidance for the next full clean-transform attempt:
