@@ -32,6 +32,27 @@ def _build_dataframe() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _build_dataframe_with_treatment_counts(
+    *,
+    treated_count: int,
+    control_count: int,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    treatments = ["1"] * treated_count + ["0"] * control_count
+    for index, treatment in enumerate(treatments):
+        rows.append(
+            {
+                "patient_id": f"p{index + 1}",
+                "treatment": treatment,
+                "outcome": float(index + 1),
+                "negative_control": float(index + 101),
+                "age": 30 + (index % 50),
+                "segment": "A" if index % 4 in {0, 1} else "B",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _build_causal_spec(
     *,
     experiment_type: str,
@@ -946,11 +967,61 @@ def test_validate_backdoor_fails_treatment_low_support_and_imbalance() -> None:
         ),
     )
 
-    assert any(issue.message == "One treatment arm has a low row count." for issue in report.issues)
-    assert any(
-        issue.message == "Treatment-arm imbalance suggests a positivity risk."
-        for issue in report.issues
+    low_support_issue = _get_issue(report, "One treatment arm has a low row count.")
+    imbalance_issue = _get_issue(
+        report, "Treatment-arm imbalance suggests a positivity risk."
     )
+    assert low_support_issue.severity == "FAIL"
+    assert imbalance_issue.severity == "WARN"
+
+
+def test_validate_backdoor_warns_for_treatment_imbalance_below_twenty_percent() -> None:
+    dataframe = _build_dataframe_with_treatment_counts(treated_count=85, control_count=15)
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="OBSERVATIONAL", covariates=["age"], effect_modifiers=[]
+        ),
+        dataframe=dataframe,
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
+        ),
+    )
+
+    imbalance_issue = _get_issue(
+        report, "Treatment-arm imbalance suggests a positivity risk."
+    )
+    assert imbalance_issue.severity == "WARN"
+    assert imbalance_issue.evidence["min_arm_share"] == 0.15
+    assert not any(issue.severity == "FAIL" for issue in report.issues)
+
+
+def test_validate_backdoor_fails_for_treatment_imbalance_below_five_percent() -> None:
+    dataframe = _build_dataframe_with_treatment_counts(treated_count=381, control_count=19)
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="OBSERVATIONAL", covariates=["age"], effect_modifiers=[]
+        ),
+        dataframe=dataframe,
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}}
+                ]
+            }
+        ),
+    )
+
+    imbalance_issue = _get_issue(
+        report, "Treatment-arm imbalance suggests a positivity risk."
+    )
+    assert imbalance_issue.severity == "FAIL"
+    assert imbalance_issue.evidence["min_arm_share"] == 0.0475
 
 
 def test_validate_backdoor_fails_for_continuous_outcome_missingness() -> None:

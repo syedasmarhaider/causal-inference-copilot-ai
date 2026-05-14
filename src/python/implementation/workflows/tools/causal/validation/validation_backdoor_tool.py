@@ -36,6 +36,8 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import (
 _OVERLAP_PROPENSITY_LOWER = 0.05
 _OVERLAP_PROPENSITY_UPPER = 0.95
 _OVERLAP_QUANTILES = (0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99)
+_TREATMENT_ARM_SHARE_FAIL_THRESHOLD = 0.05
+_TREATMENT_ARM_SHARE_WARN_THRESHOLD = 0.20
 _NEGATIVE_CONTROL_OUTCOME_UNAVAILABLE_WARNING = (
     "No valid negative-control outcome was provided or identified. "
     "CATE negative-control refutation will not be performed."
@@ -623,10 +625,15 @@ def _validate_treatment_column(
             )
         )
 
-    if min_arm_share < 0.20:
+    if min_arm_share < _TREATMENT_ARM_SHARE_WARN_THRESHOLD:
+        severity: Literal["WARN", "FAIL"] = (
+            "FAIL"
+            if min_arm_share < _TREATMENT_ARM_SHARE_FAIL_THRESHOLD
+            else "WARN"
+        )
         issues.append(
             _issue(
-                severity="FAIL",
+                severity=severity,
                 message=(
                     "Treatment-arm imbalance detected."
                     if experiment_type == "RCT"
@@ -637,6 +644,8 @@ def _validate_treatment_column(
                     "treated_count": treated_count,
                     "control_count": control_count,
                     "min_arm_share": min_arm_share,
+                    "fail_threshold": _TREATMENT_ARM_SHARE_FAIL_THRESHOLD,
+                    "warn_threshold": _TREATMENT_ARM_SHARE_WARN_THRESHOLD,
                 },
                 fix_hint="Consider broader inclusion criteria or a different treatment definition.",
             )
