@@ -19,7 +19,7 @@ duckdb==1.4.4
 joblib==1.5.3
 
 # LLM stack
-litellm
+litellm==1.85.0
 
 # Vertex AI
 google-cloud-aiplatform==1.147.0
