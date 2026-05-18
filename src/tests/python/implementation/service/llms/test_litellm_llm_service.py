@@ -69,7 +69,7 @@ class _StructuredPayloadModel(BaseModel):
 def _build_service(
     completion_stub: _CompletionStub,
     *,
-    provider: Provider = "gemini",
+    provider: Provider = "vertex_ai",
     model_names: dict[AvailableModelsKey, str] | None = None,
     reliability: ReliabilityPolicy | None = None,
 ) -> LiteLLMService:
@@ -94,10 +94,10 @@ def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def test_generate_builds_messages_and_uses_gemini_kwargs(
+def test_generate_builds_messages_and_uses_vertex_ai_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setenv("VERTEXAI_PROJECT", "project-x")
     stub = _CompletionStub(
         responses=[
             _Response(
@@ -131,8 +131,9 @@ def test_generate_builds_messages_and_uses_gemini_kwargs(
     assert len(stub.calls) == 1
 
     kwargs = stub.calls[0]
-    assert kwargs["model"] == "gemini/fake-basic"
-    assert kwargs["api_key"] == "test-key"
+    assert kwargs["model"] == "vertex_ai/fake-basic"
+    assert kwargs["vertex_project"] == "project-x"
+    assert kwargs["vertex_location"] == "global"
     assert kwargs["temperature"] == 0.3
     assert kwargs["top_p"] == 0.8
     assert kwargs["stop"] == ["END"]
@@ -149,8 +150,7 @@ def test_generate_builds_messages_and_uses_gemini_kwargs(
 
 def test_generate_builds_vertex_ai_route(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VERTEXAI_PROJECT", "project-x")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT_ID", "project-x")
-    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    monkeypatch.setenv("VERTEXAI_LOCATION", "us-central1")
     stub = _CompletionStub(
         responses=[_Response(choices=[_Choice(message=_Message(content="vertex-ok"))])]
     )
@@ -180,7 +180,7 @@ def test_generate_builds_vertex_ai_route(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_generate_handles_non_choice_return_shape(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setenv("VERTEXAI_PROJECT", "project-x")
     stub = _CompletionStub(
         responses=[_DirectContentResponse(content={"text": "ok-from-structured"})]
     )
@@ -197,7 +197,7 @@ def test_generate_handles_non_choice_return_shape(monkeypatch: pytest.MonkeyPatc
 
 
 def test_generate_retries_transient_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setenv("VERTEXAI_PROJECT", "project-x")
     stub = _CompletionStub(
         responses=[_Response(choices=[_Choice(message=_Message(content="retry-success"))])],
         errors=[TimeoutError("timed out")],
@@ -231,7 +231,7 @@ def test_generate_retries_transient_timeout(monkeypatch: pytest.MonkeyPatch) -> 
 def test_generate_json_repairs_invalid_output_and_uses_deterministic_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setenv("VERTEXAI_PROJECT", "project-x")
     stub = _CompletionStub(
         responses=[
             _Response(choices=[_Choice(message=_Message(content="not valid json"))]),
@@ -266,7 +266,7 @@ def test_generate_json_repairs_invalid_output_and_uses_deterministic_retry(
 
 
 def test_generate_json_raises_after_max_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setenv("VERTEXAI_PROJECT", "project-x")
     stub = _CompletionStub(
         responses=[
             _Response(choices=[_Choice(message=_Message(content="still not json"))]),
@@ -288,8 +288,6 @@ def test_generate_json_raises_after_max_attempts(monkeypatch: pytest.MonkeyPatch
 
 def test_vertex_ai_requires_project(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VERTEXAI_PROJECT", raising=False)
-    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
-    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT_ID", raising=False)
     stub = _CompletionStub(
         responses=[_Response(choices=[_Choice(message=_Message(content="unused"))])]
     )
@@ -321,37 +319,14 @@ def test_constructor_rejects_invalid_reliability(
 
     with pytest.raises(ValueError, match=error_pattern):
         LiteLLMService(
-            provider="gemini",
+            provider="vertex_ai",
             model_names={alias: f"fake-{alias}" for alias in aliases},
             reliability=policy,
             completion_fn=stub,
         )
 
 
-def test_factory_prefers_gemini_keys_over_vertex_in_auto_mode(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("LITELLM_PROVIDER", raising=False)
-    monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
-    monkeypatch.setenv("VERTEXAI_PROJECT", "vertex-project")
-    monkeypatch.setattr(
-        LiteLLMService,
-        "_load_completion_fn",
-        staticmethod(lambda: _CompletionStub()),
-    )
-
-    service = make_llm_service(LLMServiceSettings())
-
-    assert isinstance(service, LiteLLMService)
-    assert service._provider == "gemini"  # noqa: SLF001
-    service.close()
-
-
-def test_factory_auto_detects_vertex_ai_provider(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("LITELLM_PROVIDER", raising=False)
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.setenv("VERTEXAI_PROJECT", "vertex-project")
+def test_factory_uses_vertex_ai_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         LiteLLMService,
         "_load_completion_fn",
@@ -363,68 +338,13 @@ def test_factory_auto_detects_vertex_ai_provider(monkeypatch: pytest.MonkeyPatch
     assert isinstance(service, LiteLLMService)
     assert service._provider == "vertex_ai"  # noqa: SLF001
     service.close()
-
-
-def test_factory_maps_legacy_vertex_api_provider_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LITELLM_PROVIDER", "vertex_api")
-    monkeypatch.setattr(
-        LiteLLMService,
-        "_load_completion_fn",
-        staticmethod(lambda: _CompletionStub()),
-    )
-
-    service = make_llm_service(LLMServiceSettings())
-
-    assert isinstance(service, LiteLLMService)
-    assert service._provider == "vertex_ai"  # noqa: SLF001
-    service.close()
-
-
-@pytest.mark.integration
-def test_generate_with_live_gemini_key() -> None:
-    if not _env_truthy("RUN_LIVE_LLM_TESTS"):
-        pytest.skip("Set RUN_LIVE_LLM_TESTS=true to enable live LLM tests")
-    if not any(os.environ.get(key, "").strip() for key in ("GOOGLE_API_KEY", "GEMINI_API_KEY")):
-        pytest.skip("No Gemini API key configured")
-
-    service = LiteLLMService(
-        provider="gemini",
-        model_names={
-            "mini": "gemini-3.1-flash-lite-preview",
-            "basic": "gemini-3-flash-preview",
-            "pro": "gemini-3-flash-preview",
-            "thinking": "gemini-3.1-pro-preview",
-        },
-        reliability=ReliabilityPolicy(
-            timeout_s=30.0,
-            hard_deadline_s=60.0,
-            max_retries=0,
-            executor_workers=1,
-        ),
-    )
-
-    try:
-        response = service.generate(
-            system_prompt="Respond with the single word PONG.",
-            user_prompt="Ping",
-            config=LLMConfig(model="mini", temperature=0.0, top_p=1.0, max_tokens=16),
-            history=None,
-        )
-    finally:
-        service.close()
-
-    assert response.content
-    assert "pong" in response.content.lower()
 
 
 @pytest.mark.integration
 def test_generate_json_with_live_vertex_ai() -> None:
     if not _env_truthy("RUN_LIVE_LLM_TESTS"):
         pytest.skip("Set RUN_LIVE_LLM_TESTS=true to enable live LLM tests")
-    if not any(
-        os.environ.get(key, "").strip()
-        for key in ("VERTEXAI_PROJECT", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID")
-    ):
+    if not os.environ.get("VERTEXAI_PROJECT", "").strip():
         pytest.skip("No Vertex project configured")
 
     service = LiteLLMService(

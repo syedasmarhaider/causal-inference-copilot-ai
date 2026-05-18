@@ -144,19 +144,6 @@ ENV/
 env.bak/
 venv.bak/
 
-# Track Terraform environment configs under infrastructure
-!src/infrastructure/terraform/gcp/env/
-src/infrastructure/terraform/gcp/env/*.tfvars
-src/infrastructure/terraform/gcp/env/*.hcl
-!src/infrastructure/terraform/gcp/env/*.example
-!src/infrastructure/terraform/gcp/env/*.tfvars.example
-!src/infrastructure/terraform/gcp/env/*.hcl.example
-
-# Terraform local working directory/state artifacts
-.terraform/
-*.tfstate
-*.tfstate.*
-
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -222,19 +209,8 @@ __marimo__/
 /data*
 /models*
 *.local_data_repo
+.local_storage/
 
 
 # local typings
 typings/**/*.pyi
-
-# emulator of firebase
-*.firebaserc
-*firebase.json
-
-# Local docker image config
-.docker.env
-!.docker.env.example
-
-#local files
-*.local_storage
-

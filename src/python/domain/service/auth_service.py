@@ -7,6 +7,14 @@ from typing import Any
 from uuid import UUID
 
 
+class AuthServiceError(Exception):
+    pass
+
+
+class InvalidTokenError(AuthServiceError):
+    pass
+
+
 @dataclass(frozen=True)
 class AuthenticatedUser:
     uid: UUID

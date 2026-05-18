@@ -25,8 +25,7 @@ class LocalJsonWorkflowStateRepo(WorkflowStateRepo):
     """
     JSON-file-backed workflow state repository for local development.
 
-    The persisted JSON mirrors the Firebase RTDB logical layout so local mode and
-    deployed mode exercise the same workflow-state shape.
+    The persisted JSON keeps a stable workflow-state shape for local runs.
     """
 
     _WORKFLOWS_ROOT = "workflows"

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
@@ -13,11 +12,11 @@ from python.implementation.service.llms.litellm_llm_service import (
     ReliabilityPolicy,
 )
 
-ProviderSetting = Literal["auto", "gemini", "vertex_api", "vertex_ai"]
+ProviderSetting = Literal["vertex_ai"]
 _REQUIRED_MODEL_KEYS: tuple[AvailableModelsKey, ...] = ("mini", "basic", "pro", "thinking")
 
 
-DEFAULT_GEMINI_MODEL_MAP: Mapping[AvailableModelsKey, str] = {
+DEFAULT_VERTEX_MODEL_MAP: Mapping[AvailableModelsKey, str] = {
     "mini": "gemini-3.1-flash-lite-preview",
     "basic": "gemini-3-flash-preview",
     "pro": "gemini-3-flash-preview",
@@ -28,9 +27,9 @@ DEFAULT_GEMINI_MODEL_MAP: Mapping[AvailableModelsKey, str] = {
 @dataclass(frozen=True)
 class LLMServiceSettings:
     backend: Literal["litellm"] = "litellm"
-    provider: ProviderSetting = "auto"
+    provider: ProviderSetting = "vertex_ai"
     model_map: Mapping[AvailableModelsKey, str] = field(
-        default_factory=lambda: dict(DEFAULT_GEMINI_MODEL_MAP)
+        default_factory=lambda: dict(DEFAULT_VERTEX_MODEL_MAP)
     )
     timeout_s: float = 300.0
     hard_deadline_s: float | None = 300.0
@@ -57,39 +56,9 @@ def make_llm_service(settings: LLMServiceSettings) -> LLMService:
 
 
 def _resolve_provider(provider: ProviderSetting) -> Provider:
-    if provider != "auto":
-        return _normalize_provider(provider)
-
-    env_provider = os.environ.get("LITELLM_PROVIDER", "").strip().lower()
-    if env_provider:
-        return _normalize_provider(env_provider)
-
-    if _has_any_env_value("GOOGLE_API_KEY", "GEMINI_API_KEY"):
-        return "gemini"
-
-    if _has_any_env_value(
-        "VERTEXAI_PROJECT",
-        "GOOGLE_CLOUD_PROJECT",
-        "GOOGLE_CLOUD_PROJECT_ID",
-        "GOOGLE_APPLICATION_CREDENTIALS",
-    ):
+    if provider == "vertex_ai":
         return "vertex_ai"
-
-    return "gemini"
-
-
-def _normalize_provider(provider: str) -> Provider:
-    if provider == "gemini":
-        return "gemini"
-    if provider in {"vertex_api", "vertex_ai"}:
-        return "vertex_ai"
-    raise ValueError(
-        "Unsupported provider. Expected one of: auto, gemini, vertex_api, vertex_ai."
-    )
-
-
-def _has_any_env_value(*env_names: str) -> bool:
-    return any(os.environ.get(name, "").strip() for name in env_names)
+    raise ValueError("Unsupported provider. Expected: vertex_ai.")
 
 
 def _validate_settings(settings: LLMServiceSettings) -> None:

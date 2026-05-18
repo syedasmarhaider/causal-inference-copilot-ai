@@ -2,33 +2,16 @@
 SHELL := /bin/bash
 
 ENV_FILE ?= .env
-DOCKER_CONFIG ?= .docker.env
-DOCKER_CONFIG_EXAMPLE ?= .docker.env.example
-
--include docker.env.example
--include $(DOCKER_CONFIG_EXAMPLE)
--include docker.env
--include $(DOCKER_CONFIG)
 
 VENV ?= .venv
 PYBIN := $(VENV)/bin
 PYTHON := $(PYBIN)/python
-PIP := $(PYBIN)/pip
+PIP := $(PYTHON) -m pip
 
 # FastAPI entrypoint module:path
 API_APP ?= python.adapters.api.app:app
 API_HOST ?= 0.0.0.0
 API_PORT ?= 8080
-
-# Container image naming (industry-style split: host/project/repo/service:tag)
-DEPLOY_ENV ?= dev
-SERVICE_NAME ?= some-service
-IMAGE_TAG ?= $(DEPLOY_ENV)
-REGISTRY_HOST ?= europe-west3-docker.pkg.dev
-REGISTRY_REPOSITORY ?= causal-dev-images
-REGISTRY_PROJECT ?= your-gcp-project
-IMAGE_REPOSITORY := $(REGISTRY_HOST)/$(REGISTRY_PROJECT)/$(REGISTRY_REPOSITORY)/$(SERVICE_NAME)
-IMAGE_URI := $(IMAGE_REPOSITORY):$(IMAGE_TAG)
 
 # Make Python see your src/ packages
 export PYTHONPATH := src
@@ -46,12 +29,8 @@ help:
 	@echo "make test                - run test suite"
 	@echo "make test-quick          - run test suite (fast fail)"
 	@echo "make test-deepeval       - run opt-in DeepEval prompt evals"
-	@echo "make run-cli ARGS='...'  - run console copilot CLI (args forwarded)"
 	@echo "make run-api             - run FastAPI (REST + WebSocket) with reload"
-	@echo "make run-api-prod        - run FastAPI (REST + WebSocket) without reload"
-	@echo "make docker-image        - print full image URI"
-	@echo "make docker-build        - build Docker image for current env/tag"
-	@echo "make docker-push         - push Docker image to registry"
+	@echo "make run-api-local       - run FastAPI with env values loaded from .env"
 	@echo "make clean               - remove venv + caches"
 
 .PHONY: venv
@@ -109,10 +88,6 @@ test-deepeval: test-tools
 	DEEPEVAL_CACHE_FOLDER=/tmp/.deepeval \
 	$(PYBIN)/pytest -c pytest.ini -q -m deepeval
 
-.PHONY: run-cli
-run-cli: venv
-	@$(PYTHON) -m python.adapters.cli.main $(ARGS)
-
 # REST + WebSocket server (FastAPI)
 .PHONY: run-api
 run-api: venv
@@ -128,24 +103,6 @@ run-api-local: venv
 		--host "$${API_HOST:-0.0.0.0}" \
 		--port "$${API_PORT:-8080}" \
 		--reload
-
-.PHONY: run-api-prod
-run-api-prod: venv
-	@API_HOST="$(API_HOST)" API_PORT="$(API_PORT)" $(PYTHON) -m python.adapters.api.server
-
-.PHONY: docker-image
-docker-image:
-	@echo $(IMAGE_URI)
-
-.PHONY: docker-build
-docker-build:
-	@echo "Building image: $(IMAGE_URI)"
-	@docker build --platform linux/amd64 -t $(IMAGE_URI) -f Dockerfile .
-
-.PHONY: docker-push
-docker-push: docker-build
-	@echo "Pushing image: $(IMAGE_URI)"
-	@docker push $(IMAGE_URI)
 
 .PHONY: clean
 clean:

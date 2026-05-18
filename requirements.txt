@@ -20,9 +20,6 @@ joblib==1.5.3
 
 # LLM stack
 litellm
-langfuse==3.14.5
 
-# Cloud services
-firebase-admin==7.2.0
+# Vertex AI
 google-cloud-aiplatform==1.147.0
-google-cloud-storage==3.9.0

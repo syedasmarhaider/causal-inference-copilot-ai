@@ -4,7 +4,8 @@ import json
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, replace
 from typing import Any, Literal, TypeVar
 
@@ -20,7 +21,7 @@ from python.domain.service.llm_service import (
     ToolCall,
 )
 
-Provider = Literal["gemini", "vertex_ai"]
+Provider = Literal["vertex_ai"]
 CompletionFn = Callable[..., Any]
 T = TypeVar("T", bound=BaseModel)
 F = TypeVar("F", bound=Callable[..., Any])
@@ -28,7 +29,6 @@ F = TypeVar("F", bound=Callable[..., Any])
 MAX_TIMEOUT_S = 600.0
 _REQUIRED_MODEL_KEYS: tuple[AvailableModelsKey, ...] = ("mini", "basic", "pro", "thinking")
 _DEFAULT_VERTEX_LOCATION = "global"
-
 
 
 @dataclass(frozen=True)
@@ -239,12 +239,6 @@ class LiteLLMService(LLMService):
     def _provider_kwargs(self, model_alias: AvailableModelsKey) -> dict[str, Any]:
         model_name = self._model_names[model_alias]
 
-        if self._provider == "gemini":
-            return {
-                "model": self._normalize_gemini_model_name(model_name),
-                "api_key": self._require_gemini_api_key(),
-            }
-
         return {
             "model": self._normalize_vertex_model_name(model_name),
             "vertex_project": self._require_vertex_project(),
@@ -252,14 +246,8 @@ class LiteLLMService(LLMService):
         }
 
     @staticmethod
-    def _normalize_gemini_model_name(model_name: str) -> str:
-        if model_name.startswith("gemini/"):
-            return model_name
-        return f"gemini/{model_name}"
-
-    @staticmethod
     def _normalize_vertex_model_name(model_name: str) -> str:
-        prefixes = ("gemini/", "vertex_api/", "vertex_ai/", "models/")
+        prefixes = ("gemini/", "vertex_ai/", "models/")
         normalized = model_name
         for prefix in prefixes:
             if normalized.startswith(prefix):
@@ -267,30 +255,17 @@ class LiteLLMService(LLMService):
         return f"vertex_ai/{normalized}"
 
     @staticmethod
-    def _require_gemini_api_key() -> str:
-        for env_name in ("GOOGLE_API_KEY", "GEMINI_API_KEY"):
-            value = os.environ.get(env_name, "").strip()
-            if value:
-                return value
-        raise ValueError("Missing Gemini API key. Set GOOGLE_API_KEY or GEMINI_API_KEY.")
-
-    @staticmethod
     def _require_vertex_project() -> str:
-        for env_name in ("VERTEXAI_PROJECT", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID"):
-            value = os.environ.get(env_name, "").strip()
-            if value:
-                return value
-        raise ValueError(
-            "Missing Vertex project. Set VERTEXAI_PROJECT, GOOGLE_CLOUD_PROJECT, "
-            "or GOOGLE_CLOUD_PROJECT_ID."
-        )
+        value = os.environ.get("VERTEXAI_PROJECT", "").strip()
+        if value:
+            return value
+        raise ValueError("Missing Vertex project. Set VERTEXAI_PROJECT.")
 
     @staticmethod
     def _resolve_vertex_location() -> str:
-        for env_name in ("VERTEXAI_LOCATION", "GOOGLE_CLOUD_LOCATION"):
-            value = os.environ.get(env_name, "").strip()
-            if value:
-                return value
+        value = os.environ.get("VERTEXAI_LOCATION", "").strip()
+        if value:
+            return value
         return _DEFAULT_VERTEX_LOCATION
 
     @staticmethod
@@ -345,7 +320,7 @@ class LiteLLMService(LLMService):
             if len(lines) >= 3:
                 stripped = "\n".join(lines[1:-1]).strip()
 
-        if stripped.startswith("{") or stripped.startswith("["):
+        if stripped.startswith(("{", "[")):
             return stripped
 
         start = stripped.find("{")

@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from typing import Any
-
-from python.domain.repo.workflow_state_repo import WorkflowStateRepo
+from python.implementation.repo.local_data_repo import LocalFileDataRepo
 from python.implementation.repo.local_json_workflow_state_repo import (
     LocalJsonWorkflowStateRepo,
 )
+from python.implementation.repo.local_models_repo import LocalFileModelsRepo
 from python.implementation.workflows import depinit
 
 
-def test_make_workflow_state_repo_uses_local_json_repo_when_local_files_enabled(
+def test_make_workflow_state_repo_uses_local_json_repo(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -21,64 +20,28 @@ def test_make_workflow_state_repo_uses_local_json_repo_when_local_files_enabled(
 
     repo = depinit._make_workflow_state_repo(
         state_classes_by_name={},
-        use_local_files=True,
     )
 
     assert isinstance(repo, LocalJsonWorkflowStateRepo)
 
 
-def test_make_workflow_state_repo_uses_firebase_when_local_files_disabled(
+def test_make_data_repo_uses_local_file_repo(
     monkeypatch,
+    tmp_path,
 ) -> None:
-    class _FakeFirebaseRepo(WorkflowStateRepo):
-        @staticmethod
-        def get_default_firebase_database_app() -> object:
-            return object()
+    monkeypatch.setattr(depinit, "_LOCAL_DATA_ROOT", tmp_path / "data")
 
-        def __init__(self, **kwargs: Any) -> None:
-            self.kwargs = kwargs
+    repo = depinit._make_data_repo()
 
-        def save_conversation(self, **kwargs: Any) -> None:
-            raise NotImplementedError
+    assert isinstance(repo, LocalFileDataRepo)
 
-        def get_conversations(self, **kwargs: Any):
-            raise NotImplementedError
 
-        def is_conversation_id_for_user_id_exists(self, **kwargs: Any) -> bool:
-            raise NotImplementedError
+def test_make_models_repo_uses_local_file_repo(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(depinit, "_LOCAL_MODELS_ROOT", tmp_path / "models")
 
-        def load_ochestrator_state(self, **kwargs: Any):
-            raise NotImplementedError
+    repo = depinit._make_models_repo()
 
-        def store_ochestrator_state(self, **kwargs: Any) -> None:
-            raise NotImplementedError
-
-        def load_state(self, **kwargs: Any):
-            raise NotImplementedError
-
-        def store_state(self, **kwargs: Any) -> None:
-            raise NotImplementedError
-
-        def delete_state(self, **kwargs: Any) -> None:
-            raise NotImplementedError
-
-        def append_message(self, **kwargs: Any) -> None:
-            raise NotImplementedError
-
-        def append_messages(self, **kwargs: Any) -> None:
-            raise NotImplementedError
-
-        def load_message_history(self, **kwargs: Any):
-            raise NotImplementedError
-
-        def clear_message_history(self, **kwargs: Any) -> None:
-            raise NotImplementedError
-
-    monkeypatch.setattr(depinit, "FirebaseRealtimeWorkflowStateRepo", _FakeFirebaseRepo)
-
-    repo = depinit._make_workflow_state_repo(
-        state_classes_by_name={},
-        use_local_files=False,
-    )
-
-    assert isinstance(repo, _FakeFirebaseRepo)
+    assert isinstance(repo, LocalFileModelsRepo)

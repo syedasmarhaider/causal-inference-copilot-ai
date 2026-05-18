@@ -10,11 +10,6 @@ from python.domain.repo.workflow_state_repo import WorkflowStateRepo
 from python.domain.service.llm_service import LLMService
 from python.domain.workflows.node_state import NodeState
 from python.implementation.repo.duckdb_working_analytics_repo import DuckDBAnalyticsRepo
-from python.implementation.repo.firebase_realtime_workflow_state_repo import (
-    FirebaseRealtimeWorkflowStateRepo,
-)
-from python.implementation.repo.google_cloud_storage_data_repo import GoogleCloudStorageDataRepo
-from python.implementation.repo.google_cloud_storage_model_repo import GoogleCloudStorageModelsRepo
 from python.implementation.repo.local_data_repo import LocalFileDataRepo
 from python.implementation.repo.local_json_workflow_state_repo import LocalJsonWorkflowStateRepo
 from python.implementation.repo.local_models_repo import LocalFileModelsRepo
@@ -44,17 +39,16 @@ _LOCAL_DATA_ROOT = _LOCAL_STORAGE_ROOT / "data"
 _LOCAL_WORKFLOW_STATE_DB_PATH = _LOCAL_STORAGE_ROOT / "workflow_state.json"
 
 
-def make_apps(*, use_local_files: bool = False) -> tuple[WorkflowApp, DataflowApp, AuditLogApp]:
+def make_apps() -> tuple[WorkflowApp, DataflowApp, AuditLogApp]:
     log.info("building workflow app dependencies")
     llm: LLMService = make_llm_service(settings=LLMServiceSettings())
-    data_repo: DataRepo = _make_data_repo(use_local_files=use_local_files)
-    models_repo: ModelsRepo = _make_models_repo(use_local_files=use_local_files)
+    data_repo: DataRepo = _make_data_repo()
+    models_repo: ModelsRepo = _make_models_repo()
     analytics_repo: AnalyticsRepo = _make_analytics_repo()
 
     state_classes_by_name = build_state_classes_by_name()
     workflow_repo = _make_workflow_state_repo(
         state_classes_by_name=state_classes_by_name,
-        use_local_files=use_local_files,
     )
 
     ochestrator = Ochestrator(
@@ -69,7 +63,7 @@ def make_apps(*, use_local_files: bool = False) -> tuple[WorkflowApp, DataflowAp
         data_repo=data_repo,
     )
 
-    log.info("workflow app dependencies created", use_local_files=use_local_files)
+    log.info("workflow app dependencies created")
     workflow_app = WorkflowApp(
         repo=workflow_repo,
         ochestrator=ochestrator,
@@ -81,59 +75,45 @@ def make_apps(*, use_local_files: bool = False) -> tuple[WorkflowApp, DataflowAp
     return (workflow_app, dataflow_app, audit_log_app)
 
 
-def make_dataflow_app(*, use_local_files: bool = False) -> DataflowApp:
+def make_dataflow_app() -> DataflowApp:
     log.info("building dataflow app dependencies")
     state_classes_by_name = build_state_classes_by_name()
     workflow_repo = _make_workflow_state_repo(
         state_classes_by_name=state_classes_by_name,
-        use_local_files=use_local_files,
     )
     return DataflowApp(
         repo=workflow_repo,
-        data_repo=_make_data_repo(use_local_files=use_local_files),
+        data_repo=_make_data_repo(),
     )
 
 
 def _make_workflow_state_repo(
     *,
     state_classes_by_name: Mapping[str, type[NodeState]],
-    use_local_files: bool,
 ) -> WorkflowStateRepo:
     ochestrator_state_classes_by_name = {
         CausalOchestratorState.NAME: CausalOchestratorState,
         DataOchestratorState.NAME: DataOchestratorState,
     }
-    if use_local_files:
-        log.info(
-            "using local JSON workflow state repo",
-            root_path=str(_LOCAL_WORKFLOW_STATE_DB_PATH),
-        )
-        return LocalJsonWorkflowStateRepo(
-            root_path=_LOCAL_WORKFLOW_STATE_DB_PATH,
-            state_classes_by_name=state_classes_by_name,
-            ochestrator_state_classes_by_name=ochestrator_state_classes_by_name,
-        )
-
-    app = FirebaseRealtimeWorkflowStateRepo.get_default_firebase_database_app()
-    return FirebaseRealtimeWorkflowStateRepo(
-        app=app,
+    log.info(
+        "using local JSON workflow state repo",
+        root_path=str(_LOCAL_WORKFLOW_STATE_DB_PATH),
+    )
+    return LocalJsonWorkflowStateRepo(
+        root_path=_LOCAL_WORKFLOW_STATE_DB_PATH,
         state_classes_by_name=state_classes_by_name,
         ochestrator_state_classes_by_name=ochestrator_state_classes_by_name,
     )
 
 
-def _make_models_repo(*, use_local_files: bool) -> ModelsRepo:
-    if use_local_files:
-        log.info("using local file models repo", root_dir=str(_LOCAL_MODELS_ROOT))
-        return LocalFileModelsRepo(root_dir=_LOCAL_MODELS_ROOT)
-    return GoogleCloudStorageModelsRepo(GoogleCloudStorageModelsRepo.get_default_bucket())
+def _make_models_repo() -> ModelsRepo:
+    log.info("using local file models repo", root_dir=str(_LOCAL_MODELS_ROOT))
+    return LocalFileModelsRepo(root_dir=_LOCAL_MODELS_ROOT)
 
 
-def _make_data_repo(*, use_local_files: bool) -> DataRepo:
-    if use_local_files:
-        log.info("using local file data repo", root_dir=str(_LOCAL_DATA_ROOT))
-        return LocalFileDataRepo(root_dir=_LOCAL_DATA_ROOT)
-    return GoogleCloudStorageDataRepo(GoogleCloudStorageDataRepo.get_default_bucket())
+def _make_data_repo() -> DataRepo:
+    log.info("using local file data repo", root_dir=str(_LOCAL_DATA_ROOT))
+    return LocalFileDataRepo(root_dir=_LOCAL_DATA_ROOT)
 
 
 def _make_analytics_repo() -> AnalyticsRepo:

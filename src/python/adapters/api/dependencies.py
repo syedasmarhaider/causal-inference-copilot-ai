@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-import os
 from functools import lru_cache
 
 from fastapi import Depends, File, Header, HTTPException, Path, Query, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from python.domain.service.auth_service import AuthenticatedUser, AuthService
-from python.implementation.service.firebsae_auth_service import (
+from python.domain.service.auth_service import (
+    AuthenticatedUser,
+    AuthService,
     AuthServiceError,
-    FirebaseAuthService,
     InvalidTokenError,
 )
 from python.implementation.service.local_token_auth_service import LocalTokenAuthService
@@ -25,7 +23,7 @@ log = get_logger(__name__)
 
 bearer_scheme = HTTPBearer(
     auto_error=False,
-    description="Firebase Bearer JWT. Paste the raw Firebase ID token.",
+    description="Local bearer token. Paste the configured ID_TOKEN value.",
 )
 CREDENTIALS_SECURITY = Security(bearer_scheme)
 
@@ -77,8 +75,6 @@ def _unauthorized(detail: str) -> HTTPException:
 
 @lru_cache(maxsize=1)
 def get_apps() -> tuple[WorkflowApp, DataflowApp, AuditLogApp]:
-    if "use_local_files" in inspect.signature(make_apps).parameters:
-        return make_apps(use_local_files=_use_local_files_from_env())
     return make_apps()
 
 
@@ -99,9 +95,7 @@ def get_audit_log_app() -> AuditLogApp:
 
 @lru_cache(maxsize=1)
 def get_auth_service() -> AuthService:
-    if _use_local_files_from_env():
-        return LocalTokenAuthService.from_env()
-    return FirebaseAuthService(app=FirebaseAuthService.get_firebase_auth_default_app())
+    return LocalTokenAuthService.from_env()
 
 
 async def get_authenticated_user(
@@ -138,9 +132,3 @@ AUTHENTICATED_USER_DEP = Depends(get_authenticated_user)
 WORKFLOW_APP_DEP = Depends(get_workflow_app)
 DATAFLOW_APP_DEP = Depends(get_dataflow_app)
 AUDIT_LOG_APP_DEP = Depends(get_audit_log_app)
-
-
-def _use_local_files_from_env() -> bool:
-    value = os.getenv("USE_LOCAL_FILES", "")
-    normalized = value.strip().strip('"').strip("'").lower()
-    return normalized in {"true", "yes"}
