@@ -14,6 +14,7 @@ from python.implementation.service.firebsae_auth_service import (
     FirebaseAuthService,
     InvalidTokenError,
 )
+from python.implementation.service.local_token_auth_service import LocalTokenAuthService
 from python.implementation.service.logging.default_logging import get_logger
 from python.implementation.workflows.audit_log_app import AuditLogApp
 from python.implementation.workflows.dataflow_app import DataflowApp
@@ -98,6 +99,8 @@ def get_audit_log_app() -> AuditLogApp:
 
 @lru_cache(maxsize=1)
 def get_auth_service() -> AuthService:
+    if _use_local_files_from_env():
+        return LocalTokenAuthService.from_env()
     return FirebaseAuthService(app=FirebaseAuthService.get_firebase_auth_default_app())
 
 

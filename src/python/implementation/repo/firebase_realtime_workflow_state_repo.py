@@ -68,9 +68,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
             database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
             if not database_url:
-                raise ValueError(
-                    "FIREBASE_DATABASE_URL environment variable must be set"
-                ) from None
+                raise ValueError("FIREBASE_DATABASE_URL environment variable must be set") from None
 
             return firebase_admin.initialize_app(
                 credentials.ApplicationDefault(),
@@ -93,16 +91,46 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     ) -> None:
         if app is None:
             raise ValueError("app must not be None")
+        if not isinstance(state_classes_by_name, Mapping):
+            raise ValueError("state_classes_by_name must be a mapping")
+        if not isinstance(ochestrator_state_classes_by_name, Mapping):
+            raise ValueError("ochestrator_state_classes_by_name must be a mapping")
 
         self._root_ref = db.reference("/", app=app)
         self._state_classes_by_name = dict(state_classes_by_name)
-        self._ochestrator_state_classes_by_name = dict(
-            ochestrator_state_classes_by_name
-        )
+        self._ochestrator_state_classes_by_name = dict(ochestrator_state_classes_by_name)
 
     # ------------------------------------------------------------------
     # Conversation persistence
     # ------------------------------------------------------------------
+
+    def save_conversation_id(self, *, user_id: UUID, conversation_id: UUID) -> None:
+        """Legacy helper retained for older callers/tests."""
+        path = self._conversation_path(user_id=user_id, conversation_id=conversation_id)
+        index_path = self._conversation_index_path(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        self._root_ref.update(
+            {
+                index_path: True,
+                f"{path}/_meta": {"created": True},
+            }
+        )
+
+    def get_conversation_ids_for_user(self, *, user_id: UUID) -> Sequence[UUID]:
+        """Legacy helper retained for older callers/tests."""
+        data = self._conversation_index_user_ref(user_id=user_id).get()
+        if not isinstance(data, dict):
+            return []
+
+        conversation_ids: list[UUID] = []
+        for key in data:
+            try:
+                conversation_ids.append(UUID(str(key)))
+            except (TypeError, ValueError):
+                continue
+        return sorted(conversation_ids, key=lambda item: str(item))
 
     def save_conversation(self, *, user_id: UUID, conversation: Conversation) -> None:
         """
@@ -204,13 +232,23 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         self,
         *,
         user_id: UUID,
-        conversation: Conversation,
+        conversation: Conversation | None = None,
+        conversation_id: UUID | None = None,
     ) -> bool:
+        if conversation is None and conversation_id is None:
+            raise ValueError("conversation or conversation_id must be provided")
+        resolved_conversation_id = (
+            conversation.conversation_id if conversation is not None else conversation_id
+        )
+        if resolved_conversation_id is None:
+            raise ValueError("conversation_id must not be None")
+
         value = self._conversation_index_ref(
             user_id=user_id,
-            conversation_id=conversation.conversation_id,
+            conversation_id=resolved_conversation_id,
         ).get()
         return value is not None
+
     # ------------------------------------------------------------------
     # Orchestrator state
     # ------------------------------------------------------------------
@@ -263,9 +301,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
         cls = self._ochestrator_state_classes_by_name.get(state_name)
         if cls is None:
-            raise KeyError(
-                f"No OchestratorState class registered for name={state_name!r}"
-            )
+            raise KeyError(f"No OchestratorState class registered for name={state_name!r}")
 
         try:
             state = cls.from_json_dict(state_payload)
@@ -435,8 +471,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             state_dict = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError(
-                f"Stored state blob for state_name={state_name!r} "
-                f"is not valid JSON: {exc}"
+                f"Stored state blob for state_name={state_name!r} " f"is not valid JSON: {exc}"
             ) from exc
 
         if not isinstance(state_dict, dict):
@@ -447,22 +482,17 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
         cls = self._state_classes_by_name.get(state_name)
         if cls is None:
-            raise KeyError(
-                f"No State class registered for state_name={state_name!r}"
-            )
+            raise KeyError(f"No State class registered for state_name={state_name!r}")
 
         try:
             state = cls.from_json_dict(state_dict)
         except Exception as exc:
-            raise ValueError(
-                f"Error deserializing state '{state_name}': {exc}"
-            ) from exc
+            raise ValueError(f"Error deserializing state '{state_name}': {exc}") from exc
 
         loaded_name = self._state_name_of(state)
         if loaded_name != state_name:
             raise ValueError(
-                f"Loaded State.name mismatch: got {loaded_name!r}, "
-                f"expected {state_name!r}"
+                f"Loaded State.name mismatch: got {loaded_name!r}, " f"expected {state_name!r}"
             )
 
         return state
@@ -485,9 +515,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
                 separators=(",", ":"),
             )
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"State '{state_name}' is not JSON-serializable: {exc}"
-            ) from exc
+            raise ValueError(f"State '{state_name}' is not JSON-serializable: {exc}") from exc
 
         path = self._conversation_path(user_id=user_id, conversation_id=conversation_id)
         self._root_ref.update({f"{path}/states/{state_name}": payload_json})
@@ -581,19 +609,13 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
     def _conversation_index_user_ref(self, *, user_id: UUID) -> Any:
         return self._root_ref.child("workflow_conversation_index").child(str(user_id))
 
-    def _conversation_index_ref(
-        self, *, user_id: UUID, conversation_id: UUID
-    ) -> Any:
-        return self._conversation_index_user_ref(user_id=user_id).child(
-            str(conversation_id)
-        )
+    def _conversation_index_ref(self, *, user_id: UUID, conversation_id: UUID) -> Any:
+        return self._conversation_index_user_ref(user_id=user_id).child(str(conversation_id))
 
     def _user_ref(self, *, user_id: UUID) -> Any:
         return self._root_ref.child("workflows").child(str(user_id))
 
-    def _conversation_ref(
-        self, *, user_id: UUID, conversation_id: UUID
-    ) -> Any:
+    def _conversation_ref(self, *, user_id: UUID, conversation_id: UUID) -> Any:
         return self._user_ref(user_id=user_id).child(str(conversation_id))
 
     def _conversation_index_path(
@@ -620,9 +642,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         user_id: UUID,
         conversation_id: UUID,
     ) -> str:
-        base = self._conversation_path(
-            user_id=user_id, conversation_id=conversation_id
-        )
+        base = self._conversation_path(user_id=user_id, conversation_id=conversation_id)
         return f"{base}/_meta"
 
     # ------------------------------------------------------------------
@@ -636,12 +656,8 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             "created_at_utc": float(message.created_at_utc),
         }
 
-        artifact_refs = self._serialize_artifact_refs(
-            getattr(message, "artifact_refs", None)
-        )
-        artifacts = self._serialize_artifacts(
-            getattr(message, "artifacts", None)
-        )
+        artifact_refs = self._serialize_artifact_refs(getattr(message, "artifact_refs", None))
+        artifacts = self._serialize_artifacts(getattr(message, "artifacts", None))
         message_id = getattr(message, "id", None)
 
         if artifact_refs is not None:
@@ -671,9 +687,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             created_at_utc = self._created_at_utc_from_message_key(message_key)
 
         if not isinstance(role, str) or not isinstance(content, str):
-            raise ValueError(
-                "Invalid chat message payload: role/message must be strings"
-            )
+            raise ValueError("Invalid chat message payload: role/message must be strings")
 
         kwargs: dict[str, Any] = {
             "role": role,
@@ -693,9 +707,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
     @staticmethod
     def _serialize_artifact_refs(value: Any) -> list[dict[str, Any]] | None:
-        normalized = FirebaseRealtimeWorkflowStateRepo._normalize_artifact_refs(
-            value
-        )
+        normalized = FirebaseRealtimeWorkflowStateRepo._normalize_artifact_refs(value)
         if normalized is None:
             return None
 
@@ -718,16 +730,11 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
         normalized = FirebaseRealtimeWorkflowStateRepo._normalize_artifacts(value)
         if normalized is None:
             return None
-        return [
-            FirebaseRealtimeWorkflowStateRepo._jsonify_nested(item)
-            for item in normalized
-        ]
+        return [FirebaseRealtimeWorkflowStateRepo._jsonify_nested(item) for item in normalized]
 
     @staticmethod
     def _normalize_artifact_refs(value: Any) -> list[dict[str, Any]] | None:
-        if not isinstance(value, Sequence) or isinstance(
-            value, (str, bytes, bytearray)
-        ):
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
             return None
 
         normalized: list[dict[str, Any]] = []
@@ -755,9 +762,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
             try:
                 parsed_id = (
-                    artifact_id
-                    if isinstance(artifact_id, UUID)
-                    else UUID(str(artifact_id).strip())
+                    artifact_id if isinstance(artifact_id, UUID) else UUID(str(artifact_id).strip())
                 )
             except (TypeError, ValueError, AttributeError):
                 continue
@@ -777,9 +782,7 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
 
     @staticmethod
     def _normalize_artifacts(value: Any) -> list[dict[str, Any]] | None:
-        if not isinstance(value, Sequence) or isinstance(
-            value, (str, bytes, bytearray)
-        ):
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
             return None
 
         normalized: list[dict[str, Any]] = []
@@ -807,10 +810,8 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
             if fmt is not None and fmt not in {"csv", "json"}:
                 entry.pop("format", None)
 
-            entry["artifact_meta"] = (
-                FirebaseRealtimeWorkflowStateRepo._normalize_artifact_meta(
-                    entry.get("artifact_meta")
-                )
+            entry["artifact_meta"] = FirebaseRealtimeWorkflowStateRepo._normalize_artifact_meta(
+                entry.get("artifact_meta")
             )
 
             normalized.append(entry)
@@ -878,7 +879,5 @@ class FirebaseRealtimeWorkflowStateRepo(WorkflowStateRepo):
                 for k, v in value.items()
             }
         if isinstance(value, (list, tuple)):
-            return [
-                FirebaseRealtimeWorkflowStateRepo._jsonify_nested(v) for v in value
-            ]
+            return [FirebaseRealtimeWorkflowStateRepo._jsonify_nested(v) for v in value]
         return value

@@ -13,6 +13,7 @@ from python.implementation.service.firebsae_auth_service import (
     AuthServiceError,
     InvalidTokenError,
 )
+from python.implementation.service.local_token_auth_service import LocalTokenAuthService
 
 
 def _credentials(token: str = "token") -> HTTPAuthorizationCredentials:
@@ -47,6 +48,84 @@ def test_get_workflow_and_dataflow_apps_share_cached_make_apps(
     dependencies.get_workflow_app.cache_clear()
     dependencies.get_dataflow_app.cache_clear()
     dependencies.get_audit_log_app.cache_clear()
+
+
+def test_get_apps_passes_use_local_files_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bool] = []
+    workflow_app = object()
+    dataflow_app = object()
+    audit_log_app = object()
+
+    dependencies.get_apps.cache_clear()
+    dependencies.get_workflow_app.cache_clear()
+    dependencies.get_dataflow_app.cache_clear()
+    dependencies.get_audit_log_app.cache_clear()
+    monkeypatch.setenv("USE_LOCAL_FILES", "True")
+
+    def _make_apps(*, use_local_files: bool):
+        calls.append(use_local_files)
+        return workflow_app, dataflow_app, audit_log_app
+
+    monkeypatch.setattr(dependencies, "make_apps", _make_apps)
+
+    assert dependencies.get_apps() == (workflow_app, dataflow_app, audit_log_app)
+    assert calls == [True]
+
+    dependencies.get_apps.cache_clear()
+    dependencies.get_workflow_app.cache_clear()
+    dependencies.get_dataflow_app.cache_clear()
+    dependencies.get_audit_log_app.cache_clear()
+
+
+def test_get_auth_service_uses_local_token_auth_in_local_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dependencies.get_auth_service.cache_clear()
+    monkeypatch.setenv("USE_LOCAL_FILES", "True")
+    monkeypatch.setenv("ID_TOKEN", "local-token")
+
+    auth_service = dependencies.get_auth_service()
+
+    assert isinstance(auth_service, LocalTokenAuthService)
+    user = auth_service.verify_token_and_get_user("local-token")
+    assert user.claims["auth_provider"] == "local"
+
+    with pytest.raises(InvalidTokenError):
+        auth_service.verify_token_and_get_user("other-token")
+
+    dependencies.get_auth_service.cache_clear()
+
+
+def test_get_auth_service_requires_id_token_in_local_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dependencies.get_auth_service.cache_clear()
+    monkeypatch.setenv("USE_LOCAL_FILES", "True")
+    monkeypatch.delenv("ID_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match=r"ID_TOKEN"):
+        dependencies.get_auth_service()
+
+    dependencies.get_auth_service.cache_clear()
+
+
+def test_get_auth_service_keeps_firebase_auth_outside_local_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dependencies.get_auth_service.cache_clear()
+    monkeypatch.setenv("USE_LOCAL_FILES", "False")
+    app = object()
+    monkeypatch.setattr(
+        dependencies.FirebaseAuthService,
+        "get_firebase_auth_default_app",
+        staticmethod(lambda: app),
+    )
+
+    auth_service = dependencies.get_auth_service()
+
+    assert isinstance(auth_service, dependencies.FirebaseAuthService)
+
+    dependencies.get_auth_service.cache_clear()
 
 
 def test_get_authenticated_user_returns_verified_user(monkeypatch: pytest.MonkeyPatch) -> None:

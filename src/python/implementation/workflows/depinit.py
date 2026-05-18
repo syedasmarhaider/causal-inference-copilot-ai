@@ -16,6 +16,7 @@ from python.implementation.repo.firebase_realtime_workflow_state_repo import (
 from python.implementation.repo.google_cloud_storage_data_repo import GoogleCloudStorageDataRepo
 from python.implementation.repo.google_cloud_storage_model_repo import GoogleCloudStorageModelsRepo
 from python.implementation.repo.local_data_repo import LocalFileDataRepo
+from python.implementation.repo.local_json_workflow_state_repo import LocalJsonWorkflowStateRepo
 from python.implementation.repo.local_models_repo import LocalFileModelsRepo
 from python.implementation.service.llms.llm_service_factory import (
     LLMServiceSettings,
@@ -40,6 +41,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _LOCAL_STORAGE_ROOT = _PROJECT_ROOT / ".local_storage"
 _LOCAL_MODELS_ROOT = _LOCAL_STORAGE_ROOT / "models"
 _LOCAL_DATA_ROOT = _LOCAL_STORAGE_ROOT / "data"
+_LOCAL_WORKFLOW_STATE_DB_PATH = _LOCAL_STORAGE_ROOT / "workflow_state.json"
 
 
 def make_apps(*, use_local_files: bool = False) -> tuple[WorkflowApp, DataflowApp, AuditLogApp]:
@@ -52,6 +54,7 @@ def make_apps(*, use_local_files: bool = False) -> tuple[WorkflowApp, DataflowAp
     state_classes_by_name = build_state_classes_by_name()
     workflow_repo = _make_workflow_state_repo(
         state_classes_by_name=state_classes_by_name,
+        use_local_files=use_local_files,
     )
 
     ochestrator = Ochestrator(
@@ -83,6 +86,7 @@ def make_dataflow_app(*, use_local_files: bool = False) -> DataflowApp:
     state_classes_by_name = build_state_classes_by_name()
     workflow_repo = _make_workflow_state_repo(
         state_classes_by_name=state_classes_by_name,
+        use_local_files=use_local_files,
     )
     return DataflowApp(
         repo=workflow_repo,
@@ -93,15 +97,28 @@ def make_dataflow_app(*, use_local_files: bool = False) -> DataflowApp:
 def _make_workflow_state_repo(
     *,
     state_classes_by_name: Mapping[str, type[NodeState]],
+    use_local_files: bool,
 ) -> WorkflowStateRepo:
+    ochestrator_state_classes_by_name = {
+        CausalOchestratorState.NAME: CausalOchestratorState,
+        DataOchestratorState.NAME: DataOchestratorState,
+    }
+    if use_local_files:
+        log.info(
+            "using local JSON workflow state repo",
+            root_path=str(_LOCAL_WORKFLOW_STATE_DB_PATH),
+        )
+        return LocalJsonWorkflowStateRepo(
+            root_path=_LOCAL_WORKFLOW_STATE_DB_PATH,
+            state_classes_by_name=state_classes_by_name,
+            ochestrator_state_classes_by_name=ochestrator_state_classes_by_name,
+        )
+
     app = FirebaseRealtimeWorkflowStateRepo.get_default_firebase_database_app()
     return FirebaseRealtimeWorkflowStateRepo(
         app=app,
         state_classes_by_name=state_classes_by_name,
-        ochestrator_state_classes_by_name={CausalOchestratorState.NAME: CausalOchestratorState,
-                                           DataOchestratorState.NAME: DataOchestratorState
-                                                                                       },  # TODO: make this dynamic when we have more orch states
-        
+        ochestrator_state_classes_by_name=ochestrator_state_classes_by_name,
     )
 
 
