@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, replace
 from typing import Any, Literal, TypeVar
 
-from langfuse import observe
 from litellm import completion
 from pydantic import BaseModel, ValidationError
 

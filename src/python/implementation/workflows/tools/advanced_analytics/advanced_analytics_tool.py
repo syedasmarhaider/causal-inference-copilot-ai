@@ -77,6 +77,10 @@ def _format_stat(v: Any, *, digits: int = 4) -> str:
     return str(safe_value)
 
 
+def _format_column_list(columns: list[str]) -> str:
+    return ", ".join(columns) if columns else "(none)"
+
+
 def _binary_label(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -231,7 +235,13 @@ def _run_logistic_regression(df: pd.DataFrame, plan: AnalyticsPlanModel) -> Anal
 
 def _run_propensity_score(df: pd.DataFrame, plan: AnalyticsPlanModel) -> AnalyticsResultModel:
     treatment = str(plan.treatment)
-    covariates = [c for c in plan.covariates if c in df.columns]
+    requested_covariates = list(dict.fromkeys(str(c) for c in plan.covariates))
+    if treatment in requested_covariates:
+        raise ValueError(
+            f"Treatment column '{treatment}' cannot also be used as a propensity score covariate."
+        )
+
+    covariates = [c for c in requested_covariates if c in df.columns]
     if not covariates or treatment not in df.columns:
         raise ValueError("Treatment or covariates not found in dataframe")
 
@@ -265,7 +275,8 @@ def _run_propensity_score(df: pd.DataFrame, plan: AnalyticsPlanModel) -> Analyti
         analysis_type="propensity_score",
         summary=(
             f"Propensity scores estimated for treatment='{treatment}' "
-            f"(positive class='{treatment_levels['1']}') using {len(covariates)} covariate(s). "
+            f"(positive class='{treatment_levels['1']}') using covariates: "
+            f"{_format_column_list(covariates)}. "
             f"Treated mean={_format_stat(treated.mean())}, Control mean={_format_stat(control.mean())}."
         ),
         tables={
@@ -279,6 +290,9 @@ def _run_propensity_score(df: pd.DataFrame, plan: AnalyticsPlanModel) -> Analyti
             "auc": _safe(float(roc_auc_score(y, p_scores))),
             "n_treated": int(treated.shape[0]),
             "n_control": int(control.shape[0]),
+            "n_obs": int(work.shape[0]),
+            "treatment": treatment,
+            "covariates": covariates,
             "treatment_levels": treatment_levels,
         },
     )

@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
+from python.implementation.workflows.tools.causal.specs.causal_spec_draft import CausalSpecDraft
 from python.implementation.workflows.tools.causal.specs.causal_specs_tool import (
     CausalSpecsTool,
 )
@@ -78,6 +79,7 @@ def _spec_payload(
     control: str = "placebo",
     outcome_kind: str = "continuous",
     outcome_column: str = "outcome",
+    negative_control_outcome: dict[str, Any] | None = None,
     event: str = "1",
     non_event: str = "0",
     covariates: list[str] | None = None,
@@ -106,9 +108,11 @@ def _spec_payload(
             "control": control,
         },
         "outcome_spec": outcome_spec,
+        "negative_control_outcome": negative_control_outcome,
         "covariates": covariates if covariates is not None else ["age"],
         "effect_modifiers": effect_modifiers if effect_modifiers is not None else ["segment"],
         "experiment_type": experiment_type,
+        "id_col": "patient_id",
     }
 
 
@@ -121,6 +125,7 @@ def test_tool_identity_and_info() -> None:
 
 def test_build_backdoor_schema_binds_summary_headers_without_bloating_json_schema() -> None:
     summary = _summary_model(
+        _categorical_profile("patient_id", ["p1", "p2"]),
         _categorical_profile("treatment", ["drug", "placebo"]),
         _numeric_profile("outcome"),
         _numeric_profile("age"),
@@ -131,8 +136,15 @@ def test_build_backdoor_schema_binds_summary_headers_without_bloating_json_schem
     schema = tool.build_backdoor_schema(data_summary=summary)
 
     assert schema is not CausalSpec
-    assert schema.SUMMARY_FIELD_NAMES == ("treatment", "outcome", "age", "segment")
+    assert schema.SUMMARY_FIELD_NAMES == (
+        "patient_id",
+        "treatment",
+        "outcome",
+        "age",
+        "segment",
+    )
     assert schema.SUMMARY_FIELD_KINDS == {
+        "patient_id": "CATEGORICAL",
         "treatment": "CATEGORICAL",
         "outcome": "NUMERIC",
         "age": "NUMERIC",
@@ -147,6 +159,7 @@ def test_build_backdoor_schema_binds_summary_headers_without_bloating_json_schem
 
 def test_validate_backdoor_payload_returns_summary_bound_model() -> None:
     summary = _summary_model(
+        _categorical_profile("patient_id", ["p1", "p2"]),
         _categorical_profile("treatment", ["drug", "placebo"]),
         _numeric_profile("outcome"),
         _numeric_profile("age"),
@@ -163,8 +176,142 @@ def test_validate_backdoor_payload_returns_summary_bound_model() -> None:
     assert type(model) is not CausalSpec
     assert model.treatment_spec.column == "treatment"
     assert model.outcome_spec.column == "outcome"
+    assert model.negative_control_outcome is None
     assert model.covariates == ["age"]
     assert model.effect_modifiers == ["segment"]
+
+
+def test_validate_backdoor_payload_accepts_negative_control_outcome_spec() -> None:
+    summary = _summary_model(
+        _categorical_profile("patient_id", ["p1", "p2"]),
+        _categorical_profile("treatment", ["drug", "placebo"]),
+        _numeric_profile("outcome"),
+        _numeric_profile("negative_outcome"),
+        _numeric_profile("age"),
+        _categorical_profile("segment", ["A", "B"]),
+    )
+    tool = CausalSpecsTool()
+
+    model = tool.validate_backdoor_payload(
+        payload=_spec_payload(
+            negative_control_outcome={
+                "kind": "continuous",
+                "column": "negative_outcome",
+                "unit": "score",
+            }
+        ),
+        data_summary=summary,
+    )
+
+    assert model.negative_control_outcome is not None
+    assert model.negative_control_outcome.column == "negative_outcome"
+
+
+def test_validate_backdoor_payload_rejects_unknown_negative_control_outcome() -> None:
+    summary = _summary_model(
+        _categorical_profile("patient_id", ["p1", "p2"]),
+        _categorical_profile("treatment", ["drug", "placebo"]),
+        _numeric_profile("outcome"),
+        _numeric_profile("age"),
+        _categorical_profile("segment", ["A", "B"]),
+    )
+    tool = CausalSpecsTool()
+
+    with pytest.raises(ValidationError, match=r"unknown dataset_summary columns"):
+        tool.validate_backdoor_payload(
+            payload=_spec_payload(
+                negative_control_outcome={
+                    "kind": "continuous",
+                    "column": "missing_negative_outcome",
+                    "unit": "score",
+                }
+            ),
+            data_summary=summary,
+        )
+
+
+def test_validate_backdoor_payload_rejects_negative_control_role_overlap() -> None:
+    summary = _summary_model(
+        _categorical_profile("patient_id", ["p1", "p2"]),
+        _categorical_profile("treatment", ["drug", "placebo"]),
+        _numeric_profile("outcome"),
+        _numeric_profile("age"),
+        _categorical_profile("segment", ["A", "B"]),
+    )
+    tool = CausalSpecsTool()
+
+    with pytest.raises(ValidationError, match=r"negative_control_outcome must be different"):
+        tool.validate_backdoor_payload(
+            payload=_spec_payload(
+                negative_control_outcome={
+                    "kind": "continuous",
+                    "column": "outcome",
+                    "unit": "score",
+                }
+            ),
+            data_summary=summary,
+        )
+
+
+def test_causal_spec_draft_accepts_nullable_negative_control_outcome() -> None:
+    summary = _summary_model(
+        _categorical_profile("treatment", ["drug", "placebo"]),
+        _numeric_profile("outcome"),
+        _numeric_profile("age"),
+    )
+    schema = CausalSpecDraft.for_dataset_summary(summary)
+
+    draft = schema.model_validate(
+        {
+            "treatment_column": "treatment",
+            "outcome_column": "outcome",
+            "negative_control_outcome": None,
+            "covariates": ["age"],
+            "effect_modifiers": [],
+        }
+    )
+
+    assert draft.negative_control_outcome is None
+
+
+def test_causal_spec_draft_rejects_invalid_negative_control_outcome() -> None:
+    summary = _summary_model(
+        _categorical_profile("treatment", ["drug", "placebo"]),
+        _numeric_profile("outcome"),
+        _numeric_profile("age"),
+    )
+    schema = CausalSpecDraft.for_dataset_summary(summary)
+
+    with pytest.raises(ValidationError, match=r"negative_control_outcome must be different"):
+        schema.model_validate(
+            {
+                "treatment_column": "treatment",
+                "outcome_column": "outcome",
+                "negative_control_outcome": "age",
+                "covariates": ["age"],
+                "effect_modifiers": [],
+            }
+        )
+
+
+def test_causal_spec_draft_rejects_unknown_negative_control_outcome() -> None:
+    summary = _summary_model(
+        _categorical_profile("treatment", ["drug", "placebo"]),
+        _numeric_profile("outcome"),
+        _numeric_profile("age"),
+    )
+    schema = CausalSpecDraft.for_dataset_summary(summary)
+
+    with pytest.raises(ValidationError, match=r"unknown dataset_summary columns"):
+        schema.model_validate(
+            {
+                "treatment_column": "treatment",
+                "outcome_column": "outcome",
+                "negative_control_outcome": "missing_negative_outcome",
+                "covariates": ["age"],
+                "effect_modifiers": [],
+            }
+        )
 
 
 def test_validate_backdoor_payload_allows_observational_without_covariates_at_this_stage() -> None:

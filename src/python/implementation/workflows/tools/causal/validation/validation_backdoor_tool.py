@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import numbers
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 
+import numpy as np
 import pandas as pd
 import pandas.api.types as ptypes
 from pydantic import BaseModel, ConfigDict, Field
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 
 from python.domain.models.validation import ValidationIssueModel, ValidationStatus
 from python.domain.workflows.tool import Tool
@@ -27,6 +31,16 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import (
     BinaryTreatmentSpecModel,
     CausalSpec,
     ContinuousOutcomeSpecModel,
+)
+
+_OVERLAP_PROPENSITY_LOWER = 0.05
+_OVERLAP_PROPENSITY_UPPER = 0.95
+_OVERLAP_QUANTILES = (0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99)
+_TREATMENT_ARM_SHARE_FAIL_THRESHOLD = 0.05
+_TREATMENT_ARM_SHARE_WARN_THRESHOLD = 0.20
+_NEGATIVE_CONTROL_OUTCOME_UNAVAILABLE_WARNING = (
+    "No valid negative-control outcome was provided or identified. "
+    "CATE negative-control refutation will not be performed."
 )
 
 
@@ -70,15 +84,17 @@ class ValidationBackdoorTool(Tool):
     ) -> ValidationBackdoorReport:
         treatment_col = str(causal_spec.treatment_spec.column)
         outcome_col = str(causal_spec.outcome_spec.column)
+        negative_control_outcome = causal_spec.negative_control_outcome
+        negative_control_outcome_col = (
+            str(negative_control_outcome.column)
+            if negative_control_outcome is not None
+            else None
+        )
         identifier_col = str(causal_spec.id_col)
         covariates = _dedup_keep_order(list(causal_spec.covariates))
         effect_modifiers = _dedup_keep_order(list(causal_spec.effect_modifiers))
         eligible_cols = _dedup_keep_order(
-            [
-                column
-                for column in covariates + effect_modifiers
-                if column != identifier_col
-            ]
+            [column for column in covariates + effect_modifiers if column != identifier_col]
         )
 
         metrics: dict[str, Any] = {
@@ -88,6 +104,12 @@ class ValidationBackdoorTool(Tool):
             "columns": [str(column) for column in dataframe.columns.tolist()],
             "treatment_col": treatment_col,
             "outcome_col": outcome_col,
+            "negative_control_outcome": (
+                None
+                if negative_control_outcome is None
+                else negative_control_outcome.model_dump(mode="json")
+            ),
+            "negative_control_outcome_col": negative_control_outcome_col,
             "identifier_col": identifier_col,
             "covariates": covariates,
             "effect_modifiers": effect_modifiers,
@@ -100,43 +122,44 @@ class ValidationBackdoorTool(Tool):
         }
 
         issues: list[ValidationIssueModel] = []
-        issues.extend(
-            _guard_validation_step(
-                step_name="dataframe structure",
-                validator=lambda: _validate_dataframe_structure(
-                    dataframe=dataframe,
-                    treatment_col=treatment_col,
-                    outcome_col=outcome_col,
-                    identifier_col=identifier_col,
-                    eligible_cols=eligible_cols,
-                ),
-            )
+        dataframe_issues = _guard_validation_step(
+            step_name="dataframe structure",
+            validator=lambda: _validate_dataframe_structure(
+                dataframe=dataframe,
+                treatment_col=treatment_col,
+                outcome_col=outcome_col,
+                negative_control_outcome_col=negative_control_outcome_col,
+                identifier_col=identifier_col,
+                eligible_cols=eligible_cols,
+            ),
         )
-        issues.extend(
-            _guard_validation_step(
-                step_name="causal spec",
-                validator=lambda: _validate_causal_spec(
-                    causal_spec=causal_spec,
-                    treatment_col=treatment_col,
-                    outcome_col=outcome_col,
-                    identifier_col=identifier_col,
-                    covariates=covariates,
-                    effect_modifiers=effect_modifiers,
-                ),
-            )
-        )
+        issues.extend(dataframe_issues)
 
+        causal_spec_issues = _guard_validation_step(
+            step_name="causal spec",
+            validator=lambda: _validate_causal_spec(
+                causal_spec=causal_spec,
+                treatment_col=treatment_col,
+                outcome_col=outcome_col,
+                negative_control_outcome_col=negative_control_outcome_col,
+                identifier_col=identifier_col,
+                covariates=covariates,
+                effect_modifiers=effect_modifiers,
+            ),
+        )
+        issues.extend(causal_spec_issues)
+
+        treatment_issues: list[ValidationIssueModel] = []
         if treatment_col in dataframe.columns:
-            issues.extend(
-                _guard_validation_step(
-                    step_name="treatment column",
-                    validator=lambda: _validate_treatment_column(
-                        dataframe=dataframe,
-                        treatment_spec=causal_spec.treatment_spec,
-                        experiment_type=causal_spec.experiment_type,
-                    ),
-                )
+            treatment_issues = _guard_validation_step(
+                step_name="treatment column",
+                validator=lambda: _validate_treatment_column(
+                    dataframe=dataframe,
+                    treatment_spec=causal_spec.treatment_spec,
+                    experiment_type=causal_spec.experiment_type,
+                ),
             )
+            issues.extend(treatment_issues)
 
         if outcome_col in dataframe.columns:
             issues.extend(
@@ -147,8 +170,23 @@ class ValidationBackdoorTool(Tool):
                         treatment_spec=causal_spec.treatment_spec,
                         outcome_spec=causal_spec.outcome_spec,
                     ),
+                )
             )
-        )
+
+        if (
+            negative_control_outcome is not None
+            and negative_control_outcome_col in dataframe.columns
+        ):
+            issues.extend(
+                _guard_validation_step(
+                    step_name="negative-control outcome column",
+                    validator=lambda: _validate_outcome_column(
+                        dataframe=dataframe,
+                        treatment_spec=causal_spec.treatment_spec,
+                        outcome_spec=negative_control_outcome,
+                    ),
+                )
+            )
 
         if identifier_col in dataframe.columns:
             issues.extend(
@@ -161,20 +199,37 @@ class ValidationBackdoorTool(Tool):
                 )
             )
 
+        transform_issues = _guard_validation_step(
+            step_name="transform plan",
+            validator=lambda: _validate_transform_plan(
+                dataframe=dataframe,
+                treatment_spec=causal_spec.treatment_spec,
+                transform_plan=transform_plan,
+                covariates=covariates,
+                effect_modifiers=effect_modifiers,
+                eligible_cols=eligible_cols,
+                identifier_col=identifier_col,
+                treatment_col=treatment_col,
+                outcome_col=outcome_col,
+                negative_control_outcome_col=negative_control_outcome_col,
+            ),
+        )
+        issues.extend(transform_issues)
+
         issues.extend(
-            _guard_validation_step(
-                step_name="transform plan",
-                validator=lambda: _validate_transform_plan(
-                    dataframe=dataframe,
-                    treatment_spec=causal_spec.treatment_spec,
-                    transform_plan=transform_plan,
-                    covariates=covariates,
-                    effect_modifiers=effect_modifiers,
-                    eligible_cols=eligible_cols,
-                    identifier_col=identifier_col,
-                    treatment_col=treatment_col,
-                    outcome_col=outcome_col,
-                ),
+            _validate_propensity_overlap(
+                dataframe=dataframe,
+                treatment_spec=causal_spec.treatment_spec,
+                transform_plan=transform_plan,
+                covariates=covariates,
+                effect_modifiers=effect_modifiers,
+                metrics=metrics,
+                blocking_issues=[
+                    *dataframe_issues,
+                    *causal_spec_issues,
+                    *treatment_issues,
+                    *transform_issues,
+                ],
             )
         )
 
@@ -217,6 +272,7 @@ def _validate_dataframe_structure(
     dataframe: pd.DataFrame,
     treatment_col: str,
     outcome_col: str,
+    negative_control_outcome_col: str | None,
     identifier_col: str,
     eligible_cols: list[str],
 ) -> list[ValidationIssueModel]:
@@ -254,7 +310,15 @@ def _validate_dataframe_structure(
             )
         )
 
-    required_cols = _dedup_keep_order([identifier_col, treatment_col, outcome_col, *eligible_cols])
+    required_cols = _dedup_keep_order(
+        [
+            identifier_col,
+            treatment_col,
+            outcome_col,
+            *([negative_control_outcome_col] if negative_control_outcome_col else []),
+            *eligible_cols,
+        ]
+    )
     missing_cols = [column for column in required_cols if column not in dataframe.columns]
     if missing_cols:
         issues.append(
@@ -274,6 +338,7 @@ def _validate_causal_spec(
     causal_spec: CausalSpec,
     treatment_col: str,
     outcome_col: str,
+    negative_control_outcome_col: str | None,
     identifier_col: str,
     covariates: list[str],
     effect_modifiers: list[str],
@@ -289,6 +354,51 @@ def _validate_causal_spec(
                 fix_hint="Choose distinct treatment and outcome columns in the causal spec.",
             )
         )
+
+    if negative_control_outcome_col is None:
+        issues.append(
+            _issue(
+                severity="WARN",
+                message=_NEGATIVE_CONTROL_OUTCOME_UNAVAILABLE_WARNING,
+                evidence={"negative_control_outcome": None},
+                fix_hint=(
+                    "Provide a clinically valid negative-control outcome column if CATE "
+                    "negative-control refutation should be run."
+                ),
+            )
+        )
+    else:
+        negative_control_overlap = sorted(
+            {
+                column
+                for column in [
+                    treatment_col,
+                    outcome_col,
+                    identifier_col,
+                    *covariates,
+                    *effect_modifiers,
+                ]
+                if column == negative_control_outcome_col
+            }
+        )
+        if negative_control_overlap:
+            issues.append(
+                _issue(
+                    severity="FAIL",
+                    message=(
+                        "Negative-control outcome column must be different from treatment, "
+                        "outcome, identifier, covariate, and effect modifier columns."
+                    ),
+                    evidence={
+                        "negative_control_outcome_col": negative_control_outcome_col,
+                        "overlap_columns": negative_control_overlap,
+                    },
+                    fix_hint=(
+                        "Choose an outcome-like column that should not be affected by the "
+                        "treatment and is not already used in another causal role."
+                    ),
+                )
+            )
 
     cov_duplicates = _find_duplicates(list(causal_spec.covariates))
     if cov_duplicates:
@@ -355,11 +465,7 @@ def _validate_causal_spec(
         )
 
     identifier_overlap = sorted(
-        {
-            column
-            for column in covariates + effect_modifiers
-            if column == identifier_col
-        }
+        {column for column in covariates + effect_modifiers if column == identifier_col}
     )
     if identifier_overlap:
         issues.append(
@@ -418,7 +524,8 @@ def _validate_identifier_column(
     duplicate_count = int(duplicate_mask.sum())
     if duplicate_count > 0:
         duplicate_values = [
-            str(value) for value in non_missing.loc[duplicate_mask].astype(str).unique().tolist()[:10]
+            str(value)
+            for value in non_missing.loc[duplicate_mask].astype(str).unique().tolist()[:10]
         ]
         issues.append(
             _issue(
@@ -518,10 +625,15 @@ def _validate_treatment_column(
             )
         )
 
-    if min_arm_share < 0.20:
+    if min_arm_share < _TREATMENT_ARM_SHARE_WARN_THRESHOLD:
+        severity: Literal["WARN", "FAIL"] = (
+            "FAIL"
+            if min_arm_share < _TREATMENT_ARM_SHARE_FAIL_THRESHOLD
+            else "WARN"
+        )
         issues.append(
             _issue(
-                severity="FAIL",
+                severity=severity,
                 message=(
                     "Treatment-arm imbalance detected."
                     if experiment_type == "RCT"
@@ -532,6 +644,8 @@ def _validate_treatment_column(
                     "treated_count": treated_count,
                     "control_count": control_count,
                     "min_arm_share": min_arm_share,
+                    "fail_threshold": _TREATMENT_ARM_SHARE_FAIL_THRESHOLD,
+                    "warn_threshold": _TREATMENT_ARM_SHARE_WARN_THRESHOLD,
                 },
                 fix_hint="Consider broader inclusion criteria or a different treatment definition.",
             )
@@ -717,6 +831,7 @@ def _validate_transform_plan(
     identifier_col: str,
     treatment_col: str,
     outcome_col: str,
+    negative_control_outcome_col: str | None,
 ) -> list[ValidationIssueModel]:
     issues: list[ValidationIssueModel] = []
 
@@ -751,9 +866,10 @@ def _validate_transform_plan(
     plan_set = set(plan_columns)
     eligible_set = set(eligible_cols)
 
-    illegal_columns = sorted(
-        plan_set.intersection({treatment_col, outcome_col, identifier_col})
-    )
+    protected_columns = {treatment_col, outcome_col, identifier_col}
+    if negative_control_outcome_col:
+        protected_columns.add(negative_control_outcome_col)
+    illegal_columns = sorted(plan_set.intersection(protected_columns))
     if illegal_columns:
         protected_labels: list[str] = []
         for column in illegal_columns:
@@ -763,13 +879,23 @@ def _validate_transform_plan(
                 protected_labels.append(f"{column} (treatment)")
             elif column == outcome_col:
                 protected_labels.append(f"{column} (outcome)")
+            elif column == negative_control_outcome_col:
+                protected_labels.append(f"{column} (negative-control outcome)")
             else:
                 protected_labels.append(column)
+        protected_role_text = (
+            "identifier, treatment, outcome, or negative-control outcome columns"
+            if (
+                negative_control_outcome_col
+                and negative_control_outcome_col in illegal_columns
+            )
+            else "identifier, treatment, or outcome columns"
+        )
         issues.append(
             _issue(
                 severity="FAIL",
                 message=(
-                    f"Transform plan must not include identifier, treatment, or outcome columns, "
+                    f"Transform plan must not include {protected_role_text}, "
                     f"but found: {', '.join(protected_labels)}."
                 ),
                 evidence={"illegal_columns": illegal_columns},
@@ -786,8 +912,7 @@ def _validate_transform_plan(
             _issue(
                 severity="FAIL",
                 message=(
-                    f"Transform plan is missing eligible columns: "
-                    f"{', '.join(missing_columns)}."
+                    f"Transform plan is missing eligible columns: " f"{', '.join(missing_columns)}."
                 ),
                 evidence={"missing_columns": missing_columns},
                 fix_hint=(
@@ -882,7 +1007,7 @@ def _validate_transform_plan(
         return issues
 
     try:
-        compile_plan_to_transformers(
+        compiled_transformers = compile_plan_to_transformers(
             plan=transform_plan,
             effect_modifiers=effect_modifiers,
             covariates=covariates,
@@ -898,8 +1023,467 @@ def _validate_transform_plan(
                 fix_hint="Review and adjust the transform plan so it compiles into sklearn transformers cleanly.",
             )
         )
+        return issues
+
+    transformer_issues = _validate_compiled_transformers_against_data(
+        dataframe=dataframe,
+        compiled_transformers=compiled_transformers,
+        effect_modifiers=effect_modifiers,
+        covariates=covariates,
+    )
+    issues.extend(transformer_issues)
+
+    if effect_modifiers and not any(issue.severity == "FAIL" for issue in transformer_issues):
+        issues.extend(
+            _validate_linear_effect_modifier_inference_matrix(
+                dataframe=dataframe,
+                transform_plan=transform_plan,
+                effect_modifiers=effect_modifiers,
+                covariates=covariates,
+            )
+        )
 
     return issues
+
+
+def _validate_propensity_overlap(
+    *,
+    dataframe: pd.DataFrame,
+    treatment_spec: BinaryTreatmentSpecModel,
+    transform_plan: TransformPlan | None,
+    covariates: list[str],
+    effect_modifiers: list[str],
+    metrics: dict[str, Any],
+    blocking_issues: list[ValidationIssueModel],
+) -> list[ValidationIssueModel]:
+    xw_columns = [*effect_modifiers, *covariates]
+    if not xw_columns or transform_plan is None:
+        return []
+    if any(issue.severity == "FAIL" for issue in blocking_issues):
+        return []
+
+    treatment_col = str(treatment_spec.column)
+    if treatment_col not in dataframe.columns:
+        return []
+    if any(column not in dataframe.columns for column in xw_columns):
+        return []
+
+    try:
+        compiled_transformers = compile_plan_to_transformers(
+            plan=transform_plan,
+            effect_modifiers=effect_modifiers,
+            covariates=covariates,
+            dense_output=True,
+            require_full_coverage=True,
+        )
+        raw_xw = dataframe.loc[:, xw_columns].to_numpy(dtype=object)
+        transformed_xw = compiled_transformers.pre_XW.fit_transform(raw_xw)
+        X = _as_2d_float_array(transformed_xw)
+        if X.shape[0] == 0 or X.shape[1] == 0:
+            return []
+        if X.shape[0] != len(dataframe):
+            raise ValueError(
+                "transformed adjustment matrix row count does not match dataframe row count"
+            )
+        if not np.isfinite(X).all():
+            raise ValueError("transformed adjustment matrix contains non-finite values")
+
+        y = _encode_binary_treatment_for_overlap(dataframe[treatment_col], treatment_spec)
+        if y.shape[0] != X.shape[0]:
+            raise ValueError("encoded treatment row count does not match adjustment matrix")
+        if np.unique(y).shape[0] != 2:
+            return []
+
+        propensity_model = LogisticRegression(max_iter=1000, solver="lbfgs")
+        propensity_model.fit(X, y)
+        propensities = np.asarray(propensity_model.predict_proba(X)[:, 1], dtype=float)
+        if propensities.shape[0] != y.shape[0]:
+            raise ValueError("propensity model returned an unexpected number of scores")
+        if not np.isfinite(propensities).all():
+            raise ValueError("propensity model returned non-finite scores")
+
+    except Exception as exc:
+        metrics["overlap"] = {
+            "status": "unavailable",
+            "reason": repr(exc),
+            "source_columns": xw_columns,
+        }
+        return [
+            _issue(
+                severity="WARN",
+                message="Propensity-score overlap diagnostics could not be computed.",
+                evidence={
+                    "error": repr(exc),
+                    "source_columns": xw_columns,
+                },
+                fix_hint=(
+                    "Inspect the treatment encoding and adjustment-feature transform plan. "
+                    "The causal model can still be validated by the other deterministic checks."
+                ),
+            )
+        ]
+
+    overlap_metrics = _build_overlap_metrics(
+        propensities=propensities,
+        treatment=y,
+        source_columns=xw_columns,
+        encoded_feature_count=int(X.shape[1]),
+    )
+    metrics["overlap"] = overlap_metrics
+
+    weak_overlap = overlap_metrics["weak_overlap"]
+    if int(weak_overlap["overall_count"]) == 0:
+        return []
+
+    return [
+        _issue(
+            severity="WARN",
+            message="Propensity-score overlap diagnostics found weak common support.",
+            evidence={
+                "thresholds": overlap_metrics["thresholds"],
+                "weak_overlap": weak_overlap,
+                "common_support": overlap_metrics["common_support"],
+            },
+            fix_hint=(
+                "Rows with propensities near 0 or 1 have limited treated/control comparability. "
+                "Review inclusion criteria, treatment definition, and sparse adjustment features "
+                "before relying on causal estimates in those regions."
+            ),
+        )
+    ]
+
+
+def _as_2d_float_array(value: Any) -> np.ndarray:
+    arr = value.toarray() if hasattr(value, "toarray") else np.asarray(value)
+    arr = np.asarray(arr, dtype=float)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    if arr.ndim != 2:
+        raise ValueError(f"expected 2D transformed matrix, got ndim={arr.ndim}")
+    return arr
+
+
+def _encode_binary_treatment_for_overlap(
+    series: pd.Series,
+    treatment_spec: BinaryTreatmentSpecModel,
+) -> np.ndarray:
+    treated_key = _normalize_discrete_value(treatment_spec.treated)
+    control_key = _normalize_discrete_value(treatment_spec.control)
+    encoded: list[int] = []
+    for value in series.tolist():
+        key = _normalize_discrete_value(value)
+        if key == treated_key:
+            encoded.append(1)
+        elif key == control_key:
+            encoded.append(0)
+        else:
+            raise ValueError(f"unexpected treatment value for overlap diagnostics: {value!r}")
+    return np.asarray(encoded, dtype=int)
+
+
+def _build_overlap_metrics(
+    *,
+    propensities: np.ndarray,
+    treatment: np.ndarray,
+    source_columns: list[str],
+    encoded_feature_count: int,
+) -> dict[str, Any]:
+    lower = _OVERLAP_PROPENSITY_LOWER
+    upper = _OVERLAP_PROPENSITY_UPPER
+    treated_mask = treatment == 1
+    control_mask = treatment == 0
+    weak_mask = (propensities < lower) | (propensities > upper)
+    treated_propensities = propensities[treated_mask]
+    control_propensities = propensities[control_mask]
+
+    common_lower = float(max(np.min(treated_propensities), np.min(control_propensities)))
+    common_upper = float(min(np.max(treated_propensities), np.max(control_propensities)))
+    common_width = max(common_upper - common_lower, 0.0)
+
+    metrics: dict[str, Any] = {
+        "status": "computed",
+        "method": "logistic_regression",
+        "thresholds": {"lower": lower, "upper": upper},
+        "source_columns": source_columns,
+        "encoded_feature_count": encoded_feature_count,
+        "n_rows_used": int(propensities.shape[0]),
+        "n_treated": int(treated_mask.sum()),
+        "n_control": int(control_mask.sum()),
+        "propensity": {
+            "overall": _summarize_propensity(propensities),
+            "treated": _summarize_propensity(treated_propensities),
+            "control": _summarize_propensity(control_propensities),
+        },
+        "weak_overlap": {
+            "overall_count": int(weak_mask.sum()),
+            "overall_rate": _safe_rate(int(weak_mask.sum()), int(propensities.shape[0])),
+            "treated_count": int((weak_mask & treated_mask).sum()),
+            "treated_rate": _safe_rate(
+                int((weak_mask & treated_mask).sum()),
+                int(treated_mask.sum()),
+            ),
+            "control_count": int((weak_mask & control_mask).sum()),
+            "control_rate": _safe_rate(
+                int((weak_mask & control_mask).sum()),
+                int(control_mask.sum()),
+            ),
+        },
+        "common_support": {
+            "lower": common_lower,
+            "upper": common_upper,
+            "width": common_width,
+            "has_overlap": common_lower <= common_upper,
+        },
+    }
+
+    with suppress(Exception):
+        metrics["auc"] = float(roc_auc_score(treatment, propensities))
+
+    return metrics
+
+
+def _summarize_propensity(values: np.ndarray) -> dict[str, Any]:
+    if values.size == 0:
+        return {
+            "min": None,
+            "max": None,
+            "mean": None,
+            "quantiles": {},
+        }
+    return {
+        "min": float(np.min(values)),
+        "max": float(np.max(values)),
+        "mean": float(np.mean(values)),
+        "quantiles": {
+            f"{quantile:.2f}": float(np.quantile(values, quantile))
+            for quantile in _OVERLAP_QUANTILES
+        },
+    }
+
+
+def _safe_rate(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return float(numerator / denominator)
+
+
+def _validate_linear_effect_modifier_inference_matrix(
+    *,
+    dataframe: pd.DataFrame,
+    transform_plan: TransformPlan,
+    effect_modifiers: list[str],
+    covariates: list[str],
+) -> list[ValidationIssueModel]:
+    try:
+        compiled_transformers = compile_plan_to_transformers(
+            plan=transform_plan,
+            effect_modifiers=effect_modifiers,
+            covariates=covariates,
+            dense_output=True,
+            require_full_coverage=True,
+            drop_first_effect_modifier_onehot=True,
+        )
+        if compiled_transformers.pre_X is None:
+            return []
+
+        raw = dataframe.loc[:, effect_modifiers].to_numpy(dtype=object)
+        transformed = compiled_transformers.pre_X.fit_transform(raw)
+        arr = transformed.toarray() if hasattr(transformed, "toarray") else np.asarray(transformed)
+        arr = np.asarray(arr, dtype="float64")
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        if arr.shape[0] == 0 or arr.shape[1] == 0:
+            return []
+        if not np.isfinite(arr).all():
+            return []
+
+        feature_names = _safe_feature_names(compiled_transformers.pre_X) or [
+            f"encoded_feature_{index}" for index in range(arr.shape[1])
+        ]
+        duplicate_groups: list[list[str]] = []
+        seen: dict[bytes, list[int]] = {}
+        for index in range(arr.shape[1]):
+            key = np.ascontiguousarray(arr[:, index]).tobytes()
+            seen.setdefault(key, []).append(index)
+        for group in seen.values():
+            if len(group) > 1:
+                duplicate_groups.append(
+                    [
+                        (
+                            feature_names[index]
+                            if index < len(feature_names)
+                            else f"encoded_feature_{index}"
+                        )
+                        for index in group
+                    ]
+                )
+
+        design = np.column_stack([np.ones(arr.shape[0], dtype="float64"), arr])
+        parameter_count = int(design.shape[1])
+        matrix_rank = int(np.linalg.matrix_rank(design))
+    except Exception:
+        return []
+
+    if not duplicate_groups and matrix_rank >= parameter_count:
+        return []
+
+    return [
+        _issue(
+            severity="WARN",
+            message=(
+                "Encoded effect modifiers are rank-deficient for linear final-stage inference. "
+                "Point estimates may still train, but confidence intervals, standard errors, "
+                "and p-values from linear DR/DML models may be invalid."
+            ),
+            evidence={
+                "source_effect_modifiers": effect_modifiers,
+                "encoded_feature_count": int(arr.shape[1]),
+                "intercept_augmented_parameter_count": parameter_count,
+                "matrix_rank": matrix_rank,
+                "duplicate_encoded_feature_groups": duplicate_groups[:20],
+            },
+            fix_hint=(
+                "If confidence intervals are required, simplify or recode duplicate effect "
+                "modifiers, or choose a model whose inference method does not rely on this "
+                "linear design matrix."
+            ),
+        )
+    ]
+
+
+def _validate_compiled_transformers_against_data(
+    *,
+    dataframe: pd.DataFrame,
+    compiled_transformers: Any,
+    effect_modifiers: list[str],
+    covariates: list[str],
+) -> list[ValidationIssueModel]:
+    issues: list[ValidationIssueModel] = []
+
+    if effect_modifiers and compiled_transformers.pre_X is not None:
+        issues.extend(
+            _fit_transform_and_validate_numeric(
+                dataframe=dataframe,
+                transformer=compiled_transformers.pre_X,
+                columns=effect_modifiers,
+                label="effect-modifier matrix X",
+            )
+        )
+
+    xw_columns = [*effect_modifiers, *covariates]
+    issues.extend(
+        _fit_transform_and_validate_numeric(
+            dataframe=dataframe,
+            transformer=compiled_transformers.pre_XW,
+            columns=xw_columns,
+            label="adjustment matrix XW",
+        )
+    )
+    return issues
+
+
+def _fit_transform_and_validate_numeric(
+    *,
+    dataframe: pd.DataFrame,
+    transformer: Any,
+    columns: list[str],
+    label: str,
+) -> list[ValidationIssueModel]:
+    if not columns:
+        return []
+
+    raw = dataframe.loc[:, columns].to_numpy(dtype=object)
+    try:
+        transformed = transformer.fit_transform(raw)
+    except Exception as exc:
+        return [
+            _issue(
+                severity="FAIL",
+                message=f"Transform plan failed fitting against compiled data for {label}.",
+                evidence={
+                    "columns": columns,
+                    "error": repr(exc),
+                    "sample_input_rows": _sample_rows(dataframe.loc[:, columns]),
+                },
+                fix_hint=(
+                    "Choose transform presets that can fit the actual compiled values. "
+                    "Use categorical encodings or explicit mappings for text values such as Yes/No."
+                ),
+            )
+        ]
+
+    return _validate_transformed_matrix_numeric(
+        matrix=transformed,
+        label=label,
+        columns=columns,
+        transformer=transformer,
+    )
+
+
+def _validate_transformed_matrix_numeric(
+    *,
+    matrix: Any,
+    label: str,
+    columns: list[str],
+    transformer: Any,
+) -> list[ValidationIssueModel]:
+    arr = matrix.toarray() if hasattr(matrix, "toarray") else np.asarray(matrix)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+
+    frame = pd.DataFrame(arr)
+    numeric = frame.apply(pd.to_numeric, errors="coerce")
+    invalid = frame.notna() & numeric.isna()
+    if not bool(invalid.to_numpy().any()):
+        return []
+
+    feature_names = _safe_feature_names(transformer)
+    invalid_values: list[dict[str, Any]] = []
+    for row_index, col_index in zip(*np.where(invalid.to_numpy()), strict=False):
+        col_pos = int(col_index)
+        invalid_values.append(
+            {
+                "row": int(row_index),
+                "feature": (
+                    feature_names[col_pos]
+                    if feature_names is not None and col_pos < len(feature_names)
+                    else col_pos
+                ),
+                "value": str(frame.iat[int(row_index), col_pos]),
+            }
+        )
+        if len(invalid_values) >= 10:
+            break
+
+    return [
+        _issue(
+            severity="FAIL",
+            message=f"Transform plan produced non-numeric model inputs for {label}.",
+            evidence={
+                "source_columns": columns,
+                "invalid_values_sample": invalid_values,
+            },
+            fix_hint=(
+                "All transformed model inputs must be numeric before training. "
+                "Replace passthrough or numeric presets on text values with cat_onehot, "
+                "map_binary, or map_ordinal as appropriate."
+            ),
+        )
+    ]
+
+
+def _safe_feature_names(transformer: Any) -> list[str] | None:
+    try:
+        return [str(name) for name in transformer.get_feature_names_out()]
+    except Exception:
+        return None
+
+
+def _sample_rows(dataframe: pd.DataFrame, *, limit: int = 5) -> list[dict[str, str]]:
+    return [
+        {str(column): str(value) for column, value in row.items()}
+        for row in dataframe.head(limit).to_dict(orient="records")
+    ]
 
 
 def _validate_encoding_semantics(

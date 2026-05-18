@@ -16,7 +16,7 @@ from sklearn.ensemble import (
     RandomForestClassifier,
     RandomForestRegressor,
 )
-from sklearn.linear_model import LogisticRegressionCV, RidgeCV
+from sklearn.linear_model import LogisticRegression, RidgeCV
 from sklearn.pipeline import Pipeline
 
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
@@ -74,7 +74,7 @@ def _normalize_model_spec_to_wrapped_list(
                 random_state=random_state,
                 max_depth=None,
                 learning_rate=0.05,
-                max_iter=400,
+                max_iter=4000,
                 early_stopping=True,
             )
             return [_wrap_with_pre(pre_XW=pre_XW, model=hgb, require_dense=True)]
@@ -83,7 +83,7 @@ def _normalize_model_spec_to_wrapped_list(
             random_state=random_state,
             max_depth=None,
             learning_rate=0.05,
-            max_iter=400,
+            max_iter=4000,
             early_stopping=True,
         )
         return [_wrap_with_pre(pre_XW=pre_XW, model=hgb, require_dense=True)]
@@ -93,10 +93,13 @@ def _normalize_model_spec_to_wrapped_list(
             return build_boosting_candidates_nan_safe()
 
         if is_discrete:
-            lr = LogisticRegressionCV(
-                max_iter=2000,
-                solver="lbfgs",
-                n_jobs=n_jobs,
+            lr = LogisticRegression(
+                penalty="l2",
+                solver="saga",
+                max_iter=10000,
+                C=0.1,
+                class_weight="balanced",
+                n_jobs=n_jobs if n_jobs is not None else -1,
                 random_state=random_state,
             )
             return [_wrap_with_pre(pre_XW=pre_XW, model=lr, require_dense=False)]

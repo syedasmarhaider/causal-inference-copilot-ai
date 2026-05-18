@@ -9,8 +9,8 @@ Backend service for AitiaMed's causal inference copilot. The app exposes an auth
 - Framework: FastAPI (`python.adapters.api.app:app`)
 - Runtime: Python 3.11
 - Workflow engine: Node/state pipeline with LLM-assisted routing
-- Storage: Firebase Realtime Database + Google Cloud Storage
-- Auth: Firebase Bearer tokens for all `/v1/*` endpoints
+- Storage: Firebase Realtime Database + Google Cloud Storage, or local files with `USE_LOCAL_FILES=True`
+- Auth: Firebase Bearer tokens, or a configured local bearer token with `USE_LOCAL_FILES=True`
 - Architecture: Clean Architecture with Domain-Driven Design (DDD) boundaries
 
 ## Repository Layout
@@ -57,6 +57,7 @@ cp .env.example .env
 - `FIREBASE_DATABASE_URL`
 - `GCS_MODELS_BUCKET_NAME`
 - `GCS_DATA_BUCKET_NAME`
+- `ID_TOKEN` when `USE_LOCAL_FILES=True`
 - `GEMINI_API_KEY` (or other configured provider credentials)
 
 4. Run the API locally:
@@ -86,13 +87,21 @@ Use `make help` to print the full list. Core commands:
 - `make docker-push`: build and push Docker image
 - `make clean`: remove venv and cache artifacts
 
+## Local Mode
+
+`make run-api-local` sources `.env`. When `USE_LOCAL_FILES=True`, the API uses local filesystem backends for workflow state, datasets, models, and auth instead of Firebase/GCS.
+
+- Set `ID_TOKEN` in `.env` and call authenticated endpoints with `Authorization: Bearer <ID_TOKEN>`.
+- Workflow state is stored at `.local_storage/workflow_state.json`.
+- Delete `.local_storage/workflow_state.json` to clear local conversations and workflow state.
+
 ## API Surface
 
 Public:
 
 - `GET /healthz`
 
-Authenticated (`Authorization: Bearer <firebase_id_token>`):
+Authenticated (`Authorization: Bearer <firebase_id_token>`; in local mode use `Authorization: Bearer <ID_TOKEN>`):
 
 - `GET /v1/conversations`
 - `POST /v1/conversations`
@@ -260,6 +269,8 @@ Defined in `.env.example`:
 - `LANGFUSE_PUBLIC_KEY`
 - `LANGFUSE_BASE_URL`
 - `LANGFUSE_DEBUG`
+- `USE_LOCAL_FILES`
+- `ID_TOKEN`
 - `GOOGLE_CLOUD_PROJECT_ID`
 - `FIREBASE_DATABASE_URL`
 - `GCS_MODELS_BUCKET_NAME`

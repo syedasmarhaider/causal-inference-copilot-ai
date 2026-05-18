@@ -5,8 +5,9 @@ def get_model_train_node_info() -> str:
     return (
         "Training stage for fitting the confirmed selected model against the compiled "
         "dataset using the confirmed causal specification and transformation plan. It "
-        "runs directly from the confirmed setup and publishes the fitted model id after "
-        "successful training."
+        "runs directly from the confirmed setup, optionally runs CATE negative-control "
+        "refutation when a negative-control outcome is available, and publishes the "
+        "fitted model id after successful training."
     )
 
 

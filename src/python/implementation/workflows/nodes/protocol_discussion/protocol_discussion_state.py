@@ -8,16 +8,15 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from python.domain.workflows.node_state import NodeState
 from python.implementation.workflows.utils.utils import uuid_from_any
 
-ProtocolDiscussionPhase = Literal["DISCUSSING", "REVIEW_READY", "CONFIRMED"]
+ProtocolDiscussionStatus = Literal["DISCUSSING", "REVIEW", "READY"]
 
 
 class ProtocolDiscussionPayloadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     dataset_id: UUID | None = None
-    discussion: str = ""
-    phase: ProtocolDiscussionPhase = "DISCUSSING"
-    pending_dataset_change_request: str | None = None
+    protocol_discussion: str = ""
+    status: ProtocolDiscussionStatus = "DISCUSSING"
     assistant_message: str | None = None
 
     @field_validator("dataset_id", mode="before")
@@ -25,14 +24,18 @@ class ProtocolDiscussionPayloadModel(BaseModel):
     def _parse_dataset_id(cls, value: Any) -> UUID | None:
         return uuid_from_any(value)
 
-    @field_validator(
-        "discussion",
-        "pending_dataset_change_request",
-        "assistant_message",
-        mode="before",
-    )
+    @field_validator("protocol_discussion", mode="before")
     @classmethod
-    def _normalize_text(cls, value: Any) -> str | None:
+    def _normalize_protocol_discussion(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        raise TypeError("protocol_discussion must be str|null")
+
+    @field_validator("assistant_message", mode="before")
+    @classmethod
+    def _normalize_optional_text(cls, value: Any) -> str | None:
         if value is None:
             return None
         if isinstance(value, str):
@@ -66,6 +69,6 @@ class ProtocolDiscussionState(NodeState):
 
 __all__ = [
     "ProtocolDiscussionPayloadModel",
-    "ProtocolDiscussionPhase",
     "ProtocolDiscussionState",
+    "ProtocolDiscussionStatus",
 ]

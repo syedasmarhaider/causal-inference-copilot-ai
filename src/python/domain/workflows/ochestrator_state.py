@@ -5,27 +5,36 @@ from abc import ABC, abstractmethod
 from typing import Any
 from uuid import UUID
 
+
 class OchestratorState(ABC):
     @abstractmethod
     def name(self) -> str:
         raise NotImplementedError
-   
+
+    @abstractmethod
+    def get_update_counter(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_update_counter(self, value: int) -> None:
+        raise NotImplementedError
+
     @abstractmethod
     def get(self, key: str) -> Any:
-     raise NotImplementedError
-    
+        raise NotImplementedError
+
     @abstractmethod
     def set(self, key: str, value: dict[str, Any]) -> None:
         raise NotImplementedError
-    
+
     @abstractmethod
     def get_current_node_name(self) -> str:
-        raise NotImplementedError      
+        raise NotImplementedError
 
     @abstractmethod
     def get_current_node_companion_names(self, node_name: str) -> list[str]:
         raise NotImplementedError
-       
+
     @abstractmethod
     def get_completed_and_last_pending_nodes(self) -> list[str]:
         raise NotImplementedError
@@ -41,11 +50,11 @@ class OchestratorState(ABC):
     @abstractmethod
     def roll_back_to_state(self, state_name: str) -> None:
         raise NotImplementedError
-    
+
     @abstractmethod
     def get_working_dataset_id_and_frozen_status(self) -> tuple[UUID | None, bool]:
         raise NotImplementedError
-    
+
     @abstractmethod
     def get_ochestration_prompt(self) -> str:
         raise NotImplementedError
@@ -63,16 +72,3 @@ class OchestratorState(ABC):
     @abstractmethod
     def init_empty(cls) -> OchestratorState:
         raise NotImplementedError
-
-   
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    

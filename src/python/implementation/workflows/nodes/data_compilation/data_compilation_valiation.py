@@ -114,6 +114,16 @@ def _protocol_scope_missingness_issues(
     role_by_column: list[tuple[str, str]] = [
         (str(causal_spec.treatment_spec.column).strip(), "treatment"),
         (str(causal_spec.outcome_spec.column).strip(), "outcome"),
+        *(
+            [
+                (
+                    str(causal_spec.negative_control_outcome.column).strip(),
+                    "negative_control_outcome",
+                )
+            ]
+            if causal_spec.negative_control_outcome is not None
+            else []
+        ),
         *((str(column).strip(), "covariate") for column in causal_spec.covariates),
         *((str(column).strip(), "effect_modifier") for column in causal_spec.effect_modifiers),
     ]

@@ -1,6 +1,24 @@
 from __future__ import annotations
 
 
+def data_statistics_advanced_analytics_request_prompt() -> str:
+    return """
+Resolved advanced analytics request:
+{resolved_request}
+
+Resolve the formal statistical analysis from the latest user message and recent history below.
+For propensity-score estimation, identify exactly one treatment column and the covariate columns
+from this context. Use the row-level working dataset for estimation; do not treat descriptive
+summaries, grouped tables, or other aggregate outputs as propensity-score preprocessing.
+
+Latest user message:
+{latest_user_message}
+
+Recent history:
+{chat_history}
+""".strip()
+
+
 def data_statistics_node_info() -> str:
     return (
         "Data statistics stage. Uses the working dataset provided by orchestrator "
@@ -36,6 +54,9 @@ General rules:
 - Use chat_history to resolve short follow-ups, pronouns, ellipsis, or vague turns.
 - If the user asks for correlations, descriptive stats, summaries, comparisons, etc., set intent_analytics to true — NOT intent_advanced_analytics.
 - If the user asks for a chart of correlations, set both intent_analytics and intent_chart to true.
+- Do NOT set intent_analytics merely because the user names treatment, outcome, or covariate
+  columns for a propensity-score request. Propensity-score input selection belongs to
+  intent_advanced_analytics unless the user also asks for a separate SQL-expressible result.
 - Requests to clean the dataset, rename columns permanently, rewrite values permanently, save a transformed dataset as the new active dataset, revert dataset versions, or proceed to downstream causal/model workflow stages are out of scope here.
 - If the user mixes in-scope work with out-of-scope requests, keep the in-scope intents and set intent_out_of_scope to false.
 - If the request is only out of scope, set intent_out_of_scope to true and all other intents to false.
@@ -84,6 +105,7 @@ Guidelines:
 
 
 __all__ = [
+    "data_statistics_advanced_analytics_request_prompt",
     "data_statistics_final_response_system_prompt",
     "data_statistics_intent_classification_system_prompt",
     "data_statistics_node_info",

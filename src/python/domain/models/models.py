@@ -1,7 +1,7 @@
-from datetime import timezone, datetime
+from datetime import datetime, timezone
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -14,6 +14,10 @@ MessageRole = Literal["user", "assistant", "system"]
 
 ArtifactKind = Literal["graph", "data"]
 ArtifactFormat = Literal["json", "csv"]
+
+
+def utc_now() -> float:
+    return datetime.now(timezone.utc).timestamp()
 
 
 class _ArtifactRefBase(TypedDict):
@@ -41,6 +45,7 @@ class ChatMessage:
     artifact_refs: Sequence[ArtifactRef] | None = None
     artifacts: Sequence[ArtifactPayload] | None = None
     id: str | None = None
+    created_at_utc: float = field(default_factory=utc_now)
 
     @property
     def message(self) -> str:
@@ -63,6 +68,3 @@ def get_chat_messages_role_and_message_json(messages: Sequence[ChatMessage]) -> 
 class WorkingDatasetInfo:
     dataset_id: UUID
     is_freezed: bool
-
-def utc_now():
-    return datetime.now(timezone.utc).timestamp()

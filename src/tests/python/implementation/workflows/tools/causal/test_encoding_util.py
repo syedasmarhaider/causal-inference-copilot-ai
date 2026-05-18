@@ -84,6 +84,84 @@ def test_compile_respects_requested_feature_order_even_when_plan_order_differs()
     ]
 
 
+def test_compile_drop_first_effect_modifier_onehot_only_changes_pre_x() -> None:
+    plan = _plan(
+        {
+            "column": "segment",
+            "role": "effect_modifier",
+            "encoding": {"preset": "cat_onehot", "handle_unknown": "ignore"},
+        },
+        {
+            "column": "age",
+            "role": "covariate",
+            "encoding": {"preset": "passthrough"},
+        },
+    )
+    x = np.asarray([["A"], ["B"], ["A"]], dtype=object)
+    xw = np.asarray([["A", 10.0], ["B", 20.0], ["A", 30.0]], dtype=object)
+
+    default_compiled = compile_plan_to_transformers(
+        plan=plan,
+        effect_modifiers=["segment"],
+        covariates=["age"],
+        dense_output=True,
+        require_full_coverage=True,
+    )
+    default_x = default_compiled.pre_X.fit_transform(x)  # type: ignore[union-attr]
+
+    drop_first_compiled = compile_plan_to_transformers(
+        plan=plan,
+        effect_modifiers=["segment"],
+        covariates=["age"],
+        dense_output=True,
+        require_full_coverage=True,
+        drop_first_effect_modifier_onehot=True,
+    )
+    drop_first_x = drop_first_compiled.pre_X.fit_transform(x)  # type: ignore[union-attr]
+    drop_first_xw = drop_first_compiled.pre_XW.fit_transform(xw)
+
+    assert default_x.shape == (3, 2)
+    assert drop_first_x.shape == (3, 1)
+    assert drop_first_xw.shape == (3, 3)
+    assert plan.columns[0].encoding.drop_first is False  # type: ignore[attr-defined]
+
+
+def test_compile_linear_pre_x_casts_numeric_passthrough_to_float64() -> None:
+    plan = _plan(
+        {
+            "column": "segment",
+            "role": "effect_modifier",
+            "encoding": {"preset": "cat_onehot", "handle_unknown": "ignore"},
+        },
+        {
+            "column": "age",
+            "role": "effect_modifier",
+            "encoding": {"preset": "passthrough"},
+        },
+        {
+            "column": "income",
+            "role": "covariate",
+            "encoding": {"preset": "passthrough"},
+        },
+    )
+
+    compiled = compile_plan_to_transformers(
+        plan=plan,
+        effect_modifiers=["segment", "age"],
+        covariates=["income"],
+        dense_output=True,
+        require_full_coverage=True,
+        drop_first_effect_modifier_onehot=True,
+    )
+
+    x = np.asarray([["A", 72], ["B", 65], ["A", 80]], dtype=object)
+    x_tx = compiled.pre_X.fit_transform(x)  # type: ignore[union-attr]
+
+    assert x_tx.dtype == np.float64
+    assert x_tx.shape == (3, 2)
+    assert x_tx[:, 1].tolist() == [72.0, 65.0, 80.0]
+
+
 def test_compile_rejects_all_dropped_active_view() -> None:
     plan = _plan(
         {

@@ -9,13 +9,13 @@ from uuid import UUID, uuid4
 import pytest
 
 import python.implementation.repo.firebase_realtime_workflow_state_repo as repo_module
+from python.domain.models.errors import StateConflictError
 from python.domain.models.models import ChatMessage
 from python.domain.workflows.node_state import NodeState
 from python.domain.workflows.ochestrator_state import OchestratorState
 from python.implementation.repo.firebase_realtime_workflow_state_repo import (
     FirebaseRealtimeWorkflowStateRepo,
 )
-
 
 # -----------------------------------------------------------------------
 # Fake Firebase RTDB (in-memory)
@@ -64,6 +64,11 @@ class _FakeRTDBRef:
                 _delete_value(self.db.tree, update_parts)
             else:
                 _set_value(self.db.tree, update_parts, value)
+
+    def transaction(self, update_fn: Any) -> Any:
+        next_value = update_fn(self.get())
+        self.set(next_value)
+        return next_value
 
     def delete(self) -> None:
         _delete_value(self.db.tree, self.parts)
@@ -191,11 +196,52 @@ class _DemoOchestratorState(OchestratorState):
     def name(self) -> str:
         return "DEMO_OCHESTRATOR"
 
+    def get_update_counter(self) -> int:
+        value = self._data.get("update_counter", 0)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("update_counter must be a non-negative integer")
+        if value < 0:
+            raise ValueError("update_counter must be a non-negative integer")
+        return value
+
+    def set_update_counter(self, value: int) -> None:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("update_counter must be a non-negative integer")
+        if value < 0:
+            raise ValueError("update_counter must be a non-negative integer")
+        self._data["update_counter"] = value
+
     def get(self, key: str) -> Any:
         return self._data.get(key)
 
     def set(self, key: str, value: dict[str, Any]) -> None:
         self._data[key] = value
+
+    def get_current_node_name(self) -> str:
+        return "DEMO_NODE"
+
+    def get_current_node_companion_names(self, node_name: str) -> list[str]:
+        del node_name
+        return []
+
+    def get_completed_and_last_pending_nodes(self) -> list[str]:
+        return []
+
+    def rocover_failure(self, current_failed_node: str) -> None:
+        del current_failed_node
+
+    def get_forward_states_after_node(self, node_name: str) -> list[str]:
+        del node_name
+        return []
+
+    def roll_back_to_state(self, state_name: str) -> None:
+        del state_name
+
+    def get_working_dataset_id_and_frozen_status(self) -> tuple[UUID | None, bool]:
+        return None, False
+
+    def get_ochestration_prompt(self) -> str:
+        return ""
 
     def to_json_dict(self) -> dict[str, Any]:
         return dict(self._data)
@@ -216,11 +262,43 @@ class _MismatchOchestratorState(OchestratorState):
     def name(self) -> str:
         return "WRONG_NAME"
 
+    def get_update_counter(self) -> int:
+        return 0
+
+    def set_update_counter(self, value: int) -> None:
+        del value
+
     def get(self, key: str) -> Any:
         return None
 
     def set(self, key: str, value: dict[str, Any]) -> None:
         pass
+
+    def get_current_node_name(self) -> str:
+        return "DEMO_NODE"
+
+    def get_current_node_companion_names(self, node_name: str) -> list[str]:
+        del node_name
+        return []
+
+    def get_completed_and_last_pending_nodes(self) -> list[str]:
+        return []
+
+    def rocover_failure(self, current_failed_node: str) -> None:
+        del current_failed_node
+
+    def get_forward_states_after_node(self, node_name: str) -> list[str]:
+        del node_name
+        return []
+
+    def roll_back_to_state(self, state_name: str) -> None:
+        del state_name
+
+    def get_working_dataset_id_and_frozen_status(self) -> tuple[UUID | None, bool]:
+        return None, False
+
+    def get_ochestration_prompt(self) -> str:
+        return ""
 
     def to_json_dict(self) -> dict[str, Any]:
         return {}
@@ -268,6 +346,23 @@ def _make_repo(
 
 def _ids() -> tuple[UUID, UUID]:
     return uuid4(), uuid4()
+
+
+def _stored_ochestrator_payload(
+    fake_db: _FakeRTDB,
+    *,
+    user_id: UUID,
+    conversation_id: UUID,
+) -> dict[str, Any]:
+    raw = fake_db.reference(
+        f"/workflows/{user_id}/{conversation_id}/ochestrator_state"
+    ).get()
+    assert isinstance(raw, str)
+    envelope = json.loads(raw)
+    assert isinstance(envelope, dict)
+    payload = envelope["payload"]
+    assert isinstance(payload, dict)
+    return payload
 
 
 # -----------------------------------------------------------------------
@@ -359,12 +454,21 @@ def test_is_conversation_id_exists_returns_false_when_missing(
 
 
 def test_store_and_load_ochestrator_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
-    repo, _ = _make_repo(monkeypatch)
+    repo, fake_db = _make_repo(monkeypatch)
     user_id, conversation_id = _ids()
 
     state = _DemoOchestratorState(_data={"key": "value", "count": 42})
     repo.store_ochestrator_state(
         user_id=user_id, conversation_id=conversation_id, state=state
+    )
+    assert state.get_update_counter() == 1
+    assert (
+        _stored_ochestrator_payload(
+            fake_db,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )["update_counter"]
+        == 1
     )
 
     loaded = repo.load_ochestrator_state(
@@ -374,6 +478,125 @@ def test_store_and_load_ochestrator_state_roundtrip(monkeypatch: pytest.MonkeyPa
     assert loaded.name() == "DEMO_OCHESTRATOR"
     assert loaded.get("key") == "value"
     assert loaded.get("count") == 42
+    assert loaded.get_update_counter() == 1
+
+
+def test_store_ochestrator_state_second_save_increments_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fake_db = _make_repo(monkeypatch)
+    user_id, conversation_id = _ids()
+
+    state = _DemoOchestratorState(_data={"key": "value"})
+    repo.store_ochestrator_state(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        state=state,
+    )
+    loaded = repo.load_ochestrator_state(
+        user_id=user_id,
+        conversation_id=conversation_id,
+    )
+    assert isinstance(loaded, _DemoOchestratorState)
+
+    loaded.set("key", {"next": True})
+    repo.store_ochestrator_state(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        state=loaded,
+    )
+
+    assert loaded.get_update_counter() == 2
+    assert (
+        _stored_ochestrator_payload(
+            fake_db,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )["update_counter"]
+        == 2
+    )
+
+
+def test_store_ochestrator_state_stale_counter_raises_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _ = _make_repo(monkeypatch)
+    user_id, conversation_id = _ids()
+
+    first = _DemoOchestratorState(_data={"key": "first"})
+    repo.store_ochestrator_state(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        state=first,
+    )
+
+    stale = _DemoOchestratorState(_data={"key": "stale", "update_counter": 0})
+    with pytest.raises(StateConflictError) as exc_info:
+        repo.store_ochestrator_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state=stale,
+        )
+
+    assert exc_info.value.code == "state_conflict"
+    assert stale.get_update_counter() == 0
+
+
+def test_store_ochestrator_state_legacy_payload_defaults_counter_to_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fake_db = _make_repo(monkeypatch)
+    user_id, conversation_id = _ids()
+    fake_db.reference(
+        f"/workflows/{user_id}/{conversation_id}/ochestrator_state"
+    ).set(json.dumps({"name": "DEMO_OCHESTRATOR", "payload": {"key": "legacy"}}))
+
+    loaded = repo.load_ochestrator_state(
+        user_id=user_id,
+        conversation_id=conversation_id,
+    )
+    assert isinstance(loaded, _DemoOchestratorState)
+    assert loaded.get_update_counter() == 0
+
+    repo.store_ochestrator_state(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        state=loaded,
+    )
+
+    assert loaded.get_update_counter() == 1
+    assert (
+        _stored_ochestrator_payload(
+            fake_db,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )["update_counter"]
+        == 1
+    )
+
+
+def test_store_ochestrator_state_rejects_corrupt_stored_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fake_db = _make_repo(monkeypatch)
+    user_id, conversation_id = _ids()
+    fake_db.reference(
+        f"/workflows/{user_id}/{conversation_id}/ochestrator_state"
+    ).set(
+        json.dumps(
+            {
+                "name": "DEMO_OCHESTRATOR",
+                "payload": {"key": "bad", "update_counter": "1"},
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match=r"payload.update_counter"):
+        repo.store_ochestrator_state(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            state=_DemoOchestratorState(),
+        )
 
 
 def test_load_ochestrator_state_returns_none_when_missing(
@@ -665,33 +888,83 @@ def test_delete_state_validates_name(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_append_and_load_messages(monkeypatch: pytest.MonkeyPatch) -> None:
-    repo, _ = _make_repo(monkeypatch)
+    repo, fake_db = _make_repo(monkeypatch)
     user_id, conversation_id = _ids()
 
     repo.append_messages(
         user_id=user_id,
         conversation_id=conversation_id,
         messages=[
-            ChatMessage(role="system", content="s1"),
-            ChatMessage(role="user", content="u2"),
-            ChatMessage(role="assistant", content="a3"),
+            ChatMessage(role="system", content="s1", created_at_utc=1712345678.1),
+            ChatMessage(role="user", content="u2", created_at_utc=1712345678.2),
+            ChatMessage(role="assistant", content="a3", created_at_utc=1712345678.3),
         ],
     )
     repo.append_message(
         user_id=user_id,
         conversation_id=conversation_id,
-        message=ChatMessage(role="user", content="u4"),
+        message=ChatMessage(role="user", content="u4", created_at_utc=1712345678.4),
     )
 
     history = repo.load_message_history(
         user_id=user_id, conversation_id=conversation_id, limit=2
     )
     assert [msg.content for msg in history] == ["a3", "u4"]
+    assert [msg.created_at_utc for msg in history] == [1712345678.3, 1712345678.4]
 
     all_history = repo.load_message_history(
         user_id=user_id, conversation_id=conversation_id, limit=100
     )
     assert [msg.content for msg in all_history] == ["s1", "u2", "a3", "u4"]
+    assert [msg.created_at_utc for msg in all_history] == [
+        1712345678.1,
+        1712345678.2,
+        1712345678.3,
+        1712345678.4,
+    ]
+
+    unlimited_history = repo.load_message_history(
+        user_id=user_id, conversation_id=conversation_id, limit=None
+    )
+    assert [msg.content for msg in unlimited_history] == ["s1", "u2", "a3", "u4"]
+
+    stored_messages = _get_value(
+        fake_db.tree,
+        ("workflows", str(user_id), str(conversation_id), "messages"),
+    )
+    assert isinstance(stored_messages, dict)
+    assert [
+        item["created_at_utc"] for _, item in sorted(stored_messages.items())
+    ] == [
+        1712345678.1,
+        1712345678.2,
+        1712345678.3,
+        1712345678.4,
+    ]
+
+
+def test_load_message_history_derives_legacy_timestamp_from_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fake_db = _make_repo(monkeypatch)
+    user_id, conversation_id = _ids()
+
+    fake_db.reference(f"/workflows/{user_id}/{conversation_id}/messages").set(
+        {
+            "0001712345678123_00000000000000000001_abc": {
+                "role": "assistant",
+                "message": "legacy",
+            }
+        }
+    )
+
+    history = repo.load_message_history(
+        user_id=user_id, conversation_id=conversation_id, limit=10
+    )
+
+    assert len(history) == 1
+    assert history[0].content == "legacy"
+    assert history[0].created_at_utc == 1712345678.123
 
 
 def test_load_message_history_limit_zero_returns_empty(

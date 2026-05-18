@@ -7,10 +7,10 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from python.domain.service.llm_service import ChatMessage, LLMConfig
+from python.domain.service.llm_service import ChatMessage, LLMConfig, LLMResponse
 from python.implementation.workflows.nodes.data_compilation.data_compilation_cleaning import (
-    CleaningResult,
-    cleaning,
+    clean,
+    compile_causal_spec_from_draft,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec_draft import (
     ID_COL_AUTO_FILL,
@@ -22,7 +22,7 @@ from python.implementation.workflows.tools.data_profiling.data_profiling_tool im
 )
 
 
-def _build_dataframe() -> pd.DataFrame:
+def _dataframe() -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
@@ -45,7 +45,7 @@ def _build_dataframe() -> pd.DataFrame:
     )
 
 
-def _build_summary(dataframe: pd.DataFrame) -> DatasetSummaryModel:
+def _summary(dataframe: pd.DataFrame) -> DatasetSummaryModel:
     return DatasetProfilingTool().extract_dataset_summary(
         dataframe,
         max_categories=200,
@@ -56,110 +56,37 @@ def _build_summary(dataframe: pd.DataFrame) -> DatasetSummaryModel:
 
 
 def _draft() -> CausalSpecDraft:
-    return CausalSpecDraft.model_validate(
-        {
-            "treatment_column": "treatment",
-            "outcome_column": "outcome",
-            "covariates": ["age"],
-            "effect_modifiers": ["isex"],
-        }
+    return CausalSpecDraft(
+        treatment_column="treatment",
+        outcome_column="outcome",
+        covariates=["age"],
+        effect_modifiers=["isex"],
     )
-
-
-def _draft_with_identifier(identifier_column: str) -> CausalSpecDraft:
-    return CausalSpecDraft.model_validate(
-        {
-            "id_col": identifier_column,
-            "treatment_column": "treatment",
-            "outcome_column": "outcome",
-            "covariates": ["age"],
-            "effect_modifiers": ["isex"],
-        }
-    )
-
-
-def _semantic_payload(
-    *,
-    treated: str = "drug",
-    control: str = "control",
-    outcome_kind: str = "binary",
-    event: str = "event",
-    non_event: str = "non_event",
-    unit: str | None = None,
-    clip_min: float | None = None,
-    clip_max: float | None = None,
-    experiment_type: str = "OBSERVATIONAL",
-) -> dict[str, Any]:
-    outcome: dict[str, Any]
-    if outcome_kind == "continuous":
-        outcome = {
-            "kind": "continuous",
-            "unit": unit,
-            "clip_min": clip_min,
-            "clip_max": clip_max,
-        }
-    else:
-        outcome = {
-            "kind": "binary",
-            "event": event,
-            "non_event": non_event,
-        }
-
-    return {
-        "treatment": {
-            "treated": treated,
-            "control": control,
-        },
-        "outcome": outcome,
-        "experiment_type": experiment_type,
-    }
-
-
-def _missingness_plan_payload(
-    *,
-    treatment: str = "none_needed",
-    outcome: str = "none_needed",
-    age: str = "none_needed",
-    isex: str = "none_needed",
-) -> dict[str, Any]:
-    return {
-        "decisions": [
-            {
-                "column": "treatment",
-                "role": "treatment",
-                "resolution": treatment,
-                "reason": "Treatment missingness policy is grounded by the protocol.",
-                "instruction": "Drop rows where treatment is missing.",
-            },
-            {
-                "column": "outcome",
-                "role": "outcome",
-                "resolution": outcome,
-                "reason": "Outcome missingness policy is grounded by the protocol.",
-                "instruction": "Drop rows where outcome is missing.",
-            },
-            {
-                "column": "age",
-                "role": "covariate",
-                "resolution": age,
-                "reason": "Age should be complete after cleaning.",
-                "instruction": "Impute missing age values using a grounded numeric strategy.",
-            },
-            {
-                "column": "isex",
-                "role": "effect_modifier",
-                "resolution": isex,
-                "reason": "Sex should be complete after cleaning.",
-                "instruction": "Impute missing sex values using the observed mode.",
-            },
-        ]
-    }
 
 
 @dataclass
 class _FakeLLM:
-    json_outputs: list[Any] = field(default_factory=list)
+    generate_calls: list[dict[str, Any]] = field(default_factory=list)
+    json_outputs: list[dict[str, Any]] = field(default_factory=list)
     generate_json_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def generate(
+        self,
+        *,
+        system_prompt: str | None,
+        user_prompt: str,
+        config: LLMConfig,
+        history: list[ChatMessage] | None,
+    ) -> LLMResponse:
+        self.generate_calls.append(
+            {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "config": config,
+                "history": history,
+            }
+        )
+        return LLMResponse(content="Return the dataframe unchanged while preserving columns.")
 
     def generate_json(
         self,
@@ -181,18 +108,23 @@ class _FakeLLM:
                 "max_attempts": max_attempts,
             }
         )
-        if not self.json_outputs:
-            raise AssertionError("unexpected generate_json call")
-        next_output = self.json_outputs.pop(0)
-        if isinstance(next_output, Exception):
-            raise next_output
-        if isinstance(next_output, dict):
-            return schema.model_validate(next_output)
-        return next_output
+        payload = (
+            self.json_outputs.pop(0)
+            if self.json_outputs
+            else {
+                "treatment_treated": "drug",
+                "treatment_control": "control",
+                "outcome_event": "event",
+                "outcome_non_event": "non_event",
+                "negative_control_event": None,
+                "negative_control_non_event": None,
+            }
+        )
+        return schema.model_validate(payload)
 
 
 @dataclass
-class _FakeDataManipulationTool:
+class _FakeManipulationTool:
     responses: list[pd.DataFrame] = field(default_factory=list)
     calls: list[dict[str, Any]] = field(default_factory=list)
 
@@ -203,15 +135,13 @@ class _FakeDataManipulationTool:
         table_name: str,
         data_summary: str,
         instructions: str,
-        retry_attempts: int = 3,
     ) -> pd.DataFrame:
         self.calls.append(
             {
-                "dataframe_columns": list(dataframe.columns),
+                "dataframe": dataframe.copy(),
                 "table_name": table_name,
                 "data_summary": data_summary,
                 "instructions": instructions,
-                "retry_attempts": retry_attempts,
             }
         )
         if self.responses:
@@ -219,21 +149,20 @@ class _FakeDataManipulationTool:
         return dataframe.copy()
 
 
-def test_cleaning_narrows_input_dataframe_to_draft_scope_and_preserves_order() -> None:
-    dataframe = _build_dataframe()
-    result = cleaning(
-        protocol_discussion=None,
-        cleaning_instructions="",
-        review_recompile_request=None,
-        draft_causal_spec=_draft(),
-        data_summary=_build_summary(dataframe),
-        to_clean_df=dataframe,
-        datasetProfilingTool=DatasetProfilingTool(),
-        dataManipulationTool=_FakeDataManipulationTool(),
-        llm=_FakeLLM(json_outputs=[_semantic_payload()]),
+def test_clean_is_draft_driven_and_projects_to_compiled_scope() -> None:
+    dataframe = _dataframe()
+    llm = _FakeLLM()
+    manipulation_tool = _FakeManipulationTool()
+
+    result = clean(
+        data=dataframe,
+        data_summary=_summary(dataframe),
+        draft=_draft(),
+        data_maupulation_tools=manipulation_tool,
+        data_profiling_tools=DatasetProfilingTool(),
+        llm=llm,
     )
 
-    assert isinstance(result, CleaningResult)
     assert list(result.pd_cleaned.columns) == [
         ID_COL_AUTO_FILL,
         "treatment",
@@ -241,280 +170,270 @@ def test_cleaning_narrows_input_dataframe_to_draft_scope_and_preserves_order() -
         "age",
         "isex",
     ]
-    assert result.causal.id_col == ID_COL_AUTO_FILL
-    assert result.pd_cleaned[ID_COL_AUTO_FILL].tolist() == [1, 2]
-    assert "extra" not in result.cleaned_data_summary.model_dump_json()
-
-
-def test_cleaning_fails_immediately_when_input_dataframe_missing_draft_column() -> None:
-    dataframe = _build_dataframe().drop(columns=["age"])
-
-    with pytest.raises(ValueError, match="input dataframe does not satisfy draft causal spec"):
-        cleaning(
-            protocol_discussion="Confirmed protocol discussion",
-            cleaning_instructions="Keep only protocol columns.",
-            review_recompile_request=None,
-            draft_causal_spec=_draft(),
-            data_summary=_build_summary(dataframe),
-            to_clean_df=dataframe,
-            datasetProfilingTool=DatasetProfilingTool(),
-            dataManipulationTool=_FakeDataManipulationTool(),
-            llm=_FakeLLM(json_outputs=[_semantic_payload()]),
-        )
-
-
-def test_cleaning_runs_manipulation_when_effective_instructions_are_present() -> None:
-    dataframe = _build_dataframe()
-    data_manipulation_tool = _FakeDataManipulationTool()
-    llm = _FakeLLM(json_outputs=[_semantic_payload()])
-
-    result = cleaning(
-        protocol_discussion="Treatment is binary and age is a baseline covariate.",
-        cleaning_instructions="Normalize only grounded values.",
-        review_recompile_request=None,
-        draft_causal_spec=_draft(),
-        data_summary=_build_summary(dataframe),
-        to_clean_df=dataframe,
-        datasetProfilingTool=DatasetProfilingTool(),
-        dataManipulationTool=data_manipulation_tool,
-        llm=llm,
-    )
-
-    assert isinstance(result, CleaningResult)
-    assert len(data_manipulation_tool.calls) == 1
-    assert data_manipulation_tool.calls[0]["dataframe_columns"] == [
-        "treatment",
-        "outcome",
-        "age",
-        "isex",
-    ]
-    assert "Confirmed protocol cleaning instructions:" in data_manipulation_tool.calls[0]["instructions"]
-    assert "Confirmed protocol discussion:" in data_manipulation_tool.calls[0]["instructions"]
-    assert "Preserve exactly these columns" in data_manipulation_tool.calls[0]["instructions"]
-
-
-def test_cleaning_skips_manipulation_when_effective_instructions_are_empty() -> None:
-    dataframe = _build_dataframe()
-    data_manipulation_tool = _FakeDataManipulationTool()
-    llm = _FakeLLM(json_outputs=[_semantic_payload()])
-
-    result = cleaning(
-        protocol_discussion=None,
-        cleaning_instructions="   ",
-        review_recompile_request=None,
-        draft_causal_spec=_draft(),
-        data_summary=_build_summary(dataframe),
-        to_clean_df=dataframe,
-        datasetProfilingTool=DatasetProfilingTool(),
-        dataManipulationTool=data_manipulation_tool,
-        llm=llm,
-    )
-
-    assert isinstance(result, CleaningResult)
-    assert data_manipulation_tool.calls == []
-    assert list(result.pd_cleaned.columns) == [
-        ID_COL_AUTO_FILL,
-        "treatment",
-        "outcome",
-        "age",
-        "isex",
-    ]
-
-
-def test_cleaning_fails_when_manipulation_drops_required_draft_column() -> None:
-    dataframe = _build_dataframe()
-    data_manipulation_tool = _FakeDataManipulationTool(
-        responses=[dataframe.loc[:, ["treatment", "outcome", "isex"]]]
-    )
-
-    with pytest.raises(ValueError, match="cleaned dataframe does not satisfy draft causal spec"):
-        cleaning(
-            protocol_discussion="Confirmed protocol discussion",
-            cleaning_instructions="Apply the protocol cleaning.",
-            review_recompile_request=None,
-            draft_causal_spec=_draft(),
-            data_summary=_build_summary(dataframe),
-            to_clean_df=dataframe,
-            datasetProfilingTool=DatasetProfilingTool(),
-            dataManipulationTool=data_manipulation_tool,
-            llm=_FakeLLM(json_outputs=[_semantic_payload()]),
-        )
-
-
-def test_cleaning_retries_compile_when_first_semantic_compile_is_invalid() -> None:
-    dataframe = _build_dataframe()
-    llm = _FakeLLM(
-        json_outputs=[
-            _semantic_payload(treated="rx", control="control"),
-            _semantic_payload(),
-        ]
-    )
-
-    result = cleaning(
-        protocol_discussion="Confirmed protocol discussion",
-        cleaning_instructions="   ",
-        review_recompile_request=None,
-        draft_causal_spec=_draft(),
-        data_summary=_build_summary(dataframe),
-        to_clean_df=dataframe,
-        datasetProfilingTool=DatasetProfilingTool(),
-        dataManipulationTool=_FakeDataManipulationTool(),
-        llm=llm,
-    )
-
-    assert isinstance(result, CleaningResult)
-    assert len(llm.generate_json_calls) == 2
-    second_call_payload = json.loads(str(llm.generate_json_calls[1]["user_prompt"]))
-    assert "compile_feedback" in second_call_payload
     assert result.causal.treatment_spec.column == "treatment"
     assert result.causal.outcome_spec.column == "outcome"
-    assert result.causal.id_col == ID_COL_AUTO_FILL
-    assert result.causal.covariates == ["age"]
-    assert result.causal.effect_modifiers == ["isex"]
-    assert result.causal.experiment_type == "OBSERVATIONAL"
+    assert result.effective_draft is not None
+    assert result.effective_draft.id_col == ID_COL_AUTO_FILL
+    assert "Removed columns: extra, patient_id" in result.summary_str
+    assert len(manipulation_tool.calls) == 1
+    assert len(llm.generate_calls) == 1
 
 
-def test_cleaning_fails_when_semantic_compile_is_still_invalid_after_retry() -> None:
-    dataframe = _build_dataframe()
+def test_compile_causal_spec_keeps_one_as_treated_when_zero_is_majority() -> None:
+    dataframe = pd.DataFrame(
+        {
+            ID_COL_AUTO_FILL: range(1, 5467),
+            "treatment": ["0"] * 5464 + ["1", "1"],
+            "outcome": ["0", "1"] * 2733,
+            "age": [50] * 5466,
+        }
+    )
     llm = _FakeLLM(
         json_outputs=[
-            _semantic_payload(treated="rx", control="control"),
-            _semantic_payload(treated="rx", control="control"),
+            {
+                "treatment_treated": "1",
+                "treatment_control": "0",
+                "outcome_event": "1",
+                "outcome_non_event": "0",
+                "negative_control_event": None,
+                "negative_control_non_event": None,
+            }
         ]
     )
 
-    with pytest.raises(ValueError, match="compiled causal spec semantics remained invalid after retry"):
-        cleaning(
-            protocol_discussion="Confirmed protocol discussion",
-            cleaning_instructions="",
-            review_recompile_request=None,
-            draft_causal_spec=_draft(),
-            data_summary=_build_summary(dataframe),
-            to_clean_df=dataframe,
-            datasetProfilingTool=DatasetProfilingTool(),
-            dataManipulationTool=_FakeDataManipulationTool(),
+    causal_spec = compile_causal_spec_from_draft(
+        dataset_summary=_summary(dataframe),
+        previous_draft=CausalSpecDraft(
+            id_col=ID_COL_AUTO_FILL,
+            treatment_column="treatment",
+            outcome_column="outcome",
+            covariates=["age"],
+        ),
+        llm=llm,
+    )
+
+    assert causal_spec.treatment_spec.treated == "1"
+    assert causal_spec.treatment_spec.control == "0"
+    prompt_payload = json.loads(llm.generate_json_calls[0]["user_prompt"])
+    assert "negative_control_outcome" not in prompt_payload["binary_roles"]
+
+
+def test_compile_causal_spec_uses_llm_outcome_event_when_non_event_is_majority() -> None:
+    dataframe = pd.DataFrame(
+        {
+            ID_COL_AUTO_FILL: range(1, 5467),
+            "treatment": ["drug", "control"] * 2733,
+            "outcome": ["0"] * 5464 + ["1", "1"],
+            "age": [50] * 5466,
+        }
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            {
+                "treatment_treated": "drug",
+                "treatment_control": "control",
+                "outcome_event": "1",
+                "outcome_non_event": "0",
+                "negative_control_event": None,
+                "negative_control_non_event": None,
+            }
+        ]
+    )
+
+    causal_spec = compile_causal_spec_from_draft(
+        dataset_summary=_summary(dataframe),
+        previous_draft=CausalSpecDraft(
+            id_col=ID_COL_AUTO_FILL,
+            treatment_column="treatment",
+            outcome_column="outcome",
+            covariates=["age"],
+        ),
+        llm=llm,
+    )
+
+    assert causal_spec.outcome_spec.kind == "binary"
+    assert causal_spec.outcome_spec.event == "1"
+    assert causal_spec.outcome_spec.non_event == "0"
+
+
+def test_compile_causal_spec_uses_optional_negative_control_binary_roles() -> None:
+    dataframe = pd.DataFrame(
+        {
+            ID_COL_AUTO_FILL: range(1, 7),
+            "treatment": ["drug", "control"] * 3,
+            "outcome": ["event", "non_event"] * 3,
+            "negative_control": ["negative_non_event"] * 4 + ["negative_event"] * 2,
+            "age": [50] * 6,
+        }
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            {
+                "treatment_treated": "drug",
+                "treatment_control": "control",
+                "outcome_event": "event",
+                "outcome_non_event": "non_event",
+                "negative_control_event": "negative_event",
+                "negative_control_non_event": "negative_non_event",
+            }
+        ]
+    )
+
+    causal_spec = compile_causal_spec_from_draft(
+        dataset_summary=_summary(dataframe),
+        previous_draft=CausalSpecDraft(
+            id_col=ID_COL_AUTO_FILL,
+            treatment_column="treatment",
+            outcome_column="outcome",
+            negative_control_outcome="negative_control",
+            covariates=["age"],
+        ),
+        llm=llm,
+    )
+
+    assert causal_spec.negative_control_outcome is not None
+    assert causal_spec.negative_control_outcome.kind == "binary"
+    assert causal_spec.negative_control_outcome.event == "negative_event"
+    assert causal_spec.negative_control_outcome.non_event == "negative_non_event"
+
+
+def test_compile_causal_spec_rejects_llm_role_value_not_observed() -> None:
+    dataframe = pd.DataFrame(
+        {
+            ID_COL_AUTO_FILL: range(1, 5),
+            "treatment": ["drug", "control"] * 2,
+            "outcome": ["event", "non_event"] * 2,
+            "age": [50] * 4,
+        }
+    )
+    llm = _FakeLLM(
+        json_outputs=[
+            {
+                "treatment_treated": "drug",
+                "treatment_control": "placebo",
+                "outcome_event": "event",
+                "outcome_non_event": "non_event",
+                "negative_control_event": None,
+                "negative_control_non_event": None,
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="not observed for treatment"):
+        compile_causal_spec_from_draft(
+            dataset_summary=_summary(dataframe),
+            previous_draft=CausalSpecDraft(
+                id_col=ID_COL_AUTO_FILL,
+                treatment_column="treatment",
+                outcome_column="outcome",
+                covariates=["age"],
+            ),
             llm=llm,
         )
 
 
-def test_cleaning_compiles_without_protocol_discussion() -> None:
-    dataframe = _build_dataframe()
-    llm = _FakeLLM(json_outputs=[_semantic_payload()])
+def test_clean_adds_missingness_indicator_for_imputed_feature_column() -> None:
+    dataframe = _dataframe()
+    dataframe.loc[0, "age"] = None
+    typed_data = dataframe.drop(columns=["extra"]).copy()
+    typed_data.insert(0, ID_COL_AUTO_FILL, [1, 2])
+    imputed_data = typed_data.copy()
+    imputed_data["age"] = imputed_data["age"].fillna(53)
+    llm = _FakeLLM()
+    manipulation_tool = _FakeManipulationTool(responses=[typed_data, imputed_data])
 
-    result = cleaning(
-        protocol_discussion=None,
-        cleaning_instructions="Keep protocol columns only.",
-        review_recompile_request=None,
-        draft_causal_spec=_draft(),
-        data_summary=_build_summary(dataframe),
-        to_clean_df=dataframe,
-        datasetProfilingTool=DatasetProfilingTool(),
-        dataManipulationTool=_FakeDataManipulationTool(),
+    result = clean(
+        data=dataframe,
+        data_summary=_summary(dataframe),
+        draft=_draft(),
+        data_maupulation_tools=manipulation_tool,
+        data_profiling_tools=DatasetProfilingTool(),
         llm=llm,
     )
 
-    first_call_payload = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
-    assert isinstance(result, CleaningResult)
-    assert "protocol_discussion" not in first_call_payload
-    assert list(result.pd_cleaned.columns) == [
-        ID_COL_AUTO_FILL,
-        "treatment",
-        "outcome",
-        "age",
-        "isex",
-    ]
+    assert "age_missing" in result.pd_cleaned.columns
+    assert "age__missing" not in result.pd_cleaned.columns
+    assert result.pd_cleaned["age_missing"].tolist() == [1, 0]
+    assert result.effective_draft is not None
+    assert "age_missing" in result.effective_draft.covariates
+    assert "age_missing" in result.summary_str
+    assert len(manipulation_tool.calls) == 2
 
 
-def test_cleaning_preserves_explicit_identifier_column_and_compiles_it_into_causal_spec() -> None:
-    dataframe = _build_dataframe()
-
-    result = cleaning(
-        protocol_discussion=None,
-        cleaning_instructions="",
-        review_recompile_request=None,
-        draft_causal_spec=_draft_with_identifier("patient_id"),
-        data_summary=_build_summary(dataframe),
-        to_clean_df=dataframe,
-        datasetProfilingTool=DatasetProfilingTool(),
-        dataManipulationTool=_FakeDataManipulationTool(),
-        llm=_FakeLLM(json_outputs=[_semantic_payload()]),
-    )
-
-    assert list(result.pd_cleaned.columns) == [
-        "patient_id",
-        "treatment",
-        "outcome",
-        "age",
-        "isex",
-    ]
-    assert result.pd_cleaned["patient_id"].tolist() == ["p1", "p2"]
-    assert result.causal.id_col == "patient_id"
-
-
-def test_cleaning_plans_and_records_missingness_resolution() -> None:
-    dataframe = _build_dataframe()
+def test_clean_revised_instructions_do_not_auto_add_missingness_indicator() -> None:
+    dataframe = _dataframe()
     dataframe.loc[0, "age"] = None
-    data_manipulation_tool = _FakeDataManipulationTool(
-        responses=[
-            dataframe.assign(age=[53.0, 61.0]),
-        ]
-    )
-    llm = _FakeLLM(
-        json_outputs=[
-            _missingness_plan_payload(age="impute"),
-            _semantic_payload(),
-        ]
-    )
+    typed_data = dataframe.drop(columns=["extra"]).copy()
+    typed_data.insert(0, ID_COL_AUTO_FILL, [1, 2])
+    imputed_data = typed_data.copy()
+    imputed_data["age"] = imputed_data["age"].fillna(53)
+    llm = _FakeLLM()
+    manipulation_tool = _FakeManipulationTool(responses=[typed_data, imputed_data])
 
-    result = cleaning(
-        protocol_discussion="Keep the treatment and outcome grounded.",
-        cleaning_instructions="Resolve missingness before compilation.",
-        review_recompile_request="Handle the baseline age gap before review.",
-        draft_causal_spec=_draft(),
-        data_summary=_build_summary(dataframe),
-        to_clean_df=dataframe,
-        datasetProfilingTool=DatasetProfilingTool(),
-        dataManipulationTool=data_manipulation_tool,
+    result = clean(
+        data=dataframe,
+        data_summary=_summary(dataframe),
+        draft=_draft(),
+        data_maupulation_tools=manipulation_tool,
+        data_profiling_tools=DatasetProfilingTool(),
         llm=llm,
+        revised_instructions=(
+            "Simplification: remove redundant missing indicators for effect modifiers "
+            "and covariates unless they are clinically necessary."
+        ),
     )
 
-    assert len(llm.generate_json_calls) == 2
-    missingness_call_payload = json.loads(str(llm.generate_json_calls[0]["user_prompt"]))
-    assert missingness_call_payload["missing_count_by_column"]["age"] == 1
-    assert data_manipulation_tool.calls
-    assert "Review-time recompilation request:" in data_manipulation_tool.calls[0]["instructions"]
-    assert "Resolve protocol-scope missingness exactly as follows:" in (
-        data_manipulation_tool.calls[0]["instructions"]
-    )
-    age_decision = next(
-        decision for decision in result.missingness_decisions.decisions if decision.column == "age"
-    )
-    assert age_decision.resolution == "impute"
-    assert age_decision.missing_count_before == 1
-    assert age_decision.missing_count_after == 0
+    assert "age_missing" not in result.pd_cleaned.columns
+    assert result.effective_draft is not None
+    assert "age_missing" not in result.effective_draft.covariates
+    imputation_payload = json.loads(llm.generate_calls[-1]["user_prompt"])
+    assert "not added automatically" in imputation_payload["missing_indicator_policy"]
 
 
-def test_cleaning_fails_when_protocol_scope_missingness_remains_after_cleaning() -> None:
-    dataframe = _build_dataframe()
+def test_clean_revised_instructions_keep_missingness_indicator_when_llm_adds_it() -> None:
+    dataframe = _dataframe()
     dataframe.loc[0, "age"] = None
-    llm = _FakeLLM(
-        json_outputs=[
-            _missingness_plan_payload(age="impute"),
-        ]
+    typed_data = dataframe.drop(columns=["extra"]).copy()
+    typed_data.insert(0, ID_COL_AUTO_FILL, [1, 2])
+    imputed_data = typed_data.copy()
+    imputed_data["age"] = imputed_data["age"].fillna(53)
+    imputed_data["age_missing"] = [1, 0]
+    llm = _FakeLLM()
+    manipulation_tool = _FakeManipulationTool(responses=[typed_data, imputed_data])
+
+    result = clean(
+        data=dataframe,
+        data_summary=_summary(dataframe),
+        draft=_draft(),
+        data_maupulation_tools=manipulation_tool,
+        data_profiling_tools=DatasetProfilingTool(),
+        llm=llm,
+        revised_instructions="Keep a missingness indicator for age because it is clinically useful.",
     )
 
-    with pytest.raises(
-        ValueError,
-        match="cleaned dataframe still contains protocol-scope missing values: age=1",
-    ):
-        cleaning(
-            protocol_discussion="Confirmed protocol discussion",
-            cleaning_instructions="Resolve missingness before compilation.",
-            review_recompile_request=None,
-            draft_causal_spec=_draft(),
-            data_summary=_build_summary(dataframe),
-            to_clean_df=dataframe,
-            datasetProfilingTool=DatasetProfilingTool(),
-            dataManipulationTool=_FakeDataManipulationTool(),
-            llm=llm,
-        )
+    assert "age_missing" in result.pd_cleaned.columns
+    assert result.pd_cleaned["age_missing"].tolist() == [1, 0]
+    assert result.effective_draft is not None
+    assert "age_missing" in result.effective_draft.covariates
+
+
+def test_clean_passes_revised_feedback_to_planners() -> None:
+    dataframe = _dataframe()
+    llm = _FakeLLM()
+    manipulation_tool = _FakeManipulationTool()
+
+    clean(
+        data=dataframe,
+        data_summary=_summary(dataframe),
+        draft=_draft(),
+        data_maupulation_tools=manipulation_tool,
+        data_profiling_tools=DatasetProfilingTool(),
+        llm=llm,
+        revised_instructions="Reclean age as a numeric baseline covariate.",
+    )
+
+    assert llm.generate_calls
+    datatype_payload = json.loads(llm.generate_calls[0]["user_prompt"])
+    assert datatype_payload["revised_instructions"] == (
+        "Reclean age as a numeric baseline covariate."
+    )

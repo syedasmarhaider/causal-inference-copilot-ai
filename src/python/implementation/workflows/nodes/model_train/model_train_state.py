@@ -15,10 +15,22 @@ class ModelTrainPayloadModel(BaseModel):
     training_signature: str | None = None
     trained_model_id: UUID | None = None
     training_warnings: list[str] = Field(default_factory=list)
+    training_spec: dict[str, Any] | None = None
+    all_row_cate_dataset_id: UUID | None = None
+    all_row_cate_summary: dict[str, Any] | None = None
+    negative_control_refutation_artifact_id: UUID | None = None
+    negative_control_refutation_vectors_dataset_id: UUID | None = None
+    negative_control_refutation_summary: dict[str, Any] | None = None
     assistant_message: str | None = None
     error_message: str | None = None
 
-    @field_validator("trained_model_id", mode="before")
+    @field_validator(
+        "trained_model_id",
+        "all_row_cate_dataset_id",
+        "negative_control_refutation_artifact_id",
+        "negative_control_refutation_vectors_dataset_id",
+        mode="before",
+    )
     @classmethod
     def _parse_uuid(cls, value: Any) -> UUID | None:
         return uuid_from_any(value)
@@ -44,6 +56,12 @@ class ModelTrainPayloadModel(BaseModel):
                 "training_signature": training_signature,
                 "trained_model_id": None,
                 "training_warnings": [],
+                "training_spec": None,
+                "all_row_cate_dataset_id": None,
+                "all_row_cate_summary": None,
+                "negative_control_refutation_artifact_id": None,
+                "negative_control_refutation_vectors_dataset_id": None,
+                "negative_control_refutation_summary": None,
                 "assistant_message": None,
                 "error_message": None,
             }

@@ -53,6 +53,30 @@ class InvalidStateError(WorkflowError):
         super().__init__(f"Invalid state '{state_name}': {reason}")
 
 
+class StateConflictError(WorkflowError):
+    """Raised when a stale state write would overwrite a newer persisted state."""
+
+    @property
+    def code(self) -> str:
+        return "state_conflict"
+
+    def __init__(
+        self,
+        *,
+        state_name: str,
+        expected_counter: int,
+        actual_counter: int | None,
+    ) -> None:
+        self.state_name = state_name
+        self.expected_counter = expected_counter
+        self.actual_counter = actual_counter
+        actual = "missing" if actual_counter is None else str(actual_counter)
+        super().__init__(
+            f"State '{state_name}' has changed since it was loaded: "
+            f"expected update_counter={expected_counter}, actual update_counter={actual}"
+        )
+
+
 class DataUploadError(WorkflowError):
     """Raised when data upload fails."""
 

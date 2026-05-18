@@ -5,12 +5,11 @@ from collections.abc import Sequence
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from python.domain.models.models import ChatMessage
-from python.domain.workflows.ochestrator_state import OchestratorState
 from python.domain.workflows.node_state import NodeState
-from pydantic import Field
+from python.domain.workflows.ochestrator_state import OchestratorState
 
 ConversationType = Literal["causal", "data"]
 
@@ -91,7 +90,7 @@ class WorkflowStateRepo(ABC):
         *,
         user_id: UUID,
         conversation_id: UUID,
-        limit: int = 20,
+        limit: int | None = 20,
     ) -> Sequence[ChatMessage]:
         raise NotImplementedError
 

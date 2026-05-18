@@ -144,46 +144,25 @@ class GeneralQueriesNode(Node):
         )
 
     def _build_stage2_summary(self, orchestrator_state: Any) -> str:
-        protocol_discussion = orchestrator_state.get("protocol_discussion")
-        protocol_cleaning_instructions = orchestrator_state.get(
-            "protocol_cleaning_instructions"
-        )
         causal_spec_draft = orchestrator_state.get("causal_spec_draft")
 
-        if protocol_discussion is None and causal_spec_draft is None:
+        if causal_spec_draft is None:
             return (
-                "[PENDING] Stage 2 — Protocol discussion and causal draft.\n"
+                "[PENDING] Stage 2 — Causal draft.\n"
                 "  The causal question has not been confirmed yet."
             )
 
-        if protocol_discussion is None or causal_spec_draft is None:
-            missing_parts: list[str] = []
-            if protocol_discussion is None:
-                missing_parts.append("confirmed protocol discussion")
-            if causal_spec_draft is None:
-                missing_parts.append("causal draft")
-            return (
-                "[PENDING] Stage 2 — Protocol discussion and causal draft.\n"
-                f"  Partially complete. Missing: {', '.join(missing_parts)}."
-            )
-
-        protocol_excerpt = str(protocol_discussion).strip()
-        protocol_excerpt = protocol_excerpt[:240] + (
-            "..." if len(protocol_excerpt) > 240 else ""
-        )
         draft_summary = json.dumps(
             {
                 "treatment_column": causal_spec_draft.treatment_column,
                 "outcome_column": causal_spec_draft.outcome_column,
                 "covariates": list(causal_spec_draft.covariates),
                 "effect_modifiers": list(causal_spec_draft.effect_modifiers),
-                "has_cleaning_instructions": protocol_cleaning_instructions is not None,
             },
             ensure_ascii=False,
         )
         return (
-            "[DONE] Stage 2 — Protocol discussion and causal draft accepted.\n"
-            f"  Protocol excerpt: {protocol_excerpt}\n"
+            "[DONE] Stage 2 — Causal draft accepted.\n"
             f"  Accepted draft: {draft_summary}"
         )
 

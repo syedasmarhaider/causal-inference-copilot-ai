@@ -1,98 +1,88 @@
 from __future__ import annotations
 
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import (
-    summarize_upstream_data_prep_decisions,
-)
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_prompts import (
-    get_protocol_discussion_review_summary_prompt,
+    get_protocol_discussion_causal_draft_prompt,
+    get_protocol_discussion_get_node_info,
+    get_protocol_discussion_response_prompt,
+    get_protocol_discussion_status_prompt,
+    get_protocol_discussion_template,
     get_protocol_discussion_update_prompt,
-    get_questions,
+    get_protocol_discussion_validation_suggestion_prompt,
     initial_user_message,
 )
 
 
-def test_protocol_discussion_questions_include_identifier_question_as_q16() -> None:
-    questions = get_questions()
+def test_protocol_discussion_info_describes_discussion_and_final_draft_compile() -> None:
+    info = get_protocol_discussion_get_node_info()
 
-    assert questions[-1].startswith("16) Identifier column (optional):")
-    assert any(
-        question.startswith("14) Treatment/outcome data-quality decisions:")
-        for question in questions
-    )
-    assert any(
-        question.startswith("15) Baseline feature preparation decisions:")
-        for question in questions
-    )
+    assert "protocol discussion string" in info
+    assert "DISCUSSING, REVIEW, and READY" in info
+    assert "causal specification draft" in info
 
 
-def test_protocol_discussion_update_prompt_mentions_identifier_handling_rules() -> None:
+def test_protocol_discussion_update_prompt_uses_protocol_string_contract() -> None:
     prompt = get_protocol_discussion_update_prompt()
 
-    assert "identifier_column_candidates" in prompt
-    assert "suggested_identifier_column" in prompt
-    assert "Identifier column handling is optional and non-blocking." in prompt
-    assert "set answer 16 to __auto_id__" in prompt
-    assert "Never invent an identifier column." in prompt
-    assert "covariates are baseline variables used to control or adjust" in prompt
-    assert "effect modifiers are baseline variables that can change the size or direction" in prompt
+    assert "previous_protocol_discussion" in prompt
+    assert "latest_user_message" in prompt
+    assert "Source: user" in prompt
+    assert "Source: data" in prompt
+    assert "Do not include status" in prompt
+    assert "Do not wrap the protocol discussion in JSON" in prompt
+    assert "Output JSON exactly" not in prompt
+    assert "Treatment must be binary" in prompt
+    assert "Outcome must be binary or continuous" in prompt
 
 
-def test_protocol_discussion_review_prompt_mentions_identifier_handling() -> None:
-    prompt = get_protocol_discussion_review_summary_prompt()
+def test_protocol_discussion_status_prompt_returns_only_status() -> None:
+    prompt = get_protocol_discussion_status_prompt()
 
-    assert "Summarize the identifier column choice when grounded." in prompt
-    assert "suggested_identifier_column" in prompt
-    assert "confirming this review will accept that identifier choice" in prompt
-    assert "__auto_id__ will be used" in prompt
-    assert "baseline adjustment or control variables" in prompt
-    assert "enable heterogeneous treatment effects across subgroups" in prompt
+    assert "protocol_discussion" in prompt
+    assert "latest_user_message" in prompt
+    assert '"status": "DISCUSSING" | "REVIEW" | "READY"' in prompt
+    assert "Output JSON exactly" in prompt
 
 
-def test_protocol_discussion_questions_clarify_covariates_and_effect_modifiers() -> None:
-    questions = get_questions()
+def test_protocol_discussion_template_uses_expected_questions_and_auto_id() -> None:
+    template = get_protocol_discussion_template()
 
-    assert any(
-        "used to control or adjust for confounding or prognostic differences"
-        in question
-        for question in questions
-    )
-    assert any(
-        "change the size or direction of the treatment effect across subgroups"
-        in question
-        for question in questions
-    )
+    assert "Q1: Treatment" in template
+    assert "Q2: Outcome" in template
+    assert "Q5: ID column" in template
+    assert "auto_id" in template
+    assert "Source: unclear" in template
 
 
-def test_initial_user_message_mentions_identifier_selection() -> None:
+def test_protocol_discussion_response_prompt_is_plain_text_not_json() -> None:
+    prompt = get_protocol_discussion_response_prompt()
+
+    assert "Return only the user-facing assistant message as plain text" in prompt
+    assert "Do not wrap the message in JSON" in prompt
+    assert "Output JSON exactly" not in prompt
+
+
+def test_protocol_discussion_causal_draft_prompt_is_grounded() -> None:
+    prompt = get_protocol_discussion_causal_draft_prompt()
+
+    assert "signed-off protocol discussion" in prompt
+    assert "exact dataset column names" in prompt
+    assert "auto_id" in prompt
+    assert "Return only JSON matching the requested causal draft schema" in prompt
+
+
+def test_protocol_discussion_validation_suggestion_prompt_requires_update_dataset() -> None:
+    prompt = get_protocol_discussion_validation_suggestion_prompt()
+
+    assert "validation_issues" in prompt
+    assert "Every dataset-change suggestion must start" in prompt
+    assert "update dataset" in prompt
+    assert "Return plain text only" in prompt
+
+
+def test_initial_user_message_starts_protocol_discussion() -> None:
     message = initial_user_message()
 
-    assert "identifier column" in message
-    assert "patient or unit" in message
-    assert "treatment, outcome, or baseline features" in message
-
-
-def test_summarize_upstream_data_prep_decisions_collects_questions_14_and_15() -> None:
-    discussion = "\n".join(
-        [
-            "1) Causal question: effect of transfusion on mortality.",
-            "14) Treatment/outcome data-quality decisions: Map istatus so 1=Dead and 2/3=Alive.",
-            "15) Baseline feature preparation decisions: Impute missing iage values before modeling and keep isex unknown as its own category.",
-        ]
-    )
-
-    summary = summarize_upstream_data_prep_decisions(discussion)
-
-    assert summary is not None
-    assert "Map istatus so 1=Dead and 2/3=Alive." in summary
-    assert "Impute missing iage values before modeling" in summary
-
-
-def test_summarize_upstream_data_prep_decisions_skips_unclear_items() -> None:
-    discussion = "\n".join(
-        [
-            "14) Treatment/outcome data-quality decisions: UNCLEAR",
-            "15) Baseline feature preparation decisions: UNCLEAR",
-        ]
-    )
-
-    assert summarize_upstream_data_prep_decisions(discussion) is None
+    assert "Welcome" in message
+    assert "treatment" in message
+    assert "outcome" in message
+    assert "negative-control outcome" in message

@@ -24,7 +24,7 @@ from sklearn.ensemble import (
     RandomForestClassifier,
     RandomForestRegressor,
 )
-from sklearn.linear_model import LogisticRegressionCV, RidgeCV
+from sklearn.linear_model import LogisticRegression, RidgeCV
 from sklearn.pipeline import Pipeline
 
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
@@ -65,11 +65,14 @@ from python.implementation.workflows.tools.causal.inference.econml.utils import 
     now_utc,
     raise_if_x_rows_not_exactly_match_fit_x_cols,
     required_init_keys,
+    serialize_econml_sensitivity_analysis,
     serialize_inference_obj,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 
 log = get_logger(__name__)
+
+_SPARSE_LINEAR_MAX_ITER = 10000
 
 # =============================================================================
 # Helpers
@@ -98,6 +101,14 @@ def _shape_as_list(x: Any) -> list[int] | None:
     return list(np.asarray(x).shape)
 
 
+def _ndim_or_none(x: Any) -> int | None:
+    if x is None:
+        return None
+    if hasattr(x, "ndim"):
+        return int(x.ndim)
+    return int(np.asarray(x).ndim)
+
+
 def _width(x: Any) -> int:
     if x is None:
         return 0
@@ -107,6 +118,51 @@ def _width(x: Any) -> int:
     if arr.ndim == 1:
         return 1
     return int(arr.shape[1])
+
+
+def _estimator_debug_name(value: Any) -> str:
+    if isinstance(value, Pipeline):
+        try:
+            final_step = value.steps[-1][1]
+            return f"Pipeline(..., {type(final_step).__name__})"
+        except Exception:
+            return "Pipeline"
+    return type(value).__name__
+
+
+def _debug_init_defaults(defaults: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in defaults.items():
+        if isinstance(value, list):
+            out[key] = [_estimator_debug_name(item) for item in value]
+        elif isinstance(value, BaseEstimator):
+            out[key] = _estimator_debug_name(value)
+        else:
+            out[key] = value
+    return out
+
+
+def _dtype_or_none(x: Any) -> str | None:
+    if x is None:
+        return None
+    if hasattr(x, "dtype"):
+        return str(x.dtype)
+    try:
+        return str(np.asarray(x).dtype)
+    except Exception:
+        return None
+
+
+def _inference_attr_debug(value: Any) -> dict[str, Any]:
+    try:
+        arr = np.asarray(value)
+        return {
+            "type": type(value).__name__,
+            "dtype": str(arr.dtype),
+            "shape": list(arr.shape),
+        }
+    except Exception as exc:
+        return {"type": type(value).__name__, "error": repr(exc)}
 
 
 def _to_jsonable(value: Any) -> Any:
@@ -288,6 +344,22 @@ def _wrap_xw_plus_t_model(
     return Pipeline(steps)
 
 
+def _stable_logistic_classifier(
+    *,
+    random_state: int | None,
+    n_jobs: int | None,
+) -> LogisticRegression:
+    return LogisticRegression(
+        penalty="l2",
+        solver="saga",
+        max_iter=5000,
+        C=0.1,
+        class_weight="balanced",
+        n_jobs=n_jobs if n_jobs is not None else -1,
+        random_state=random_state,
+    )
+
+
 # =============================================================================
 # Default nuisance candidates
 # =============================================================================
@@ -314,12 +386,7 @@ def _build_propensity_candidates(
         )
         return [_wrap_xw_model(pre_XW=pre_XW, model=hgb, require_dense=True)]
 
-    lr = LogisticRegressionCV(
-        max_iter=2000,
-        solver="lbfgs",
-        n_jobs=n_jobs,
-        random_state=random_state,
-    )
+    lr = _stable_logistic_classifier(random_state=random_state, n_jobs=n_jobs)
     et = ExtraTreesClassifier(
         n_estimators=400,
         min_samples_leaf=5,
@@ -395,12 +462,7 @@ def _build_regression_candidates(
         ]
 
     if discrete_outcome:
-        lr = LogisticRegressionCV(
-            max_iter=2000,
-            solver="lbfgs",
-            n_jobs=n_jobs,
-            random_state=random_state,
-        )
+        lr = _stable_logistic_classifier(random_state=random_state, n_jobs=n_jobs)
         et = ExtraTreesClassifier(
             n_estimators=400,
             min_samples_leaf=5,
@@ -427,7 +489,10 @@ def _build_regression_candidates(
             _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=hgb, require_dense=True),
         ]
 
-    lasso = WeightedLassoCVWrapper(random_state=random_state)
+    lasso = WeightedLassoCVWrapper(
+        random_state=random_state,
+        max_iter=_SPARSE_LINEAR_MAX_ITER,
+    )
     ridge = RidgeCV(alphas=np.logspace(-4, 4, 25))
     et = ExtraTreesRegressor(
         n_estimators=400,
@@ -490,6 +555,7 @@ class _BaseDRLearnerAdapter(CausalModel):
     ESTIMATOR_CLS: ClassVar[Any]
     BACKEND_NAME: ClassVar[str]
     INFO: ClassVar[str]
+    DROP_FIRST_EFFECT_MODIFIER_ONEHOT: ClassVar[bool] = False
 
     def get_info(self) -> str:
         return self.INFO
@@ -570,6 +636,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 effect_modifiers_order=effect_modifiers_order,
                 covariates_order=covariates_order,
                 dense_output=True,
+                drop_first_effect_modifier_onehot=self.DROP_FIRST_EFFECT_MODIFIER_ONEHOT,
             )
 
             pre_x = plan.pre_X
@@ -631,6 +698,8 @@ class _BaseDRLearnerAdapter(CausalModel):
                 defaults, init_map, "categories", _treatment_categories_from_spec(specs)
             )
             _set_if_supported(defaults, init_map, "allow_missing", missingness_W)
+            if self.ESTIMATOR_CLS is SparseLinearDRLearner:
+                _set_if_supported(defaults, init_map, "max_iter", _SPARSE_LINEAR_MAX_ITER)
 
             if pre_xw is not None:
                 _set_if_supported(
@@ -678,9 +747,19 @@ class _BaseDRLearnerAdapter(CausalModel):
             raw_x_has_nan = has_missing(X)
             raw_w_has_nan = has_missing(W)
 
-            log.debug(
+            log.info(
                 "DRLearner fit prepared",
                 backend=self.BACKEND_NAME,
+                estimator_cls=getattr(self.ESTIMATOR_CLS, "__name__", str(self.ESTIMATOR_CLS)),
+                n=int(df.shape[0]),
+                y_shape=_shape_as_list(Y),
+                y_ndim=_ndim_or_none(Y),
+                t_shape=_shape_as_list(T),
+                t_ndim=_ndim_or_none(T),
+                x_shape=_shape_as_list(X),
+                x_ndim=_ndim_or_none(X),
+                w_shape=_shape_as_list(W),
+                w_ndim=_ndim_or_none(W),
                 allow_missing_requested=bool(defaults.get("allow_missing")),
                 estimator_allowed_missing_vars=allowed_missing_vars,
                 missingness_X=missingness_X,
@@ -689,8 +768,13 @@ class _BaseDRLearnerAdapter(CausalModel):
                 raw_W_has_nan=raw_w_has_nan,
                 x_columns=effect_modifiers_order,
                 w_columns=covariates_order,
+                init_defaults=_debug_init_defaults(defaults),
             )
-            if missingness_W and allowed_missing_vars is not None and "W" not in allowed_missing_vars:
+            if (
+                missingness_W
+                and allowed_missing_vars is not None
+                and "W" not in allowed_missing_vars
+            ):
                 log.warning(
                     "DRLearner estimator does not report W as allow_missing-capable",
                     backend=self.BACKEND_NAME,
@@ -704,13 +788,44 @@ class _BaseDRLearnerAdapter(CausalModel):
                 warnings.simplefilter("always")
                 est.fit(Y=Y, T=T, X=X, W=W)  # pyright: ignore[reportUnknownMemberType]
             fit_warnings = [f"{w.category.__name__}: {str(w.message)}" for w in ws]
+            fit_warning_details = [
+                {
+                    "category": w.category.__name__,
+                    "message": str(w.message),
+                    "filename": w.filename,
+                    "lineno": int(w.lineno),
+                }
+                for w in ws
+            ]
+            for warning_detail in fit_warning_details:
+                log.warning(
+                    "DRLearner fit warning",
+                    backend=self.BACKEND_NAME,
+                    warning_category=warning_detail["category"],
+                    warning_message=warning_detail["message"],
+                    warning_filename=warning_detail["filename"],
+                    warning_lineno=warning_detail["lineno"],
+                )
+            log.info(
+                "DRLearner fit completed",
+                backend=self.BACKEND_NAME,
+                warning_count=len(fit_warnings),
+                score_available=hasattr(est, "score_"),
+                nuisance_scores_propensity_available=hasattr(est, "nuisance_scores_propensity"),
+                nuisance_scores_regression_available=hasattr(est, "nuisance_scores_regression"),
+            )
 
             artifacts: dict[str, Any] = {
                 "n": int(df.shape[0]),
                 "y_shape": _shape_as_list(Y),
+                "y_ndim": _ndim_or_none(Y),
                 "t_shape": _shape_as_list(T),
+                "t_ndim": _ndim_or_none(T),
                 "x_shape": _shape_as_list(X),
+                "x_ndim": _ndim_or_none(X),
                 "w_shape": _shape_as_list(W),
+                "w_ndim": _ndim_or_none(W),
+                "fit_warning_details": fit_warning_details,
             }
             for attr in ("score_", "nuisance_scores_propensity", "nuisance_scores_regression"):
                 try:
@@ -810,7 +925,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 is_global_counter_factual=False,
             )
 
-            _, _, X, _, _ = get_input_params_from_spec(
+            Y, T, X, _, _ = get_input_params_from_spec(
                 df,
                 spec,
                 effect_modifiers_order=effect_modifiers_order,
@@ -818,9 +933,26 @@ class _BaseDRLearnerAdapter(CausalModel):
             )
 
             item: dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
+            log.info(
+                "DRLearner ATE inference input dtypes",
+                backend=self.BACKEND_NAME,
+                fitted_model_id=str(command.fitted_model_id),
+                X_type=str(type(X)),
+                X_dtype=_dtype_or_none(X),
+                Y_dtype=_dtype_or_none(Y),
+                T_dtype=_dtype_or_none(T),
+            )
             item["ate"] = est.ate(
                 X=X, T0=t0, T1=t1
             )  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+            log.info(
+                "DRLearner ATE point estimate",
+                backend=self.BACKEND_NAME,
+                fitted_model_id=str(command.fitted_model_id),
+                ate=_to_jsonable(np.asarray(item["ate"])),
+                ate_type=str(type(item["ate"])),
+                ate_dtype=_dtype_or_none(item["ate"]),
+            )
 
             try:
                 ate_interval = est.ate_interval(
@@ -834,7 +966,20 @@ class _BaseDRLearnerAdapter(CausalModel):
                     item["ate_interval"] = None
                 else:
                     item["ate_interval"] = ate_interval
+                    log.info(
+                        "DRLearner ATE interval object",
+                        backend=self.BACKEND_NAME,
+                        fitted_model_id=str(command.fitted_model_id),
+                        interval_type=str(type(ate_interval)),
+                        interval_dtype=_dtype_or_none(ate_interval),
+                    )
             except Exception as e:
+                log.exception(
+                    "DRLearner EconML ATE interval failed",
+                    backend=self.BACKEND_NAME,
+                    fitted_model_id=str(command.fitted_model_id),
+                    exception=repr(e),
+                )
                 warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                 item["ate_interval"] = None
 
@@ -846,10 +991,36 @@ class _BaseDRLearnerAdapter(CausalModel):
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
                     item["ate_inference"] = None
                 else:
+                    log.info(
+                        "DRLearner ATE inference object",
+                        backend=self.BACKEND_NAME,
+                        fitted_model_id=str(command.fitted_model_id),
+                        inf_type=str(type(inf)),
+                        point_type=str(type(getattr(inf, "point_estimate", None))),
+                        point_dtype=_dtype_or_none(getattr(inf, "point_estimate", None)),
+                        stderr_type=str(type(getattr(inf, "stderr", None))),
+                        stderr_dtype=_dtype_or_none(getattr(inf, "stderr", None)),
+                        point_debug=_inference_attr_debug(getattr(inf, "point_estimate", None)),
+                        stderr_debug=_inference_attr_debug(getattr(inf, "stderr", None)),
+                    )
                     item["ate_inference"] = serialize_inference_obj(inf)
             except Exception as e:
+                log.exception(
+                    "DRLearner EconML ATE inference failed",
+                    backend=self.BACKEND_NAME,
+                    fitted_model_id=str(command.fitted_model_id),
+                    exception=repr(e),
+                )
                 warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                 item["ate_inference"] = None
+
+            sensitivity_fields, sensitivity_warnings = serialize_econml_sensitivity_analysis(
+                est,
+                treatment_value=t1,
+                alpha=command.inputs.alpha,
+            )
+            item.update(sensitivity_fields)
+            warnings_list.extend(sensitivity_warnings)
 
             finished = now_utc()
             return ATESuccess(
@@ -1061,6 +1232,7 @@ class LinearDRLearnerCausalModel(_BaseDRLearnerAdapter):
     ESTIMATOR_CLS: ClassVar[Any] = LinearDRLearner
     BACKEND_NAME: ClassVar[str] = "econml.dr.LinearDRLearner"
     INFO: ClassVar[str] = get_linear_dr_learner_causal_model_info()
+    DROP_FIRST_EFFECT_MODIFIER_ONEHOT: ClassVar[bool] = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1075,3 +1247,4 @@ class SparseLinearDRLearnerCausalModel(_BaseDRLearnerAdapter):
     ESTIMATOR_CLS: ClassVar[Any] = SparseLinearDRLearner
     BACKEND_NAME: ClassVar[str] = "econml.dr.SparseLinearDRLearner"
     INFO: ClassVar[str] = get_sparse_linear_dr_learner_causal_model_info()
+    DROP_FIRST_EFFECT_MODIFIER_ONEHOT: ClassVar[bool] = True

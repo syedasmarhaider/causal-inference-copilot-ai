@@ -273,6 +273,11 @@ def test_generate_specs_injects_values_and_title_from_dataframe() -> None:
     spec = specs[0]
     assert spec["$schema"] == "https://vega.github.io/schema/vega-lite/v5.json"
     assert spec["title"] == "Age vs Outcome"
+    assert spec["config"]["title"]["color"] == "#2563eb"
+    assert spec["config"]["axis"]["labelColor"] == "#1d4ed8"
+    assert spec["config"]["legend"]["titleColor"] == "#1d4ed8"
+    assert spec["config"]["header"]["labelColor"] == "#1d4ed8"
+    assert spec["config"]["rule"]["color"] == "#94a3b8"
     assert spec["data"]["values"] == [
         {"age": 40, "outcome": 1.0},
         {"age": 41, "outcome": 1.2},
@@ -622,6 +627,65 @@ def test_generate_specs_preserves_existing_spec_title_over_plan_title() -> None:
     )
 
     assert specs[0]["title"] == "Spec Title"
+
+
+def test_generate_specs_overrides_black_vega_text_theme() -> None:
+    llm = _FakeLLMService(
+        plans=[
+            _plan_payload(
+                charts=[
+                    {
+                        "spec": {
+                            "title": {"text": "Black Title", "color": "black"},
+                            "config": {
+                                "title": {"color": "black"},
+                                "axis": {"labelColor": "black", "titleColor": "black"},
+                                "legend": {"labelColor": "black", "titleColor": "black"},
+                                "header": {"labelColor": "black", "titleColor": "black"},
+                            },
+                            "mark": "bar",
+                            "encoding": {
+                                "x": {
+                                    "field": "x",
+                                    "type": "quantitative",
+                                    "axis": {
+                                        "labelColor": "black",
+                                        "titleColor": "black",
+                                    },
+                                },
+                                "color": {
+                                    "field": "segment",
+                                    "type": "nominal",
+                                    "legend": {
+                                        "labelColor": "black",
+                                        "titleColor": "black",
+                                    },
+                                },
+                            },
+                        },
+                    }
+                ]
+            )
+        ]
+    )
+    tool = PlotTool(llm=llm)
+
+    specs = tool.generate_specs(
+        dataframe=pd.DataFrame([{"x": 1, "segment": "A"}]),
+        data_summary=_summary_model(_numeric_profile("x"), _categorical_profile("segment")),
+        user_intent="plot x by segment",
+    )
+
+    spec = specs[0]
+    assert spec["title"]["color"] == "#2563eb"
+    assert spec["config"]["title"]["color"] == "#2563eb"
+    assert spec["config"]["axis"]["labelColor"] == "#1d4ed8"
+    assert spec["config"]["legend"]["titleColor"] == "#1d4ed8"
+    assert spec["config"]["header"]["labelColor"] == "#1d4ed8"
+    assert spec["config"]["rule"]["color"] == "#94a3b8"
+    assert spec["encoding"]["x"]["axis"]["labelColor"] == "#1d4ed8"
+    assert spec["encoding"]["x"]["axis"]["titleColor"] == "#1d4ed8"
+    assert spec["encoding"]["color"]["legend"]["labelColor"] == "#1d4ed8"
 
 
 @pytest.mark.parametrize(

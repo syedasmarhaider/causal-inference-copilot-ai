@@ -13,6 +13,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
+    CatOneHotParams,
     EncodingPresetSpec,
     TransformPlan,
 )
@@ -28,6 +29,7 @@ class EncodingUtil:
         effect_modifiers_order: Sequence[str],
         covariates_order: Sequence[str],
         dense_output: bool = True,
+        drop_first_effect_modifier_onehot: bool = False,
     ) -> CompiledTransformers:
         return compile_plan_to_transformers(
             plan=plan,
@@ -35,6 +37,7 @@ class EncodingUtil:
             covariates=covariates_order,
             dense_output=dense_output,
             require_full_coverage=True,
+            drop_first_effect_modifier_onehot=drop_first_effect_modifier_onehot,
         )
 
 
@@ -51,7 +54,7 @@ class CompiledTransformers:
              ordered as (effect_modifiers_order + covariates_order)
     """
 
-    pre_X: ColumnTransformer | None
+    pre_X: BaseEstimator | None
     pre_XW: ColumnTransformer
 
 
@@ -468,6 +471,7 @@ def compile_plan_to_transformers(
     covariates: Sequence[str],
     dense_output: bool = True,
     require_full_coverage: bool = True,
+    drop_first_effect_modifier_onehot: bool = False,
 ) -> CompiledTransformers:
     """
     Requires effect_modifiers and covariates (non-empty). No inference. No None.
@@ -514,12 +518,21 @@ def compile_plan_to_transformers(
                 f"{extra_plans}"
             )
 
-    def _compile(enc: EncodingPresetSpec) -> CTTransformer:
+    def _compile(
+        enc: EncodingPresetSpec,
+        *,
+        force_drop_first_onehot: bool = False,
+        safe_numeric_passthrough: bool = False,
+    ) -> CTTransformer:
+        if force_drop_first_onehot and isinstance(enc, CatOneHotParams):
+            enc = enc.model_copy(update={"drop_first": True})
         preset = enc.preset
 
         if preset == "drop":
             return "drop"
         if preset == "passthrough":
+            if safe_numeric_passthrough:
+                return NumericPassthroughFloat64()
             return "passthrough"
 
         if preset == "cat_onehot":
@@ -632,7 +645,17 @@ def compile_plan_to_transformers(
                 f"Column {col!r} is in effect_modifiers order but plan role is "
                 f"{cp.role!r} (expected 'effect_modifier')."
             )
-        x_trs.append((col, _compile(cp.encoding), [x_index[col]]))
+        x_trs.append(
+            (
+                col,
+                _compile(
+                    cp.encoding,
+                    force_drop_first_onehot=drop_first_effect_modifier_onehot,
+                    safe_numeric_passthrough=drop_first_effect_modifier_onehot,
+                ),
+                [x_index[col]],
+            )
+        )
 
     # pre_XW: effect_modifier then covariate, in (effect_modifiers + covariates)
     for col in xw_cols:
@@ -680,13 +703,18 @@ def compile_plan_to_transformers(
     # If not, allow sparse when beneficial (especially for one-hot).
     sparse_threshold = 0.0 if dense_output else 1.0
 
-    pre_X: ColumnTransformer | None = None
+    pre_X: BaseEstimator | None = None
     if x_trs:
-        pre_X = ColumnTransformer(
+        pre_X_ct = ColumnTransformer(
             transformers=x_trs,
             remainder="drop",
             sparse_threshold=sparse_threshold,
             verbose_feature_names_out=True,
+        )
+        pre_X = (
+            Pipeline([("pre", pre_X_ct), ("to_float64", ToFloat64())])
+            if drop_first_effect_modifier_onehot
+            else pre_X_ct
         )
 
     pre_XW = ColumnTransformer(
@@ -700,3 +728,47 @@ def compile_plan_to_transformers(
         pre_X=pre_X,
         pre_XW=pre_XW,
     )
+
+
+class NumericPassthroughFloat64(BaseEstimator, TransformerMixin):
+    """
+    Semantic passthrough for numeric columns.
+
+    Does not impute, scale, bin, or change values.
+    Only ensures numeric values are represented as float64.
+    """
+
+    def fit(self, X, y=None):
+        arr = np.asarray(X, dtype=np.float64)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        return self
+
+    def transform(self, X) -> np.ndarray:
+        arr = np.asarray(X, dtype=np.float64)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        return arr
+
+    def get_feature_names_out(self, input_features=None):
+        if input_features is None or len(input_features) == 0:
+            return np.asarray(["numeric_passthrough"], dtype=object)
+        return np.asarray(input_features, dtype=object)
+
+
+class ToFloat64(BaseEstimator, TransformerMixin):
+    """
+    Final safety cast for transformed design matrices.
+    """
+
+    def fit(self, X, y=None):
+        np.asarray(X, dtype=np.float64)
+        return self
+
+    def transform(self, X) -> np.ndarray:
+        return np.asarray(X, dtype=np.float64)
+
+    def get_feature_names_out(self, input_features=None):
+        if input_features is None:
+            return np.asarray([], dtype=object)
+        return np.asarray(input_features, dtype=object)

@@ -10,6 +10,8 @@ from uuid import UUID
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
+from sklearn.base import BaseEstimator
+from sklearn.pipeline import Pipeline
 
 from python.domain.repo.models_repo import ModelRecord, ModelsRepo
 from python.implementation.service.logging.default_logging import get_logger
@@ -46,6 +48,7 @@ from python.implementation.workflows.tools.causal.inference.econml.utils import 
     now_utc,
     raise_if_x_rows_not_exactly_match_fit_x_cols,
     required_init_keys,
+    serialize_econml_sensitivity_analysis,
     serialize_inference_obj,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
@@ -59,6 +62,59 @@ def _shape_as_list(x: Any) -> list[int] | None:
     if hasattr(x, "shape"):
         return list(x.shape)
     return list(np.asarray(x).shape)
+
+
+def _ndim_or_none(x: Any) -> int | None:
+    if x is None:
+        return None
+    if hasattr(x, "ndim"):
+        return int(x.ndim)
+    return int(np.asarray(x).ndim)
+
+
+def _estimator_debug_name(value: Any) -> str:
+    if isinstance(value, Pipeline):
+        try:
+            final_step = value.steps[-1][1]
+            return f"Pipeline(..., {type(final_step).__name__})"
+        except Exception:
+            return "Pipeline"
+    return type(value).__name__
+
+
+def _debug_init_defaults(defaults: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in defaults.items():
+        if isinstance(value, list):
+            out[key] = [_estimator_debug_name(item) for item in value]
+        elif isinstance(value, BaseEstimator):
+            out[key] = _estimator_debug_name(value)
+        else:
+            out[key] = value
+    return out
+
+
+def _dtype_or_none(x: Any) -> str | None:
+    if x is None:
+        return None
+    if hasattr(x, "dtype"):
+        return str(x.dtype)
+    try:
+        return str(np.asarray(x).dtype)
+    except Exception:
+        return None
+
+
+def _inference_attr_debug(value: Any) -> dict[str, Any]:
+    try:
+        arr = np.asarray(value)
+        return {
+            "type": type(value).__name__,
+            "dtype": str(arr.dtype),
+            "shape": list(arr.shape),
+        }
+    except Exception as exc:
+        return {"type": type(value).__name__, "error": repr(exc)}
 
 
 def _to_jsonable(value: Any) -> Any:
@@ -145,6 +201,7 @@ class _BaseDMLAdapter(CausalModel):
     FIT_INCLUDE_NAMES: ClassVar[set[str]]
     USE_PRE_X_AS_FEATURIZER: ClassVar[bool] = True
     REQUIRE_NUMERIC_X: ClassVar[bool] = False
+    DROP_FIRST_EFFECT_MODIFIER_ONEHOT: ClassVar[bool] = False
 
     def get_info(self) -> str:
         return self.INFO
@@ -217,6 +274,7 @@ class _BaseDMLAdapter(CausalModel):
                 effect_modifiers_order=ctx.effect_modifiers_order,
                 covariates_order=ctx.covariates_order,
                 dense_output=True,
+                drop_first_effect_modifier_onehot=self.DROP_FIRST_EFFECT_MODIFIER_ONEHOT,
             )
 
             pre_x = plan.pre_X
@@ -306,19 +364,71 @@ class _BaseDMLAdapter(CausalModel):
                 )
 
             est = self.ESTIMATOR_CLS(**defaults)
+            log.info(
+                "%s fit prepared",
+                self.BACKEND_NAME,
+                backend=self.BACKEND_NAME,
+                estimator_cls=getattr(self.ESTIMATOR_CLS, "__name__", str(self.ESTIMATOR_CLS)),
+                n=int(df.shape[0]),
+                y_shape=_shape_as_list(Y),
+                y_ndim=_ndim_or_none(Y),
+                t_shape=_shape_as_list(T),
+                t_ndim=_ndim_or_none(T),
+                x_shape=_shape_as_list(X),
+                x_ndim=_ndim_or_none(X),
+                w_shape=_shape_as_list(W),
+                w_ndim=_ndim_or_none(W),
+                allow_missing_requested=bool(defaults.get("allow_missing")),
+                missingness_X=missingness_X,
+                missingness_W=missingness_W,
+                x_columns=ctx.effect_modifiers_order,
+                w_columns=ctx.covariates_order,
+                init_defaults=_debug_init_defaults(defaults),
+            )
 
             fit_warnings: list[str] = []
             with warnings.catch_warnings(record=True) as ws:
                 warnings.simplefilter("always")
                 est.fit(Y, T, X=X, W=W)  # pyright: ignore[reportUnknownMemberType]
             fit_warnings = [f"{w.category.__name__}: {str(w.message)}" for w in ws]
+            fit_warning_details = [
+                {
+                    "category": w.category.__name__,
+                    "message": str(w.message),
+                    "filename": w.filename,
+                    "lineno": int(w.lineno),
+                }
+                for w in ws
+            ]
+            for warning_detail in fit_warning_details:
+                log.warning(
+                    "%s fit warning",
+                    self.BACKEND_NAME,
+                    backend=self.BACKEND_NAME,
+                    warning_category=warning_detail["category"],
+                    warning_message=warning_detail["message"],
+                    warning_filename=warning_detail["filename"],
+                    warning_lineno=warning_detail["lineno"],
+                )
+            log.info(
+                "%s fit completed",
+                self.BACKEND_NAME,
+                backend=self.BACKEND_NAME,
+                warning_count=len(fit_warnings),
+                score_available=hasattr(est, "score_"),
+            )
 
             artifacts: dict[str, Any] = {
                 "n": int(df.shape[0]),
                 "y_shape": _shape_as_list(Y),
+                "y_ndim": _ndim_or_none(Y),
                 "t_shape": _shape_as_list(T),
+                "t_ndim": _ndim_or_none(T),
                 "x_shape": _shape_as_list(X),
+                "x_ndim": _ndim_or_none(X),
                 "w_shape": _shape_as_list(W),
+                "w_ndim": _ndim_or_none(W),
+                "fit_warning_details": fit_warning_details,
                 **self._extra_fit_artifacts(est),
             }
 
@@ -405,7 +515,7 @@ class _BaseDMLAdapter(CausalModel):
                 is_global_counter_factual=False,
             )
 
-            _, _, X, _, _ = get_input_params_from_spec(
+            Y, T, X, _, _ = get_input_params_from_spec(
                 df,
                 ctx.specs,
                 effect_modifiers_order=ctx.effect_modifiers_order,
@@ -414,9 +524,28 @@ class _BaseDMLAdapter(CausalModel):
             self._validate_ate_x(X)
 
             item: dict[ATEModelResult, Any] = {"for_treatment": {"t0": t0, "t1": t1}}
+            log.info(
+                "%s ATE inference input dtypes",
+                self.BACKEND_NAME,
+                backend=self.BACKEND_NAME,
+                fitted_model_id=str(command.fitted_model_id),
+                X_type=str(type(X)),
+                X_dtype=_dtype_or_none(X),
+                Y_dtype=_dtype_or_none(Y),
+                T_dtype=_dtype_or_none(T),
+            )
             item["ate"] = est.ate(
                 X=X, T0=t0, T1=t1
             )  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
+            log.info(
+                "%s ATE point estimate",
+                self.BACKEND_NAME,
+                backend=self.BACKEND_NAME,
+                fitted_model_id=str(command.fitted_model_id),
+                ate=_to_jsonable(np.asarray(item["ate"])),
+                ate_type=str(type(item["ate"])),
+                ate_dtype=_dtype_or_none(item["ate"]),
+            )
 
             try:
                 ate_interval = est.ate_interval(
@@ -430,7 +559,22 @@ class _BaseDMLAdapter(CausalModel):
                     item["ate_interval"] = None
                 else:
                     item["ate_interval"] = ate_interval
+                    log.info(
+                        "%s ATE interval object",
+                        self.BACKEND_NAME,
+                        backend=self.BACKEND_NAME,
+                        fitted_model_id=str(command.fitted_model_id),
+                        interval_type=str(type(ate_interval)),
+                        interval_dtype=_dtype_or_none(ate_interval),
+                    )
             except Exception as e:
+                log.exception(
+                    "%s EconML ATE interval failed",
+                    self.BACKEND_NAME,
+                    backend=self.BACKEND_NAME,
+                    fitted_model_id=str(command.fitted_model_id),
+                    exception=repr(e),
+                )
                 warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                 item["ate_interval"] = None
 
@@ -442,10 +586,38 @@ class _BaseDMLAdapter(CausalModel):
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: ate_inference returned None")
                     item["ate_inference"] = None
                 else:
+                    log.info(
+                        "%s ATE inference object",
+                        self.BACKEND_NAME,
+                        backend=self.BACKEND_NAME,
+                        fitted_model_id=str(command.fitted_model_id),
+                        inf_type=str(type(inf)),
+                        point_type=str(type(getattr(inf, "point_estimate", None))),
+                        point_dtype=_dtype_or_none(getattr(inf, "point_estimate", None)),
+                        stderr_type=str(type(getattr(inf, "stderr", None))),
+                        stderr_dtype=_dtype_or_none(getattr(inf, "stderr", None)),
+                        point_debug=_inference_attr_debug(getattr(inf, "point_estimate", None)),
+                        stderr_debug=_inference_attr_debug(getattr(inf, "stderr", None)),
+                    )
                     item["ate_inference"] = serialize_inference_obj(inf)
             except Exception as e:
+                log.exception(
+                    "%s EconML ATE inference failed",
+                    self.BACKEND_NAME,
+                    backend=self.BACKEND_NAME,
+                    fitted_model_id=str(command.fitted_model_id),
+                    exception=repr(e),
+                )
                 warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                 item["ate_inference"] = None
+
+            sensitivity_fields, sensitivity_warnings = serialize_econml_sensitivity_analysis(
+                est,
+                treatment_value=t1,
+                alpha=command.inputs.alpha,
+            )
+            item.update(sensitivity_fields)
+            warnings_list.extend(sensitivity_warnings)
 
             finished = now_utc()
             return ATESuccess(

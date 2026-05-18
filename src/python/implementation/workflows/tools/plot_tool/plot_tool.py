@@ -26,6 +26,10 @@ _KIND_TO_VEGA_TYPE: dict[str, str] = {
     "BOOLEAN": "nominal",
     "OTHER": "nominal",
 }
+_CHART_TITLE_COLOR = "#2563eb"
+_CHART_TEXT_COLOR = "#1d4ed8"
+_CHART_GRID_COLOR = "#dbe5ef"
+_CHART_AXIS_LINE_COLOR = "#94a3b8"
 
 log = get_app_logger(__name__, component="plot_tool", log_type="tool")
 
@@ -195,7 +199,7 @@ class PlotTool(Tool):
         if title:
             out.setdefault("title", title)
         out["data"] = {"values": values}
-        return out
+        return _apply_chart_theme(out)
 
     def _validate_final_spec_without_render(
         self,
@@ -429,6 +433,76 @@ def _validate_field_types_against_summary(
                 f"chart {chart_index} field '{field_name}' declared {normalized_type} "
                 f"but data_summary inferred kind is {inferred_kind}"
             )
+
+
+def _apply_chart_theme(spec: dict[str, Any]) -> dict[str, Any]:
+    themed = dict(spec)
+    config = dict(themed.get("config") if isinstance(themed.get("config"), dict) else {})
+    config["title"] = {
+        **(config.get("title") if isinstance(config.get("title"), dict) else {}),
+        "color": _CHART_TITLE_COLOR,
+        "fontSize": 18,
+        "fontWeight": 700,
+        "lineHeight": 24,
+    }
+    config["axis"] = {
+        **(config.get("axis") if isinstance(config.get("axis"), dict) else {}),
+        "labelColor": _CHART_TEXT_COLOR,
+        "titleColor": _CHART_TEXT_COLOR,
+        "domainColor": _CHART_AXIS_LINE_COLOR,
+        "gridColor": _CHART_GRID_COLOR,
+        "tickColor": _CHART_AXIS_LINE_COLOR,
+    }
+    config["legend"] = {
+        **(config.get("legend") if isinstance(config.get("legend"), dict) else {}),
+        "labelColor": _CHART_TEXT_COLOR,
+        "titleColor": _CHART_TEXT_COLOR,
+    }
+    config["header"] = {
+        **(config.get("header") if isinstance(config.get("header"), dict) else {}),
+        "labelColor": _CHART_TEXT_COLOR,
+        "titleColor": _CHART_TEXT_COLOR,
+    }
+    config["view"] = {
+        **(config.get("view") if isinstance(config.get("view"), dict) else {}),
+        "stroke": None,
+    }
+    config["rule"] = {
+        **(config.get("rule") if isinstance(config.get("rule"), dict) else {}),
+        "color": _CHART_AXIS_LINE_COLOR,
+    }
+    config["tick"] = {
+        **(config.get("tick") if isinstance(config.get("tick"), dict) else {}),
+        "color": _CHART_AXIS_LINE_COLOR,
+    }
+    themed["config"] = config
+    _force_chart_text_theme(themed)
+    return themed
+
+
+def _force_chart_text_theme(node: Any) -> None:
+    if isinstance(node, dict):
+        title = node.get("title")
+        if isinstance(title, dict):
+            title["color"] = _CHART_TITLE_COLOR
+
+        for guide_key in ("axis", "legend", "header"):
+            guide = node.get(guide_key)
+            if isinstance(guide, dict):
+                guide["labelColor"] = _CHART_TEXT_COLOR
+                guide["titleColor"] = _CHART_TEXT_COLOR
+                if guide_key == "axis":
+                    guide["domainColor"] = _CHART_AXIS_LINE_COLOR
+                    guide["gridColor"] = _CHART_GRID_COLOR
+                    guide["tickColor"] = _CHART_AXIS_LINE_COLOR
+
+        for value in node.values():
+            _force_chart_text_theme(value)
+        return
+
+    if isinstance(node, list):
+        for item in node:
+            _force_chart_text_theme(item)
 
 
 def _build_field_guide(summary: DatasetSummaryModel) -> str:

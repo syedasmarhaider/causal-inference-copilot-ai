@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import zipfile
 from collections.abc import Generator
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -10,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from python.adapters.api.app import app
 from python.adapters.api.dependencies import (
+    get_audit_log_app,
     get_authenticated_user,
     get_dataflow_app,
     get_workflow_app,
@@ -271,12 +274,47 @@ class _StubDataflowApp:
         return self.diff_result
 
 
+class _StubAuditLogApp:
+    def __init__(self) -> None:
+        self.render_calls: list[dict[str, object]] = []
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "audit-log.html",
+                (
+                    "<!doctype html><html><body>"
+                    "<h1>Conversation Audit Log</h1>"
+                    "<p>Escaped &lt;message&gt;</p>"
+                    "</body></html>"
+                ),
+            )
+        self.render_result = buffer.getvalue()
+
+    def render_zip(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        conversation_type: str,
+    ) -> bytes:
+        self.render_calls.append(
+            {
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "conversation_type": conversation_type,
+            }
+        )
+        return self.render_result
+
+
 @pytest.fixture
 def api_client() -> (
     Generator[tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser], None, None]
 ):
     workflow = _StubWorkflowApp()
     dataflow = _StubDataflowApp()
+    audit_log = _StubAuditLogApp()
+    workflow.audit_log = audit_log  # type: ignore[attr-defined]
     user = AuthenticatedUser(
         uid=uuid4(),
         email="tester@example.com",
@@ -286,6 +324,7 @@ def api_client() -> (
 
     app.dependency_overrides[get_workflow_app] = lambda: workflow
     app.dependency_overrides[get_dataflow_app] = lambda: dataflow
+    app.dependency_overrides[get_audit_log_app] = lambda: audit_log
     app.dependency_overrides[get_authenticated_user] = lambda: user
     app.openapi_schema = None
     with TestClient(app) as client:
@@ -393,6 +432,7 @@ def test_get_conversation_returns_snapshot(
             ChatMessage(
                 role="assistant",
                 content="Snapshot message",
+                created_at_utc=1712345678.123,
                 artifact_refs=[
                     {
                         "id": artifact_id,
@@ -418,6 +458,7 @@ def test_get_conversation_returns_snapshot(
             {
                 "role": "assistant",
                 "content": "Snapshot message",
+                "created_at_utc": 1712345678.123,
                 "id": None,
                 "artifact_refs": [
                     {
@@ -446,6 +487,35 @@ def test_get_conversation_returns_snapshot(
     assert dataflow.artifact_calls == []
 
 
+def test_get_audit_log_returns_zip(
+    api_client: tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser],
+) -> None:
+    client, workflow, dataflow, user = api_client
+    conversation_id = uuid4()
+    audit_log = workflow.audit_log  # type: ignore[attr-defined]
+
+    response = client.get(f"/v1/conversations/{conversation_id}/types/causal/audit-log")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/zip")
+    assert (
+        response.headers["content-disposition"]
+        == f'attachment; filename="audit-log-{conversation_id}.zip"'
+    )
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        html = archive.read("audit-log.html").decode("utf-8")
+    assert "Conversation Audit Log" in html
+    assert "Escaped &lt;message&gt;" in html
+    assert audit_log.render_calls == [
+        {
+            "user_id": user.uid,
+            "conversation_id": conversation_id,
+            "conversation_type": "causal",
+        }
+    ]
+    assert dataflow.artifact_calls == []
+
+
 def test_create_conversation_message_returns_workflow_result(
     api_client: tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser],
 ) -> None:
@@ -458,6 +528,7 @@ def test_create_conversation_message_returns_workflow_result(
             ChatMessage(
                 role="assistant",
                 content="I summarized the dataset.",
+                created_at_utc=1712345678.456,
                 artifact_refs=[
                     {
                         "id": artifact_id,
@@ -488,6 +559,7 @@ def test_create_conversation_message_returns_workflow_result(
             {
                 "role": "assistant",
                 "content": "I summarized the dataset.",
+                "created_at_utc": 1712345678.456,
                 "id": None,
                 "artifact_refs": [
                     {
@@ -548,7 +620,13 @@ def test_create_state_reversion_returns_updated_snapshot(
     conversation_id = uuid4()
     dataset_id = uuid4()
     workflow.revert_result = SimpleNamespace(
-        messages=(ChatMessage(role="system", content="Reverted to MODEL_SELECTION"),),
+        messages=(
+            ChatMessage(
+                role="system",
+                content="Reverted to MODEL_SELECTION",
+                created_at_utc=1712345678.789,
+            ),
+        ),
         states=["DATASET", "MODEL_SELECTION"],
         current_data_id=dataset_id,
         is_dataset_frozen=False,
@@ -567,6 +645,7 @@ def test_create_state_reversion_returns_updated_snapshot(
             {
                 "role": "system",
                 "content": "Reverted to MODEL_SELECTION",
+                "created_at_utc": 1712345678.789,
                 "id": None,
                 "artifact_refs": None,
             }
@@ -819,6 +898,12 @@ def test_openapi_mentions_scoped_paths_and_enums() -> None:
     artifact_parameters = {param["name"]: param for param in artifact_operation["parameters"]}
     assert artifact_parameters["artifact_kind"]["schema"]["enum"] == ["graph", "data"]
     assert artifact_parameters["artifact_format"]["schema"]["enum"] == ["json", "csv"]
+
+    audit_operation = schema["paths"][
+        "/v1/conversations/{conversation_id}/types/{conversation_type}/audit-log"
+    ]["get"]
+    assert "application/zip" in audit_operation["responses"]["200"]["content"]
+    assert "Trained model objects are not included" in audit_operation["description"]
 
     diff_operation = schema["paths"][
         "/v1/conversations/{conversation_id}/types/{conversation_type}/dataset-diffs"
