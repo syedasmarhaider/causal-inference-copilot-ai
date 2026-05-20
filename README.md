@@ -8,7 +8,7 @@ Local backend for the agent API. The app exposes an authenticated FastAPI API fo
 - Runtime: Python 3.11
 - Workflow engine: Node/state pipeline with LLM-assisted routing
 - Storage: local files under `.local_storage`
-- Auth: local JWT bearer token containing a UUID identity
+- Auth: local bearer token with JWT-like, UUID, or opaque local identity support
 - LLM provider: Vertex AI through LiteLLM
 
 ## Repository Layout
@@ -78,10 +78,16 @@ The app always uses local filesystem backends:
 - Dataset artifacts: `.local_storage/data`
 - Model artifacts: `.local_storage/models`
 
-Call authenticated endpoints with a JWT-like bearer token whose payload has an `id`, `ID`, `uuid`, `user_id`, `uid`, or `sub` UUID claim:
+Call authenticated endpoints with either:
+
+- A JWT-like bearer token whose payload has an `id`, `ID`, `uuid`, `user_id`, `uid`, or `sub` UUID claim.
+- A raw UUID bearer token for local clients.
+- Any other non-empty raw bearer token, which is mapped to a stable local UUID.
 
 ```http
 Authorization: Bearer <local-jwt-like-token>
+Authorization: Bearer <uuid>
+Authorization: Bearer <opaque-local-token>
 ```
 
 JWT signatures are not validated in this local paper branch.

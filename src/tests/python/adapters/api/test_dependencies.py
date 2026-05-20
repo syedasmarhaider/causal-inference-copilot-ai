@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -75,7 +75,7 @@ def test_get_auth_service_uses_local_token_auth() -> None:
     assert user.claims["local_subject_claim"] == "id"
 
     with pytest.raises(InvalidTokenError):
-        auth_service.verify_token_and_get_user("other-token")
+        auth_service.verify_token_and_get_user("not.valid.jwt")
 
     dependencies.get_auth_service.cache_clear()
 
@@ -92,6 +92,52 @@ def test_get_auth_service_accepts_uppercase_id_claim() -> None:
     assert user.email is None
     assert user.email_verified is False
     assert user.claims["local_subject_claim"] == "ID"
+
+    dependencies.get_auth_service.cache_clear()
+
+
+def test_get_auth_service_accepts_frontend_local_jwt_claims() -> None:
+    dependencies.get_auth_service.cache_clear()
+    user_id = uuid4()
+    token = _jwt_like({"id": str(user_id), "sub": str(user_id), "uid": str(user_id)})
+
+    auth_service = dependencies.get_auth_service()
+    user = auth_service.verify_token_and_get_user(token)
+
+    assert user.uid == user_id
+    assert user.claims["local_subject_claim"] == "id"
+    assert user.claims["sub"] == str(user_id)
+    assert user.claims["uid"] == str(user_id)
+
+    dependencies.get_auth_service.cache_clear()
+
+
+def test_get_auth_service_accepts_raw_uuid_token() -> None:
+    dependencies.get_auth_service.cache_clear()
+    user_id = uuid4()
+
+    auth_service = dependencies.get_auth_service()
+    user = auth_service.verify_token_and_get_user(str(user_id))
+
+    assert user.uid == user_id
+    assert user.claims["local_subject_claim"] == "id"
+    assert user.claims["uid"] == str(user_id)
+    assert user.claims["local_token_kind"] == "uuid"
+
+    dependencies.get_auth_service.cache_clear()
+
+
+def test_get_auth_service_accepts_opaque_raw_token() -> None:
+    dependencies.get_auth_service.cache_clear()
+
+    auth_service = dependencies.get_auth_service()
+    user = auth_service.verify_token_and_get_user("local-dev-token")
+    repeated_user = auth_service.verify_token_and_get_user("local-dev-token")
+
+    assert isinstance(user.uid, UUID)
+    assert repeated_user.uid == user.uid
+    assert user.claims["local_subject_claim"] == "id"
+    assert user.claims["local_token_kind"] == "opaque"
 
     dependencies.get_auth_service.cache_clear()
 
@@ -135,6 +181,42 @@ def test_get_authenticated_user_accepts_local_jwt_like_token() -> None:
 
     assert user.uid == user_id
     assert user.claims["local_subject_claim"] == "uuid"
+
+    dependencies.get_auth_service.cache_clear()
+
+
+def test_get_authenticated_user_accepts_raw_uuid_bearer_token() -> None:
+    dependencies.get_auth_service.cache_clear()
+    user_id = uuid4()
+    token = str(user_id)
+
+    user = asyncio.run(
+        dependencies.get_authenticated_user(
+            credentials=_credentials(token),
+            authorization=f"Bearer {token}",
+        )
+    )
+
+    assert user.uid == user_id
+    assert user.claims["local_subject_claim"] == "id"
+
+    dependencies.get_auth_service.cache_clear()
+
+
+def test_get_authenticated_user_accepts_opaque_raw_bearer_token() -> None:
+    dependencies.get_auth_service.cache_clear()
+    token = "local-dev-token"
+
+    user = asyncio.run(
+        dependencies.get_authenticated_user(
+            credentials=_credentials(token),
+            authorization=f"Bearer {token}",
+        )
+    )
+
+    assert isinstance(user.uid, UUID)
+    assert user.claims["local_subject_claim"] == "id"
+    assert user.claims["local_token_kind"] == "opaque"
 
     dependencies.get_auth_service.cache_clear()
 

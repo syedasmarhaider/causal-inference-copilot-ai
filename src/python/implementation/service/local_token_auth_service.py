@@ -6,11 +6,12 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from python.domain.service.auth_service import AuthenticatedUser, AuthService, InvalidTokenError
 
 _UUID_CLAIM_KEYS = ("id", "ID", "uuid", "user_id", "uid", "sub")
+_OPAQUE_TOKEN_NAMESPACE = UUID("0a8d8840-1d84-46ab-b7e5-9dfaf72e8b42")
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,7 @@ class LocalUserIdentity:
 
 
 class LocalTokenAuthService(AuthService):
-    """Dev-only auth service for unsigned local JWT-like bearer tokens."""
+    """Dev-only auth service for unsigned local JWT-like or opaque bearer tokens."""
 
     @classmethod
     def from_env(cls) -> LocalTokenAuthService:
@@ -47,7 +48,7 @@ def decode_local_bearer_token(token: str) -> DecodedLocalBearerToken:
 
     parts = normalized.split(".")
     if len(parts) != 3:
-        raise InvalidTokenError("local bearer token must be a JWT-like token")
+        return _decode_raw_uuid_token(normalized)
 
     _, payload_segment, _ = parts
     if not payload_segment:
@@ -57,6 +58,21 @@ def decode_local_bearer_token(token: str) -> DecodedLocalBearerToken:
     if not isinstance(payload, dict):
         raise InvalidTokenError("local bearer token payload must be a JSON object")
     return DecodedLocalBearerToken(payload=payload)
+
+
+def _decode_raw_uuid_token(token: str) -> DecodedLocalBearerToken:
+    try:
+        user_id = UUID(token)
+    except ValueError:
+        user_id = uuid5(_OPAQUE_TOKEN_NAMESPACE, token)
+        return DecodedLocalBearerToken(
+            payload={
+                "id": str(user_id),
+                "local_token_kind": "opaque",
+            }
+        )
+
+    return DecodedLocalBearerToken(payload={"id": str(user_id), "local_token_kind": "uuid"})
 
 
 def _decode_json_segment(segment: str) -> Any:
