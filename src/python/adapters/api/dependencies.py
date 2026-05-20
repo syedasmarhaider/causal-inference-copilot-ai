@@ -23,7 +23,7 @@ log = get_logger(__name__)
 
 bearer_scheme = HTTPBearer(
     auto_error=False,
-    description="Local bearer token. Paste the configured ID_TOKEN value.",
+    description="Local bearer token. Use a raw UUID or JWT-like token with a UUID identity claim.",
 )
 CREDENTIALS_SECURITY = Security(bearer_scheme)
 

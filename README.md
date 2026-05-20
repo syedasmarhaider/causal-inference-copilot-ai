@@ -8,7 +8,7 @@ Local backend for AitiaMed's causal inference copilot. The app exposes an authen
 - Runtime: Python 3.11
 - Workflow engine: Node/state pipeline with LLM-assisted routing
 - Storage: local files under `.local_storage`
-- Auth: local bearer token from `ID_TOKEN`
+- Auth: local bearer token containing a UUID identity
 - LLM provider: Vertex AI through LiteLLM
 
 ## Repository Layout
@@ -42,7 +42,6 @@ cp .env.example .env
 
 3. Fill required values in `.env`:
 
-- `ID_TOKEN`
 - `VERTEXAI_PROJECT`
 - `VERTEXAI_LOCATION`
 
@@ -79,11 +78,13 @@ The app always uses local filesystem backends:
 - Dataset artifacts: `.local_storage/data`
 - Model artifacts: `.local_storage/models`
 
-Set `ID_TOKEN` in `.env` and call authenticated endpoints with:
+Call authenticated endpoints with either a raw UUID or a JWT-like token whose payload has an `id`, `uuid`, `user_id`, `uid`, or `sub` UUID claim:
 
 ```http
-Authorization: Bearer <ID_TOKEN>
+Authorization: Bearer <uuid-or-local-jwt-like-token>
 ```
+
+JWT signatures are not validated in this local paper branch.
 
 Delete `.local_storage/workflow_state.json` to clear local conversations and workflow state.
 
@@ -144,7 +145,6 @@ Dataset-history revert inside the workflow is triggered through the messages end
 Defined in `.env.example`:
 
 - `SERVICE_NAME`
-- `ID_TOKEN`
 - `VERTEXAI_PROJECT`
 - `VERTEXAI_LOCATION`
 - `GOOGLE_APPLICATION_CREDENTIALS`

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from uuid import uuid4
 
 import pytest
@@ -18,6 +20,14 @@ from python.implementation.service.local_token_auth_service import LocalTokenAut
 
 def _credentials(token: str = "token") -> HTTPAuthorizationCredentials:
     return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+
+def _jwt_like(payload: dict[str, object]) -> str:
+    def _encode(value: dict[str, object]) -> str:
+        raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    return f"{_encode({'alg': 'none', 'typ': 'JWT'})}.{_encode(payload)}."
 
 
 def test_get_workflow_and_dataflow_apps_share_cached_make_apps(
@@ -54,13 +64,18 @@ def test_get_auth_service_uses_local_token_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dependencies.get_auth_service.cache_clear()
-    monkeypatch.setenv("ID_TOKEN", "local-token")
+    monkeypatch.delenv("ID_TOKEN", raising=False)
+    user_id = uuid4()
+    token = _jwt_like({"id": str(user_id), "email": "local@example.test"})
 
     auth_service = dependencies.get_auth_service()
 
     assert isinstance(auth_service, LocalTokenAuthService)
-    user = auth_service.verify_token_and_get_user("local-token")
+    user = auth_service.verify_token_and_get_user(token)
+    assert user.uid == user_id
+    assert user.email == "local@example.test"
     assert user.claims["auth_provider"] == "local"
+    assert user.claims["local_subject_claim"] == "id"
 
     with pytest.raises(InvalidTokenError):
         auth_service.verify_token_and_get_user("other-token")
@@ -68,14 +83,19 @@ def test_get_auth_service_uses_local_token_auth(
     dependencies.get_auth_service.cache_clear()
 
 
-def test_get_auth_service_requires_id_token(
+def test_get_auth_service_accepts_raw_uuid_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dependencies.get_auth_service.cache_clear()
     monkeypatch.delenv("ID_TOKEN", raising=False)
+    user_id = uuid4()
 
-    with pytest.raises(ValueError, match=r"ID_TOKEN"):
-        dependencies.get_auth_service()
+    auth_service = dependencies.get_auth_service()
+    user = auth_service.verify_token_and_get_user(str(user_id))
+
+    assert user.uid == user_id
+    assert user.email is None
+    assert user.claims["local_subject_claim"] == "token"
 
     dependencies.get_auth_service.cache_clear()
 
@@ -103,6 +123,27 @@ def test_get_authenticated_user_returns_verified_user(monkeypatch: pytest.Monkey
     )
 
     assert user == expected_user
+
+
+def test_get_authenticated_user_accepts_local_jwt_like_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dependencies.get_auth_service.cache_clear()
+    monkeypatch.delenv("ID_TOKEN", raising=False)
+    user_id = uuid4()
+    token = _jwt_like({"uuid": str(user_id)})
+
+    user = asyncio.run(
+        dependencies.get_authenticated_user(
+            credentials=_credentials(token),
+            authorization=f"Bearer {token}",
+        )
+    )
+
+    assert user.uid == user_id
+    assert user.claims["local_subject_claim"] == "uuid"
+
+    dependencies.get_auth_service.cache_clear()
 
 
 @pytest.mark.parametrize(

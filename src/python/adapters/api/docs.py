@@ -29,9 +29,10 @@ API_SUMMARY = "Authenticated API for medical causal inference workflow interacti
 API_DESCRIPTION = (
     "Create typed conversations, upload CSV datasets, send workflow messages, inspect workflow state, and download generated artifacts.\n\n"
     "Authentication:\n"
-    "- All `/v1/...` endpoints require the configured local bearer token.\n"
+    "- All `/v1/...` endpoints require a local bearer token containing a UUID identity.\n"
+    "- The token may be a raw UUID or JWT-like token with an `id`, `uuid`, `user_id`, `uid`, or `sub` UUID claim.\n"
     "- `/healthz` is public.\n"
-    "- The authenticated local identity is resolved server-side; clients do not send a `user_id`.\n\n"
+    "- The authenticated local identity is read from the bearer token; signatures are not validated in this local branch.\n\n"
     "Conversation metadata:\n"
     "- `POST /v1/conversations` accepts an optional `conversation_name`.\n"
     "- `GET /v1/conversations` returns `conversation_name` and `last_updated_at_utc` for each conversation.\n\n"
