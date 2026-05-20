@@ -60,11 +60,8 @@ def test_get_workflow_and_dataflow_apps_share_cached_make_apps(
     dependencies.get_audit_log_app.cache_clear()
 
 
-def test_get_auth_service_uses_local_token_auth(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_get_auth_service_uses_local_token_auth() -> None:
     dependencies.get_auth_service.cache_clear()
-    monkeypatch.delenv("ID_TOKEN", raising=False)
     user_id = uuid4()
     token = _jwt_like({"id": str(user_id), "email": "local@example.test"})
 
@@ -83,19 +80,18 @@ def test_get_auth_service_uses_local_token_auth(
     dependencies.get_auth_service.cache_clear()
 
 
-def test_get_auth_service_accepts_raw_uuid_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_get_auth_service_accepts_uppercase_id_claim() -> None:
     dependencies.get_auth_service.cache_clear()
-    monkeypatch.delenv("ID_TOKEN", raising=False)
     user_id = uuid4()
+    token = _jwt_like({"ID": str(user_id), "email_verified": False})
 
     auth_service = dependencies.get_auth_service()
-    user = auth_service.verify_token_and_get_user(str(user_id))
+    user = auth_service.verify_token_and_get_user(token)
 
     assert user.uid == user_id
     assert user.email is None
-    assert user.claims["local_subject_claim"] == "token"
+    assert user.email_verified is False
+    assert user.claims["local_subject_claim"] == "ID"
 
     dependencies.get_auth_service.cache_clear()
 
@@ -125,11 +121,8 @@ def test_get_authenticated_user_returns_verified_user(monkeypatch: pytest.Monkey
     assert user == expected_user
 
 
-def test_get_authenticated_user_accepts_local_jwt_like_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_get_authenticated_user_accepts_local_jwt_like_token() -> None:
     dependencies.get_auth_service.cache_clear()
-    monkeypatch.delenv("ID_TOKEN", raising=False)
     user_id = uuid4()
     token = _jwt_like({"uuid": str(user_id)})
 

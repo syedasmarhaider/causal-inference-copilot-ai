@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any, Protocol
 
-_DEFAULT_SERVICE_NAME = "causal-inference-copilot-ai"
+_DEFAULT_SERVICE_NAME = "agent"
 _LOG_LEVEL_ENV = "LOG_LEVEL"
 _SERVICE_NAME_ENV = "LOG_SERVICE_NAME"
 _LOG_FLUSH_FILE_ENABLED_ENV = "LOG_FLUSH_FILE_ENABLED"

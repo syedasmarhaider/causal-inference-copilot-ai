@@ -1,4 +1,4 @@
-"""FastAPI route handlers for the Causal Inference Agent API.
+"""FastAPI route handlers for the Agent API.
 
 The adapter intentionally keeps the HTTP surface thin:
 
@@ -179,7 +179,7 @@ async def get_conversation(
     summary="Send a message to the workflow",
     description=(
         "Submits a user message to the current workflow stage and returns the resulting workflow step. "
-        "Send ``user_text=\"revert_data_changes\"`` to request a dataset-history revert inside the workflow."
+        'Send ``user_text="revert_data_changes"`` to request a dataset-history revert inside the workflow.'
     ),
     response_description="Workflow step result.",
     responses={
@@ -589,9 +589,7 @@ def _to_chat_message_response(message: ChatMessage) -> ChatMessageResponse:
         content=message.content,
         created_at_utc=message.created_at_utc,
         id=message.id,
-        artifact_refs=[
-            _to_artifact_ref_response(ref) for ref in (message.artifact_refs or ())
-        ]
+        artifact_refs=[_to_artifact_ref_response(ref) for ref in (message.artifact_refs or ())]
         or None,
     )
 

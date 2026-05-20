@@ -1,6 +1,6 @@
-# AitiaMed Causal Inference Copilot API
+# Agent API
 
-Local backend for AitiaMed's causal inference copilot. The app exposes an authenticated FastAPI API for conversations, dataset uploads, staged workflow execution, and artifact retrieval.
+Local backend for the agent API. The app exposes an authenticated FastAPI API for conversations, dataset uploads, staged workflow execution, and artifact retrieval.
 
 ## Overview
 
@@ -8,7 +8,7 @@ Local backend for AitiaMed's causal inference copilot. The app exposes an authen
 - Runtime: Python 3.11
 - Workflow engine: Node/state pipeline with LLM-assisted routing
 - Storage: local files under `.local_storage`
-- Auth: local bearer token containing a UUID identity
+- Auth: local JWT bearer token containing a UUID identity
 - LLM provider: Vertex AI through LiteLLM
 
 ## Repository Layout
@@ -78,10 +78,10 @@ The app always uses local filesystem backends:
 - Dataset artifacts: `.local_storage/data`
 - Model artifacts: `.local_storage/models`
 
-Call authenticated endpoints with either a raw UUID or a JWT-like token whose payload has an `id`, `uuid`, `user_id`, `uid`, or `sub` UUID claim:
+Call authenticated endpoints with a JWT-like bearer token whose payload has an `id`, `ID`, `uuid`, `user_id`, `uid`, or `sub` UUID claim:
 
 ```http
-Authorization: Bearer <uuid-or-local-jwt-like-token>
+Authorization: Bearer <local-jwt-like-token>
 ```
 
 JWT signatures are not validated in this local paper branch.
@@ -144,14 +144,14 @@ Dataset-history revert inside the workflow is triggered through the messages end
 
 Defined in `.env.example`:
 
-- `SERVICE_NAME`
+- `LOG_SERVICE_NAME`
 - `VERTEXAI_PROJECT`
 - `VERTEXAI_LOCATION`
 - `GOOGLE_APPLICATION_CREDENTIALS`
+- `LITELLM_LOCAL_MODEL_COST_MAP`
 - `LOG_LEVEL`
 - `API_HOST`
 - `API_PORT`
-- `WEB_CONCURRENCY`
 
 ## Tests
 

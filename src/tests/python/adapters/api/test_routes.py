@@ -863,6 +863,8 @@ def test_openapi_mentions_scoped_paths_and_enums() -> None:
 
     assert response.status_code == 200
     schema = response.json()
+    assert schema["info"]["title"] == "Agent API"
+    assert schema["info"]["summary"] == "Authenticated API for workflow interactions."
 
     create_schema = schema["paths"]["/v1/conversations"]["post"]["requestBody"]["content"][
         "application/json"

@@ -23,14 +23,14 @@ OPENAPI_TAGS = [
     },
 ]
 
-API_TITLE = "AitiaMed Agent API"
+API_TITLE = "Agent API"
 API_VERSION = "0.1.0"
-API_SUMMARY = "Authenticated API for medical causal inference workflow interactions."
+API_SUMMARY = "Authenticated API for workflow interactions."
 API_DESCRIPTION = (
     "Create typed conversations, upload CSV datasets, send workflow messages, inspect workflow state, and download generated artifacts.\n\n"
     "Authentication:\n"
-    "- All `/v1/...` endpoints require a local bearer token containing a UUID identity.\n"
-    "- The token may be a raw UUID or JWT-like token with an `id`, `uuid`, `user_id`, `uid`, or `sub` UUID claim.\n"
+    "- All `/v1/...` endpoints require a local JWT bearer token containing a UUID identity.\n"
+    "- The token payload must include an `id`, `ID`, `uuid`, `user_id`, `uid`, or `sub` UUID claim.\n"
     "- `/healthz` is public.\n"
     "- The authenticated local identity is read from the bearer token; signatures are not validated in this local branch.\n\n"
     "Conversation metadata:\n"

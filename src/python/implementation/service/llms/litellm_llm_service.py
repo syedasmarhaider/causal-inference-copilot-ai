@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -9,7 +10,6 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, replace
 from typing import Any, Literal, TypeVar
 
-from litellm import completion
 from pydantic import BaseModel, ValidationError
 
 from python.domain.models.models import ChatMessage
@@ -20,6 +20,23 @@ from python.domain.service.llm_service import (
     LLMService,
     ToolCall,
 )
+
+# LiteLLM reads this during import, before service configuration exists.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
+_OPTIONAL_PROVIDER_WARNING_SNIPPETS = (
+    "could not pre-load bedrock-runtime response stream shape",
+    "could not pre-load sagemaker-runtime response stream shape",
+)
+
+
+class _LiteLLMOptionalProviderWarningFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(snippet in message for snippet in _OPTIONAL_PROVIDER_WARNING_SNIPPETS)
+
+
+logging.getLogger("LiteLLM").addFilter(_LiteLLMOptionalProviderWarningFilter())
 
 Provider = Literal["vertex_ai"]
 CompletionFn = Callable[..., Any]
@@ -124,6 +141,8 @@ class LiteLLMService(LLMService):
 
     @staticmethod
     def _load_completion_fn() -> CompletionFn:
+        from litellm import completion
+
         return completion
 
     @staticmethod
@@ -338,9 +357,7 @@ class LiteLLMService(LLMService):
             message = getattr(first_choice, "message", None)
             content = LiteLLMService._stringify_content(getattr(message, "content", ""))
             finish_reason = getattr(first_choice, "finish_reason", None)
-            tool_calls = LiteLLMService._normalize_tool_calls(
-                getattr(message, "tool_calls", None)
-            )
+            tool_calls = LiteLLMService._normalize_tool_calls(getattr(message, "tool_calls", None))
             return LLMResponse(
                 content=content.strip(),
                 finish_reason=finish_reason,
