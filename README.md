@@ -9,7 +9,7 @@ Local backend for the agent API. The app exposes an authenticated FastAPI API fo
 - Workflow engine: Node/state pipeline with LLM-assisted routing
 - Storage: local files under `.local_storage`
 - Auth: local bearer token with JWT-like, UUID, or opaque local identity support
-- LLM provider: Vertex AI through LiteLLM
+- LLM provider: configurable through LiteLLM; Vertex AI is the default
 
 ## Repository Layout
 
@@ -94,15 +94,28 @@ JWT signatures are not validated in this local paper branch.
 
 Delete `.local_storage/workflow_state.json` to clear local conversations and workflow state.
 
-## Vertex AI
+## LLM Configuration
 
-The LLM service uses Vertex AI only. Configure:
+The LLM service uses LiteLLM. Vertex AI remains the default provider and uses the existing
+Application Default Credentials setup:
 
 - `VERTEXAI_PROJECT`
 - `VERTEXAI_LOCATION` (defaults to `global` in `.env.example`)
 - `GOOGLE_APPLICATION_CREDENTIALS` if you are not using `gcloud auth application-default login`
 
-Model aliases are defined in `src/python/implementation/service/llms/llm_service_factory.py`.
+Provider and model aliases can be configured through env vars:
+
+- `LLM_PROVIDER`: `vertex_ai`, `google_ai_studio`, `openai`, or `azure`
+- `LLM_API_KEY`: required for `google_ai_studio`, `openai`, and `azure`
+- `LLM_API_BASE`: required for `azure`
+- `LLM_API_VERSION`: required for `azure`
+- `LLM_MODEL_MINI`
+- `LLM_MODEL_BASIC`
+- `LLM_MODEL_PRO`
+- `LLM_MODEL_THINKING`
+
+For Vertex AI, the model env vars are optional and default to the current Gemini model map.
+For non-Vertex providers, set all four model env vars to the provider model or deployment names.
 
 ## API Surface
 
@@ -151,6 +164,14 @@ Dataset-history revert inside the workflow is triggered through the messages end
 Defined in `.env.example`:
 
 - `LOG_SERVICE_NAME`
+- `LLM_PROVIDER`
+- `LLM_API_KEY`
+- `LLM_API_BASE`
+- `LLM_API_VERSION`
+- `LLM_MODEL_MINI`
+- `LLM_MODEL_BASIC`
+- `LLM_MODEL_PRO`
+- `LLM_MODEL_THINKING`
 - `VERTEXAI_PROJECT`
 - `VERTEXAI_LOCATION`
 - `GOOGLE_APPLICATION_CREDENTIALS`

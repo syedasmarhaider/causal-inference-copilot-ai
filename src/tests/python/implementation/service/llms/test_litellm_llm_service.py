@@ -70,6 +70,9 @@ def _build_service(
     completion_stub: _CompletionStub,
     *,
     provider: Provider = "vertex_ai",
+    api_key: str | None = None,
+    api_base: str | None = None,
+    api_version: str | None = None,
     model_names: dict[AvailableModelsKey, str] | None = None,
     reliability: ReliabilityPolicy | None = None,
 ) -> LiteLLMService:
@@ -85,9 +88,37 @@ def _build_service(
     return LiteLLMService(
         provider=provider,
         model_names=resolved_model_names,
+        api_key=api_key,
+        api_base=api_base,
+        api_version=api_version,
         reliability=resolved_reliability,
         completion_fn=completion_stub,
     )
+
+
+def _clear_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "LLM_PROVIDER",
+        "LLM_API_KEY",
+        "LLM_API_BASE",
+        "LLM_API_VERSION",
+        "LLM_MODEL_MINI",
+        "LLM_MODEL_BASIC",
+        "LLM_MODEL_PRO",
+        "LLM_MODEL_THINKING",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_AI_STUDIO_API_KEY",
+        "AZURE_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_API_BASE",
+        "AZURE_OPENAI_ENDPOINT",
+        "AZURE_API_VERSION",
+        "OPENAI_API_BASE",
+        "OPENAI_API_VERSION",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _env_truthy(name: str) -> bool:
@@ -177,6 +208,99 @@ def test_generate_builds_vertex_ai_route(monkeypatch: pytest.MonkeyPatch) -> Non
     assert kwargs["model"] == "vertex_ai/fake-basic"
     assert kwargs["vertex_project"] == "project-x"
     assert kwargs["vertex_location"] == "us-central1"
+
+
+def test_generate_builds_google_ai_studio_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-secret")
+    stub = _CompletionStub(
+        responses=[_Response(choices=[_Choice(message=_Message(content="google-ok"))])]
+    )
+    service = _build_service(
+        stub,
+        provider="google_ai_studio",
+        model_names={
+            "mini": "models/gemini-fake-mini",
+            "basic": "models/gemini-fake-basic",
+            "pro": "models/gemini-fake-pro",
+            "thinking": "models/gemini-fake-thinking",
+        },
+    )
+
+    response = service.generate(
+        system_prompt=None,
+        user_prompt="hello",
+        config=LLMConfig(model="basic"),
+        history=None,
+    )
+
+    assert response.content == "google-ok"
+    kwargs = stub.calls[0]
+    assert kwargs["model"] == "gemini/gemini-fake-basic"
+    assert kwargs["api_key"] == "gemini-secret"
+
+
+def test_generate_builds_openai_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    stub = _CompletionStub(
+        responses=[_Response(choices=[_Choice(message=_Message(content="openai-ok"))])]
+    )
+    service = _build_service(
+        stub,
+        provider="openai",
+        model_names={
+            "mini": "gpt-fake-mini",
+            "basic": "gpt-fake-basic",
+            "pro": "gpt-fake-pro",
+            "thinking": "gpt-fake-thinking",
+        },
+    )
+
+    response = service.generate(
+        system_prompt=None,
+        user_prompt="hello",
+        config=LLMConfig(model="basic"),
+        history=None,
+    )
+
+    assert response.content == "openai-ok"
+    kwargs = stub.calls[0]
+    assert kwargs["model"] == "openai/gpt-fake-basic"
+    assert kwargs["api_key"] == "openai-secret"
+
+
+def test_generate_builds_azure_route() -> None:
+    stub = _CompletionStub(
+        responses=[_Response(choices=[_Choice(message=_Message(content="azure-ok"))])]
+    )
+    service = _build_service(
+        stub,
+        provider="azure",
+        api_key="azure-secret",
+        api_base="https://example.openai.azure.com",
+        api_version="2024-10-21",
+        model_names={
+            "mini": "fake-mini-deployment",
+            "basic": "fake-basic-deployment",
+            "pro": "fake-pro-deployment",
+            "thinking": "fake-thinking-deployment",
+        },
+    )
+
+    response = service.generate(
+        system_prompt=None,
+        user_prompt="hello",
+        config=LLMConfig(model="basic"),
+        history=None,
+    )
+
+    assert response.content == "azure-ok"
+    kwargs = stub.calls[0]
+    assert kwargs["model"] == "azure/fake-basic-deployment"
+    assert kwargs["api_key"] == "azure-secret"
+    assert kwargs["api_base"] == "https://example.openai.azure.com"
+    assert kwargs["api_version"] == "2024-10-21"
 
 
 def test_generate_handles_non_choice_return_shape(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -338,6 +462,62 @@ def test_factory_uses_vertex_ai_provider(monkeypatch: pytest.MonkeyPatch) -> Non
     assert isinstance(service, LiteLLMService)
     assert service._provider == "vertex_ai"  # noqa: SLF001
     service.close()
+
+
+def test_factory_builds_openai_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_API_KEY", "openai-secret")
+    monkeypatch.setenv("LLM_MODEL_MINI", "gpt-mini")
+    monkeypatch.setenv("LLM_MODEL_BASIC", "gpt-basic")
+    monkeypatch.setenv("LLM_MODEL_PRO", "gpt-pro")
+    monkeypatch.setenv("LLM_MODEL_THINKING", "gpt-thinking")
+    monkeypatch.setattr(
+        LiteLLMService,
+        "_load_completion_fn",
+        staticmethod(lambda: _CompletionStub()),
+    )
+
+    settings = LLMServiceSettings.from_env()
+    service = make_llm_service(settings)
+
+    assert isinstance(service, LiteLLMService)
+    assert service._provider == "openai"  # noqa: SLF001
+    assert service._api_key == "openai-secret"  # noqa: SLF001
+    assert service._model_names["basic"] == "gpt-basic"  # noqa: SLF001
+    service.close()
+
+
+def test_factory_auto_provider_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "google-ai-studio")
+    monkeypatch.setenv("LLM_API_KEY", "google-secret")
+    monkeypatch.setenv("LLM_MODEL_MINI", "gemini-mini")
+    monkeypatch.setenv("LLM_MODEL_BASIC", "gemini-basic")
+    monkeypatch.setenv("LLM_MODEL_PRO", "gemini-pro")
+    monkeypatch.setenv("LLM_MODEL_THINKING", "gemini-thinking")
+    monkeypatch.setattr(
+        LiteLLMService,
+        "_load_completion_fn",
+        staticmethod(lambda: _CompletionStub()),
+    )
+
+    service = make_llm_service(LLMServiceSettings(provider="auto"))
+
+    assert isinstance(service, LiteLLMService)
+    assert service._provider == "google_ai_studio"  # noqa: SLF001
+    assert service._api_key == "google-secret"  # noqa: SLF001
+    assert service._model_names["thinking"] == "gemini-thinking"  # noqa: SLF001
+    service.close()
+
+
+def test_factory_requires_non_vertex_model_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_API_KEY", "openai-secret")
+
+    with pytest.raises(ValueError, match="Missing model env vars"):
+        LLMServiceSettings.from_env()
 
 
 @pytest.mark.integration

@@ -38,7 +38,7 @@ class _LiteLLMOptionalProviderWarningFilter(logging.Filter):
 
 logging.getLogger("LiteLLM").addFilter(_LiteLLMOptionalProviderWarningFilter())
 
-Provider = Literal["vertex_ai"]
+Provider = Literal["vertex_ai", "google_ai_studio", "openai", "azure"]
 CompletionFn = Callable[..., Any]
 T = TypeVar("T", bound=BaseModel)
 F = TypeVar("F", bound=Callable[..., Any])
@@ -63,11 +63,17 @@ class LiteLLMService(LLMService):
         *,
         provider: Provider,
         model_names: Mapping[AvailableModelsKey, str],
+        api_key: str | None = None,
+        api_base: str | None = None,
+        api_version: str | None = None,
         reliability: ReliabilityPolicy | None = None,
         completion_fn: CompletionFn | None = None,
     ) -> None:
         self._provider = provider
         self._model_names = self._validate_model_names(model_names)
+        self._api_key = self._normalize_optional_setting(api_key)
+        self._api_base = self._normalize_optional_setting(api_base)
+        self._api_version = self._normalize_optional_setting(api_version)
         self._reliability = reliability or ReliabilityPolicy()
         self._validate_reliability(self._reliability)
         self._completion = completion_fn or self._load_completion_fn()
@@ -258,11 +264,131 @@ class LiteLLMService(LLMService):
     def _provider_kwargs(self, model_alias: AvailableModelsKey) -> dict[str, Any]:
         model_name = self._model_names[model_alias]
 
-        return {
-            "model": self._normalize_vertex_model_name(model_name),
-            "vertex_project": self._require_vertex_project(),
-            "vertex_location": self._resolve_vertex_location(),
+        if self._provider == "vertex_ai":
+            return {
+                "model": self._normalize_vertex_model_name(model_name),
+                "vertex_project": self._require_vertex_project(),
+                "vertex_location": self._resolve_vertex_location(),
+            }
+
+        if self._provider == "google_ai_studio":
+            return {
+                "model": self._prefix_model_name(
+                    model_name,
+                    prefix="gemini",
+                    strip_prefixes=("models/",),
+                ),
+                "api_key": self._require_api_key(
+                    "Google AI Studio",
+                    ("LLM_API_KEY", "GOOGLE_AI_STUDIO_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
+                ),
+            }
+
+        if self._provider == "openai":
+            return self._openai_kwargs(model_name)
+
+        if self._provider == "azure":
+            return {
+                "model": self._prefix_model_name(model_name, prefix="azure"),
+                "api_key": self._require_api_key(
+                    "Azure OpenAI",
+                    ("LLM_API_KEY", "AZURE_API_KEY", "AZURE_OPENAI_API_KEY"),
+                ),
+                "api_base": self._require_setting(
+                    self._api_base,
+                    ("LLM_API_BASE", "AZURE_API_BASE", "AZURE_OPENAI_ENDPOINT"),
+                    "Azure OpenAI API base",
+                ),
+                "api_version": self._require_setting(
+                    self._api_version,
+                    ("LLM_API_VERSION", "AZURE_API_VERSION", "OPENAI_API_VERSION"),
+                    "Azure OpenAI API version",
+                ),
+            }
+
+        raise ValueError(f"Unsupported provider: {self._provider}")
+
+    @staticmethod
+    def _prefix_model_name(
+        model_name: str,
+        *,
+        prefix: str,
+        strip_prefixes: tuple[str, ...] = (),
+    ) -> str:
+        normalized = model_name.strip()
+        for strip_prefix in strip_prefixes:
+            if normalized.startswith(strip_prefix):
+                normalized = normalized[len(strip_prefix) :]
+        if normalized.startswith(f"{prefix}/"):
+            return normalized
+        return f"{prefix}/{normalized}"
+
+    @staticmethod
+    def _normalize_optional_setting(value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    def _require_api_key(self, provider_label: str, env_names: tuple[str, ...]) -> str:
+        return self._require_setting(
+            self._api_key,
+            env_names,
+            f"{provider_label} API key",
+        )
+
+    @staticmethod
+    def _require_setting(
+        explicit_value: str | None,
+        env_names: tuple[str, ...],
+        label: str,
+    ) -> str:
+        if explicit_value:
+            return explicit_value
+
+        for env_name in env_names:
+            value = os.environ.get(env_name, "").strip()
+            if value:
+                return value
+
+        expected = " or ".join(env_names)
+        raise ValueError(f"Missing {label}. Set {expected}.")
+
+    @staticmethod
+    def _optional_env_setting(env_names: tuple[str, ...]) -> str | None:
+        for env_name in env_names:
+            value = os.environ.get(env_name, "").strip()
+            if value:
+                return value
+        return None
+
+    def _optional_api_base(self, env_names: tuple[str, ...]) -> str | None:
+        if self._api_base:
+            return self._api_base
+        return self._optional_env_setting(env_names)
+
+    def _optional_api_version(self, env_names: tuple[str, ...]) -> str | None:
+        if self._api_version:
+            return self._api_version
+        return self._optional_env_setting(env_names)
+
+    def _openai_optional_kwargs(self) -> dict[str, str]:
+        kwargs: dict[str, str] = {}
+        api_base = self._optional_api_base(("LLM_API_BASE", "OPENAI_API_BASE"))
+        if api_base:
+            kwargs["api_base"] = api_base
+        api_version = self._optional_api_version(("LLM_API_VERSION", "OPENAI_API_VERSION"))
+        if api_version:
+            kwargs["api_version"] = api_version
+        return kwargs
+
+    def _openai_kwargs(self, model_name: str) -> dict[str, str]:
+        kwargs = {
+            "model": self._prefix_model_name(model_name, prefix="openai"),
+            "api_key": self._require_api_key("OpenAI", ("LLM_API_KEY", "OPENAI_API_KEY")),
         }
+        kwargs.update(self._openai_optional_kwargs())
+        return kwargs
 
     @staticmethod
     def _normalize_vertex_model_name(model_name: str) -> str:

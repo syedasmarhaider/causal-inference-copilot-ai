@@ -41,7 +41,7 @@ _LOCAL_WORKFLOW_STATE_DB_PATH = _LOCAL_STORAGE_ROOT / "workflow_state.json"
 
 def make_apps() -> tuple[WorkflowApp, DataflowApp, AuditLogApp]:
     log.info("building workflow app dependencies")
-    llm: LLMService = make_llm_service(settings=LLMServiceSettings())
+    llm: LLMService = make_llm_service(settings=LLMServiceSettings.from_env())
     data_repo: DataRepo = _make_data_repo()
     models_repo: ModelsRepo = _make_models_repo()
     analytics_repo: AnalyticsRepo = _make_analytics_repo()
