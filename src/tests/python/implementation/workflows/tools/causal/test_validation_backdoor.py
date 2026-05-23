@@ -209,9 +209,43 @@ def test_validate_backdoor_fails_observational_without_covariates() -> None:
 
     assert report.status == "FAIL"
     assert any(
-        issue.message == "Observational studies require covariate for adjustment."
+        issue.message
+        == (
+            "Observational studies require at least one covariate or effect modifier "
+            "for adjustment."
+        )
         for issue in report.issues
     )
+
+
+def test_validate_backdoor_accepts_observational_with_effect_modifier_only() -> None:
+    dataframe = _build_dataframe()
+    dataframe["age"] = [30, 30, 40, 40, 50, 50, 60, 60] * 5
+
+    report = validate_backdoor(
+        causal_spec=_build_causal_spec(
+            experiment_type="OBSERVATIONAL", covariates=[], effect_modifiers=["age"]
+        ),
+        dataframe=dataframe,
+        transform_plan=TransformPlan.model_validate(
+            {
+                "columns": [
+                    {
+                        "column": "age",
+                        "role": "effect_modifier",
+                        "encoding": {"preset": "num_standard"},
+                    }
+                ]
+            }
+        ),
+    )
+
+    assert not any(issue.severity == "FAIL" for issue in report.issues)
+    assert not any(
+        issue.message.startswith("Observational studies require")
+        for issue in report.issues
+    )
+    assert "overlap" in report.metrics
 
 
 def test_validate_backdoor_reports_transform_compile_failure_as_issue() -> None:

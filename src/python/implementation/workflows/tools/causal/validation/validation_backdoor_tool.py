@@ -477,13 +477,21 @@ def _validate_causal_spec(
             )
         )
 
-    if causal_spec.experiment_type == "OBSERVATIONAL" and not covariates:
+    if causal_spec.experiment_type == "OBSERVATIONAL" and not (
+        covariates or effect_modifiers
+    ):
         issues.append(
             _issue(
                 severity="FAIL",
-                message="Observational studies require covariate for adjustment.",
+                message=(
+                    "Observational studies require at least one covariate or effect "
+                    "modifier for adjustment."
+                ),
                 evidence={"experiment_type": causal_spec.experiment_type},
-                fix_hint="Add observed confounders to causal_spec.covariates.",
+                fix_hint=(
+                    "Add observed confounders to causal_spec.covariates or "
+                    "causal_spec.effect_modifiers."
+                ),
             )
         )
 
