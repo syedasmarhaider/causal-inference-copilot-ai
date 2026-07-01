@@ -112,6 +112,7 @@ class WorkflowApp:
         user_id: UUID,
         conversation_id: UUID,
         conversation_type: str,
+        message_limit: int | None = 50,
     ) -> ConversationResponse:
         self._raise_if_userid_not_relates_to_conversation_id(
             user_id=user_id,
@@ -127,7 +128,7 @@ class WorkflowApp:
         messages = self._repo.load_message_history(
             user_id=user_id,
             conversation_id=conversation_id,
-            limit=30,
+            limit=message_limit,
         )
         state = self._ochestrator.get_current_ochestrator_state(
             user_id=user_id,
@@ -201,6 +202,7 @@ class WorkflowApp:
         conversation_id: UUID,
         conversation_type: str,
         state_name: str,
+        message_limit: int | None = 50,
     ) -> ConversationResponse:
         self._raise_if_userid_not_relates_to_conversation_id(
             user_id=user_id,
@@ -254,7 +256,7 @@ class WorkflowApp:
         messages = self._repo.load_message_history(
             user_id=user_id,
             conversation_id=conversation_id,
-            limit=30,
+            limit=message_limit,
         )
         state = self._ochestrator.get_current_ochestrator_state(
             user_id=user_id,

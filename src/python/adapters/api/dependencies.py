@@ -48,6 +48,12 @@ DATASET_LIMIT_QUERY_PARAM = Query(
         "Use `0` to return only column metadata."
     ),
 )
+MESSAGE_LIMIT_QUERY_PARAM = Query(
+    default=50,
+    ge=0,
+    le=50,
+    description="Maximum number of recent conversation messages to return.",
+)
 ARTIFACT_KIND_QUERY_PARAM = Query(
     ...,
     description="Artifact kind enum. Allowed values: `graph` or `data`.",

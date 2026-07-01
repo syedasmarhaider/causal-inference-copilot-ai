@@ -30,6 +30,7 @@ from python.adapters.api.dependencies import (
     DATASET_ID_PATH_PARAM,
     DATASET_LIMIT_QUERY_PARAM,
     DATASET_START_QUERY_PARAM,
+    MESSAGE_LIMIT_QUERY_PARAM,
     UPLOAD_DATASET_FILE_PARAM,
     WORKFLOW_APP_DEP,
 )
@@ -156,6 +157,7 @@ async def create_conversation(
 async def get_conversation(
     conversation_id: UUID = CONVERSATION_ID_PATH_PARAM,
     conversation_type: ConversationType = CONVERSATION_TYPE_PATH_PARAM,
+    message_limit: int = MESSAGE_LIMIT_QUERY_PARAM,
     authenticated_user: AuthenticatedUser = AUTHENTICATED_USER_DEP,
     workflow: WorkflowApp = WORKFLOW_APP_DEP,
 ) -> ConversationSnapshotResponse:
@@ -164,6 +166,7 @@ async def get_conversation(
         user_id=authenticated_user.uid,
         conversation_id=conversation_id,
         conversation_type=conversation_type,
+        message_limit=message_limit,
     )
     return _to_conversation_snapshot_response(
         conversation_id=conversation_id,
@@ -232,6 +235,7 @@ async def create_state_reversion(
     req: ConversationStateReversionRequest,
     conversation_id: UUID = CONVERSATION_ID_PATH_PARAM,
     conversation_type: ConversationType = CONVERSATION_TYPE_PATH_PARAM,
+    message_limit: int = MESSAGE_LIMIT_QUERY_PARAM,
     authenticated_user: AuthenticatedUser = AUTHENTICATED_USER_DEP,
     workflow: WorkflowApp = WORKFLOW_APP_DEP,
 ) -> ConversationSnapshotResponse:
@@ -241,6 +245,7 @@ async def create_state_reversion(
         conversation_id=conversation_id,
         conversation_type=conversation_type,
         state_name=req.state_name,
+        message_limit=message_limit,
     )
     return _to_conversation_snapshot_response(
         conversation_id=conversation_id,

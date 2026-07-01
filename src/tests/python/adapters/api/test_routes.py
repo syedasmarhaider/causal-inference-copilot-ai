@@ -80,12 +80,14 @@ class _StubWorkflowApp:
         user_id: UUID,
         conversation_id: UUID,
         conversation_type: str,
+        message_limit: int | None = 50,
     ) -> object:
         self.current_info_calls.append(
             {
                 "user_id": user_id,
                 "conversation_id": conversation_id,
                 "conversation_type": conversation_type,
+                "message_limit": message_limit,
             }
         )
         return self.current_info_result
@@ -115,6 +117,7 @@ class _StubWorkflowApp:
         conversation_id: UUID,
         conversation_type: str,
         state_name: str,
+        message_limit: int | None = 50,
     ) -> object:
         self.revert_calls.append(
             {
@@ -122,6 +125,7 @@ class _StubWorkflowApp:
                 "conversation_id": conversation_id,
                 "conversation_type": conversation_type,
                 "state_name": state_name,
+                "message_limit": message_limit,
             }
         )
         return self.revert_result
@@ -448,7 +452,10 @@ def test_get_conversation_returns_snapshot(
         is_dataset_frozen=True,
     )
 
-    response = client.get(f"/v1/conversations/{conversation_id}/types/causal")
+    response = client.get(
+        f"/v1/conversations/{conversation_id}/types/causal",
+        params={"message_limit": 50},
+    )
 
     assert response.status_code == 200
     assert response.json() == {
@@ -481,6 +488,7 @@ def test_get_conversation_returns_snapshot(
             "user_id": user.uid,
             "conversation_id": conversation_id,
             "conversation_type": "causal",
+            "message_limit": 50,
         }
     ]
     assert dataflow.upload_calls == []
@@ -662,6 +670,7 @@ def test_create_state_reversion_returns_updated_snapshot(
             "conversation_id": conversation_id,
             "conversation_type": "causal",
             "state_name": "MODEL_SELECTION",
+            "message_limit": 50,
         }
     ]
 
@@ -893,6 +902,8 @@ def test_openapi_mentions_scoped_paths_and_enums() -> None:
     ]["get"]
     scoped_parameters = {param["name"]: param for param in scoped_get_operation["parameters"]}
     assert scoped_parameters["conversation_type"]["schema"]["enum"] == ["causal", "data"]
+    assert scoped_parameters["message_limit"]["schema"]["default"] == 50
+    assert scoped_parameters["message_limit"]["schema"]["maximum"] == 50
 
     artifact_operation = schema["paths"][
         "/v1/conversations/{conversation_id}/types/{conversation_type}/artifacts/{artifact_id}"
