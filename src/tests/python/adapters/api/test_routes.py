@@ -495,6 +495,21 @@ def test_get_conversation_returns_snapshot(
     assert dataflow.artifact_calls == []
 
 
+def test_get_conversation_rejects_message_limit_above_50(
+    api_client: tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser],
+) -> None:
+    client, workflow, _, _ = api_client
+    conversation_id = uuid4()
+
+    response = client.get(
+        f"/v1/conversations/{conversation_id}/types/causal",
+        params={"message_limit": 51},
+    )
+
+    assert response.status_code == 422
+    assert workflow.current_info_calls == []
+
+
 def test_get_audit_log_returns_zip(
     api_client: tuple[TestClient, _StubWorkflowApp, _StubDataflowApp, AuthenticatedUser],
 ) -> None:
