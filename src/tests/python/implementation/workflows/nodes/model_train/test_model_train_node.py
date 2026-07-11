@@ -14,8 +14,8 @@ from python.domain.workflows.ochestrator_state import OchestratorState
 from python.domain.workflows.tool import Tool
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.model_train.model_train_node import (
-    _NEGATIVE_CONTROL_OUTCOME_UNAVAILABLE_WARNING,
     ModelTrainNode,
+    _NEGATIVE_CONTROL_OUTCOME_UNAVAILABLE_WARNING,
 )
 from python.implementation.workflows.nodes.model_train.model_train_state import (
     ModelTrainPayloadModel,
@@ -23,18 +23,6 @@ from python.implementation.workflows.nodes.model_train.model_train_state import 
 )
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import (
     TransformPlan,
-)
-from python.implementation.workflows.tools.causal.inference.cate_cache import (
-    CATE_COLUMN,
-    CATE_LOWER_COLUMN,
-    CATE_REVERSE_COLUMN,
-    CATE_REVERSE_LOWER_COLUMN,
-    CATE_REVERSE_UPPER_COLUMN,
-    CATE_STDERR_COLUMN,
-    CATE_T0_COLUMN,
-    CATE_T1_COLUMN,
-    CATE_UPPER_COLUMN,
-    EFFECT_ROW_COLUMN,
 )
 from python.implementation.workflows.tools.causal.inference.causal_command import (
     CATECommand,
@@ -46,6 +34,17 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
 )
 from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
+)
+from python.implementation.workflows.tools.causal.inference.cate_cache import (
+    CATE_COLUMN,
+    CATE_LOWER_COLUMN,
+    CATE_REVERSE_COLUMN,
+    CATE_REVERSE_LOWER_COLUMN,
+    CATE_REVERSE_UPPER_COLUMN,
+    CATE_T0_COLUMN,
+    CATE_T1_COLUMN,
+    CATE_UPPER_COLUMN,
+    EFFECT_ROW_COLUMN,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.data_profiling.data_profiling_tool import (
@@ -455,9 +454,6 @@ def test_model_train_success_stores_training_spec_in_orchestrator_state() -> Non
             "for_treatment": {"t0": 0.0, "t1": 1.0},
             "cate": [0.1, 0.6, 0.2, 0.8],
             "cate_interval": [[-0.1, 0.3, 0.0, 0.5], [0.3, 0.9, 0.4, 1.1]],
-            "cate_stderr": [0.01, 0.02, 0.03, 0.04],
-            "shap_values": [[-0.05], [0.15], [-0.01], [0.22]],
-            "shap_meta": {"feature_names": ["sex"]},
         },
     )
     fake_model = _FakeCausalModel(results=[fit_result, all_row_cate_result])
@@ -559,23 +555,17 @@ def test_model_train_success_stores_training_spec_in_orchestrator_state() -> Non
     assert data_repo.saved_csv_calls[0]["dataset_id"] == payload.all_row_cate_dataset_id
     assert list(saved_cate_df["patient_id"]) == ["p1", "p2", "p3", "p4"]
     assert {
+        EFFECT_ROW_COLUMN,
         CATE_COLUMN,
         CATE_LOWER_COLUMN,
         CATE_UPPER_COLUMN,
-        CATE_STDERR_COLUMN,
-        "shap_sex",
-    }.issubset(saved_cate_df.columns)
-    assert {
-        EFFECT_ROW_COLUMN,
         CATE_REVERSE_COLUMN,
         CATE_REVERSE_LOWER_COLUMN,
         CATE_REVERSE_UPPER_COLUMN,
         CATE_T0_COLUMN,
         CATE_T1_COLUMN,
-    }.isdisjoint(saved_cate_df.columns)
+    }.issubset(saved_cate_df.columns)
     assert list(saved_cate_df[CATE_COLUMN]) == [0.1, 0.6, 0.2, 0.8]
-    assert list(saved_cate_df[CATE_STDERR_COLUMN]) == [0.01, 0.02, 0.03, 0.04]
-    assert list(saved_cate_df["shap_sex"]) == [-0.05, 0.15, -0.01, 0.22]
     assert data_repo.saved_json_calls == []
     assert len(fake_model.commands) == 2
     assert fake_model.commands[0].model_name == "econml.dml.CausalForestDML"
@@ -624,10 +614,7 @@ def test_model_train_with_negative_control_runs_cate_refutation_and_saves_artifa
         meta={},
         fitted_model_id=negative_control_model_id,
         x_cols=["sex"],
-        effects={
-            "cate": [0.02, -0.01, 0.03, 0.0],
-            "cate_interval": [[-0.1, -0.1, -0.1, -0.1], [0.1, 0.1, 0.1, 0.1]],
-        },
+        effects={"cate": [0.02, -0.01, 0.03, 0.0], "cate_interval": [[-0.1, -0.1, -0.1, -0.1], [0.1, 0.1, 0.1, 0.1]]},
     )
     fake_model = _FakeCausalModel(
         results=[
@@ -663,8 +650,9 @@ def test_model_train_with_negative_control_runs_cate_refutation_and_saves_artifa
     assert payload.negative_control_refutation_summary is not None
     assert payload.negative_control_refutation_summary["status"] == "COMPLETED"
     assert payload.negative_control_refutation_summary["primary_model_id"] == str(primary_model_id)
-    assert payload.negative_control_refutation_summary["negative_control_model_id"] == str(
-        negative_control_model_id
+    assert (
+        payload.negative_control_refutation_summary["negative_control_model_id"]
+        == str(negative_control_model_id)
     )
     assert payload.negative_control_refutation_summary["comparison"]["n_rows"] == 4
 
@@ -686,10 +674,9 @@ def test_model_train_with_negative_control_runs_cate_refutation_and_saves_artifa
     cached_cate_df = data_repo.saved_csv_calls[0]["df"]
     assert data_repo.saved_csv_calls[0]["dataset_id"] == payload.all_row_cate_dataset_id
     assert list(cached_cate_df["patient_id"]) == ["p1", "p2", "p3", "p4"]
-    assert {CATE_COLUMN, CATE_LOWER_COLUMN, CATE_UPPER_COLUMN, CATE_STDERR_COLUMN}.issubset(
+    assert {CATE_COLUMN, CATE_REVERSE_COLUMN, CATE_T0_COLUMN, CATE_T1_COLUMN}.issubset(
         cached_cate_df.columns
     )
-    assert {CATE_REVERSE_COLUMN, CATE_T0_COLUMN, CATE_T1_COLUMN}.isdisjoint(cached_cate_df.columns)
     vector_df = data_repo.saved_csv_calls[1]["df"]
     assert list(vector_df["patient_id"]) == ["p1", "p2", "p3", "p4"]
     assert {"primary_cate", "negative_control_cate", "sex"}.issubset(vector_df.columns)

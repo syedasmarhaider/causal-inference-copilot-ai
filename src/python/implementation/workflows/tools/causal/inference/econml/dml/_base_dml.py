@@ -43,7 +43,6 @@ from python.implementation.workflows.tools.causal.inference.econml.dml.shared_nu
 from python.implementation.workflows.tools.causal.inference.econml.utils import (
     ModelSpecError,
     build_init_fit_options_param_maps,
-    extract_inference_stderr,
     get_input_params_from_spec,
     get_treatment_t0_t1_from_spec,
     now_utc,
@@ -51,7 +50,6 @@ from python.implementation.workflows.tools.causal.inference.econml.utils import 
     required_init_keys,
     serialize_econml_sensitivity_analysis,
     serialize_inference_obj,
-    serialize_shap_values_for_effect_modifiers,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 
@@ -751,33 +749,11 @@ class _BaseDMLAdapter(CausalModel):
                 if inf is None:
                     warnings_list.append("INFERENCE_NOT_AVAILABLE: effect_inference returned None")
                     effects["cate_inference"] = None
-                    effects["cate_stderr"] = None
                 else:
                     effects["cate_inference"] = serialize_inference_obj(inf)
-                    effects["cate_stderr"] = extract_inference_stderr(
-                        inf,
-                        expected_length=int(X_query_df.shape[0]),
-                    )
             except Exception as e:
                 warnings_list.append("INFERENCE_NOT_AVAILABLE: " + repr(e))
                 effects["cate_inference"] = None
-                effects["cate_stderr"] = None
-
-            shap_payload, shap_warnings = serialize_shap_values_for_effect_modifiers(
-                est,
-                X=X_query,
-                feature_names=x_cols,
-            )
-            warnings_list.extend(shap_warnings)
-            if shap_payload is None:
-                effects["shap_values"] = None
-                effects["shap_meta"] = None
-            else:
-                effects["shap_values"] = shap_payload["values"]
-                effects["shap_meta"] = {
-                    "feature_names": shap_payload["feature_names"],
-                    "selector": shap_payload["selector"],
-                }
 
             if effects.get("cate") is None:
                 return CommandFailure(

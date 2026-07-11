@@ -41,12 +41,6 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_sta
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
     InferenceReadyCausalSpec,
 )
-from python.implementation.workflows.tools.causal.inference.cate_cache import (
-    CATE_COLUMN,
-    CATE_LOWER_COLUMN,
-    CATE_STDERR_COLUMN,
-    CATE_UPPER_COLUMN,
-)
 from python.implementation.workflows.tools.causal.inference.causal_command import (
     ATECommand,
     ATEInputsModel,
@@ -56,6 +50,17 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
 from python.implementation.workflows.tools.causal.inference.causal_model import CausalModel
 from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
+)
+from python.implementation.workflows.tools.causal.inference.cate_cache import (
+    CATE_COLUMN,
+    CATE_LOWER_COLUMN,
+    CATE_REVERSE_COLUMN,
+    CATE_REVERSE_LOWER_COLUMN,
+    CATE_REVERSE_UPPER_COLUMN,
+    CATE_T0_COLUMN,
+    CATE_T1_COLUMN,
+    CATE_UPPER_COLUMN,
+    EFFECT_ROW_COLUMN,
 )
 from python.implementation.workflows.tools.common.model.data_summary import (
     DatasetSummaryModel,
@@ -75,20 +80,29 @@ _WORKING_TABLE_PREFIX = "df_"
 _WORKING_TABLE_HASH_HEX_LEN = 16
 _ARTIFACT_KIND_CHART_SPEC = "chart_spec"
 _GROUP_KEY_COLUMN = "group_key"
+_EFFECT_ROW_COLUMN = EFFECT_ROW_COLUMN
 _CATE_COLUMN = CATE_COLUMN
 _CATE_LOWER_COLUMN = CATE_LOWER_COLUMN
 _CATE_UPPER_COLUMN = CATE_UPPER_COLUMN
-_CATE_STDERR_COLUMN = CATE_STDERR_COLUMN
+_CATE_REVERSE_COLUMN = CATE_REVERSE_COLUMN
+_CATE_REVERSE_LOWER_COLUMN = CATE_REVERSE_LOWER_COLUMN
+_CATE_REVERSE_UPPER_COLUMN = CATE_REVERSE_UPPER_COLUMN
+_CATE_T0_COLUMN = CATE_T0_COLUMN
+_CATE_T1_COLUMN = CATE_T1_COLUMN
 _CACHED_CATE_EFFECT_COLUMNS = frozenset(
     {
+        _EFFECT_ROW_COLUMN,
         _CATE_COLUMN,
         _CATE_LOWER_COLUMN,
         _CATE_UPPER_COLUMN,
-        _CATE_STDERR_COLUMN,
+        _CATE_REVERSE_COLUMN,
+        _CATE_REVERSE_LOWER_COLUMN,
+        _CATE_REVERSE_UPPER_COLUMN,
+        _CATE_T0_COLUMN,
+        _CATE_T1_COLUMN,
     }
 )
 _DATA_MANIPULATION_RETRY_ATTEMPTS = 3
-
 
 class _InferenceRouteDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -243,7 +257,9 @@ class CausalInferenceNode(Node):
             all_row_cate_dataset_id=deps.all_row_cate_dataset_id,
             all_row_cate_summary=deps.all_row_cate_summary,
             negative_control_refutation_summary=deps.negative_control_refutation_summary,
-            negative_control_refutation_artifact_id=(deps.negative_control_refutation_artifact_id),
+            negative_control_refutation_artifact_id=(
+                deps.negative_control_refutation_artifact_id
+            ),
             negative_control_refutation_vectors_dataset_id=(
                 deps.negative_control_refutation_vectors_dataset_id
             ),
@@ -401,7 +417,9 @@ class CausalInferenceNode(Node):
             "effect_modifiers": resolved.inference_ready_spec.get_effect_modifiers_order(),
             "selected_model": resolved.selected_model,
             "all_row_cate_summary": resolved.all_row_cate_summary,
-            "negative_control_refutation_summary": (resolved.negative_control_refutation_summary),
+            "negative_control_refutation_summary": (
+                resolved.negative_control_refutation_summary
+            ),
         }
 
         try:
@@ -530,7 +548,9 @@ class CausalInferenceNode(Node):
                 selected_model=resolved.selected_model,
                 causal_spec=resolved.inference_ready_spec.causal_spec,
                 cate_payload=cached_cate_payload,
-                negative_control_refutation_summary=(resolved.negative_control_refutation_summary),
+                negative_control_refutation_summary=(
+                    resolved.negative_control_refutation_summary
+                ),
                 history=history,
             )
             return self._needs_input_result(
@@ -609,7 +629,6 @@ class CausalInferenceNode(Node):
             for column in requested_filter_columns
             if str(column).strip() not in effect_modifier_set
             and str(column).strip() not in _CACHED_CATE_EFFECT_COLUMNS
-            and not str(column).strip().startswith("shap_")
         ]
 
         try:
@@ -881,7 +900,9 @@ def _source_signature(*, resolved: _ResolvedInferenceContext) -> str:
             if resolved.negative_control_refutation_vectors_dataset_id is None
             else str(resolved.negative_control_refutation_vectors_dataset_id)
         ),
-        "negative_control_refutation_summary": (resolved.negative_control_refutation_summary),
+        "negative_control_refutation_summary": (
+            resolved.negative_control_refutation_summary
+        ),
     }
     signature_json = json.dumps(
         signature_payload,
@@ -1277,10 +1298,13 @@ def _build_cached_cate_query_instructions(
     return (
         "Prepare a read-only analytical result set from the cached all-row CATE dataframe. "
         "The dataframe already contains the original compiled protocol-scope columns plus "
-        f"`{_CATE_COLUMN}`, `{_CATE_LOWER_COLUMN}`, `{_CATE_UPPER_COLUMN}`, "
-        f"`{_CATE_STDERR_COLUMN}`, and any `shap_` effect-modifier columns that were "
-        f"available from EconML. Do not recompute CATE. `{_CATE_COLUMN}` is the "
-        "row-level treatment-effect contrast on the model outcome scale. "
+        f"`{_EFFECT_ROW_COLUMN}`, `{_CATE_COLUMN}`, `{_CATE_LOWER_COLUMN}`, "
+        f"`{_CATE_UPPER_COLUMN}`, `{_CATE_REVERSE_COLUMN}`, "
+        f"`{_CATE_REVERSE_LOWER_COLUMN}`, `{_CATE_REVERSE_UPPER_COLUMN}`, "
+        f"`{_CATE_T0_COLUMN}`, and `{_CATE_T1_COLUMN}`. Do not recompute CATE. "
+        f"`{_CATE_COLUMN}` is the row-level counterfactual contrast from "
+        f"`{_CATE_T0_COLUMN}` to `{_CATE_T1_COLUMN}` on the model outcome scale. "
+        f"`{_CATE_REVERSE_COLUMN}` is the same contrast in the opposite direction. "
         f"The identifier column is `{identifier_column}`. "
         "The CATE values were estimated using only these confirmed effect modifiers: "
         f"{quoted_effect_modifiers}. "
@@ -1327,10 +1351,7 @@ def _build_cached_cate_query_payload(
 
 
 def _cohort_summaries_from_query_result(query_result_df: pd.DataFrame) -> list[dict[str, Any]]:
-    if (
-        _GROUP_KEY_COLUMN not in query_result_df.columns
-        or _CATE_COLUMN not in query_result_df.columns
-    ):
+    if _GROUP_KEY_COLUMN not in query_result_df.columns or _CATE_COLUMN not in query_result_df.columns:
         return []
     summaries: list[dict[str, Any]] = []
     for group_key, group_df in query_result_df.groupby(_GROUP_KEY_COLUMN, sort=False, dropna=False):
@@ -1379,13 +1400,13 @@ def _build_cate_graph_user_intent(
         "Create a causal graph for conditional treatment effects. "
         "Each row in the dataframe is an individual-level CATE estimate. "
         f"`{_GROUP_KEY_COLUMN}` identifies requested cohorts when multiple groups are present. "
+        f"`{_EFFECT_ROW_COLUMN}` is a stable row index for individual-level/ITE-style views. "
         f"`{_CATE_COLUMN}` is the estimated effect and `{_CATE_LOWER_COLUMN}`/`{_CATE_UPPER_COLUMN}` "
-        f"are interval bounds when available. `{_CATE_STDERR_COLUMN}` is the row-level "
-        "standard error when available. "
+        "are interval bounds when available. "
         "Use a real Vega-Lite causal-effect visualization, never a markdown or ASCII chart. "
         "For box plot requests, use a Vega-Lite boxplot mark with group_key on the categorical axis "
         "and cate on the quantitative axis. For ITE or individual-effect requests, plot cate by "
-        "the identifier column when available and color or facet by group_key when groups exist. "
+        f"`{_EFFECT_ROW_COLUMN}` and color or facet by group_key when groups exist. "
         "Otherwise use an appropriate distribution for a single cohort, a cohort comparison when "
         "multiple group_key values exist, or a trend against a continuous effect modifier when clinically requested. "
         f"Subgroup intent: {request_summary}. Latest user request: {latest_request}"
