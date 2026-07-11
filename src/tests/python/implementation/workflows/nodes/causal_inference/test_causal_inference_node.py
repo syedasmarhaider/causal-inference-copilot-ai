@@ -848,7 +848,7 @@ def test_causal_inference_cate_chart_request_generates_graph_even_when_routed_co
     assert len(fake_plot_tool.calls) == 1
     plotted_df = fake_plot_tool.calls[0]["dataframe"]
     assert isinstance(plotted_df, pd.DataFrame)
-    assert "effect_row" in plotted_df.columns
+    assert "cate" in plotted_df.columns
     assert "box plot" in str(fake_plot_tool.calls[0]["user_intent"]).lower()
 
 

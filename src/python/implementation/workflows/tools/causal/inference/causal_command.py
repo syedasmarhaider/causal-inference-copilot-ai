@@ -22,7 +22,15 @@ ATEModelResult = Literal[
     "robustness_value",
     "sensitivity_interval",
 ]
-CATEModelResult = Literal["for_treatment", "cate", "cate_interval", "cate_inference"]
+CATEModelResult = Literal[
+    "for_treatment",
+    "cate",
+    "cate_interval",
+    "cate_inference",
+    "cate_stderr",
+    "shap_values",
+    "shap_meta",
+]
 
 
 def _now_utc() -> datetime:

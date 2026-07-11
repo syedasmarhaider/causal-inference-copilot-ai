@@ -29,6 +29,12 @@ from python.implementation.workflows.nodes.model_train.model_train_state import 
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
     InferenceReadyCausalSpec,
 )
+from python.implementation.workflows.tools.causal.inference.cate_cache import (
+    build_all_row_cate_dataframe,
+    failed_all_row_cate_summary,
+    skipped_all_row_cate_summary,
+    summarize_all_row_cate_dataframe,
+)
 from python.implementation.workflows.tools.causal.inference.causal_command import (
     CATECommand,
     CATEInputs,
@@ -37,12 +43,6 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
     FitCommand,
     FitInputs,
     FitSuccess,
-)
-from python.implementation.workflows.tools.causal.inference.cate_cache import (
-    build_all_row_cate_dataframe,
-    failed_all_row_cate_summary,
-    skipped_all_row_cate_summary,
-    summarize_all_row_cate_dataframe,
 )
 from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
     CausalModelFactoryTool,
@@ -85,6 +85,9 @@ class _AllRowCATEResult:
     cate_values: np.ndarray | None = None
     lower_values: np.ndarray | None = None
     upper_values: np.ndarray | None = None
+    stderr_values: np.ndarray | None = None
+    shap_values: np.ndarray | None = None
+    shap_feature_names: list[str] | None = None
 
 
 class ModelTrainNode(Node):
@@ -563,7 +566,9 @@ class ModelTrainNode(Node):
             )
 
         if isinstance(cate_result, CommandFailure):
-            warning = f"All-row CATE cache failed during CATE computation: {cate_result.error.message}"
+            warning = (
+                f"All-row CATE cache failed during CATE computation: {cate_result.error.message}"
+            )
             return _AllRowCATEResult(
                 warnings=[warning],
                 summary=failed_all_row_cate_summary(
@@ -603,6 +608,14 @@ class ModelTrainNode(Node):
                     },
                 ),
             )
+        stderr_values = _extract_optional_effect_array(
+            cate_result.effects.get("cate_stderr"),
+            expected_length=len(x_rows),
+        )
+        shap_values, shap_feature_names = _extract_shap_effect_matrix(
+            cate_result.effects,
+            expected_rows=len(x_rows),
+        )
 
         dataset_id = uuid4()
         cate_df = build_all_row_cate_dataframe(
@@ -610,6 +623,9 @@ class ModelTrainNode(Node):
             cate_values=cate_values,
             lower_values=lower_values,
             upper_values=upper_values,
+            stderr_values=stderr_values,
+            shap_values=shap_values,
+            shap_feature_names=shap_feature_names,
             for_treatment=cate_result.effects.get("for_treatment"),
         )
         try:
@@ -642,12 +658,15 @@ class ModelTrainNode(Node):
             for_treatment=cate_result.effects.get("for_treatment"),
         )
         return _AllRowCATEResult(
-            warnings=[],
+            warnings=list(cate_result.warnings or []),
             summary=summary,
             dataset_id=dataset_id,
             cate_values=cate_values,
             lower_values=lower_values,
             upper_values=upper_values,
+            stderr_values=stderr_values,
+            shap_values=shap_values,
+            shap_feature_names=shap_feature_names,
         )
 
     def _run_negative_control_cate_refutation(
@@ -927,10 +946,7 @@ class ModelTrainNode(Node):
         summary_primary_model_id: UUID,
         summary_negative_control_model_id: UUID | None,
         x_rows: pd.DataFrame,
-    ) -> (
-        tuple[np.ndarray, np.ndarray | None, np.ndarray | None]
-        | _NegativeControlRefutationResult
-    ):
+    ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None] | _NegativeControlRefutationResult:
         command = CATECommand(
             model_name=deps.selected_model,
             df=dataframe,
@@ -1149,6 +1165,46 @@ def _extract_cate_effect_arrays(
         upper_values = _to_1d_float_array(interval.get("upper"))
 
     return cate_values, lower_values, upper_values
+
+
+def _extract_optional_effect_array(value: Any, *, expected_length: int) -> np.ndarray | None:
+    values = _to_1d_float_array(value)
+    if values is None or values.size != expected_length:
+        return None
+    return values
+
+
+def _extract_shap_effect_matrix(
+    effects: Mapping[str, Any],
+    *,
+    expected_rows: int,
+) -> tuple[np.ndarray | None, list[str] | None]:
+    raw_values = effects.get("shap_values")
+    if raw_values is None:
+        return None, None
+    try:
+        values = np.asarray(raw_values, dtype=float)
+    except Exception:
+        return None, None
+    if values.ndim == 1:
+        values = values.reshape(-1, 1)
+    if values.ndim != 2 or values.shape[0] != expected_rows:
+        return None, None
+
+    raw_meta = effects.get("shap_meta")
+    if not isinstance(raw_meta, Mapping):
+        return None, None
+    raw_feature_names = raw_meta.get("feature_names")
+    if not isinstance(raw_feature_names, Sequence) or isinstance(
+        raw_feature_names,
+        (str, bytes, bytearray),
+    ):
+        return None, None
+
+    feature_names = [str(name) for name in raw_feature_names]
+    if len(feature_names) != values.shape[1]:
+        return None, None
+    return values.astype(float, copy=False), feature_names
 
 
 def _to_1d_float_array(value: Any) -> np.ndarray | None:

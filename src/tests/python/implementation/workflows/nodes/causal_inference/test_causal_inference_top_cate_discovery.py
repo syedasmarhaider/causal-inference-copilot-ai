@@ -17,9 +17,9 @@ from python.domain.workflows.tool import Tool
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
     CausalInferenceNode,
-    _ResolvedInferenceContext,
     _build_cached_cate_query_instructions,
     _build_cached_cate_query_payload,
+    _ResolvedInferenceContext,
     _source_signature,
 )
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
@@ -30,21 +30,22 @@ from python.implementation.workflows.tools.causal.common.inference_ready_causal_
     InferenceReadyCausalSpec,
 )
 from python.implementation.workflows.tools.causal.encoding.encoding_plan import TransformPlan
-from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
-    CausalModelFactoryTool,
-)
 from python.implementation.workflows.tools.causal.inference.cate_cache import (
     CATE_COLUMN,
     CATE_LOWER_COLUMN,
     CATE_REVERSE_COLUMN,
     CATE_REVERSE_LOWER_COLUMN,
     CATE_REVERSE_UPPER_COLUMN,
+    CATE_STDERR_COLUMN,
     CATE_T0_COLUMN,
     CATE_T1_COLUMN,
     CATE_UPPER_COLUMN,
     EFFECT_ROW_COLUMN,
     build_all_row_cate_dataframe,
     summarize_all_row_cate_dataframe,
+)
+from python.implementation.workflows.tools.causal.inference.causal_model_factory_tool import (
+    CausalModelFactoryTool,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool import (
@@ -398,19 +399,26 @@ def test_cached_all_row_cate_dataframe_exposes_required_query_columns() -> None:
         cate_values=np.asarray([0.1, 0.6, 0.2, 0.8], dtype=float),
         lower_values=np.asarray([-0.1, 0.3, 0.0, 0.5], dtype=float),
         upper_values=np.asarray([0.3, 0.9, 0.4, 1.1], dtype=float),
+        stderr_values=np.asarray([0.01, 0.02, 0.03, 0.04], dtype=float),
+        shap_values=np.asarray([[-0.05], [0.15], [-0.01], [0.22]], dtype=float),
+        shap_feature_names=["sex"],
         for_treatment={"t0": 0.0, "t1": 1.0},
     )
 
     assert list(query_df["patient_id"]) == ["p1", "p2", "p3", "p4"]
-    assert list(query_df[EFFECT_ROW_COLUMN]) == [1, 2, 3, 4]
     assert list(query_df[CATE_COLUMN]) == [0.1, 0.6, 0.2, 0.8]
     assert list(query_df[CATE_LOWER_COLUMN]) == [-0.1, 0.3, 0.0, 0.5]
     assert list(query_df[CATE_UPPER_COLUMN]) == [0.3, 0.9, 0.4, 1.1]
-    assert list(query_df[CATE_REVERSE_COLUMN]) == [-0.1, -0.6, -0.2, -0.8]
-    assert list(query_df[CATE_REVERSE_LOWER_COLUMN]) == [-0.3, -0.9, -0.4, -1.1]
-    assert list(query_df[CATE_REVERSE_UPPER_COLUMN]) == [0.1, -0.3, -0.0, -0.5]
-    assert list(query_df[CATE_T0_COLUMN]) == [0.0, 0.0, 0.0, 0.0]
-    assert list(query_df[CATE_T1_COLUMN]) == [1.0, 1.0, 1.0, 1.0]
+    assert list(query_df[CATE_STDERR_COLUMN]) == [0.01, 0.02, 0.03, 0.04]
+    assert list(query_df["shap_sex"]) == [-0.05, 0.15, -0.01, 0.22]
+    assert {
+        EFFECT_ROW_COLUMN,
+        CATE_REVERSE_COLUMN,
+        CATE_REVERSE_LOWER_COLUMN,
+        CATE_REVERSE_UPPER_COLUMN,
+        CATE_T0_COLUMN,
+        CATE_T1_COLUMN,
+    }.isdisjoint(query_df.columns)
 
 
 def test_cached_cate_query_instructions_use_duckdb_without_recomputing_cate() -> None:
@@ -424,7 +432,7 @@ def test_cached_cate_query_instructions_use_duckdb_without_recomputing_cate() ->
     assert "DuckDB SQL" in instructions
     assert "Do not recompute CATE" in instructions
     assert "`cate`" in instructions
-    assert "`cate_reverse`" in instructions
+    assert "`cate_reverse`" not in instructions
     assert "mean_cate" in instructions
     assert "Which sex has the highest average benefit?" in instructions
 
@@ -564,8 +572,6 @@ def test_causal_inference_followup_loads_cached_cate_and_does_not_execute_cate()
     assert list(query_dataframe[CATE_COLUMN]) == [0.1, 0.6, 0.2, 0.8]
     assert "Do not recompute CATE" in str(fake_data_manip.calls[0]["instructions"])
     assert isinstance(result.new_node_state, CausalInferenceState)
-    cate_payload = json.loads(
-        result.new_node_state.payload.latest_cate_result_raw_json_str or "{}"
-    )
+    cate_payload = json.loads(result.new_node_state.payload.latest_cate_result_raw_json_str or "{}")
     assert cate_payload["analysis_kind"] == "cached_cate_query"
     assert cate_payload["query_result"]["records"][0]["sex"] == "M"

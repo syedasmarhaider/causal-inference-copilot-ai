@@ -402,6 +402,78 @@ def serialize_inference_obj(obj: Any) -> dict[str, Any]:
     return {"type": "repr", "data": repr(obj)}
 
 
+def extract_inference_stderr(obj: Any, *, expected_length: int | None = None) -> np.ndarray | None:
+    try:
+        stderr = getattr(obj, "stderr", None)
+    except Exception:
+        stderr = None
+    arr = _to_1d_float_array_or_none(stderr)
+    if arr is not None and (expected_length is None or arr.size == expected_length):
+        return arr
+
+    if hasattr(obj, "summary_frame"):
+        try:
+            sf = obj.summary_frame()
+        except Exception:
+            sf = None
+        if isinstance(sf, pd.DataFrame):
+            for column in ("stderr", "std_err", "std err", "Std. Err.", "std_error"):
+                if column in sf.columns:
+                    arr = _to_1d_float_array_or_none(sf[column])
+                    if arr is not None and (expected_length is None or arr.size == expected_length):
+                        return arr
+    return None
+
+
+def serialize_shap_values_for_effect_modifiers(
+    estimator: Any,
+    *,
+    X: Any,
+    feature_names: Sequence[str],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    warnings: list[str] = []
+    try:
+        shap_method = getattr(estimator, "shap_values", None)
+    except Exception as exc:
+        return None, [f"SHAP_NOT_AVAILABLE: shap_values lookup failed: {repr(exc)}"]
+
+    if not callable(shap_method):
+        return None, ["SHAP_NOT_AVAILABLE: estimator does not expose shap_values"]
+
+    try:
+        raw_shap = shap_method(X)
+    except Exception as exc:
+        return None, [f"SHAP_NOT_AVAILABLE: shap_values failed: {repr(exc)}"]
+
+    selected = _select_single_shap_payload(raw_shap)
+    if selected is None:
+        return None, ["SHAP_NOT_AVAILABLE: shap_values returned an unsupported shape"]
+
+    values_raw, selector = selected
+    values = _extract_shap_values_matrix(values_raw)
+    if values is None:
+        return None, ["SHAP_NOT_AVAILABLE: could not extract a 2D SHAP value matrix"]
+
+    resolved_feature_names = _resolve_shap_feature_names(
+        estimator=estimator,
+        shap_payload=values_raw,
+        input_feature_names=[str(name) for name in feature_names],
+        width=int(values.shape[1]),
+        warnings=warnings,
+    )
+    if len(resolved_feature_names) != values.shape[1]:
+        return None, [
+            "SHAP_NOT_AVAILABLE: SHAP feature-name count did not match value width "
+            f"({len(resolved_feature_names)} != {values.shape[1]})"
+        ]
+
+    return {
+        "values": values,
+        "feature_names": resolved_feature_names,
+        "selector": selector,
+    }, warnings
+
+
 def serialize_econml_sensitivity_analysis(
     estimator: Any,
     *,
@@ -446,6 +518,79 @@ def serialize_econml_sensitivity_analysis(
         results[method_name] = _json_safe_sensitivity_value(value)
 
     return results, warnings
+
+
+def _to_1d_float_array_or_none(value: Any) -> np.ndarray | None:
+    if value is None:
+        return None
+    try:
+        arr = np.asarray(value, dtype=float)
+    except Exception:
+        return None
+    if arr.ndim == 0:
+        arr = arr.reshape(1)
+    return arr.astype(float, copy=False).ravel()
+
+
+def _select_single_shap_payload(value: Any) -> tuple[Any, list[str]] | None:
+    if isinstance(value, Mapping):
+        current: Any = value
+        selector: list[str] = []
+        while isinstance(current, Mapping):
+            if not current:
+                return None
+            key = next(iter(current.keys()))
+            selector.append(str(key))
+            current = current[key]
+        return current, selector
+    return value, []
+
+
+def _extract_shap_values_matrix(value: Any) -> np.ndarray | None:
+    raw_values = getattr(value, "values", value)
+    try:
+        arr = np.asarray(raw_values, dtype=float)
+    except Exception:
+        return None
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    if arr.ndim != 2:
+        return None
+    return arr.astype(float, copy=False)
+
+
+def _resolve_shap_feature_names(
+    *,
+    estimator: Any,
+    shap_payload: Any,
+    input_feature_names: list[str],
+    width: int,
+    warnings: list[str],
+) -> list[str]:
+    payload_names = getattr(shap_payload, "feature_names", None)
+    if payload_names is not None:
+        names = [str(name) for name in list(payload_names)]
+        if len(names) == width:
+            return names
+
+    cate_feature_names = getattr(estimator, "cate_feature_names", None)
+    if callable(cate_feature_names):
+        try:
+            names = [
+                str(name) for name in list(cate_feature_names(feature_names=input_feature_names))
+            ]
+            if len(names) == width:
+                return names
+            warnings.append(
+                "SHAP_FEATURE_NAMES_FALLBACK: cate_feature_names width did not match SHAP values"
+            )
+        except Exception as exc:
+            warnings.append(f"SHAP_FEATURE_NAMES_FALLBACK: cate_feature_names failed: {repr(exc)}")
+
+    if len(input_feature_names) == width:
+        return input_feature_names
+
+    return [f"feature_{index + 1}" for index in range(width)]
 
 
 def _call_econml_sensitivity_method(
