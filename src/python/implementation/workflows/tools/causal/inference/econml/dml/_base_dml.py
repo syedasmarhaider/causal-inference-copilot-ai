@@ -56,6 +56,26 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import Causa
 
 log = get_logger(__name__)
 
+# =============================================================================
+# Reproducibility and scientifically conservative DML defaults
+# =============================================================================
+
+_RUN_SEED_ENV = "PRECISION_MEDICINE_RUN_SEED"
+_MAX_SKLEARN_SEED = 2**32 - 1
+
+_DML_CV_FOLDS = 5
+_DML_MC_ITERS = 1
+_DML_MC_AGG = "median"
+
+_SPARSE_LINEAR_DML_MAX_ITER = 10_000
+_SPARSE_LINEAR_DML_TOL = 1e-4
+
+_CAUSAL_FOREST_N_ESTIMATORS = 1_000
+_CAUSAL_FOREST_SUBFOREST_SIZE = 4
+_CAUSAL_FOREST_MAX_SAMPLES = 0.45
+_CAUSAL_FOREST_MIN_SAMPLES_LEAF = 20
+_CAUSAL_FOREST_MIN_BALANCEDNESS_TOL = 0.45
+
 
 def _shape_as_list(x: Any) -> list[int] | None:
     if x is None:
@@ -150,8 +170,87 @@ def _set_if_supported(
 
 
 def _configured_run_seed() -> int | None:
-    value = os.getenv("SEED_1796_FOR_DR_DML_FOREST_OR_RANDOM", "false")
-    return 1796 if value.strip().lower() in {"1", "true", "yes", "on"} else None
+    """
+    Resolve the analysis seed from PRECISION_MEDICINE_RUN_SEED.
+
+    Examples:
+        PRECISION_MEDICINE_RUN_SEED=1729
+            Reproduce the primary manuscript analysis.
+
+        PRECISION_MEDICINE_RUN_SEED=2718
+            Run a prespecified seed-sensitivity analysis.
+
+        PRECISION_MEDICINE_RUN_SEED=none
+            Run an explicitly unseeded exploratory analysis.
+
+    The default is 1729 so production and manuscript executions are seeded
+    unless unseeded behavior is requested explicitly.
+    """
+    raw_value = os.getenv(_RUN_SEED_ENV)
+    if raw_value is None:
+        return None
+
+    normalized = raw_value.strip().lower()
+    if normalized in {"", "none", "null", "random", "unseeded"}:
+        return None
+
+    try:
+        seed = int(normalized)
+    except ValueError as exc:
+        raise ModelSpecError(
+            f"{_RUN_SEED_ENV} must be an integer or one of "
+            "{'none', 'null', 'random', 'unseeded'}. "
+            f"Received: {raw_value!r}."
+        ) from exc
+
+    if not 0 <= seed <= _MAX_SKLEARN_SEED:
+        raise ModelSpecError(
+            f"{_RUN_SEED_ENV} must be between 0 and {_MAX_SKLEARN_SEED}, "
+            f"inclusive. Received: {seed}."
+        )
+
+    return seed
+
+
+def set_dml_defaults(
+    defaults: dict[str, Any],
+    init_map: dict[str, Any],
+    *,
+    run_seed: int | None,
+) -> None:
+    """
+    Apply common cross-fitting defaults to every EconML DML estimator.
+
+    Five-fold cross-fitting preserves more training data per nuisance fit than
+    the two-fold library default. Repeating the nuisance stage three times and
+    aggregating by the median reduces sensitivity to a single random partition.
+    """
+    _set_if_supported(defaults, init_map, "random_state", run_seed)
+    _set_if_supported(defaults, init_map, "cv", _DML_CV_FOLDS)
+    _set_if_supported(defaults, init_map, "mc_iters", _DML_MC_ITERS)
+    _set_if_supported(defaults, init_map, "mc_agg", _DML_MC_AGG)
+
+
+def set_sparse_linear_dml_defaults(
+    defaults: dict[str, Any],
+    init_map: dict[str, Any],
+    *,
+    run_seed: int | None,
+) -> None:
+    """
+    Extend common DML defaults for SparseLinearDML.
+
+    A larger iteration budget reduces avoidable non-convergence in the
+    debiased-lasso final stage without changing its estimand.
+    """
+    set_dml_defaults(defaults, init_map, run_seed=run_seed)
+    _set_if_supported(
+        defaults,
+        init_map,
+        "max_iter",
+        _SPARSE_LINEAR_DML_MAX_ITER,
+    )
+    _set_if_supported(defaults, init_map, "tol", _SPARSE_LINEAR_DML_TOL)
 
 
 def set_causal_forest_defaults(
@@ -160,19 +259,48 @@ def set_causal_forest_defaults(
     *,
     run_seed: int | None,
 ) -> None:
-    """Apply the explicit, reproducible configuration for CausalForestDML."""
-    _set_if_supported(defaults, init_map, "random_state", run_seed)
-    _set_if_supported(defaults, init_map, "cv", 5)
-    _set_if_supported(defaults, init_map, "mc_iters", 3)
-    _set_if_supported(defaults, init_map, "mc_agg", "median")
-    _set_if_supported(defaults, init_map, "n_estimators", 1000)
-    _set_if_supported(defaults, init_map, "subforest_size", 4)
-    _set_if_supported(defaults, init_map, "max_samples", 0.45)
-    _set_if_supported(defaults, init_map, "min_samples_leaf", 20)
+    """
+    Extend common DML defaults for CausalForestDML.
+
+    The forest remains honest and uses subsampling compatible with EconML's
+    built-in forest inference. The larger tree count and moderate leaf size
+    reduce Monte Carlo noise and avoid highly local, unstable CATE estimates.
+    """
+    set_dml_defaults(defaults, init_map, run_seed=run_seed)
+
+    _set_if_supported(
+        defaults,
+        init_map,
+        "n_estimators",
+        _CAUSAL_FOREST_N_ESTIMATORS,
+    )
+    _set_if_supported(
+        defaults,
+        init_map,
+        "subforest_size",
+        _CAUSAL_FOREST_SUBFOREST_SIZE,
+    )
+    _set_if_supported(
+        defaults,
+        init_map,
+        "max_samples",
+        _CAUSAL_FOREST_MAX_SAMPLES,
+    )
+    _set_if_supported(
+        defaults,
+        init_map,
+        "min_samples_leaf",
+        _CAUSAL_FOREST_MIN_SAMPLES_LEAF,
+    )
     _set_if_supported(defaults, init_map, "honest", True)
     _set_if_supported(defaults, init_map, "inference", True)
     _set_if_supported(defaults, init_map, "criterion", "mse")
-    _set_if_supported(defaults, init_map, "min_balancedness_tol", 0.45)
+    _set_if_supported(
+        defaults,
+        init_map,
+        "min_balancedness_tol",
+        _CAUSAL_FOREST_MIN_BALANCEDNESS_TOL,
+    )
     _set_if_supported(defaults, init_map, "n_jobs", -1)
 
 
@@ -361,10 +489,26 @@ class _BaseDMLAdapter(CausalModel):
                 specs.outcome_spec.kind == "binary",
             )
             _set_if_supported(defaults, init_map, "allow_missing", missingness_W)
-            # Keep non-forest EconML and stochastic nuisance learners reproducible.
-            _set_if_supported(defaults, init_map, "random_state", run_seed)
+            # Apply the same seeded cross-fitting policy to every DML estimator.
+            # Class-specific helpers extend, rather than replace, these defaults.
             if self.BACKEND_NAME == "econml.dml.CausalForestDML":
-                set_causal_forest_defaults(defaults, init_map, run_seed=run_seed)
+                set_causal_forest_defaults(
+                    defaults,
+                    init_map,
+                    run_seed=run_seed,
+                )
+            elif self.BACKEND_NAME == "econml.dml.SparseLinearDML":
+                set_sparse_linear_dml_defaults(
+                    defaults,
+                    init_map,
+                    run_seed=run_seed,
+                )
+            else:
+                set_dml_defaults(
+                    defaults,
+                    init_map,
+                    run_seed=run_seed,
+                )
 
             if pre_xw is not None:
                 nuisance_defaults = _get_default_models_for_t_and_y(
@@ -473,6 +617,12 @@ class _BaseDMLAdapter(CausalModel):
                     "backend": self.BACKEND_NAME,
                     "n": int(df.shape[0]),
                     "run_seed": run_seed,
+                    "run_seed_env": _RUN_SEED_ENV,
+                    "dml_cross_fitting": {
+                        "cv": defaults.get("cv"),
+                        "mc_iters": defaults.get("mc_iters"),
+                        "mc_agg": defaults.get("mc_agg"),
+                    },
                     "columns": col_meta,
                     "used_init_kwargs": defaults,
                     "spec_semantics_applied": sorted(list(required_keys)),
@@ -875,4 +1025,11 @@ class _BaseDMLAdapter(CausalModel):
         return {}
 
 
-__all__ = ["_BaseDMLAdapter", "_to_jsonable"]
+__all__ = [
+    "_BaseDMLAdapter",
+    "_configured_run_seed",
+    "_to_jsonable",
+    "set_causal_forest_defaults",
+    "set_dml_defaults",
+    "set_sparse_linear_dml_defaults",
+]

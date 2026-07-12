@@ -75,6 +75,23 @@ log = get_logger(__name__)
 
 _SPARSE_LINEAR_MAX_ITER = 10000
 
+
+_RUN_SEED_ENV = "PRECISION_MEDICINE_RUN_SEED"
+
+# TODO: later it can be selected by agent
+_NUISANCE_N_ESTIMATORS = 500
+_NUISANCE_MIN_SAMPLES_LEAF = 20
+
+# TODO: later it can be selected by agent
+_HGB_LEARNING_RATE = 0.05
+_HGB_MAX_ITER = 400
+_HGB_MAX_LEAF_NODES = 15
+_HGB_MIN_SAMPLES_LEAF = 20
+_HGB_L2_REGULARIZATION = 1.0
+_HGB_VALIDATION_FRACTION = 0.10
+_HGB_N_ITER_NO_CHANGE = 20
+_HGB_TOL = 1e-7
+
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -202,8 +219,29 @@ def _set_if_supported(
 
 
 def _configured_run_seed() -> int | None:
-    value = os.getenv("SEED_1796_FOR_DR_DML_FOREST_OR_RANDOM", "false")
-    return 1796 if value.strip().lower() in {"1", "true", "yes", "on"} else None
+    """Resolve the run seed from an integer environment variable.
+
+    Examples:
+        PRECISION_MEDICINE_RUN_SEED=1729  -> reproducible primary run
+        PRECISION_MEDICINE_RUN_SEED=2718  -> reproducible sensitivity run
+        PRECISION_MEDICINE_RUN_SEED=none or not present  -> explicitly unseeded exploratory run
+    """
+    raw_value = os.getenv(_RUN_SEED_ENV)
+    if raw_value is None:
+        return None
+
+    normalized = raw_value.strip().lower()
+    if normalized in {"", "none", "null", "random", "unseeded"}:
+        return None
+
+    try:
+        return int(normalized)
+    except ValueError as exc:
+        raise ModelSpecError(
+            f"{_RUN_SEED_ENV} must be an integer or one of "
+            "{'none', 'null', 'random', 'unseeded'}. "
+            f"Received: {raw_value!r}."
+        ) from exc
 
 
 def set_causal_forest_defaults(
@@ -215,15 +253,13 @@ def set_causal_forest_defaults(
     """Apply the explicit, reproducible configuration for ForestDRLearner."""
     _set_if_supported(defaults, init_map, "random_state", run_seed)
     _set_if_supported(defaults, init_map, "cv", 5)
-    _set_if_supported(defaults, init_map, "mc_iters", 3)
+    _set_if_supported(defaults, init_map, "mc_iters", 1)
     _set_if_supported(defaults, init_map, "mc_agg", "median")
-    _set_if_supported(defaults, init_map, "n_estimators", 1000)
+    _set_if_supported(defaults, init_map, "n_estimators", 5000)
     _set_if_supported(defaults, init_map, "subforest_size", 4)
     _set_if_supported(defaults, init_map, "max_samples", 0.45)
     _set_if_supported(defaults, init_map, "min_samples_leaf", 20)
     _set_if_supported(defaults, init_map, "honest", True)
-    _set_if_supported(defaults, init_map, "inference", True)
-    _set_if_supported(defaults, init_map, "criterion", "mse")
     _set_if_supported(defaults, init_map, "min_balancedness_tol", 0.45)
     _set_if_supported(defaults, init_map, "n_jobs", -1)
 
@@ -377,13 +413,57 @@ def _stable_logistic_classifier(
     random_state: int | None,
     n_jobs: int | None,
 ) -> LogisticRegression:
+    _ = n_jobs
     return LogisticRegression(
         penalty="l2",
         solver="saga",
         max_iter=5000,
         C=0.1,
-        class_weight="balanced",
-        n_jobs=n_jobs if n_jobs is not None else -1,
+        class_weight=None,
+        random_state=random_state,
+    )
+
+
+def _make_hgb_classifier(
+    *,
+    random_state: int | None,
+) -> HistGradientBoostingClassifier:
+    """Conservative probability model with native NaN support."""
+    return HistGradientBoostingClassifier(
+        loss="log_loss",
+        learning_rate=_HGB_LEARNING_RATE,
+        max_iter=_HGB_MAX_ITER,
+        max_leaf_nodes=_HGB_MAX_LEAF_NODES,
+        max_depth=None,
+        min_samples_leaf=_HGB_MIN_SAMPLES_LEAF,
+        l2_regularization=_HGB_L2_REGULARIZATION,
+        early_stopping=True,
+        scoring="loss",
+        validation_fraction=_HGB_VALIDATION_FRACTION,
+        n_iter_no_change=_HGB_N_ITER_NO_CHANGE,
+        tol=_HGB_TOL,
+        random_state=random_state,
+    )
+
+
+def _make_hgb_regressor(
+    *,
+    random_state: int | None,
+) -> HistGradientBoostingRegressor:
+    """Conservative continuous-outcome model with native NaN support."""
+    return HistGradientBoostingRegressor(
+        loss="squared_error",
+        learning_rate=_HGB_LEARNING_RATE,
+        max_iter=_HGB_MAX_ITER,
+        max_leaf_nodes=_HGB_MAX_LEAF_NODES,
+        max_depth=None,
+        min_samples_leaf=_HGB_MIN_SAMPLES_LEAF,
+        l2_regularization=_HGB_L2_REGULARIZATION,
+        early_stopping=True,
+        scoring="loss",
+        validation_fraction=_HGB_VALIDATION_FRACTION,
+        n_iter_no_change=_HGB_N_ITER_NO_CHANGE,
+        tol=_HGB_TOL,
         random_state=random_state,
     )
 
@@ -402,38 +482,32 @@ def _build_propensity_candidates(
 ) -> Sequence[BaseEstimator]:
     """
     Propensity nuisance: classifier for Pr[T=t | X, W].
-    If W-missingness is present, restrict to NaN-tolerant candidates.
+
     """
     if missingness_W:
-        hgb = HistGradientBoostingClassifier(
-            random_state=random_state,
-            max_depth=None,
-            learning_rate=0.05,
-            max_iter=400,
-            early_stopping=True,
-        )
+        hgb = _make_hgb_classifier(random_state=random_state)
         return [_wrap_xw_model(pre_XW=pre_XW, model=hgb, require_dense=True)]
 
     lr = _stable_logistic_classifier(random_state=random_state, n_jobs=n_jobs)
     et = ExtraTreesClassifier(
-        n_estimators=400,
-        min_samples_leaf=5,
+        n_estimators=_NUISANCE_N_ESTIMATORS,
+        criterion="log_loss",
+        min_samples_leaf=_NUISANCE_MIN_SAMPLES_LEAF,
+        max_features="sqrt",
+        bootstrap=False,
         random_state=random_state,
         n_jobs=n_jobs,
     )
     rf = RandomForestClassifier(
-        n_estimators=400,
-        min_samples_leaf=5,
+        n_estimators=_NUISANCE_N_ESTIMATORS,
+        criterion="log_loss",
+        min_samples_leaf=_NUISANCE_MIN_SAMPLES_LEAF,
+        max_features="sqrt",
+        bootstrap=True,
         random_state=random_state,
         n_jobs=n_jobs,
     )
-    hgb = HistGradientBoostingClassifier(
-        random_state=random_state,
-        max_depth=None,
-        learning_rate=0.05,
-        max_iter=400,
-        early_stopping=True,
-    )
+    hgb = _make_hgb_classifier(random_state=random_state)
     return [
         _wrap_xw_model(pre_XW=pre_XW, model=lr, require_dense=False),
         _wrap_xw_model(pre_XW=pre_XW, model=et, require_dense=True),
@@ -452,18 +526,14 @@ def _build_regression_candidates(
     n_jobs: int | None,
 ) -> Sequence[BaseEstimator]:
     """
-    Outcome nuisance: estimator for E[Y | X, W, T], trained on concat([X, W, onehot(T_excl_baseline)]).
-    If W-missingness is present, restrict to NaN-tolerant candidates.
+    Outcome nuisance: estimator for E[Y | X, W, T], trained on
+    concat([X, W, onehot(T_excl_baseline)]).
+
+    If W-missingness is present, restrict to the NaN-tolerant HGB candidate.
     """
     if missingness_W:
         if discrete_outcome:
-            hgb = HistGradientBoostingClassifier(
-                random_state=random_state,
-                max_depth=None,
-                learning_rate=0.05,
-                max_iter=400,
-                early_stopping=True,
-            )
+            hgb = _make_hgb_classifier(random_state=random_state)
             return [
                 _wrap_xw_plus_t_model(
                     pre_XW=pre_XW,
@@ -473,13 +543,7 @@ def _build_regression_candidates(
                 )
             ]
 
-        hgb = HistGradientBoostingRegressor(
-            random_state=random_state,
-            max_depth=None,
-            learning_rate=0.05,
-            max_iter=400,
-            early_stopping=True,
-        )
+        hgb = _make_hgb_regressor(random_state=random_state)
         return [
             _wrap_xw_plus_t_model(
                 pre_XW=pre_XW,
@@ -492,61 +556,80 @@ def _build_regression_candidates(
     if discrete_outcome:
         lr = _stable_logistic_classifier(random_state=random_state, n_jobs=n_jobs)
         et = ExtraTreesClassifier(
-            n_estimators=400,
-            min_samples_leaf=5,
+            n_estimators=_NUISANCE_N_ESTIMATORS,
+            criterion="log_loss",
+            min_samples_leaf=_NUISANCE_MIN_SAMPLES_LEAF,
+            max_features="sqrt",
+            bootstrap=False,
             random_state=random_state,
             n_jobs=n_jobs,
         )
         rf = RandomForestClassifier(
-            n_estimators=400,
-            min_samples_leaf=5,
+            n_estimators=_NUISANCE_N_ESTIMATORS,
+            criterion="log_loss",
+            min_samples_leaf=_NUISANCE_MIN_SAMPLES_LEAF,
+            max_features="sqrt",
+            bootstrap=True,
             random_state=random_state,
             n_jobs=n_jobs,
         )
-        hgb = HistGradientBoostingClassifier(
-            random_state=random_state,
-            max_depth=None,
-            learning_rate=0.05,
-            max_iter=400,
-            early_stopping=True,
-        )
+        hgb = _make_hgb_classifier(random_state=random_state)
         return [
-            _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=lr, require_dense=False),
-            _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=et, require_dense=True),
-            _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=rf, require_dense=True),
-            _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=hgb, require_dense=True),
+            _wrap_xw_plus_t_model(
+                pre_XW=pre_XW, n_xw=n_xw, model=lr, require_dense=False
+            ),
+            _wrap_xw_plus_t_model(
+                pre_XW=pre_XW, n_xw=n_xw, model=et, require_dense=True
+            ),
+            _wrap_xw_plus_t_model(
+                pre_XW=pre_XW, n_xw=n_xw, model=rf, require_dense=True
+            ),
+            _wrap_xw_plus_t_model(
+                pre_XW=pre_XW, n_xw=n_xw, model=hgb, require_dense=True
+            ),
         ]
 
     lasso = WeightedLassoCVWrapper(
         random_state=random_state,
         max_iter=_SPARSE_LINEAR_MAX_ITER,
     )
-    ridge = RidgeCV(alphas=np.logspace(-4, 4, 25))
+    ridge = RidgeCV(
+        alphas=np.logspace(-4, 4, 25),
+        scoring="neg_mean_squared_error",
+    )
     et = ExtraTreesRegressor(
-        n_estimators=400,
-        min_samples_leaf=5,
+        n_estimators=_NUISANCE_N_ESTIMATORS,
+        criterion="squared_error",
+        min_samples_leaf=_NUISANCE_MIN_SAMPLES_LEAF,
+        bootstrap=False,
         random_state=random_state,
         n_jobs=n_jobs,
     )
     rf = RandomForestRegressor(
-        n_estimators=400,
-        min_samples_leaf=5,
+        n_estimators=_NUISANCE_N_ESTIMATORS,
+        criterion="squared_error",
+        min_samples_leaf=_NUISANCE_MIN_SAMPLES_LEAF,
+        bootstrap=True,
         random_state=random_state,
         n_jobs=n_jobs,
     )
-    hgb = HistGradientBoostingRegressor(
-        random_state=random_state,
-        max_depth=None,
-        learning_rate=0.05,
-        max_iter=400,
-        early_stopping=True,
-    )
+    hgb = _make_hgb_regressor(random_state=random_state)
     return [
-        _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=lasso, require_dense=False),  # type: ignore[arg-type]
-        _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=ridge, require_dense=False),
-        _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=et, require_dense=True),
-        _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=rf, require_dense=True),
-        _wrap_xw_plus_t_model(pre_XW=pre_XW, n_xw=n_xw, model=hgb, require_dense=True),
+        _wrap_xw_plus_t_model(
+            pre_XW=pre_XW, n_xw=n_xw, model=lasso, require_dense=False
+        ),  # type: ignore[arg-type]
+        _wrap_xw_plus_t_model(
+            pre_XW=pre_XW, n_xw=n_xw, model=ridge, require_dense=False
+        ),
+        _wrap_xw_plus_t_model(
+            pre_XW=pre_XW, n_xw=n_xw, model=et, require_dense=True
+        ),
+        _wrap_xw_plus_t_model(
+            pre_XW=pre_XW, n_xw=n_xw, model=rf, require_dense=True
+        ),
+        _wrap_xw_plus_t_model(
+            pre_XW=pre_XW, n_xw=n_xw, model=hgb, require_dense=True
+        ),
     ]
 
 
@@ -744,7 +827,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                             pre_XW=pre_xw,
                             missingness_W=missingness_W,
                             random_state=run_seed,
-                            n_jobs=None,
+                            n_jobs=1,
                         )
                     ),
                 )
@@ -759,7 +842,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                             discrete_outcome=discrete_outcome,
                             missingness_W=missingness_W,
                             random_state=run_seed,
-                            n_jobs=None,
+                            n_jobs=1,
                         )
                     ),
                 )
