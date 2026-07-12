@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -17,25 +17,61 @@ from python.domain.workflows.node import Action, Node, NodeRequest, Status
 from python.domain.workflows.node_state import NodeState
 from python.domain.workflows.ochestrator_state import OchestratorState
 from python.implementation.service.logging.default_logging import get_app_logger
-from python.implementation.workflows.nodes.causal_inference.causal_inference_node import CausalInferenceNode
-from python.implementation.workflows.nodes.causal_inference.causal_inference_state import CausalInferenceState
-from python.implementation.workflows.nodes.data_compilation.data_compilation_node import DataCompilationNode
-from python.implementation.workflows.nodes.data_compilation.data_compilation_state import DataCompilationState
-from python.implementation.workflows.nodes.data_manupulation.data_manupulation_node import DataManupulationNode
-from python.implementation.workflows.nodes.data_manupulation.data_manupulation_state import DataManupulationState
-from python.implementation.workflows.nodes.data_statistics.data_statistics_node import DataStatisticsNode
-from python.implementation.workflows.nodes.data_statistics.data_statistics_state import DataStatisticsState
-from python.implementation.workflows.nodes.general_queries.general_queries_node import GeneralQueriesNode
-from python.implementation.workflows.nodes.general_queries.general_queries_state import GeneralQueriesState
-from python.implementation.workflows.nodes.model_selection.mode_selection_state import ModelSelectionState
-from python.implementation.workflows.nodes.model_selection.model_selection_node import ModelSelectionNode
+from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
+    CausalInferenceNode,
+)
+from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
+    CausalInferenceState,
+)
+from python.implementation.workflows.nodes.data_compilation.data_compilation_node import (
+    DataCompilationNode,
+)
+from python.implementation.workflows.nodes.data_compilation.data_compilation_state import (
+    DataCompilationState,
+)
+from python.implementation.workflows.nodes.data_manupulation.data_manupulation_node import (
+    DataManupulationNode,
+)
+from python.implementation.workflows.nodes.data_manupulation.data_manupulation_state import (
+    DataManupulationState,
+)
+from python.implementation.workflows.nodes.data_statistics.data_statistics_node import (
+    DataStatisticsNode,
+)
+from python.implementation.workflows.nodes.data_statistics.data_statistics_state import (
+    DataStatisticsState,
+)
+from python.implementation.workflows.nodes.general_queries.general_queries_node import (
+    GeneralQueriesNode,
+)
+from python.implementation.workflows.nodes.general_queries.general_queries_state import (
+    GeneralQueriesState,
+)
+from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
+    ModelSelectionState,
+)
+from python.implementation.workflows.nodes.model_selection.model_selection_node import (
+    ModelSelectionNode,
+)
 from python.implementation.workflows.nodes.model_train.model_train_node import ModelTrainNode
 from python.implementation.workflows.nodes.model_train.model_train_state import ModelTrainState
 from python.implementation.workflows.nodes.noop_done.noop_done_node import NoopDoneNode
 from python.implementation.workflows.nodes.noop_done.noop_done_state import NoopDoneState
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import ProtocolDiscussionNode
-from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import ProtocolDiscussionState
-from python.implementation.workflows.ochestrator.causal_ochestrator_state import CausalOchestratorState
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_node import (
+    ProtocolDiscussionNode,
+)
+from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
+    ProtocolDiscussionState,
+)
+from python.implementation.workflows.nodes.shap_explanation.shap_explanation_node import (
+    ShapExplanationNode,
+)
+from python.implementation.workflows.nodes.shap_explanation.shap_explanation_state import (
+    ShapExplanationState,
+)
+from python.implementation.workflows.ochestrator.causal_ochestrator_state import (
+    CausalOchestratorState,
+)
 from python.implementation.workflows.ochestrator.data_ochestrator_state import DataOchestratorState
 from python.implementation.workflows.tools.tools_factory import DefaultToolFactory
 
@@ -368,6 +404,7 @@ def build_state_classes_by_name() -> Mapping[str, type[NodeState]]:
         ModelSelectionState.NAME: ModelSelectionState,
         ModelTrainState.NAME: ModelTrainState,
         CausalInferenceState.NAME: CausalInferenceState,
+        ShapExplanationState.NAME: ShapExplanationState,
         NoopDoneState.NAME: NoopDoneState,
         GeneralQueriesState.NAME: GeneralQueriesState,
     }
@@ -382,6 +419,7 @@ def build_state_name_by_node_name() -> Mapping[str, str]:
         ModelSelectionNode.NAME: ModelSelectionState.NAME,
         ModelTrainNode.NAME: ModelTrainState.NAME,
         CausalInferenceNode.NAME: CausalInferenceState.NAME,
+        ShapExplanationNode.NAME: ShapExplanationState.NAME,
         NoopDoneNode.NAME: NoopDoneState.NAME,
         GeneralQueriesNode.NAME: GeneralQueriesState.NAME,
     }
@@ -396,6 +434,7 @@ def build_node_name_by_node_name() -> Mapping[str, type[Node]]:
         ModelSelectionNode.NAME: ModelSelectionNode,
         ModelTrainNode.NAME: ModelTrainNode,
         CausalInferenceNode.NAME: CausalInferenceNode,
+        ShapExplanationNode.NAME: ShapExplanationNode,
         NoopDoneNode.NAME: NoopDoneNode,
         GeneralQueriesNode.NAME: GeneralQueriesNode,
     }
@@ -444,6 +483,12 @@ def init_all_nodes_with_name_as_key(
         data_repo=data_repo,
         tools_factory=tool_factory,
     )
+    shap_explanation_node = ShapExplanationNode(
+        llm=llm,
+        data_repo=data_repo,
+        models_repo=models_repo,
+        tools_factory=tool_factory,
+    )
     done_node = NoopDoneNode()
     general_queries_node = GeneralQueriesNode(llm=llm)
 
@@ -455,6 +500,7 @@ def init_all_nodes_with_name_as_key(
         model_selection_node.name: model_selection_node,
         model_train_node.name: model_train_node,
         causal_inference_node.name: causal_inference_node,
+        shap_explanation_node.name: shap_explanation_node,
         done_node.name: done_node,
         general_queries_node.name: general_queries_node,
     }

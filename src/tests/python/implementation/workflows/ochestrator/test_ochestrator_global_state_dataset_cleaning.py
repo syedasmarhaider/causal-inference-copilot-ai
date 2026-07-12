@@ -17,8 +17,12 @@ from python.implementation.workflows.nodes.data_manupulation.data_manupulation_s
 from python.implementation.workflows.nodes.model_selection.mode_selection_state import (
     ModelSelectionState,
 )
+from python.implementation.workflows.nodes.model_train.model_train_state import ModelTrainState
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionState,
+)
+from python.implementation.workflows.nodes.shap_explanation.shap_explanation_state import (
+    ShapExplanationState,
 )
 from python.implementation.workflows.ochestrator.causal_ochestrator_state import (
     CausalOchestratorState,
@@ -80,6 +84,82 @@ def _transform_plan() -> TransformPlan:
             ]
         }
     )
+
+
+def _complete_state_through_training() -> CausalOchestratorState:
+    state = CausalOchestratorState.init_empty()
+    state.set(
+        DataManupulationState.NAME,
+        {
+            "working_dataset_id": uuid4(),
+            "latest_dataset_summary": _summary(100),
+        },
+    )
+    state.set(
+        ProtocolDiscussionState.NAME,
+        {"causal_spec_draft": _causal_draft()},
+    )
+    state.set(
+        DataCompilationState.NAME,
+        {
+            "working_dataset_id": uuid4(),
+            "latest_dataset_summary": _summary(90),
+            "causal_spec_draft": _causal_draft(),
+            "causal_spec": _causal_spec(),
+            "data_transformation_plan": _transform_plan(),
+            "working_dataset_frozen": True,
+            "validation_issues": [],
+            "is_validated": True,
+        },
+    )
+    state.set(
+        ModelSelectionState.NAME,
+        {
+            "selected_model": "econml.dr.ForestDRLearner",
+            "selection_reasoning": "Selected for heterogeneity.",
+        },
+    )
+    state.set(
+        ModelTrainState.NAME,
+        {
+            "trained_model_id": uuid4(),
+            "training_warnings": [],
+            "training_spec": {"selected_model": "econml.dr.ForestDRLearner"},
+        },
+    )
+    return state
+
+
+def test_shap_explanation_update_is_allowed_after_training() -> None:
+    state = _complete_state_through_training()
+    shap_dataset_id = uuid4()
+
+    state.set(
+        ShapExplanationState.NAME,
+        {
+            "shap_values_dataset_id": shap_dataset_id,
+            "shap_values_summary": {"status": "COMPLETED", "row_count": 10},
+            "shap_values_source_signature": "signature",
+        },
+    )
+
+    assert state.get("shap_values_dataset_id") == shap_dataset_id
+    assert state.get("shap_values_summary") == {"status": "COMPLETED", "row_count": 10}
+    assert state.get("shap_values_source_signature") == "signature"
+
+
+def test_shap_explanation_update_requires_trained_model() -> None:
+    state = CausalOchestratorState.init_empty()
+
+    with pytest.raises(ValueError, match="Stage 5 incomplete"):
+        state.set(
+            ShapExplanationState.NAME,
+            {
+                "shap_values_dataset_id": uuid4(),
+                "shap_values_summary": {"status": "COMPLETED"},
+                "shap_values_source_signature": "signature",
+            },
+        )
 
 
 def test_data_compilation_dataset_only_publish_preserves_draft_and_invalidates_downstream() -> None:

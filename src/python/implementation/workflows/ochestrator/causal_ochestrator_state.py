@@ -47,6 +47,12 @@ from python.implementation.workflows.nodes.protocol_discussion.protocol_discussi
 from python.implementation.workflows.nodes.protocol_discussion.protocol_discussion_state import (
     ProtocolDiscussionState,
 )
+from python.implementation.workflows.nodes.shap_explanation.shap_explanation_node import (
+    ShapExplanationNode,
+)
+from python.implementation.workflows.nodes.shap_explanation.shap_explanation_state import (
+    ShapExplanationState,
+)
 from python.implementation.workflows.ochestrator.ochestrator_prompts import (
     ROUTE_SYSTEM_PROMPT_CAUSAL,
 )
@@ -90,6 +96,9 @@ class GlobalStateModel(BaseModel):
     negative_control_refutation_artifact_id: UUID | None = None
     negative_control_refutation_vectors_dataset_id: UUID | None = None
     negative_control_refutation_summary: dict[str, Any] | None = None
+    shap_values_dataset_id: UUID | None = None
+    shap_values_summary: dict[str, Any] | None = None
+    shap_values_source_signature: str | None = None
     training_error_message: str | None = None
 
     @field_validator("update_counter", mode="before")
@@ -115,6 +124,7 @@ class GlobalStateModel(BaseModel):
         "all_row_cate_dataset_id",
         "negative_control_refutation_artifact_id",
         "negative_control_refutation_vectors_dataset_id",
+        "shap_values_dataset_id",
         mode="before",
     )
     @classmethod
@@ -148,6 +158,9 @@ class CausalOchestratorState(OchestratorState):
             "negative_control_refutation_artifact_id",
             "negative_control_refutation_vectors_dataset_id",
             "negative_control_refutation_summary",
+            "shap_values_dataset_id",
+            "shap_values_summary",
+            "shap_values_source_signature",
             "training_error_message",
         ),
     }
@@ -207,6 +220,8 @@ class CausalOchestratorState(OchestratorState):
                 self._set_model_selection(value)
             case _ if key == ModelTrainState.NAME:
                 self._set_model_train(value)
+            case _ if key == ShapExplanationState.NAME:
+                self._set_shap_explanation(value)
             case _:
                 raise KeyError(f"Unknown node name for set: {key!r}")
 
@@ -293,9 +308,7 @@ class CausalOchestratorState(OchestratorState):
             next_ids = next_ids[:-1]
 
         self._set_stage1_fields(
-            working_dataset_ids=self._append_dataset_id_if_needed(
-                next_ids, dataset_id
-            ),
+            working_dataset_ids=self._append_dataset_id_if_needed(next_ids, dataset_id),
             latest_dataset_summary=latest_dataset_summary,
         )
         self._model.causal_spec_draft = causal_spec_draft
@@ -388,8 +401,25 @@ class CausalOchestratorState(OchestratorState):
             value.get("negative_control_refutation_summary"),
             field_name="negative_control_refutation_summary",
         )
+        self._model.shap_values_dataset_id = None
+        self._model.shap_values_summary = None
+        self._model.shap_values_source_signature = None
         self._model.training_error_message = self._parse_optional_text(
             value.get("training_error_message")
+        )
+
+    def _set_shap_explanation(self, value: dict[str, Any]) -> None:
+        self._require_stage5()
+        self._model.shap_values_dataset_id = self._parse_optional_uuid(
+            value.get("shap_values_dataset_id"),
+            field_name="shap_values_dataset_id",
+        )
+        self._model.shap_values_summary = self._parse_optional_dict(
+            value.get("shap_values_summary"),
+            field_name="shap_values_summary",
+        )
+        self._model.shap_values_source_signature = self._parse_optional_text(
+            value.get("shap_values_source_signature")
         )
 
     def get_current_node_name(self) -> str:
@@ -427,7 +457,10 @@ class CausalOchestratorState(OchestratorState):
             case _ if node_name == ModelTrainNode.NAME:
                 return []
             case _ if node_name == CausalInferenceNode.NAME:
-                return [DataStatisticsNode.NAME, GeneralQueriesNode.NAME]
+                return [
+                    ShapExplanationNode.NAME,
+                    GeneralQueriesNode.NAME,
+                ]
             case _:
                 raise ValueError(f"Unknown node name for companions: {node_name!r}")
 
@@ -461,6 +494,8 @@ class CausalOchestratorState(OchestratorState):
                 self._clear_stages_from(2, reason=f"rollback from {current_failed_node}")
             case _ if current_failed_node == CausalInferenceNode.NAME:
                 pass
+            case _ if current_failed_node == ShapExplanationNode.NAME:
+                pass
             case _:
                 raise ValueError(f"Unknown node name for rollback: {current_failed_node!r}")
 
@@ -472,6 +507,7 @@ class CausalOchestratorState(OchestratorState):
                     ModelSelectionNode.NAME,
                     ModelTrainNode.NAME,
                     CausalInferenceNode.NAME,
+                    ShapExplanationNode.NAME,
                 ]
             case _ if node_name == ProtocolDiscussionNode.NAME:
                 return [
@@ -479,14 +515,22 @@ class CausalOchestratorState(OchestratorState):
                     ModelSelectionNode.NAME,
                     ModelTrainNode.NAME,
                     CausalInferenceNode.NAME,
+                    ShapExplanationNode.NAME,
                 ]
             case _ if node_name == DataCompilationNode.NAME:
-                return [ModelSelectionNode.NAME, ModelTrainNode.NAME, CausalInferenceNode.NAME]
+                return [
+                    ModelSelectionNode.NAME,
+                    ModelTrainNode.NAME,
+                    CausalInferenceNode.NAME,
+                    ShapExplanationNode.NAME,
+                ]
             case _ if node_name == ModelSelectionNode.NAME:
-                return [ModelTrainNode.NAME, CausalInferenceNode.NAME]
+                return [ModelTrainNode.NAME, CausalInferenceNode.NAME, ShapExplanationNode.NAME]
             case _ if node_name == ModelTrainNode.NAME:
-                return [CausalInferenceNode.NAME]
+                return [CausalInferenceNode.NAME, ShapExplanationNode.NAME]
             case _ if node_name == CausalInferenceNode.NAME:
+                return []
+            case _ if node_name == ShapExplanationNode.NAME:
                 return []
             case _:
                 raise ValueError(f"Unknown node name for forward states: {node_name!r}")
@@ -504,6 +548,8 @@ class CausalOchestratorState(OchestratorState):
             case _ if state_name == ModelTrainState.NAME:
                 self._clear_stages_from(5, reason=f"rollback to {state_name}")
             case _ if state_name == CausalInferenceState.NAME:
+                pass
+            case _ if state_name == ShapExplanationState.NAME:
                 pass
             case _:
                 raise ValueError(f"Unknown state name for rollback: {state_name!r}")
@@ -550,6 +596,10 @@ class CausalOchestratorState(OchestratorState):
     def _require_stage4(self) -> None:
         if not self._is_stage4_complete():
             raise ValueError("Stage 4 incomplete: model selection not set")
+
+    def _require_stage5(self) -> None:
+        if not self._is_stage5_complete():
+            raise ValueError("Stage 5 incomplete: trained model not set")
 
     def _set_stage1_fields(
         self,
