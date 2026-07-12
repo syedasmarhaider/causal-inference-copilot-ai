@@ -53,21 +53,34 @@ class DuckDBAnalyticsRepo(AnalyticsRepo):
             last_dataframe = pd.DataFrame()
             last_columns: tuple[str, ...] = ()
 
-            for statement in statements:
-                self._connection.execute(statement)
+            transaction_started = False
+            try:
+                self._connection.execute("BEGIN TRANSACTION")
+                transaction_started = True
 
-                description = self._connection.description
-                has_result_set = bool(description)
-                if has_result_set:
-                    result_df = self._connection.fetchdf()
-                    result_columns = tuple(str(col) for col in result_df.columns)
-                else:
-                    result_df = pd.DataFrame()
-                    result_columns = ()
+                for statement in statements:
+                    self._connection.execute(statement)
 
-                last_has_result_set = has_result_set
-                last_dataframe = result_df
-                last_columns = result_columns
+                    description = self._connection.description
+                    has_result_set = bool(description)
+                    if has_result_set:
+                        result_df = self._connection.fetchdf()
+                        result_columns = tuple(str(col) for col in result_df.columns)
+                    else:
+                        result_df = pd.DataFrame()
+                        result_columns = ()
+
+                    last_has_result_set = has_result_set
+                    last_dataframe = result_df
+                    last_columns = result_columns
+
+                self._connection.execute("COMMIT")
+                transaction_started = False
+            except Exception:
+                if transaction_started:
+                    with contextlib.suppress(Exception):
+                        self._connection.execute("ROLLBACK")
+                raise
 
             elapsed_ms = (time.perf_counter() - started) * 1000.0
 

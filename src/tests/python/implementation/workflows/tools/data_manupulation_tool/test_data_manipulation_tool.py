@@ -90,9 +90,12 @@ class _FakeLLMService:
 @dataclass
 class _FakeAnalyticsRepo:
     calls: list[dict[str, object]] = field(default_factory=list)
+    errors: list[Exception] = field(default_factory=list)
 
     def execute_sql(self, *, dataframe: pd.DataFrame, request: object) -> AnalyticsSQLResult:
         self.calls.append({"dataframe": dataframe.copy(), "request": request})
+        if self.errors:
+            raise self.errors.pop(0)
         return AnalyticsSQLResult(
             table_name=request.table_name,
             executed_statements=tuple(request.statements),
@@ -179,6 +182,71 @@ def test_manipulate_accepts_quoted_table_references() -> None:
     )
 
     assert repo.calls[0]["request"].statements == (f'SELECT a FROM "{_TABLE}"',)
+
+
+def test_manipulate_repairs_failed_sql_once_and_executes_repaired_plan() -> None:
+    original_intent = "Report the median of a without changing the requested statistic"
+    failed_statement = (
+        f"SELECT PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY a) AS median_a FROM {_TABLE}"
+    )
+    repaired_statement = f"SELECT quantile_cont(a, 0.50) AS median_a FROM {_TABLE}"
+    execution_error = RuntimeError(
+        "Catalog Error: Scalar Function with name percentile_cont does not exist"
+    )
+    llm = _FakeLLMService(
+        plans=[
+            _plan_payload(statements=[failed_statement]),
+            _plan_payload(statements=[repaired_statement]),
+        ]
+    )
+    repo = _FakeAnalyticsRepo(errors=[execution_error])
+    tool = DataManipulationTool(llm=llm, analytics_repo=repo)
+
+    output_df = tool.manipulate(
+        dataframe=pd.DataFrame([{"a": 1}, {"a": 3}, {"a": 2}]),
+        table_name=_TABLE,
+        instructions=original_intent,
+        data_summary='{"n_rows": 3}',
+    )
+
+    assert len(llm.calls) == 2
+    repair_prompt = str(llm.calls[1]["user_prompt"])
+    assert original_intent in repair_prompt
+    assert failed_statement in repair_prompt
+    assert str(execution_error) in repair_prompt
+    assert len(repo.calls) == 2
+    assert repo.calls[0]["request"].statements == (failed_statement,)
+    assert repo.calls[1]["request"].statements == (repaired_statement,)
+    assert output_df.to_dict(orient="records") == [{"a": 1}, {"a": 3}, {"a": 2}]
+
+
+def test_manipulate_propagates_second_execution_error_without_third_attempt() -> None:
+    failed_statement = f"SELECT unavailable_function(a) FROM {_TABLE}"
+    repaired_statement = f"SELECT another_unavailable_function(a) FROM {_TABLE}"
+    first_error = RuntimeError("Catalog Error: unavailable_function does not exist")
+    second_error = RuntimeError("Catalog Error: repaired SQL still cannot execute")
+    llm = _FakeLLMService(
+        plans=[
+            _plan_payload(statements=[failed_statement]),
+            _plan_payload(statements=[repaired_statement]),
+        ]
+    )
+    repo = _FakeAnalyticsRepo(errors=[first_error, second_error])
+    tool = DataManipulationTool(llm=llm, analytics_repo=repo)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _ = tool.manipulate(
+            dataframe=pd.DataFrame([{"a": 1}]),
+            table_name=_TABLE,
+            instructions="Apply the requested function to a",
+            data_summary='{"n_rows": 1}',
+        )
+
+    assert exc_info.value is second_error
+    assert len(llm.calls) == 2
+    assert len(repo.calls) == 2
+    assert repo.calls[0]["request"].statements == (failed_statement,)
+    assert repo.calls[1]["request"].statements == (repaired_statement,)
 
 
 def test_manipulate_uses_llm_internal_retry_for_table_name_mismatch() -> None:

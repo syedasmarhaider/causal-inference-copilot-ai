@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import duckdb
 import pandas as pd
 import pytest
 
@@ -96,3 +97,31 @@ def test_execute_sql_reloads_table_when_new_dataframe_is_passed() -> None:
 
     assert result_1.dataframe.to_dict(orient="records") == [{"total": 3.0}]
     assert result_2.dataframe.to_dict(orient="records") == [{"total": 30.0}]
+
+
+def test_execute_sql_rolls_back_earlier_statements_when_later_statement_fails() -> None:
+    repo = DuckDBAnalyticsRepo()
+    df = pd.DataFrame([{"a": 1}, {"a": 2}])
+
+    failing_request = AnalyticsSQLRequest(
+        table_name="input_table",
+        statements=(
+            "CREATE TEMP TABLE rollback_probe AS SELECT a FROM input_table",
+            "SELECT missing_column FROM rollback_probe",
+        ),
+    )
+
+    with pytest.raises(duckdb.BinderException, match=r"missing_column"):
+        repo.execute_sql(dataframe=df, request=failing_request)
+
+    retry_request = AnalyticsSQLRequest(
+        table_name="input_table",
+        statements=(
+            "CREATE TEMP TABLE rollback_probe AS SELECT a FROM input_table",
+            "SELECT a FROM rollback_probe ORDER BY a",
+        ),
+    )
+
+    result = repo.execute_sql(dataframe=df, request=retry_request)
+
+    assert result.dataframe.to_dict(orient="records") == [{"a": 1}, {"a": 2}]

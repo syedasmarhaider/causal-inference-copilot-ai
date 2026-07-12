@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from python.domain.service.llm_service import AvailableModelsKey, LLMConfig, LLM
 from python.domain.workflows.tool import Tool
 from python.implementation.service.logging.default_logging import get_app_logger
 from python.implementation.workflows.tools.data_manupulation_tool.data_manipulation_tool_prompts import (
+    DATA_MANIPULATION_SQL_REPAIR_USER_PROMPT_TEMPLATE,
     DATA_MANIPULATION_SQL_SYSTEM_PROMPT,
     DATA_MANIPULATION_SQL_USER_PROMPT_TEMPLATE,
 )
@@ -141,10 +143,56 @@ class DataManipulationTool(Tool):
             max_attempts=effective_retry_attempts,
         )
 
+        try:
+            return self._execute_sql_plan(
+                dataframe=dataframe,
+                table_name=normalized_table_name,
+                sql_plan=sql_plan,
+            )
+        except Exception as exc:
+            failed_statements = tuple(str(statement).strip() for statement in sql_plan.statements)
+            execution_error = f"{type(exc).__name__}: {str(exc).strip()}".strip()
+            log.warning(
+                "data manipulation sql execution failed; generating one repair",
+                table_name=normalized_table_name,
+                statements_count=len(failed_statements),
+                error=execution_error,
+            )
+
+            repair_user_prompt = DATA_MANIPULATION_SQL_REPAIR_USER_PROMPT_TEMPLATE.format(
+                table_name=normalized_table_name,
+                user_intent=normalized_instructions,
+                data_summary=normalized_data_summary,
+                failed_statements=json.dumps(failed_statements, ensure_ascii=False),
+                execution_error=execution_error,
+            )
+            repaired_sql_plan = self.llm.generate_json(
+                schema=plan_schema,
+                system_prompt=DATA_MANIPULATION_SQL_SYSTEM_PROMPT,
+                user_prompt=repair_user_prompt,
+                config=LLMConfig(model=self.model, temperature=0.2),
+                history=None,
+                max_attempts=effective_retry_attempts,
+            )
+
+            # Execute the repaired plan once. Any second execution error is final.
+            return self._execute_sql_plan(
+                dataframe=dataframe,
+                table_name=normalized_table_name,
+                sql_plan=repaired_sql_plan,
+            )
+
+    def _execute_sql_plan(
+        self,
+        *,
+        dataframe: pd.DataFrame,
+        table_name: str,
+        sql_plan: DataManipulationSQLPlan,
+    ) -> pd.DataFrame:
         statements = tuple(str(statement).strip() for statement in sql_plan.statements)
         sql_request = AnalyticsSQLRequest(
             statements=statements,
-            table_name=normalized_table_name,
+            table_name=table_name,
         )
         sql_result = self.analytics_repo.execute_sql(
             dataframe=dataframe,
