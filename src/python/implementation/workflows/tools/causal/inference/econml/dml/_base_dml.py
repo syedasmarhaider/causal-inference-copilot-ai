@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -146,6 +147,33 @@ def _set_if_supported(
         return
     if _supports_param(init_map, name):
         defaults[name] = value
+
+
+def _configured_run_seed() -> int | None:
+    value = os.getenv("SEED_1796_FOR_DR_DML_FOREST_OR_RANDOM", "false")
+    return 1796 if value.strip().lower() in {"1", "true", "yes", "on"} else None
+
+
+def set_causal_forest_defaults(
+    defaults: dict[str, Any],
+    init_map: dict[str, Any],
+    *,
+    run_seed: int | None,
+) -> None:
+    """Apply the explicit, reproducible configuration for CausalForestDML."""
+    _set_if_supported(defaults, init_map, "random_state", run_seed)
+    _set_if_supported(defaults, init_map, "cv", 5)
+    _set_if_supported(defaults, init_map, "mc_iters", 3)
+    _set_if_supported(defaults, init_map, "mc_agg", "median")
+    _set_if_supported(defaults, init_map, "n_estimators", 1000)
+    _set_if_supported(defaults, init_map, "subforest_size", 4)
+    _set_if_supported(defaults, init_map, "max_samples", 0.45)
+    _set_if_supported(defaults, init_map, "min_samples_leaf", 20)
+    _set_if_supported(defaults, init_map, "honest", True)
+    _set_if_supported(defaults, init_map, "inference", True)
+    _set_if_supported(defaults, init_map, "criterion", "mse")
+    _set_if_supported(defaults, init_map, "min_balancedness_tol", 0.45)
+    _set_if_supported(defaults, init_map, "n_jobs", -1)
 
 
 def _raise_if_x_not_numeric(X: Any) -> None:
@@ -318,6 +346,7 @@ class _BaseDMLAdapter(CausalModel):
             )
             init_map = maps["init"]
             defaults: dict[str, Any] = {}
+            run_seed = _configured_run_seed()
 
             _set_if_supported(
                 defaults,
@@ -332,12 +361,17 @@ class _BaseDMLAdapter(CausalModel):
                 specs.outcome_spec.kind == "binary",
             )
             _set_if_supported(defaults, init_map, "allow_missing", missingness_W)
+            # Keep non-forest EconML and stochastic nuisance learners reproducible.
+            _set_if_supported(defaults, init_map, "random_state", run_seed)
+            if self.BACKEND_NAME == "econml.dml.CausalForestDML":
+                set_causal_forest_defaults(defaults, init_map, run_seed=run_seed)
 
             if pre_xw is not None:
                 nuisance_defaults = _get_default_models_for_t_and_y(
                     specs,
                     pre_XW=pre_xw,
                     missingness=missingness_W,
+                    random_state=run_seed,
                 )
                 for key, value in nuisance_defaults.items():
                     _set_if_supported(defaults, init_map, key, value)
@@ -369,6 +403,7 @@ class _BaseDMLAdapter(CausalModel):
                 self.BACKEND_NAME,
                 backend=self.BACKEND_NAME,
                 estimator_cls=getattr(self.ESTIMATOR_CLS, "__name__", str(self.ESTIMATOR_CLS)),
+                run_seed=run_seed,
                 n=int(df.shape[0]),
                 y_shape=_shape_as_list(Y),
                 y_ndim=_ndim_or_none(Y),
@@ -437,6 +472,7 @@ class _BaseDMLAdapter(CausalModel):
                 "meta": {
                     "backend": self.BACKEND_NAME,
                     "n": int(df.shape[0]),
+                    "run_seed": run_seed,
                     "columns": col_meta,
                     "used_init_kwargs": defaults,
                     "spec_semantics_applied": sorted(list(required_keys)),

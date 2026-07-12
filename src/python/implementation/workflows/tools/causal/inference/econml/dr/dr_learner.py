@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -198,6 +199,33 @@ def _set_if_supported(
         return
     if _supports_param(init_map, name):
         defaults[name] = value
+
+
+def _configured_run_seed() -> int | None:
+    value = os.getenv("SEED_1796_FOR_DR_DML_FOREST_OR_RANDOM", "false")
+    return 1796 if value.strip().lower() in {"1", "true", "yes", "on"} else None
+
+
+def set_causal_forest_defaults(
+    defaults: dict[str, Any],
+    init_map: dict[str, Any],
+    *,
+    run_seed: int | None,
+) -> None:
+    """Apply the explicit, reproducible configuration for ForestDRLearner."""
+    _set_if_supported(defaults, init_map, "random_state", run_seed)
+    _set_if_supported(defaults, init_map, "cv", 5)
+    _set_if_supported(defaults, init_map, "mc_iters", 3)
+    _set_if_supported(defaults, init_map, "mc_agg", "median")
+    _set_if_supported(defaults, init_map, "n_estimators", 1000)
+    _set_if_supported(defaults, init_map, "subforest_size", 4)
+    _set_if_supported(defaults, init_map, "max_samples", 0.45)
+    _set_if_supported(defaults, init_map, "min_samples_leaf", 20)
+    _set_if_supported(defaults, init_map, "honest", True)
+    _set_if_supported(defaults, init_map, "inference", True)
+    _set_if_supported(defaults, init_map, "criterion", "mse")
+    _set_if_supported(defaults, init_map, "min_balancedness_tol", 0.45)
+    _set_if_supported(defaults, init_map, "n_jobs", -1)
 
 
 def _treatment_categories_from_spec(specs: CausalSpec) -> Any:
@@ -689,6 +717,7 @@ class _BaseDRLearnerAdapter(CausalModel):
             init_map = maps["init"]
 
             defaults: dict[str, Any] = {}
+            run_seed = _configured_run_seed()
             discrete_outcome = specs.outcome_spec.kind == "binary"
 
             if discrete_outcome:
@@ -698,6 +727,10 @@ class _BaseDRLearnerAdapter(CausalModel):
                 defaults, init_map, "categories", _treatment_categories_from_spec(specs)
             )
             _set_if_supported(defaults, init_map, "allow_missing", missingness_W)
+            # Keep non-forest EconML and stochastic nuisance learners reproducible.
+            _set_if_supported(defaults, init_map, "random_state", run_seed)
+            if self.ESTIMATOR_CLS is ForestDRLearner:
+                set_causal_forest_defaults(defaults, init_map, run_seed=run_seed)
             if self.ESTIMATOR_CLS is SparseLinearDRLearner:
                 _set_if_supported(defaults, init_map, "max_iter", _SPARSE_LINEAR_MAX_ITER)
 
@@ -710,7 +743,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                         _build_propensity_candidates(
                             pre_XW=pre_xw,
                             missingness_W=missingness_W,
-                            random_state=None,
+                            random_state=run_seed,
                             n_jobs=None,
                         )
                     ),
@@ -725,7 +758,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                             n_xw=n_xw,
                             discrete_outcome=discrete_outcome,
                             missingness_W=missingness_W,
-                            random_state=None,
+                            random_state=run_seed,
                             n_jobs=None,
                         )
                     ),
@@ -751,6 +784,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 "DRLearner fit prepared",
                 backend=self.BACKEND_NAME,
                 estimator_cls=getattr(self.ESTIMATOR_CLS, "__name__", str(self.ESTIMATOR_CLS)),
+                run_seed=run_seed,
                 n=int(df.shape[0]),
                 y_shape=_shape_as_list(Y),
                 y_ndim=_ndim_or_none(Y),
@@ -839,6 +873,7 @@ class _BaseDRLearnerAdapter(CausalModel):
                 "meta": {
                     "backend": self.BACKEND_NAME,
                     "n": int(df.shape[0]),
+                    "run_seed": run_seed,
                     "columns": col_meta,
                     "used_init_kwargs": defaults,
                     "spec_semantics_applied": sorted(list(required_keys)),
