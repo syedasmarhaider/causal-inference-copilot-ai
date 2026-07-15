@@ -13,6 +13,9 @@ from python.implementation.workflows.nodes.data_manupulation.data_manupulation_s
 from python.implementation.workflows.nodes.general_queries.general_queries_node import (
     GeneralQueriesNode,
 )
+from python.implementation.workflows.nodes.shap_explanation.shap_explanation_node import (
+    ShapExplanationNode,
+)
 from python.implementation.workflows.ochestrator.causal_ochestrator_state import (
     CausalOchestratorState,
 )
@@ -58,6 +61,7 @@ def _build_orchestrator_for_routing(llm: object) -> Ochestrator:
     orchestrator._llm = llm
     orchestrator._log = _StubLogger()
     orchestrator._node_classes_by_name = build_node_name_by_node_name()
+    orchestrator._shap_enabled = True
     return orchestrator
 
 
@@ -123,3 +127,14 @@ def test_llm_pick_node_can_still_fall_back_to_general_queries_when_allowed() -> 
     )
 
     assert selected == GeneralQueriesNode.NAME
+
+
+def test_orchestrator_removes_shap_companion_when_disabled() -> None:
+    orchestrator = _build_orchestrator_for_routing(_RaisingLLM())
+    orchestrator._shap_enabled = False
+
+    filtered = orchestrator._get_enabled_companion_names(
+        [ShapExplanationNode.NAME, GeneralQueriesNode.NAME]
+    )
+
+    assert filtered == [GeneralQueriesNode.NAME]

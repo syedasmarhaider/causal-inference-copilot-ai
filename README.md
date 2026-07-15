@@ -178,6 +178,7 @@ Defined in `.env.example`:
 - `LITELLM_LOCAL_MODEL_COST_MAP`
 - `LOG_LEVEL`
 - `API_HOST`
+- `SHAP_ENABLED`: enable or disable the SHAP companion node (`true` by default)
 - `API_PORT`
 
 ## Tests

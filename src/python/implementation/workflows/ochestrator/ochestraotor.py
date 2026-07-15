@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -99,9 +100,11 @@ class Ochestrator:
         data_repo: DataRepo,
         models_repo: ModelsRepo,
         analytics_repo: AnalyticsRepo,
+        shap_enabled: bool | None = None,
     ) -> None:
         self._workflow_repo = workflow_repo
         self._llm = llm
+        self._shap_enabled = shap_enabled if shap_enabled is not None else shap_enabled_from_env()
         self.nodes_by_name = init_all_nodes_with_name_as_key(
             llm=llm,
             data_repo=data_repo,
@@ -162,7 +165,10 @@ class Ochestrator:
         if not last_is_user:
             node_name = needed_node
         else:
-            companions = orch_state.get_current_node_companion_names(needed_node)
+            companions = self._get_current_node_companion_names(
+                ochestrator_state=orch_state,
+                node_name=needed_node,
+            )
             node_name = self._llm_pick_node(
                 current_node=needed_node,
                 companions=companions,
@@ -245,6 +251,20 @@ class Ochestrator:
             current_data_id=self._safe_get_uuid(new_orch_state, "working_dataset_id"),
             is_dataset_frozen=self._safe_get_bool(new_orch_state, "working_dataset_frozen"),
         )
+
+    def _get_current_node_companion_names(
+        self,
+        *,
+        ochestrator_state: OchestratorState,
+        node_name: str,
+    ) -> list[str]:
+        companions = ochestrator_state.get_current_node_companion_names(node_name)
+        return self._get_enabled_companion_names(companions)
+
+    def _get_enabled_companion_names(self, companions: Sequence[str]) -> list[str]:
+        if self._shap_enabled:
+            return list(companions)
+        return [companion for companion in companions if companion != ShapExplanationNode.NAME]
 
     def _load_or_init_ochestrator_state(
         self,
@@ -393,6 +413,14 @@ class Ochestrator:
         if not isinstance(state, NodeState):
             raise ValueError(f"init_empty() for {state_cls.__name__} did not return a NodeState")
         return state
+
+
+def shap_enabled_from_env() -> bool:
+    raw_value = os.getenv("SHAP_ENABLED")
+    if raw_value is None:
+        # Keep SHAP enabled by default for existing deployments without this setting.
+        raw_value = os.getenv("ENABLE_SHAP", "true")
+    return raw_value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def build_state_classes_by_name() -> Mapping[str, type[NodeState]]:
