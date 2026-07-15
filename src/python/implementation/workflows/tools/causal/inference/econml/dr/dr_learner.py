@@ -255,7 +255,7 @@ def set_causal_forest_defaults(
     _set_if_supported(defaults, init_map, "cv", 5)
     _set_if_supported(defaults, init_map, "mc_iters", 1)
     _set_if_supported(defaults, init_map, "mc_agg", "median")
-    _set_if_supported(defaults, init_map, "n_estimators", 5000)
+    _set_if_supported(defaults, init_map, "n_estimators", 2000)
     _set_if_supported(defaults, init_map, "subforest_size", 4)
     _set_if_supported(defaults, init_map, "max_samples", 0.45)
     _set_if_supported(defaults, init_map, "min_samples_leaf", 20)
