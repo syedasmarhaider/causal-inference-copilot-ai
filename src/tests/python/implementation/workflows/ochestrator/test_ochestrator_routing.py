@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 from python.domain.models.models import ChatMessage
+from python.implementation.workflows.nodes.causal_inference.causal_inference_node import (
+    CausalInferenceNode,
+)
 from python.implementation.workflows.nodes.data_manupulation.data_manupulation_node import (
     DataManupulationNode,
 )
@@ -138,3 +141,14 @@ def test_orchestrator_removes_shap_companion_when_disabled() -> None:
     )
 
     assert filtered == [GeneralQueriesNode.NAME]
+
+
+def test_shap_node_keeps_follow_up_queries_in_the_causal_workflow() -> None:
+    orch_state = CausalOchestratorState.init_empty()
+
+    companions = orch_state.get_current_node_companion_names(ShapExplanationNode.NAME)
+
+    assert companions == [
+        CausalInferenceNode.NAME,
+        GeneralQueriesNode.NAME,
+    ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -7,6 +8,7 @@ from uuid import UUID, uuid4
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from python.domain.models.models import ChatMessage
 from python.domain.repo.data_repo import DataRepo, ImageMime
@@ -119,6 +121,8 @@ class _FakeDataRepo(DataRepo):
     dataframes: dict[UUID, pd.DataFrame]
     loaded_dataset_ids: list[UUID] = field(default_factory=list)
     saved_csv_calls: list[dict[str, Any]] = field(default_factory=list)
+    json_data: dict[UUID, str] = field(default_factory=dict)
+    saved_json_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def get_csv_data(
         self,
@@ -155,7 +159,8 @@ class _FakeDataRepo(DataRepo):
         )
 
     def get_json_data(self, user_id: UUID, conversation_id: UUID, dataset_id: UUID) -> str:
-        raise NotImplementedError
+        del user_id, conversation_id
+        return self.json_data[dataset_id]
 
     def save_json_data(
         self,
@@ -166,7 +171,15 @@ class _FakeDataRepo(DataRepo):
         *,
         overwrite: bool = True,
     ) -> None:
-        raise NotImplementedError
+        del user_id, conversation_id
+        self.json_data[dataset_id] = json_data
+        self.saved_json_calls.append(
+            {
+                "dataset_id": dataset_id,
+                "json_data": json_data,
+                "overwrite": overwrite,
+            }
+        )
 
     def save_artifact(
         self,
@@ -272,6 +285,7 @@ class _FakeDataManipulationTool:
         table_name: str,
         data_summary: str,
         instructions: str,
+        retry_attempts: int = 1,
     ) -> pd.DataFrame:
         self.calls.append(
             {
@@ -279,6 +293,7 @@ class _FakeDataManipulationTool:
                 "table_name": table_name,
                 "data_summary": data_summary,
                 "instructions": instructions,
+                "retry_attempts": retry_attempts,
             }
         )
         return pd.DataFrame([{"column": "shap_sex", "mean_abs_shap": 0.1075, "mean_shap": 0.0775}])
@@ -490,6 +505,7 @@ def test_shap_explanation_node_calculates_separate_shap_csv_and_updates_state() 
     assert "cate" not in shap_df.columns
     assert "effect_row" not in shap_df.columns
     assert len(data_tool.calls) == 1
+    assert data_tool.calls[0]["retry_attempts"] == 3
     assert "separate feature-importance artifact" in data_tool.calls[0]["instructions"]
     assert isinstance(result.new_node_state, ShapExplanationState)
     assert result.response_messages
@@ -502,7 +518,67 @@ def test_shap_explanation_node_calculates_separate_shap_csv_and_updates_state() 
     assert [ref["artifact_meta"]["kind"] for ref in refs] == [
         "shap_values",
         "shap_query_result",
+        "chart_spec",
     ]
+    assert len(data_repo.saved_json_calls) == 1
+
+
+def test_shap_explanation_node_attaches_one_vega_lite_chart_when_requested() -> None:
+    inputs = _inputs()
+    estimator = _FakeEstimator(values=np.asarray([[-0.05], [0.15], [-0.01], [0.22]], dtype=float))
+    data_repo = _FakeDataRepo(dataframes={inputs.dataset_id: _dataframe()})
+    models_repo = _FakeModelsRepo(records={inputs.trained_model_id: estimator})
+    data_tool = _FakeDataManipulationTool()
+    orchestrator_state = _orchestrator_state(inputs)
+
+    result = _node(data_repo=data_repo, models_repo=models_repo, data_tool=data_tool).run(
+        request=NodeRequest(
+            user_id=uuid4(),
+            conversation_id=uuid4(),
+            node_state=ShapExplanationState.init_empty(),
+            orchestrator_state=orchestrator_state,
+            read_only_messages_history=[
+                ChatMessage(
+                    role="user",
+                    content="Show a Vega-Lite graph of global SHAP feature importance.",
+                )
+            ],
+        )
+    )
+
+    refs = result.response_messages[0].artifact_refs or []
+    assert [ref["artifact_meta"]["kind"] for ref in refs] == [
+        "shap_values",
+        "shap_query_result",
+        "chart_spec",
+    ]
+    chart_ref = refs[-1]
+    assert chart_ref["kind"] == "graph"
+    assert chart_ref["format"] == "json"
+    chart_spec = json.loads(data_repo.json_data[chart_ref["id"]])
+    assert chart_spec["$schema"].endswith("vega-lite/v5.json")
+    chart_values = chart_spec["data"]["values"]
+    assert len(chart_values) == 4
+    assert {value["feature"] for value in chart_values} == {"sex"}
+    assert [value["shap_value"] for value in chart_values] == pytest.approx(
+        [-0.05, 0.15, -0.01, 0.22]
+    )
+    assert all(value["feature_value_rank"] is not None for value in chart_values)
+    assert {value["direction"] for value in chart_values} == {"negative", "positive"}
+    assert chart_spec["layer"][1]["encoding"]["x"]["field"] == "shap_value"
+    assert chart_spec["layer"][1]["encoding"]["y"]["field"] == "feature"
+    assert chart_spec["layer"][1]["encoding"]["color"]["field"] == "feature_value_rank"
+    assert chart_spec["layer"][1]["encoding"]["color"]["scale"]["range"] == [
+        "#2F80ED",
+        "#8E24AA",
+        "#E91E63",
+    ]
+    assert chart_spec["layer"][1]["encoding"]["color"]["legend"]["values"] == [0, 1]
+    assert len(data_repo.saved_json_calls) == 1
+
+    payload = json.loads(result.new_node_state.payload.latest_query_result_raw_json_str or "{}")
+    assert payload["chart_generated"] is True
+    assert payload["chart_artifact_id"] == str(chart_ref["id"])
 
 
 def test_shap_explanation_node_reuses_cached_shap_csv() -> None:
@@ -542,3 +618,4 @@ def test_shap_explanation_node_reuses_cached_shap_csv() -> None:
     assert len(models_repo.load_calls) == 1
     assert len(data_tool.calls) == 2
     assert len(llm.generate_calls) == 2
+    assert len(data_repo.saved_json_calls) == 2

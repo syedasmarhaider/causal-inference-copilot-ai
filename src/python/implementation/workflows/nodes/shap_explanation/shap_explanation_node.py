@@ -18,6 +18,9 @@ from python.domain.service.llm_service import LLMConfig, LLMService
 from python.domain.workflows.node import Node, NodeExecutionResult, NodeRequest
 from python.domain.workflows.tool_factory import ToolFactory
 from python.implementation.service.logging.default_logging import get_app_logger
+from python.implementation.workflows.nodes.shap_explanation.shap_explanation_chart import (
+    build_shap_feature_importance_chart_spec,
+)
 from python.implementation.workflows.nodes.shap_explanation.shap_explanation_deps import (
     ShapExplanationDeps,
 )
@@ -53,8 +56,10 @@ log = get_app_logger(__name__, component="shap_explanation_node", log_type="node
 
 _ARTIFACT_KIND_SHAP_VALUES = "shap_values"
 _ARTIFACT_KIND_SHAP_QUERY_RESULT = "shap_query_result"
+_ARTIFACT_KIND_CHART_SPEC = "chart_spec"
 _WORKING_TABLE_PREFIX = "df_"
 _WORKING_TABLE_HASH_HEX_LEN = 16
+_DATA_MANIPULATION_RETRY_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -201,7 +206,8 @@ class ShapExplanationNode(Node):
                 error_message="no effect modifiers",
             )
 
-        latest_user_message = _latest_user_message(request.read_only_messages_history)
+        history = list(request.read_only_messages_history or [])[-6:]
+        latest_user_message = _latest_user_message(history)
         shap_dataset = self._load_or_compute_shap_dataset(
             request=request,
             payload=payload,
@@ -213,10 +219,17 @@ class ShapExplanationNode(Node):
         if isinstance(shap_dataset, NodeExecutionResult):
             return shap_dataset
 
+        chart_ref, chart_error = self._maybe_build_shap_chart_artifact(
+            request=request,
+            shap_dataframe=shap_dataset.dataframe,
+            value_dataframe=dataframe,
+            shap_summary=shap_dataset.summary,
+        )
         query_result_df, query_error = self._query_shap_dataset(
             dataframe=shap_dataset.dataframe,
             conversation_id=request.conversation_id,
             request_summary=latest_user_message,
+            recent_history=history,
             resolved=resolved,
             shap_summary=shap_dataset.summary,
         )
@@ -232,10 +245,18 @@ class ShapExplanationNode(Node):
             "request_summary": latest_user_message,
             "shap_values_dataset_id": str(shap_dataset.dataset_id),
             "shap_summary": shap_dataset.summary,
-            "query_result": _dataframe_preview(query_result_df),
+            "identifier_column": str(resolved.inference_ready_spec.causal_spec.id_col),
+            "effect_modifier_columns": list(effect_modifier_columns),
+            "shap_columns": list(shap_dataset.summary.get("shap_columns", [])),
+            "query_result": _dataframe_preview(query_result_df, max_rows=100),
+            "chart_generated": chart_ref is not None,
         }
         if query_error:
             query_payload["query_error"] = query_error
+        if chart_ref is not None:
+            query_payload["chart_artifact_id"] = str(chart_ref["id"])
+        if chart_error:
+            query_payload["chart_error"] = chart_error
 
         if not query_result_df.empty:
             query_result_id = uuid4()
@@ -254,12 +275,17 @@ class ShapExplanationNode(Node):
                 )
             )
 
+        if chart_ref is not None:
+            artifact_refs.append(chart_ref)
+
         assistant_message = self._generate_shap_answer(
             request_summary=latest_user_message,
             shap_summary=shap_dataset.summary,
             query_result_df=query_result_df,
             computed=shap_dataset.computed,
             query_error=query_error,
+            chart_attached=chart_ref is not None,
+            chart_error=chart_error,
             history=request.read_only_messages_history,
         )
 
@@ -272,7 +298,7 @@ class ShapExplanationNode(Node):
                 "latest_request_summary": latest_user_message,
                 "assistant_message": assistant_message,
                 "message_artifact_refs": artifact_refs,
-                "error_message": query_error,
+                "error_message": _combine_errors(query_error, chart_error),
             }
         )
         return self._needs_input_result(
@@ -280,8 +306,47 @@ class ShapExplanationNode(Node):
             payload=next_payload,
             user_message=assistant_message,
             artifact_refs=artifact_refs,
-            error_message=query_error,
+            error_message=_combine_errors(query_error, chart_error),
         )
+
+    def _maybe_build_shap_chart_artifact(
+        self,
+        *,
+        request: NodeRequest,
+        shap_dataframe: pd.DataFrame,
+        value_dataframe: pd.DataFrame,
+        shap_summary: Mapping[str, Any],
+    ) -> tuple[ArtifactRef | None, str | None]:
+        try:
+            chart_spec = build_shap_feature_importance_chart_spec(
+                shap_dataframe=shap_dataframe,
+                value_dataframe=value_dataframe,
+                shap_summary=shap_summary,
+            )
+        except Exception as exc:
+            log.warning("SHAP chart specification build failed", error=safe_err(exc))
+            return None, f"SHAP chart generation failed: {safe_err(exc)}"
+
+        if chart_spec is None:
+            return (
+                None,
+                "No finite row-level SHAP values were available for the summary chart.",
+            )
+
+        chart_id = uuid4()
+        try:
+            self._data_repo.save_json_data(
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                dataset_id=chart_id,
+                json_data=_dumps(chart_spec),
+                overwrite=True,
+            )
+        except Exception as exc:
+            log.warning("SHAP chart artifact save failed", error=safe_err(exc))
+            return None, f"SHAP chart artifact save failed: {safe_err(exc)}"
+
+        return _build_graph_artifact_ref(artifact_id=chart_id), None
 
     def _load_or_compute_shap_dataset(
         self,
@@ -467,6 +532,7 @@ class ShapExplanationNode(Node):
         dataframe: pd.DataFrame,
         conversation_id: UUID,
         request_summary: str,
+        recent_history: Sequence[ChatMessage],
         resolved: _ResolvedShapContext,
         shap_summary: Mapping[str, Any],
     ) -> tuple[pd.DataFrame, str | None]:
@@ -484,6 +550,7 @@ class ShapExplanationNode(Node):
                 summary_json=self._profiling_tool.dataset_summary_to_json(summary_model),
                 instructions=_build_shap_query_instructions(
                     request_summary=request_summary,
+                    recent_history=recent_history,
                     identifier_column=str(resolved.inference_ready_spec.causal_spec.id_col),
                     effect_modifier_columns=(
                         resolved.inference_ready_spec.get_effect_modifiers_order()
@@ -521,6 +588,8 @@ class ShapExplanationNode(Node):
             raise TypeError(
                 "data manipulation tool must accept either 'table_name' or 'conversation_id'"
             )
+        if "retry_attempts" in params:
+            kwargs["retry_attempts"] = _DATA_MANIPULATION_RETRY_ATTEMPTS
         return manipulate(**kwargs)
 
     def _generate_shap_answer(
@@ -531,6 +600,8 @@ class ShapExplanationNode(Node):
         query_result_df: pd.DataFrame,
         computed: bool,
         query_error: str | None,
+        chart_attached: bool,
+        chart_error: str | None,
         history: Sequence[ChatMessage] | None,
     ) -> str:
         fallback = _build_shap_answer(
@@ -538,12 +609,16 @@ class ShapExplanationNode(Node):
             query_result_df=query_result_df,
             computed=computed,
             query_error=query_error,
+            chart_attached=chart_attached,
+            chart_error=chart_error,
         )
         shap_context = {
             "artifact_status": "calculated" if computed else "reused",
             "shap_summary": dict(shap_summary),
             "query_result": _dataframe_preview(query_result_df),
             "query_error": query_error,
+            "chart_attached": chart_attached,
+            "chart_error": chart_error,
             "interpretation_constraints": {
                 "shap_scope": "effect modifiers only",
                 "global_importance_metric": "mean_abs_shap",
@@ -655,6 +730,7 @@ def _source_signature(*, resolved: _ResolvedShapContext) -> str:
 def _build_shap_query_instructions(
     *,
     request_summary: str,
+    recent_history: Sequence[ChatMessage],
     identifier_column: str,
     effect_modifier_columns: Sequence[str],
     shap_summary: Mapping[str, Any],
@@ -662,15 +738,21 @@ def _build_shap_query_instructions(
     shap_columns = ", ".join(str(column) for column in shap_summary.get("shap_columns", []))
     quoted_effect_modifiers = ", ".join(str(column) for column in effect_modifier_columns)
     return (
-        "Use DuckDB SQL over the provided row-level SHAP dataframe. The dataframe is a "
+        "Use DuckDB SQL as a read-only follow-up query over the provided row-level SHAP dataframe. "
+        "Do not recalculate SHAP values, modify the dataset, or query the original CATE artifact. "
+        "Each new user message is a query against this cached SHAP artifact. The dataframe is a "
         "separate feature-importance artifact and is not the CATE CSV. It contains the "
         f"identifier column `{identifier_column}`, original effect modifier columns "
         f"({quoted_effect_modifiers}), and SHAP attribution columns ({shap_columns}). "
         "SHAP values are row-level effect-modifier attributions for the trained EconML "
-        "treatment-effect model. For global feature-importance questions, rank features by "
-        "mean absolute SHAP. For local or patient-specific questions, include the identifier "
-        "and the requested shap_ columns. Preserve the sign of SHAP values when the user asks "
-        "about direction; use absolute values only for importance strength. "
+        "treatment-effect model. For global feature-importance questions, return feature, "
+        "mean absolute SHAP, and mean signed SHAP. For local, patient-specific, subgroup, "
+        "or ranking questions, filter or group using only columns present in this dataframe "
+        "and include the identifier plus the requested shap_ columns. Preserve signed SHAP "
+        "values when the user asks about direction; use absolute values only for importance "
+        "strength. Use the recent conversation context to resolve follow-up references. "
+        f"Recent conversation context: {_dumps(_messages_payload(recent_history))}. "
+        "Return a compact result table, not SQL or narrative. "
         f"Answer this request with a compact result table: {request_summary}. "
         f"SHAP summary JSON: {_dumps(dict(shap_summary))}"
     )
@@ -682,6 +764,8 @@ def _build_shap_answer(
     query_result_df: pd.DataFrame,
     computed: bool,
     query_error: str | None,
+    chart_attached: bool,
+    chart_error: str | None,
 ) -> str:
     action = "calculated" if computed else "reused"
     top_features = _top_feature_lines(shap_summary=shap_summary, limit=5)
@@ -696,6 +780,10 @@ def _build_shap_answer(
         )
     if not query_result_df.empty:
         parts.append(_compact_records_text(query_result_df) + ".")
+    if chart_attached:
+        parts.append("The signed global SHAP summary Vega-Lite chart is attached.")
+    elif chart_error:
+        parts.append(chart_error)
     if query_error:
         parts.append(query_error)
     return " ".join(part for part in parts if part).strip()
@@ -762,6 +850,15 @@ def _latest_user_message(history: Sequence[ChatMessage] | None) -> str:
     return "Show global SHAP feature importance."
 
 
+def _messages_payload(messages: Sequence[ChatMessage]) -> list[dict[str, str]]:
+    return [{"role": message.role, "content": message.content} for message in messages]
+
+
+def _combine_errors(*errors: str | None) -> str | None:
+    messages = [error.strip() for error in errors if error and error.strip()]
+    return "; ".join(messages) or None
+
+
 def _conversation_id_to_table_name(conversation_id: UUID) -> str:
     digest = hashlib.sha256(str(conversation_id).encode("ascii")).hexdigest()
     return f"{_WORKING_TABLE_PREFIX}{digest[:_WORKING_TABLE_HASH_HEX_LEN]}"
@@ -777,6 +874,18 @@ def _build_data_artifact_ref(
         "kind": "data",
         "format": "csv",
         "artifact_meta": {"kind": artifact_kind},
+    }
+
+
+def _build_graph_artifact_ref(*, artifact_id: UUID) -> ArtifactRef:
+    return {
+        "id": artifact_id,
+        "kind": "graph",
+        "format": "json",
+        "artifact_meta": {
+            "kind": _ARTIFACT_KIND_CHART_SPEC,
+            "title": "Signed SHAP summary",
+        },
     }
 
 

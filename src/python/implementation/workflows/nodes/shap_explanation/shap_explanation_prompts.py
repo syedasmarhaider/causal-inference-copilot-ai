@@ -14,10 +14,14 @@ Interpretation rules:
 - Treat mean absolute SHAP as the global feature-importance ranking.
 - Explain signed mean SHAP cautiously as direction on the model's estimated
   treatment-effect scale.
+- In the attached signed SHAP summary, points left of zero lower the model's
+  estimated treatment-effect contrast and points right of zero raise it.
 - Do not say "benefit" or "harm" unless the outcome direction is explicitly known.
   Prefer "higher estimated treatment-effect contrast" or "lower estimated
   treatment-effect contrast".
 - State that the row-level SHAP CSV is a separate artifact when useful.
+- When a global SHAP chart is attached, mention that the Vega-Lite chart is attached.
+- If a requested chart could not be generated, state that clearly without inventing a chart.
 - Include the important feature names, values, and clinical interpretation needed to answer the user.
 - If the query result is empty or a fallback was used, say what was available
   without blaming the user.
@@ -43,7 +47,8 @@ def get_shap_explanation_node_info() -> str:
         "when the user asks for SHAP values, feature importance, important effect modifiers, "
         "drivers of heterogeneous treatment effects, local explanations, global importance, "
         "or why certain patients have stronger treatment-effect estimates. It computes a "
-        "separate row-level SHAP CSV on demand and answers questions from that file."
+        "separate row-level SHAP CSV on demand, answers read-only follow-up queries from the "
+        "cached SHAP artifact, and attaches one signed global Vega-Lite summary chart."
     )
 
 

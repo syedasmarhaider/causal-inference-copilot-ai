@@ -461,6 +461,11 @@ class CausalOchestratorState(OchestratorState):
                     ShapExplanationNode.NAME,
                     GeneralQueriesNode.NAME,
                 ]
+            case _ if node_name == ShapExplanationNode.NAME:
+                return [
+                    CausalInferenceNode.NAME,
+                    GeneralQueriesNode.NAME,
+                ]
             case _:
                 raise ValueError(f"Unknown node name for companions: {node_name!r}")
 
