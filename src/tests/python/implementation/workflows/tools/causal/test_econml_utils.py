@@ -5,7 +5,11 @@ import pandas as pd
 import pytest
 
 from python.implementation.workflows.tools.causal.inference.econml.utils import (
+    ModelSpecError,
     get_input_params_from_spec,
+    normalize_drtester_cate_predictions,
+    normalize_drtester_treatment_codes,
+    normalize_drtester_treatment_pair,
     serialize_econml_sensitivity_analysis,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
@@ -95,6 +99,142 @@ def test_get_input_params_does_not_guess_binary_mapping_for_continuous_outcome()
             _df(outcome=["YES", "no", "Yes", "No"]),
             _continuous_outcome_spec(),
         )
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        (
+            np.array([0.0, 1.0, 1.0, 0.0]),
+            np.array([0, 1, 1, 0], dtype=np.int64),
+        ),
+        (
+            np.array([[0.0], [1.0], [0.0]]),
+            np.array([0, 1, 0], dtype=np.int64),
+        ),
+        (
+            np.array([[0.0, 1.0, 0.0]]),
+            np.array([0, 1, 0], dtype=np.int64),
+        ),
+        (
+            np.array([2, 0, 1, 2], dtype=np.int16),
+            np.array([2, 0, 1, 2], dtype=np.int64),
+        ),
+        (
+            np.array([False, True, False]),
+            np.array([0, 1, 0], dtype=np.int64),
+        ),
+    ],
+    ids=["binary-float", "column-vector", "row-vector", "multiclass", "boolean"],
+)
+def test_normalize_drtester_treatment_codes_returns_contiguous_integer_indices(
+    values: np.ndarray,
+    expected: np.ndarray,
+) -> None:
+    result = normalize_drtester_treatment_codes(values)
+
+    np.testing.assert_array_equal(result, expected)
+    assert result.ndim == 1
+    assert result.dtype == np.dtype(np.int64)
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ([], "must not be empty"),
+        (np.array(0), "one-dimensional"),
+        (np.zeros((2, 2)), "one-dimensional"),
+        ([[0, 1], [0]], "rectangular array"),
+        (np.array([0]), "at least two treatment groups"),
+        (np.array([0.0, 1.5]), "integer-valued codes"),
+        (np.array([1.0, 2.0]), "starting at zero"),
+        (np.array([0, 2]), "starting at zero"),
+        (np.array([-1, 0]), "starting at zero"),
+        (np.array([0.0, np.nan]), "must be finite"),
+        (np.array([0.0, np.inf]), "must be finite"),
+        (np.array([0.0, -np.inf]), "must be finite"),
+        (np.array([0 + 1j, 1 + 0j]), "real numeric codes"),
+        (np.array(["0", "1"]), "numeric codes"),
+        (np.array([None, 1], dtype=object), "numeric codes"),
+    ],
+    ids=[
+        "empty",
+        "scalar",
+        "matrix",
+        "ragged",
+        "one-group",
+        "fractional",
+        "shifted",
+        "gapped",
+        "negative",
+        "nan",
+        "positive-infinity",
+        "negative-infinity",
+        "complex",
+        "numeric-strings",
+        "object",
+    ],
+)
+def test_normalize_drtester_treatment_codes_rejects_values_drtester_cannot_index(
+    values: object,
+    message: str,
+) -> None:
+    with pytest.raises(ModelSpecError, match=message):
+        normalize_drtester_treatment_codes(values)
+
+
+def test_normalize_drtester_treatment_pair_normalizes_both_samples() -> None:
+    train, validation = normalize_drtester_treatment_pair(
+        train=np.array([0.0, 1.0, 1.0, 0.0]),
+        validation=np.array([[1.0], [0.0]]),
+    )
+
+    np.testing.assert_array_equal(train, np.array([0, 1, 1, 0], dtype=np.int64))
+    np.testing.assert_array_equal(validation, np.array([1, 0], dtype=np.int64))
+
+
+def test_normalize_drtester_treatment_pair_rejects_different_code_sets() -> None:
+    with pytest.raises(ModelSpecError, match="must contain the same treatment codes"):
+        normalize_drtester_treatment_pair(
+            train=np.array([0, 1, 2]),
+            validation=np.array([0, 1]),
+        )
+
+
+def test_normalize_drtester_cate_predictions_collapses_singleton_outcome_axis() -> None:
+    result = normalize_drtester_cate_predictions(
+        np.array([[0.1], [0.2], [0.3]]),
+        expected_rows=3,
+    )
+
+    np.testing.assert_array_equal(result, np.array([0.1, 0.2, 0.3]))
+    assert result.ndim == 1
+
+
+@pytest.mark.parametrize(
+    ("predictions", "expected_rows", "message"),
+    [
+        (np.ones((3, 2)), 3, "expected shape"),
+        (np.ones((3, 1, 1)), 3, "expected shape"),
+        (np.ones(2), 3, "row count"),
+        (np.array(1.0), 2, "row count"),
+        (np.array(["not-a-number"]), 1, "must be numeric"),
+    ],
+    ids=[
+        "multi-outcome",
+        "three-dimensional",
+        "wrong-row-count",
+        "scalar-many-rows",
+        "non-numeric",
+    ],
+)
+def test_normalize_drtester_cate_predictions_rejects_invalid_shapes_and_values(
+    predictions: np.ndarray,
+    expected_rows: int,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        normalize_drtester_cate_predictions(predictions, expected_rows=expected_rows)
 
 
 class _Summary:

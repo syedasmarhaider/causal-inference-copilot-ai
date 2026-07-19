@@ -15,6 +15,12 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_nod
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
     CausalInferenceState,
 )
+from python.implementation.workflows.nodes.causal_validate.causal_validate_node import (
+    CausalValidateNode,
+)
+from python.implementation.workflows.nodes.causal_validate.causal_validate_state import (
+    CausalValidateState,
+)
 from python.implementation.workflows.nodes.data_compilation.data_compilation_node import (
     DataCompilationNode,
 )
@@ -458,6 +464,13 @@ class CausalOchestratorState(OchestratorState):
                 return []
             case _ if node_name == CausalInferenceNode.NAME:
                 return [
+                    CausalValidateNode.NAME,
+                    ShapExplanationNode.NAME,
+                    GeneralQueriesNode.NAME,
+                ]
+            case _ if node_name == CausalValidateNode.NAME:
+                return [
+                    CausalInferenceNode.NAME,
                     ShapExplanationNode.NAME,
                     GeneralQueriesNode.NAME,
                 ]
@@ -499,6 +512,8 @@ class CausalOchestratorState(OchestratorState):
                 self._clear_stages_from(2, reason=f"rollback from {current_failed_node}")
             case _ if current_failed_node == CausalInferenceNode.NAME:
                 pass
+            case _ if current_failed_node == CausalValidateNode.NAME:
+                pass
             case _ if current_failed_node == ShapExplanationNode.NAME:
                 pass
             case _:
@@ -512,6 +527,7 @@ class CausalOchestratorState(OchestratorState):
                     ModelSelectionNode.NAME,
                     ModelTrainNode.NAME,
                     CausalInferenceNode.NAME,
+                    CausalValidateNode.NAME,
                     ShapExplanationNode.NAME,
                 ]
             case _ if node_name == ProtocolDiscussionNode.NAME:
@@ -520,6 +536,7 @@ class CausalOchestratorState(OchestratorState):
                     ModelSelectionNode.NAME,
                     ModelTrainNode.NAME,
                     CausalInferenceNode.NAME,
+                    CausalValidateNode.NAME,
                     ShapExplanationNode.NAME,
                 ]
             case _ if node_name == DataCompilationNode.NAME:
@@ -527,13 +544,25 @@ class CausalOchestratorState(OchestratorState):
                     ModelSelectionNode.NAME,
                     ModelTrainNode.NAME,
                     CausalInferenceNode.NAME,
+                    CausalValidateNode.NAME,
                     ShapExplanationNode.NAME,
                 ]
             case _ if node_name == ModelSelectionNode.NAME:
-                return [ModelTrainNode.NAME, CausalInferenceNode.NAME, ShapExplanationNode.NAME]
+                return [
+                    ModelTrainNode.NAME,
+                    CausalInferenceNode.NAME,
+                    CausalValidateNode.NAME,
+                    ShapExplanationNode.NAME,
+                ]
             case _ if node_name == ModelTrainNode.NAME:
-                return [CausalInferenceNode.NAME, ShapExplanationNode.NAME]
+                return [
+                    CausalInferenceNode.NAME,
+                    CausalValidateNode.NAME,
+                    ShapExplanationNode.NAME,
+                ]
             case _ if node_name == CausalInferenceNode.NAME:
+                return []
+            case _ if node_name == CausalValidateNode.NAME:
                 return []
             case _ if node_name == ShapExplanationNode.NAME:
                 return []
@@ -553,6 +582,8 @@ class CausalOchestratorState(OchestratorState):
             case _ if state_name == ModelTrainState.NAME:
                 self._clear_stages_from(5, reason=f"rollback to {state_name}")
             case _ if state_name == CausalInferenceState.NAME:
+                pass
+            case _ if state_name == CausalValidateState.NAME:
                 pass
             case _ if state_name == ShapExplanationState.NAME:
                 pass

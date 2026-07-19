@@ -352,6 +352,113 @@ def get_input_params_from_spec(
     return y, T, X, W, meta
 
 
+def normalize_drtester_treatment_codes(treatment: Any) -> np.ndarray:
+    """Return the contiguous integer treatment codes required by EconML DRTester.
+
+    The shared causal input adapter intentionally represents binary treatment as
+    floating-point ``0.0``/``1.0`` for the estimators. DRTester instead iterates the
+    observed treatment values and uses each value directly as a NumPy column index,
+    which requires integer codes starting at zero.
+    """
+
+    try:
+        values = np.asarray(treatment)
+    except (TypeError, ValueError) as exc:
+        raise ModelSpecError("DRTester treatment values must be a rectangular array.") from exc
+    if values.ndim == 2 and 1 in values.shape:
+        values = values.reshape(-1)
+    if values.ndim != 1:
+        raise ModelSpecError("DRTester treatment values must be a one-dimensional array.")
+    if values.size == 0:
+        raise ModelSpecError("DRTester treatment values must not be empty.")
+    if np.iscomplexobj(values):
+        raise ModelSpecError("DRTester treatment values must be real numeric codes.")
+    if not (np.issubdtype(values.dtype, np.number) or np.issubdtype(values.dtype, np.bool_)):
+        raise ModelSpecError("DRTester treatment values must be numeric codes.")
+
+    try:
+        numeric = values.astype(float, copy=False)
+    except (TypeError, ValueError) as exc:
+        raise ModelSpecError("DRTester treatment values must be numeric codes.") from exc
+    if not np.isfinite(numeric).all():
+        raise ModelSpecError("DRTester treatment values must be finite.")
+
+    rounded = np.rint(numeric)
+    if not np.array_equal(numeric, rounded):
+        raise ModelSpecError("DRTester treatment values must be integer-valued codes.")
+    codes = rounded.astype(np.int64, copy=False)
+
+    unique_codes = np.unique(codes)
+    if len(unique_codes) < 2:
+        raise ModelSpecError("DRTester requires at least two treatment groups.")
+    expected_codes = np.arange(len(unique_codes), dtype=np.int64)
+    if not np.array_equal(unique_codes, expected_codes):
+        raise ModelSpecError(
+            "DRTester treatment codes must be contiguous integers starting at zero."
+        )
+    return codes
+
+
+def normalize_drtester_treatment_pair(
+    *,
+    train: Any,
+    validation: Any,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Normalize and validate the paired treatment vectors passed to DRTester.
+
+    DRTester defines its treatment columns from ``Dval`` and then uses treatment
+    values from both ``Dval`` and ``Dtrain`` as direct column indices. The two
+    samples therefore need the same zero-based, contiguous treatment code set.
+    """
+
+    train_codes = normalize_drtester_treatment_codes(train)
+    validation_codes = normalize_drtester_treatment_codes(validation)
+    if not np.array_equal(np.unique(train_codes), np.unique(validation_codes)):
+        raise ModelSpecError(
+            "DRTester training and validation samples must contain the same treatment codes."
+        )
+    return train_codes, validation_codes
+
+
+def normalize_drtester_cate_predictions(
+    predictions: Any,
+    *,
+    expected_rows: int,
+) -> np.ndarray:
+    """Return the one CATE prediction per row required by ``DRTester``.
+
+    ``DRTester.get_cate_preds`` stacks each treatment contrast with
+    ``np.stack(...).T``. It therefore requires each ``cate.effect`` call to
+    return a one-dimensional vector. EconML returns ``(n, 1)`` when an
+    estimator was fitted with a column-vector single outcome; keeping that
+    singleton output axis would make DRTester's stacked result three
+    dimensional and break its BLP test. Multi-outcome effects are not
+    meaningful to DRTester, so reject them instead of silently choosing one.
+    """
+
+    try:
+        values = np.asarray(predictions, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("DRTester CATE predictions must be numeric.") from exc
+
+    if values.ndim == 0:
+        values = values.reshape(1)
+    elif values.ndim == 2 and values.shape[1] == 1:
+        values = values[:, 0]
+    elif values.ndim != 1:
+        raise ValueError(
+            "DRTester requires one CATE prediction per row; expected shape "
+            f"(n,) or (n, 1), received {values.shape}."
+        )
+
+    if len(values) != expected_rows:
+        raise ValueError(
+            "DRTester CATE prediction row count does not match its feature rows: "
+            f"expected {expected_rows}, received {len(values)}."
+        )
+    return values
+
+
 def get_treatment_t0_t1_from_spec(
     spec: CausalSpec, is_global_counter_factual: bool
 ) -> tuple[float, float]:

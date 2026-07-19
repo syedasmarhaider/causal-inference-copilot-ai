@@ -17,7 +17,7 @@ class CausalValidateDeps:
 
     ``trained_model_id`` is a dependency marker: outer-CV validation fits temporary models
     for its folds and does not call the already trained model.  Requiring it guarantees that
-    validation is 
+    validation is
     only available after normal training, and lets the node invalidate cached
     validation after a retrain.
     """

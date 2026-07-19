@@ -34,6 +34,7 @@ from python.implementation.workflows.tools.causal.inference.econml.dr.dr_learner
 )
 from python.implementation.workflows.tools.causal.inference.econml.dr.validate_dr import (
     _BaseValidateDR,
+    _CATEOnCombinedFeatures,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
@@ -321,6 +322,35 @@ class _RecordingEstimator:
         return None
 
 
+class _ColumnVectorEffectEstimator(_RecordingEstimator):
+    def effect(
+        self, X, T0=None, T1=None
+    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+        rows = int(getattr(X, "shape", [0])[0])
+        return np.ones((rows, 1), dtype=float)
+
+
+def test_drtester_cate_adapter_flattens_column_vector_predictions() -> None:
+    adapter = _CATEOnCombinedFeatures(
+        estimator=_ColumnVectorEffectEstimator(categories=[0.0, 1.0]),
+        effect_modifier_columns=["segment_score"],
+    )
+
+    result = adapter.effect(
+        pd.DataFrame(
+            {
+                "segment_score": [0.1, 0.2, 0.3],
+                "covariate": [10.0, 20.0, 30.0],
+            }
+        ),
+        T0=0,
+        T1=1,
+    )
+
+    np.testing.assert_array_equal(result, np.ones(3))
+    assert result.ndim == 1
+
+
 @dataclass(frozen=True, slots=True)
 class _TestDRModel(_BaseDRLearnerAdapter):
     ESTIMATOR_CLS: ClassVar[Any] = _RecordingEstimator
@@ -341,20 +371,79 @@ class _TestForestDRModel(ForestDRLearnerCausalModel):
 
 
 class _FakeDRTester:
-    def __init__(self, **_: Any) -> None:
+    """Small source-compatible DRTester double that preserves indexing semantics."""
+
+    def __init__(
+        self,
+        *,
+        model_regression: Any,
+        model_propensity: Any,
+        cate: Any,
+        cv: int,
+    ) -> None:
+        assert model_regression is not None
+        assert model_propensity is not None
+        assert cv == 5
+        self.cate = cate
         self.dr_val_ = np.asarray([], dtype=float)
+        self.treatments = np.asarray([], dtype=np.int64)
 
-    def fit_nuisance(self, *, Xval: Any, **_: Any) -> None:
-        self.dr_val_ = np.arange(len(Xval), dtype=float)
+    def fit_nuisance(
+        self,
+        *,
+        Xval: Any,
+        Dval: Any,
+        yval: Any,
+        Xtrain: Any,
+        Dtrain: Any,
+        ytrain: Any,
+    ) -> None:
+        dval = np.asarray(Dval)
+        dtrain = np.asarray(Dtrain)
+        assert dval.dtype == np.dtype(np.int64)
+        assert dtrain.dtype == np.dtype(np.int64)
+        assert dval.ndim == dtrain.ndim == 1
+        assert len(Xval) == len(dval) == len(yval)
+        assert len(Xtrain) == len(dtrain) == len(ytrain)
+        assert np.asarray(Xval).shape[1] == np.asarray(Xtrain).shape[1] == 3
 
-    def get_cate_preds(self, **_: Any) -> None:
-        return None
+        self.treatments = np.sort(np.unique(dval))
+        np.testing.assert_array_equal(np.unique(dtrain), self.treatments)
 
-    def evaluate_all(self, **_: Any) -> _FakeDRTester:
+        # EconML's calculate_dr_outcomes performs equivalent direct column
+        # indexing. This intentionally raises IndexError if Dval remains float.
+        regression_predictions = np.zeros((len(dval), len(self.treatments)))
+        regression_predictions[np.arange(len(dval)), dval]
+        self.dr_val_ = np.arange(len(Xval), dtype=float).reshape(-1, 1)
+
+    def get_cate_preds(self, *, Xval: Any, Xtrain: Any) -> None:
+        base = self.treatments[0]
+        validation_predictions = [
+            self.cate.effect(X=Xval, T0=base, T1=treatment) for treatment in self.treatments[1:]
+        ]
+        training_predictions = [
+            self.cate.effect(X=Xtrain, T0=base, T1=treatment) for treatment in self.treatments[1:]
+        ]
+        assert all(len(prediction) == len(Xval) for prediction in validation_predictions)
+        assert all(len(prediction) == len(Xtrain) for prediction in training_predictions)
+
+    def evaluate_all(self, *, n_bootstrap: int) -> _FakeDRTester:
+        assert n_bootstrap == 1_000
         return self
 
     def summary(self) -> pd.DataFrame:
         return pd.DataFrame({"test_name": ["fake_dr_test"]})
+
+
+class _WrongRowCountDRTester(_FakeDRTester):
+    def fit_nuisance(self, **kwargs: Any) -> None:
+        super().fit_nuisance(**kwargs)
+        self.dr_val_ = np.append(self.dr_val_.reshape(-1), 999.0).reshape(-1, 1)
+
+
+class _ExplodingDRTester(_FakeDRTester):
+    def fit_nuisance(self, **_: Any) -> None:
+        raise IndexError("simulated DRTester treatment-index failure")
 
 
 def _fit_command(*, df: pd.DataFrame, inference_ready_spec: InferenceReadyCausalSpec) -> FitCommand:
@@ -601,5 +690,59 @@ def test_validate_dr_returns_one_oof_row_for_every_patient(monkeypatch, n_jobs: 
     assert result.validation_dataframe["effect_row"].tolist() == list(range(1, 9))
     assert result.validation_dataframe["outer_fold"].value_counts().to_dict() == {1: 4, 2: 4}
     assert result.validation_dataframe["cate_oof"].tolist() == [1.0] * 8
+    assert sorted(result.validation_dataframe["dr_outcome_oof"].tolist()) == [
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        2.0,
+        2.0,
+        3.0,
+        3.0,
+    ]
     assert result.dr_test_summary["outer_fold"].tolist() == [1, 2]
+    assert repo._records == {}
+
+
+@pytest.mark.parametrize(
+    ("dr_tester_cls", "exception_message"),
+    [
+        (_WrongRowCountDRTester, "DRTester returned the wrong held-out row count"),
+        (_ExplodingDRTester, "simulated DRTester treatment-index failure"),
+    ],
+    ids=["wrong-dr-row-count", "drtester-index-error"],
+)
+def test_validate_dr_converts_drtester_contract_violations_to_failure_and_cleans_models(
+    monkeypatch,
+    dr_tester_cls: type[_FakeDRTester],
+    exception_message: str,
+) -> None:
+    monkeypatch.setenv("PRECISION_MEDICINE_ENABLE_OUTER_CV_CATE", "2")
+    repo = _InMemoryModelsRepo()
+    model = _TestDRModel(models_repo=repo, encoding_util=EncodingUtil())
+    spec = _inference_ready_spec(
+        plan_columns=[
+            {
+                "column": "segment_score",
+                "role": "effect_modifier",
+                "encoding": {"preset": "num_standard"},
+            },
+            {"column": "income", "role": "covariate", "encoding": {"preset": "num_standard"}},
+            {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
+        ]
+    )
+
+    result = _BaseValidateDR(
+        run_dr=model._build_run_dr(),
+        n_jobs=1,
+        dr_tester_cls=dr_tester_cls,
+    ).execute(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        command=ValidateCommand(fit_command=_fit_command(df=_df(), inference_ready_spec=spec)),
+    )
+
+    assert isinstance(result, CommandFailure)
+    assert result.error.code == "ESTIMATOR_ERROR"
+    assert exception_message in result.error.details["exception"]
     assert repo._records == {}

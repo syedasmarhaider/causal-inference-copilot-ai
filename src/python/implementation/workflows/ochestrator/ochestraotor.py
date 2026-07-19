@@ -24,6 +24,12 @@ from python.implementation.workflows.nodes.causal_inference.causal_inference_nod
 from python.implementation.workflows.nodes.causal_inference.causal_inference_state import (
     CausalInferenceState,
 )
+from python.implementation.workflows.nodes.causal_validate.causal_validate_node import (
+    CausalValidateNode,
+)
+from python.implementation.workflows.nodes.causal_validate.causal_validate_state import (
+    CausalValidateState,
+)
 from python.implementation.workflows.nodes.data_compilation.data_compilation_node import (
     DataCompilationNode,
 )
@@ -101,10 +107,16 @@ class Ochestrator:
         models_repo: ModelsRepo,
         analytics_repo: AnalyticsRepo,
         shap_enabled: bool | None = None,
+        causal_validate_enabled: bool | None = None,
     ) -> None:
         self._workflow_repo = workflow_repo
         self._llm = llm
         self._shap_enabled = shap_enabled if shap_enabled is not None else shap_enabled_from_env()
+        self._causal_validate_enabled = (
+            causal_validate_enabled
+            if causal_validate_enabled is not None
+            else causal_validate_enabled_from_env()
+        )
         self.nodes_by_name = init_all_nodes_with_name_as_key(
             llm=llm,
             data_repo=data_repo,
@@ -262,9 +274,20 @@ class Ochestrator:
         return self._get_enabled_companion_names(companions)
 
     def _get_enabled_companion_names(self, companions: Sequence[str]) -> list[str]:
-        if self._shap_enabled:
-            return list(companions)
-        return [companion for companion in companions if companion != ShapExplanationNode.NAME]
+        enabled_companions = list(companions)
+        if not self._shap_enabled:
+            enabled_companions = [
+                companion
+                for companion in enabled_companions
+                if companion != ShapExplanationNode.NAME
+            ]
+        if not self._causal_validate_enabled:
+            enabled_companions = [
+                companion
+                for companion in enabled_companions
+                if companion != CausalValidateNode.NAME
+            ]
+        return enabled_companions
 
     def _load_or_init_ochestrator_state(
         self,
@@ -423,6 +446,11 @@ def shap_enabled_from_env() -> bool:
     return raw_value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
+def causal_validate_enabled_from_env() -> bool:
+    raw_value = os.getenv("CAUSAL_VALIDATE_ENABLED", "false")
+    return raw_value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
 def build_state_classes_by_name() -> Mapping[str, type[NodeState]]:
     return {
         DataManupulationState.NAME: DataManupulationState,
@@ -432,6 +460,7 @@ def build_state_classes_by_name() -> Mapping[str, type[NodeState]]:
         ModelSelectionState.NAME: ModelSelectionState,
         ModelTrainState.NAME: ModelTrainState,
         CausalInferenceState.NAME: CausalInferenceState,
+        CausalValidateState.NAME: CausalValidateState,
         ShapExplanationState.NAME: ShapExplanationState,
         NoopDoneState.NAME: NoopDoneState,
         GeneralQueriesState.NAME: GeneralQueriesState,
@@ -447,6 +476,7 @@ def build_state_name_by_node_name() -> Mapping[str, str]:
         ModelSelectionNode.NAME: ModelSelectionState.NAME,
         ModelTrainNode.NAME: ModelTrainState.NAME,
         CausalInferenceNode.NAME: CausalInferenceState.NAME,
+        CausalValidateNode.NAME: CausalValidateState.NAME,
         ShapExplanationNode.NAME: ShapExplanationState.NAME,
         NoopDoneNode.NAME: NoopDoneState.NAME,
         GeneralQueriesNode.NAME: GeneralQueriesState.NAME,
@@ -462,6 +492,7 @@ def build_node_name_by_node_name() -> Mapping[str, type[Node]]:
         ModelSelectionNode.NAME: ModelSelectionNode,
         ModelTrainNode.NAME: ModelTrainNode,
         CausalInferenceNode.NAME: CausalInferenceNode,
+        CausalValidateNode.NAME: CausalValidateNode,
         ShapExplanationNode.NAME: ShapExplanationNode,
         NoopDoneNode.NAME: NoopDoneNode,
         GeneralQueriesNode.NAME: GeneralQueriesNode,
@@ -511,6 +542,11 @@ def init_all_nodes_with_name_as_key(
         data_repo=data_repo,
         tools_factory=tool_factory,
     )
+    causal_validate_node = CausalValidateNode(
+        llm=llm,
+        data_repo=data_repo,
+        tools_factory=tool_factory,
+    )
     shap_explanation_node = ShapExplanationNode(
         llm=llm,
         data_repo=data_repo,
@@ -528,6 +564,7 @@ def init_all_nodes_with_name_as_key(
         model_selection_node.name: model_selection_node,
         model_train_node.name: model_train_node,
         causal_inference_node.name: causal_inference_node,
+        causal_validate_node.name: causal_validate_node,
         shap_explanation_node.name: shap_explanation_node,
         done_node.name: done_node,
         general_queries_node.name: general_queries_node,

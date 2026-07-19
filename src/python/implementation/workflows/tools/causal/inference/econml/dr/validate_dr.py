@@ -38,6 +38,8 @@ from python.implementation.workflows.tools.causal.inference.econml.dr._base_run_
 from python.implementation.workflows.tools.causal.inference.econml.utils import (
     ModelSpecError,
     get_input_params_from_spec,
+    normalize_drtester_cate_predictions,
+    normalize_drtester_treatment_pair,
     now_utc,
 )
 
@@ -71,7 +73,10 @@ class _CATEOnCombinedFeatures:
             x_effect = X.loc[:, self._effect_modifier_columns]
         else:
             x_effect = np.asarray(X)[:, : len(self._effect_modifier_columns)]
-        return self._estimator.effect(x_effect, T0=T0, T1=T1)
+        return normalize_drtester_cate_predictions(
+            self._estimator.effect(x_effect, T0=T0, T1=T1),
+            expected_rows=len(x_effect),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,6 +371,10 @@ class _BaseValidateDR:
             spec.causal_spec,
             effect_modifiers_order=effect_modifiers,
             covariates_order=covariates,
+        )
+        t_train, t_test = normalize_drtester_treatment_pair(
+            train=t_train,
+            validation=t_test,
         )
         if x_train is None or x_test is None:
             raise _ValidationFoldError("DR validation requires non-empty effect modifiers.")
