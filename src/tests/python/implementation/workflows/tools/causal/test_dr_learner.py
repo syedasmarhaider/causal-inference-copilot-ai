@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from python.domain.repo.models_repo import ModelRecord
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
@@ -23,11 +24,16 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
     FitCommand,
     FitInputs,
     FitSuccess,
+    ValidateCommand,
+    ValidateSuccess,
 )
 from python.implementation.workflows.tools.causal.inference.econml.dr.dr_learner import (
     ForestDRLearnerCausalModel,
     LinearDRLearnerCausalModel,
     _BaseDRLearnerAdapter,
+)
+from python.implementation.workflows.tools.causal.inference.econml.dr.validate_dr import (
+    _BaseValidateDR,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
@@ -334,6 +340,23 @@ class _TestForestDRModel(ForestDRLearnerCausalModel):
     INFO: ClassVar[str] = "test"
 
 
+class _FakeDRTester:
+    def __init__(self, **_: Any) -> None:
+        self.dr_val_ = np.asarray([], dtype=float)
+
+    def fit_nuisance(self, *, Xval: Any, **_: Any) -> None:
+        self.dr_val_ = np.arange(len(Xval), dtype=float)
+
+    def get_cate_preds(self, **_: Any) -> None:
+        return None
+
+    def evaluate_all(self, **_: Any) -> _FakeDRTester:
+        return self
+
+    def summary(self) -> pd.DataFrame:
+        return pd.DataFrame({"test_name": ["fake_dr_test"]})
+
+
 def _fit_command(*, df: pd.DataFrame, inference_ready_spec: InferenceReadyCausalSpec) -> FitCommand:
     return FitCommand(
         model_name="linear_dr",
@@ -546,3 +569,37 @@ def test_cate_uses_transformation_plan_order_for_effect_modifiers() -> None:
     recorded_x = _RecordingEstimator.last_effect_payload["X"]
     assert isinstance(recorded_x, pd.DataFrame)
     assert list(recorded_x.columns) == ["risk_score", "segment_score"]
+
+
+@pytest.mark.parametrize("n_jobs", [1, 2])
+def test_validate_dr_returns_one_oof_row_for_every_patient(monkeypatch, n_jobs: int) -> None:
+    monkeypatch.setenv("PRECISION_MEDICINE_ENABLE_OUTER_CV_CATE", "2")
+    repo = _InMemoryModelsRepo()
+    model = _TestDRModel(models_repo=repo, encoding_util=EncodingUtil())
+    spec = _inference_ready_spec(
+        plan_columns=[
+            {
+                "column": "segment_score",
+                "role": "effect_modifier",
+                "encoding": {"preset": "num_standard"},
+            },
+            {"column": "income", "role": "covariate", "encoding": {"preset": "num_standard"}},
+            {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
+        ]
+    )
+    result = _BaseValidateDR(
+        run_dr=model._build_run_dr(),
+        n_jobs=n_jobs,
+        dr_tester_cls=_FakeDRTester,
+    ).execute(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        command=ValidateCommand(fit_command=_fit_command(df=_df(), inference_ready_spec=spec)),
+    )
+
+    assert isinstance(result, ValidateSuccess)
+    assert result.validation_dataframe["effect_row"].tolist() == list(range(1, 9))
+    assert result.validation_dataframe["outer_fold"].value_counts().to_dict() == {1: 4, 2: 4}
+    assert result.validation_dataframe["cate_oof"].tolist() == [1.0] * 8
+    assert result.dr_test_summary["outer_fold"].tolist() == [1, 2]
+    assert repo._records == {}
