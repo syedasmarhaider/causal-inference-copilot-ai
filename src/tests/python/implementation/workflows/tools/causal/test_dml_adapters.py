@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from python.domain.repo.models_repo import ModelRecord
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
@@ -24,6 +25,8 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
     FitCommand,
     FitInputs,
     FitSuccess,
+    ValidateCommand,
+    ValidateSuccess,
 )
 from python.implementation.workflows.tools.causal.inference.econml.dml.kernel_dml import (
     KernelDMLCausalModel,
@@ -33,6 +36,9 @@ from python.implementation.workflows.tools.causal.inference.econml.dml.linear_dm
 )
 from python.implementation.workflows.tools.causal.inference.econml.dml.sparse_linear_dml import (
     SparseLinearDMLCausalModel,
+)
+from python.implementation.workflows.tools.causal.inference.econml.dml.validate_dml import (
+    _BaseValidateDML,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
@@ -430,6 +436,23 @@ class _TestKernelDMLModel(KernelDMLCausalModel):
     INFO: ClassVar[str] = "test"
 
 
+class _FakeDRTester:
+    def __init__(self, **_: Any) -> None:
+        self.dr_val_ = np.asarray([], dtype=float)
+
+    def fit_nuisance(self, *, Xval: Any, **_: Any) -> None:
+        self.dr_val_ = np.arange(len(Xval), dtype=float)
+
+    def get_cate_preds(self, **_: Any) -> None:
+        return None
+
+    def evaluate_all(self, **_: Any) -> _FakeDRTester:
+        return self
+
+    def summary(self) -> pd.DataFrame:
+        return pd.DataFrame({"test_name": ["fake_dr_test"]})
+
+
 def _fit_command(
     *,
     model_name: str,
@@ -768,3 +791,53 @@ def test_causal_forest_dml_module_imports_cleanly() -> None:
     importlib.import_module(
         "python.implementation.workflows.tools.causal.inference.econml.dml.causal_forest_dml"
     )
+
+
+@pytest.mark.parametrize("n_jobs", [1, 2])
+def test_validate_dml_returns_one_oof_row_for_every_patient(monkeypatch, n_jobs: int) -> None:
+    monkeypatch.setenv("PRECISION_MEDICINE_ENABLE_OUTER_CV_CATE", "2")
+    repo = _InMemoryModelsRepo()
+    model = _TestLinearDMLModel(models_repo=repo, encoding_util=EncodingUtil())
+    spec = _inference_ready_spec(
+        plan_columns=[
+            {
+                "column": "segment_score",
+                "role": "effect_modifier",
+                "encoding": {"preset": "num_standard"},
+            },
+            {"column": "income", "role": "covariate", "encoding": {"preset": "num_standard"}},
+            {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
+        ]
+    )
+    result = _BaseValidateDML(
+        run_dml=model._build_run_dml(),
+        n_jobs=n_jobs,
+        dr_tester_cls=_FakeDRTester,
+    ).execute(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        command=ValidateCommand(
+            fit_command=_fit_command(
+                model_name="linear_dml",
+                df=_df(),
+                inference_ready_spec=spec,
+            )
+        ),
+    )
+
+    assert isinstance(result, ValidateSuccess)
+    assert result.validation_dataframe["effect_row"].tolist() == list(range(1, 9))
+    assert result.validation_dataframe["outer_fold"].value_counts().to_dict() == {1: 4, 2: 4}
+    assert result.validation_dataframe["cate_oof"].tolist() == [1.0] * 8
+    assert sorted(result.validation_dataframe["dr_outcome_oof"].tolist()) == [
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        2.0,
+        2.0,
+        3.0,
+        3.0,
+    ]
+    assert result.dr_test_summary["outer_fold"].tolist() == [1, 2]
+    assert repo._records == {}

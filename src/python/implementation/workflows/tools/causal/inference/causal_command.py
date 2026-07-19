@@ -11,7 +11,7 @@ from python.implementation.workflows.tools.causal.common.inference_ready_causal_
     InferenceReadyCausalSpec,
 )
 
-CommandType = Literal["FIT", "ATE", "CATE"]
+CommandType = Literal["FIT", "ATE", "CATE", "VALIDATE"]
 ResultStatus = Literal["SUCCEEDED", "FAILED"]
 ATEModelResult = Literal[
     "for_treatment",
@@ -53,6 +53,14 @@ class FitCommand(BaseCommand):
 
 
 @dataclass(frozen=True, slots=True, eq=False)
+class ValidateCommand:
+    """Request validation of a normal fit without changing FIT semantics."""
+
+    fit_command: FitCommand
+    command: Literal["VALIDATE"] = field(init=False, default="VALIDATE")
+
+
+@dataclass(frozen=True, slots=True, eq=False)
 class ErrorInfo:
     code: str
     message: str
@@ -75,6 +83,18 @@ class BaseResult:
 class CommandFailure(BaseResult):
     error: ErrorInfo
     status: Literal["FAILED"] = field(init=False, default="FAILED")
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ValidateSuccess(BaseResult):
+    """Out-of-fold validation rows and the associated DRTester test summaries."""
+
+    validation_dataframe: pd.DataFrame = field(repr=False)
+    dr_test_summary: pd.DataFrame = field(repr=False)
+    status: Literal["SUCCEEDED"] = field(init=False, default="SUCCEEDED")
+
+
+ValidateResult = ValidateSuccess | CommandFailure
 
 
 @dataclass(frozen=True, slots=True, eq=False)

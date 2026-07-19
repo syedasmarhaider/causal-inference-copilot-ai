@@ -22,7 +22,6 @@ from sklearn.pipeline import Pipeline
 
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 
-
 # =============================================================================
 # Scientifically conservative nuisance-model defaults
 # =============================================================================
@@ -94,7 +93,7 @@ class _ProbabilityScoredClassifier(ClassifierMixin, BaseEstimator):
         y: Any,
         sample_weight: Any = None,
         **fit_params: Any,
-    ) -> "_ProbabilityScoredClassifier":
+    ) -> _ProbabilityScoredClassifier:
         if sample_weight is None:
             self.model.fit(X, y, **fit_params)
         else:
@@ -105,10 +104,10 @@ class _ProbabilityScoredClassifier(ClassifierMixin, BaseEstimator):
                 **fit_params,
             )
 
-        self.classes_ = np.asarray(getattr(self.model, "classes_"))
+        self.classes_ = np.asarray(self.model.classes_)
 
         if hasattr(self.model, "n_features_in_"):
-            self.n_features_in_ = int(getattr(self.model, "n_features_in_"))
+            self.n_features_in_ = int(self.model.n_features_in_)
 
         return self
 
@@ -118,9 +117,7 @@ class _ProbabilityScoredClassifier(ClassifierMixin, BaseEstimator):
     def predict_proba(self, X: Any) -> Any:
         predict_proba = getattr(self.model, "predict_proba", None)
         if not callable(predict_proba):
-            raise AttributeError(
-                f"{type(self.model).__name__} does not implement predict_proba()."
-            )
+            raise AttributeError(f"{type(self.model).__name__} does not implement predict_proba().")
         return predict_proba(X)
 
     def score(
@@ -158,8 +155,7 @@ def _as_probability_scored_classifier(model: BaseEstimator) -> BaseEstimator:
     """Wrap a probabilistic classifier in the shared negative-log-loss scorer."""
     if not callable(getattr(model, "predict_proba", None)):
         raise ValueError(
-            f"Discrete nuisance estimator {type(model).__name__} must implement "
-            "predict_proba()."
+            f"Discrete nuisance estimator {type(model).__name__} must implement " "predict_proba()."
         )
     return _ProbabilityScoredClassifier(model=model)
 
@@ -511,6 +507,30 @@ def get_default_models_for_t_and_y(
     }
 
 
+def get_drtester_models_for_t_and_y(
+    specs: CausalSpec,
+    pre_XW: ColumnTransformer,
+    missingness: bool,
+    random_state: int | None = None,
+) -> tuple[BaseEstimator, BaseEstimator]:
+    """Return one outcome and one propensity nuisance model for ``DRTester``.
+
+    EconML DML accepts candidate lists and performs its own selection. DRTester
+    accepts one estimator for each nuisance task, so this takes the first shared
+    (regularized linear) candidate from the same preprocessed libraries.
+    """
+    models = get_default_models_for_t_and_y(
+        specs,
+        pre_XW=pre_XW,
+        missingness=missingness,
+        random_state=random_state,
+    )
+    model_y = models["model_y"]
+    model_t = models["model_t"]
+    return model_y[0], model_t[0]
+
+
 __all__ = [
+    "get_drtester_models_for_t_and_y",
     "get_default_models_for_t_and_y",
 ]

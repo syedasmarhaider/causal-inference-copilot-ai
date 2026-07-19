@@ -11,11 +11,13 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
     CommandType,
     FitCommand,
     FitResult,
+    ValidateCommand,
+    ValidateResult,
 )
 
-CausalCommand = FitCommand | ATECommand | CATECommand
+CausalCommand = FitCommand | ATECommand | CATECommand | ValidateCommand
 
-CausalResult = FitResult | ATEResult | CATEResult
+CausalResult = FitResult | ATEResult | CATEResult | ValidateResult
 
 
 class CausalModel(Protocol):

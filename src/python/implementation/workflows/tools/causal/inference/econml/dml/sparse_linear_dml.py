@@ -5,7 +5,7 @@ from typing import Any, ClassVar
 
 from econml.dml import SparseLinearDML
 
-from python.implementation.workflows.tools.causal.inference.econml.dml._base_dml import (
+from python.implementation.workflows.tools.causal.inference.econml.dml._base_run_dml import (
     _BaseDMLAdapter,
 )
 from python.implementation.workflows.tools.causal.inference.econml.models_info import (
