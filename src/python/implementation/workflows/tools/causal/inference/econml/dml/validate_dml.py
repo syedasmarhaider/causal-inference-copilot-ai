@@ -60,6 +60,48 @@ class _ValidationFoldError(RuntimeError):
     pass
 
 
+def _exclusive_quantile_groups(
+    values: np.ndarray,
+    *,
+    n_groups: int,
+) -> np.ndarray:
+    """Assign each row to exactly one stable, approximately equal-sized group."""
+    values_1d = np.asarray(values, dtype=float).reshape(-1)
+    n_rows = len(values_1d)
+    if n_groups < 2:
+        raise ValueError("Pooled OOF calibration requires at least two groups.")
+    if n_rows < n_groups:
+        raise _ValidationFoldError("Pooled OOF calibration requires at least one row per group.")
+
+    order = np.argsort(values_1d, kind="stable")
+    ordered_groups = np.minimum(
+        np.arange(n_rows, dtype=np.int64) * n_groups // n_rows,
+        n_groups - 1,
+    )
+    groups = np.empty(n_rows, dtype=np.int64)
+    groups[order] = ordered_groups
+    return groups
+
+
+def _exclusive_calibration_r_squared(
+    *,
+    cate_oof: np.ndarray,
+    dr_oof: np.ndarray,
+    n_groups: int,
+) -> float:
+    """Calculate EconML's calibration score with exclusive group membership."""
+    groups = _exclusive_quantile_groups(cate_oof, n_groups=n_groups)
+    counts = np.bincount(groups, minlength=n_groups).astype(float)
+    gate = np.bincount(groups, weights=dr_oof, minlength=n_groups) / counts
+    grouped_cate = np.bincount(groups, weights=cate_oof, minlength=n_groups) / counts
+    probabilities = counts / float(len(groups))
+    grouped_error = float(np.sum(np.abs(gate - grouped_cate) * probabilities))
+    baseline_error = float(np.sum(np.abs(gate - float(np.mean(dr_oof))) * probabilities))
+    if np.isclose(baseline_error, 0.0):
+        return float("nan")
+    return 1.0 - grouped_error / baseline_error
+
+
 class _CATEOnCombinedFeatures:
     """Expose a fitted DML estimator as DRTester's CATE object."""
 
@@ -432,17 +474,11 @@ class _BaseValidateDML:
         ).reshape(-1)
 
         if len(cate_oof) != len(dr_oof) or len(cate_oof) != len(treatment):
-            raise _ValidationFoldError(
-                "Pooled OOF evaluation received inconsistent row counts."
-            )
+            raise _ValidationFoldError("Pooled OOF evaluation received inconsistent row counts.")
         if not np.all(np.isfinite(cate_oof)):
-            raise _ValidationFoldError(
-                "Pooled OOF CATE predictions contain non-finite values."
-            )
+            raise _ValidationFoldError("Pooled OOF CATE predictions contain non-finite values.")
         if not np.all(np.isfinite(dr_oof)):
-            raise _ValidationFoldError(
-                "Pooled OOF DR outcomes contain non-finite values."
-            )
+            raise _ValidationFoldError("Pooled OOF DR outcomes contain non-finite values.")
 
         treatments = np.sort(np.unique(np.asarray(treatment).reshape(-1)))
         if len(treatments) != 2:
@@ -464,6 +500,10 @@ class _BaseValidateDML:
         tester.n_treat = 1
         tester.fit_on_train = True
         tester.dr_val_ = dr_oof.reshape(-1, 1)
+        # EconML's evaluate_all() requires this fitted-state attribute before
+        # entering calibration. Here every pooled value is already OOF, and
+        # evaluate_cal() uses dr_val_ (not dr_train_) for the group estimates.
+        tester.dr_train_ = dr_oof.reshape(-1, 1)
         tester.cate_preds_val_ = cate_oof.reshape(-1, 1)
 
         # Pooled OOF predictions define the empirical score distribution used
@@ -473,6 +513,14 @@ class _BaseValidateDML:
         tester.ate_val = np.asarray([float(np.mean(dr_oof))])
 
         summary = tester.evaluate_all(n_bootstrap=1_000).summary().copy()
+        summary["cal_r_squared"] = round(
+            _exclusive_calibration_r_squared(
+                cate_oof=cate_oof,
+                dr_oof=dr_oof,
+                n_groups=4,
+            ),
+            3,
+        )
         summary.insert(0, "evaluation_scope", "pooled_oof")
         return summary
 

@@ -149,7 +149,6 @@ class _ProbabilityScoredClassifier(ClassifierMixin, BaseEstimator):
         )
 
 
-
 def _take_rows(X: Any, indices: np.ndarray) -> Any:
     """Index pandas, NumPy, or sparse feature matrices without densifying."""
     if hasattr(X, "iloc"):
@@ -177,9 +176,7 @@ def _selection_splits(
     """Create safe inner-CV splits for one nuisance-selection fit."""
     n_rows = len(y)
     if n_rows < 4:
-        raise ValueError(
-            "DRTester nuisance selection requires at least four training rows."
-        )
+        raise ValueError("DRTester nuisance selection requires at least four training rows.")
 
     if discrete:
         classes, counts = np.unique(y, return_counts=True)
@@ -191,8 +188,7 @@ def _selection_splits(
         n_splits = min(cv, int(counts.min()))
         if n_splits < 2:
             raise ValueError(
-                "DRTester nuisance selection requires at least two observations "
-                "in every class."
+                "DRTester nuisance selection requires at least two observations " "in every class."
             )
         splitter = StratifiedKFold(
             n_splits=n_splits,
@@ -203,9 +199,7 @@ def _selection_splits(
 
     n_splits = min(cv, n_rows)
     if n_splits < 2:
-        raise ValueError(
-            "DRTester nuisance selection requires at least two training rows."
-        )
+        raise ValueError("DRTester nuisance selection requires at least two training rows.")
     splitter = KFold(
         n_splits=n_splits,
         shuffle=True,
@@ -278,7 +272,7 @@ class _CrossValidatedProbabilityClassifier(ClassifierMixin, BaseEstimator):
         self.cv = cv
         self.random_state = random_state
 
-    def fit(self, X: Any, y: Any) -> "_CrossValidatedProbabilityClassifier":
+    def fit(self, X: Any, y: Any) -> _CrossValidatedProbabilityClassifier:
         y_array = np.asarray(y).reshape(-1)
         (
             self.selected_model_,
@@ -308,9 +302,7 @@ class _CrossValidatedProbabilityClassifier(ClassifierMixin, BaseEstimator):
             dtype=float,
         )
         if probabilities.ndim != 2 or not np.all(np.isfinite(probabilities)):
-            raise ValueError(
-                "Selected DRTester propensity model returned invalid probabilities."
-            )
+            raise ValueError("Selected DRTester propensity model returned invalid probabilities.")
         return probabilities
 
 
@@ -328,7 +320,7 @@ class _CrossValidatedBinaryOutcomeRegressor(RegressorMixin, BaseEstimator):
         self.cv = cv
         self.random_state = random_state
 
-    def fit(self, X: Any, y: Any) -> "_CrossValidatedBinaryOutcomeRegressor":
+    def fit(self, X: Any, y: Any) -> _CrossValidatedBinaryOutcomeRegressor:
         y_array = np.asarray(y).reshape(-1)
         classes = np.unique(y_array)
         if not np.array_equal(classes, np.array([0, 1])):
@@ -353,9 +345,7 @@ class _CrossValidatedBinaryOutcomeRegressor(RegressorMixin, BaseEstimator):
         fitted_classes = np.asarray(self.selected_model_.classes_)
         positive_matches = np.flatnonzero(fitted_classes == 1)
         if len(positive_matches) != 1:
-            raise ValueError(
-                "Selected DRTester outcome model must contain positive class 1."
-            )
+            raise ValueError("Selected DRTester outcome model must contain positive class 1.")
         self.positive_class_index_ = int(positive_matches[0])
         return self
 
@@ -374,9 +364,7 @@ class _CrossValidatedBinaryOutcomeRegressor(RegressorMixin, BaseEstimator):
             or not np.all(np.isfinite(positive))
             or np.any((positive < 0.0) | (positive > 1.0))
         ):
-            raise ValueError(
-                "Selected DRTester outcome model returned invalid P(Y=1 | X)."
-            )
+            raise ValueError("Selected DRTester outcome model returned invalid P(Y=1 | X).")
         return positive
 
 
@@ -394,7 +382,7 @@ class _CrossValidatedRegressor(RegressorMixin, BaseEstimator):
         self.cv = cv
         self.random_state = random_state
 
-    def fit(self, X: Any, y: Any) -> "_CrossValidatedRegressor":
+    def fit(self, X: Any, y: Any) -> _CrossValidatedRegressor:
         y_array = np.asarray(y).reshape(-1)
         (
             self.selected_model_,
@@ -419,10 +407,9 @@ class _CrossValidatedRegressor(RegressorMixin, BaseEstimator):
             dtype=float,
         ).reshape(-1)
         if not np.all(np.isfinite(predictions)):
-            raise ValueError(
-                "Selected DRTester outcome regressor returned non-finite predictions."
-            )
+            raise ValueError("Selected DRTester outcome regressor returned non-finite predictions.")
         return predictions
+
 
 def _wrap_with_pre(
     *,

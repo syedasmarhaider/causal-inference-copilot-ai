@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 import numpy as np
 import pandas as pd
 import pytest
+from econml.validate import DRTester
 
 from python.domain.repo.models_repo import ModelRecord
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
@@ -40,6 +41,7 @@ from python.implementation.workflows.tools.causal.inference.econml.dml.sparse_li
 from python.implementation.workflows.tools.causal.inference.econml.dml.validate_dml import (
     _BaseValidateDML,
     _CATEOnCombinedFeatures,
+    _exclusive_quantile_groups,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
@@ -477,8 +479,12 @@ class _FakeDRTester:
         cate: Any,
         cv: int,
     ) -> None:
-        assert model_regression is not None
-        assert model_propensity is not None
+        if cate is None:
+            assert model_regression is None
+            assert model_propensity is None
+        else:
+            assert model_regression is not None
+            assert model_propensity is not None
         assert cv == 5
         self.cate = cate
         self.dr_val_ = np.asarray([], dtype=float)
@@ -525,6 +531,8 @@ class _FakeDRTester:
 
     def evaluate_all(self, *, n_bootstrap: int) -> _FakeDRTester:
         assert n_bootstrap == 1_000
+        if self.cate is None:
+            np.testing.assert_array_equal(self.dr_train_, self.dr_val_)
         return self
 
     def summary(self) -> pd.DataFrame:
@@ -928,8 +936,49 @@ def test_validate_dml_returns_one_oof_row_for_every_patient(monkeypatch, n_jobs:
         3.0,
         3.0,
     ]
-    assert result.dr_test_summary["outer_fold"].tolist() == [1, 2]
+    assert result.dr_test_summary["evaluation_scope"].tolist() == ["pooled_oof"]
+    assert result.dr_test_summary["test_name"].tolist() == ["fake_dr_test"]
+    assert "cal_r_squared" in result.dr_test_summary
     assert repo._records == {}
+
+
+def test_pooled_oof_evaluation_runs_with_real_econml_drtester() -> None:
+    rng = np.random.default_rng(23)
+    row_count = 120
+    cate = np.linspace(-1.5, 1.5, row_count)
+    validation_dataframe = pd.DataFrame(
+        {
+            "cate_oof": cate,
+            "dr_outcome_oof": 0.4 * cate + rng.normal(scale=0.7, size=row_count),
+        }
+    )
+    validator = _BaseValidateDML(
+        run_dml=object(),  # type: ignore[arg-type]
+        dr_tester_cls=DRTester,
+    )
+
+    summary = validator._evaluate_pooled_oof(
+        validation_dataframe=validation_dataframe,
+        treatment=np.resize(np.array([0, 1]), row_count),
+    )
+
+    assert len(summary) == 1
+    assert summary["evaluation_scope"].tolist() == ["pooled_oof"]
+    assert {
+        "blp_est",
+        "cal_r_squared",
+        "qini_est",
+        "autoc_est",
+    }.issubset(summary.columns)
+
+
+def test_pooled_oof_quartiles_assign_every_row_exactly_once() -> None:
+    values = np.ones(121, dtype=float)
+
+    groups = _exclusive_quantile_groups(values, n_groups=4)
+
+    assert groups.tolist() == sorted(groups.tolist())
+    assert np.bincount(groups, minlength=4).tolist() == [31, 30, 30, 30]
 
 
 @pytest.mark.parametrize(
