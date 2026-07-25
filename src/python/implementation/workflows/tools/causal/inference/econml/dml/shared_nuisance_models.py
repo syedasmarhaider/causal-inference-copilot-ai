@@ -6,7 +6,13 @@ from typing import Any
 import numpy as np
 from econml.sklearn_extensions.linear_model import WeightedLassoCVWrapper
 from scipy.sparse import issparse
-from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
+from sklearn.base import (
+    BaseEstimator,
+    ClassifierMixin,
+    RegressorMixin,
+    TransformerMixin,
+    clone,
+)
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import (
     ExtraTreesClassifier,
@@ -18,7 +24,9 @@ from sklearn.ensemble import (
 )
 from sklearn.linear_model import LogisticRegression, RidgeCV
 from sklearn.metrics import log_loss
+from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
+from sklearn.utils.validation import check_is_fitted
 
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 
@@ -51,6 +59,10 @@ _HGB_L2_REGULARIZATION = 1.0
 _HGB_VALIDATION_FRACTION = 0.10
 _HGB_N_ITER_NO_CHANGE = 20
 _HGB_TOL = 1e-7
+
+# DRTester accepts only one nuisance estimator for each task. The selectors
+# below choose among the existing candidate libraries inside each fit call.
+_DRTESTER_SELECTION_CV = 5
 
 
 class _ToDense(BaseEstimator, TransformerMixin):
@@ -136,6 +148,281 @@ class _ProbabilityScoredClassifier(ClassifierMixin, BaseEstimator):
             )
         )
 
+
+
+def _take_rows(X: Any, indices: np.ndarray) -> Any:
+    """Index pandas, NumPy, or sparse feature matrices without densifying."""
+    if hasattr(X, "iloc"):
+        return X.iloc[indices]
+    return X[indices]
+
+
+def _candidate_name(model: BaseEstimator) -> str:
+    """Return a stable diagnostic name for a candidate estimator."""
+    if isinstance(model, Pipeline) and "model" in model.named_steps:
+        inner = model.named_steps["model"]
+        if isinstance(inner, _ProbabilityScoredClassifier):
+            inner = inner.model
+        return type(inner).__name__
+    return type(model).__name__
+
+
+def _selection_splits(
+    *,
+    y: np.ndarray,
+    discrete: bool,
+    cv: int,
+    random_state: int | None,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Create safe inner-CV splits for one nuisance-selection fit."""
+    n_rows = len(y)
+    if n_rows < 4:
+        raise ValueError(
+            "DRTester nuisance selection requires at least four training rows."
+        )
+
+    if discrete:
+        classes, counts = np.unique(y, return_counts=True)
+        if len(classes) < 2:
+            raise ValueError(
+                "DRTester nuisance selection requires at least two observed classes; "
+                f"received {classes.tolist()}."
+            )
+        n_splits = min(cv, int(counts.min()))
+        if n_splits < 2:
+            raise ValueError(
+                "DRTester nuisance selection requires at least two observations "
+                "in every class."
+            )
+        splitter = StratifiedKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=random_state,
+        )
+        return list(splitter.split(np.zeros(n_rows), y))
+
+    n_splits = min(cv, n_rows)
+    if n_splits < 2:
+        raise ValueError(
+            "DRTester nuisance selection requires at least two training rows."
+        )
+    splitter = KFold(
+        n_splits=n_splits,
+        shuffle=True,
+        random_state=random_state,
+    )
+    return list(splitter.split(np.zeros(n_rows)))
+
+
+def _select_and_refit(
+    *,
+    candidates: Sequence[BaseEstimator],
+    X: Any,
+    y: np.ndarray,
+    discrete: bool,
+    cv: int,
+    random_state: int | None,
+) -> tuple[BaseEstimator, str, np.ndarray]:
+    """Select the highest-scoring candidate by inner CV and refit on all rows."""
+    if not candidates:
+        raise ValueError("DRTester nuisance candidate list is empty.")
+
+    splits = _selection_splits(
+        y=y,
+        discrete=discrete,
+        cv=cv,
+        random_state=random_state,
+    )
+    mean_scores: list[float] = []
+
+    for candidate in candidates:
+        fold_scores: list[float] = []
+        for train_indices, test_indices in splits:
+            fitted = clone(candidate)
+            fitted.fit(
+                _take_rows(X, train_indices),
+                y[train_indices],
+            )
+            score = float(
+                fitted.score(
+                    _take_rows(X, test_indices),
+                    y[test_indices],
+                )
+            )
+            if not np.isfinite(score):
+                raise ValueError(
+                    f"Non-finite DRTester nuisance score from {_candidate_name(candidate)}."
+                )
+            fold_scores.append(score)
+
+        mean_scores.append(float(np.mean(fold_scores)))
+
+    score_array = np.asarray(mean_scores, dtype=float)
+    best_index = int(np.argmax(score_array))
+    best_model = clone(candidates[best_index])
+    best_model.fit(X, y)
+    return best_model, _candidate_name(candidates[best_index]), score_array
+
+
+class _CrossValidatedProbabilityClassifier(ClassifierMixin, BaseEstimator):
+    """Select a propensity classifier by inner-CV probability score."""
+
+    def __init__(
+        self,
+        *,
+        candidates: Sequence[BaseEstimator],
+        cv: int = _DRTESTER_SELECTION_CV,
+        random_state: int | None = None,
+    ):
+        self.candidates = candidates
+        self.cv = cv
+        self.random_state = random_state
+
+    def fit(self, X: Any, y: Any) -> "_CrossValidatedProbabilityClassifier":
+        y_array = np.asarray(y).reshape(-1)
+        (
+            self.selected_model_,
+            self.selected_model_name_,
+            self.candidate_scores_,
+        ) = _select_and_refit(
+            candidates=self.candidates,
+            X=X,
+            y=y_array,
+            discrete=True,
+            cv=self.cv,
+            random_state=self.random_state,
+        )
+        self.classes_ = np.asarray(self.selected_model_.classes_)
+        if hasattr(self.selected_model_, "n_features_in_"):
+            self.n_features_in_ = int(self.selected_model_.n_features_in_)
+        return self
+
+    def predict(self, X: Any) -> np.ndarray:
+        check_is_fitted(self, attributes=["selected_model_", "classes_"])
+        return np.asarray(self.selected_model_.predict(X))
+
+    def predict_proba(self, X: Any) -> np.ndarray:
+        check_is_fitted(self, attributes=["selected_model_", "classes_"])
+        probabilities = np.asarray(
+            self.selected_model_.predict_proba(X),
+            dtype=float,
+        )
+        if probabilities.ndim != 2 or not np.all(np.isfinite(probabilities)):
+            raise ValueError(
+                "Selected DRTester propensity model returned invalid probabilities."
+            )
+        return probabilities
+
+
+class _CrossValidatedBinaryOutcomeRegressor(RegressorMixin, BaseEstimator):
+    """Select a binary outcome classifier and expose P(Y=1 | X) via predict()."""
+
+    def __init__(
+        self,
+        *,
+        candidates: Sequence[BaseEstimator],
+        cv: int = _DRTESTER_SELECTION_CV,
+        random_state: int | None = None,
+    ):
+        self.candidates = candidates
+        self.cv = cv
+        self.random_state = random_state
+
+    def fit(self, X: Any, y: Any) -> "_CrossValidatedBinaryOutcomeRegressor":
+        y_array = np.asarray(y).reshape(-1)
+        classes = np.unique(y_array)
+        if not np.array_equal(classes, np.array([0, 1])):
+            raise ValueError(
+                "DRTester binary outcome fitting requires both classes 0 and 1 "
+                f"within the treatment-arm training sample; received {classes.tolist()}."
+            )
+
+        (
+            self.selected_model_,
+            self.selected_model_name_,
+            self.candidate_scores_,
+        ) = _select_and_refit(
+            candidates=self.candidates,
+            X=X,
+            y=y_array,
+            discrete=True,
+            cv=self.cv,
+            random_state=self.random_state,
+        )
+
+        fitted_classes = np.asarray(self.selected_model_.classes_)
+        positive_matches = np.flatnonzero(fitted_classes == 1)
+        if len(positive_matches) != 1:
+            raise ValueError(
+                "Selected DRTester outcome model must contain positive class 1."
+            )
+        self.positive_class_index_ = int(positive_matches[0])
+        return self
+
+    def predict(self, X: Any) -> np.ndarray:
+        check_is_fitted(
+            self,
+            attributes=["selected_model_", "positive_class_index_"],
+        )
+        probabilities = np.asarray(
+            self.selected_model_.predict_proba(X),
+            dtype=float,
+        )
+        positive = probabilities[:, self.positive_class_index_]
+        if (
+            positive.ndim != 1
+            or not np.all(np.isfinite(positive))
+            or np.any((positive < 0.0) | (positive > 1.0))
+        ):
+            raise ValueError(
+                "Selected DRTester outcome model returned invalid P(Y=1 | X)."
+            )
+        return positive
+
+
+class _CrossValidatedRegressor(RegressorMixin, BaseEstimator):
+    """Select a continuous-outcome nuisance regressor by inner-CV score."""
+
+    def __init__(
+        self,
+        *,
+        candidates: Sequence[BaseEstimator],
+        cv: int = _DRTESTER_SELECTION_CV,
+        random_state: int | None = None,
+    ):
+        self.candidates = candidates
+        self.cv = cv
+        self.random_state = random_state
+
+    def fit(self, X: Any, y: Any) -> "_CrossValidatedRegressor":
+        y_array = np.asarray(y).reshape(-1)
+        (
+            self.selected_model_,
+            self.selected_model_name_,
+            self.candidate_scores_,
+        ) = _select_and_refit(
+            candidates=self.candidates,
+            X=X,
+            y=y_array,
+            discrete=False,
+            cv=self.cv,
+            random_state=self.random_state,
+        )
+        if hasattr(self.selected_model_, "n_features_in_"):
+            self.n_features_in_ = int(self.selected_model_.n_features_in_)
+        return self
+
+    def predict(self, X: Any) -> np.ndarray:
+        check_is_fitted(self, attributes=["selected_model_"])
+        predictions = np.asarray(
+            self.selected_model_.predict(X),
+            dtype=float,
+        ).reshape(-1)
+        if not np.all(np.isfinite(predictions)):
+            raise ValueError(
+                "Selected DRTester outcome regressor returned non-finite predictions."
+            )
+        return predictions
 
 def _wrap_with_pre(
     *,
@@ -513,11 +800,15 @@ def get_drtester_models_for_t_and_y(
     missingness: bool,
     random_state: int | None = None,
 ) -> tuple[BaseEstimator, BaseEstimator]:
-    """Return one outcome and one propensity nuisance model for ``DRTester``.
+    """Return independently selected nuisance estimators for ``DRTester``.
 
-    EconML DML accepts candidate lists and performs its own selection. DRTester
-    accepts one estimator for each nuisance task, so this takes the first shared
-    (regularized linear) candidate from the same preprocessed libraries.
+    The primary CATE estimators still receive the unchanged candidate lists from
+    ``get_default_models_for_t_and_y``. This validation-only factory wraps those
+    same lists in sklearn-compatible selectors, so DRTester selects candidates
+    by inner-CV score instead of silently taking ``model_y[0]`` and ``model_t[0]``.
+
+    For binary outcomes, ``predict(X)`` returns P(Y=1 | X), as required by
+    DRTester's outcome-regression interface.
     """
     models = get_default_models_for_t_and_y(
         specs,
@@ -527,7 +818,27 @@ def get_drtester_models_for_t_and_y(
     )
     model_y = models["model_y"]
     model_t = models["model_t"]
-    return model_y[0], model_t[0]
+
+    if specs.outcome_spec.kind == "binary":
+        model_regression: BaseEstimator = _CrossValidatedBinaryOutcomeRegressor(
+            candidates=model_y,
+            cv=_DRTESTER_SELECTION_CV,
+            random_state=random_state,
+        )
+    else:
+        model_regression = _CrossValidatedRegressor(
+            candidates=model_y,
+            cv=_DRTESTER_SELECTION_CV,
+            random_state=random_state,
+        )
+
+    model_propensity: BaseEstimator = _CrossValidatedProbabilityClassifier(
+        candidates=model_t,
+        cv=_DRTESTER_SELECTION_CV,
+        random_state=random_state,
+    )
+
+    return model_regression, model_propensity
 
 
 __all__ = [
