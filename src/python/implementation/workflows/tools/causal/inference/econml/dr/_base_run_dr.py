@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -48,6 +47,9 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
 from python.implementation.workflows.tools.causal.inference.causal_model import (
     CausalResult,
 )
+from python.implementation.workflows.tools.causal.inference.econml import (
+    model_training_config,
+)
 from python.implementation.workflows.tools.causal.inference.econml.utils import (
     ModelSpecError,
     build_init_fit_options_param_maps,
@@ -66,8 +68,6 @@ log = get_logger(__name__)
 
 _SPARSE_LINEAR_MAX_ITER = 10000
 
-
-_RUN_SEED_ENV = "PRECISION_MEDICINE_RUN_SEED"
 
 # TODO: later it can be selected by agent
 _NUISANCE_N_ESTIMATORS = 500
@@ -210,29 +210,8 @@ def _set_if_supported(
 
 
 def _configured_run_seed() -> int | None:
-    """Resolve the run seed from an integer environment variable.
-
-    Examples:
-        PRECISION_MEDICINE_RUN_SEED=1729  -> reproducible primary run
-        PRECISION_MEDICINE_RUN_SEED=2718  -> reproducible sensitivity run
-        PRECISION_MEDICINE_RUN_SEED=none or not present  -> explicitly unseeded exploratory run
-    """
-    raw_value = os.getenv(_RUN_SEED_ENV)
-    if raw_value is None:
-        return None
-
-    normalized = raw_value.strip().lower()
-    if normalized in {"", "none", "null", "random", "unseeded"}:
-        return None
-
-    try:
-        return int(normalized)
-    except ValueError as exc:
-        raise ModelSpecError(
-            f"{_RUN_SEED_ENV} must be an integer or one of "
-            "{'none', 'null', 'random', 'unseeded'}. "
-            f"Received: {raw_value!r}."
-        ) from exc
+    """Return the application-wide run seed from code configuration."""
+    return model_training_config.MODEL_TRAINING_CONFIG.run_seed
 
 
 def set_causal_forest_defaults(
@@ -242,16 +221,22 @@ def set_causal_forest_defaults(
     run_seed: int | None,
 ) -> None:
     """Apply the explicit, reproducible configuration for ForestDRLearner."""
+    forest_config = model_training_config.MODEL_TRAINING_CONFIG.causal_forest
     _set_if_supported(defaults, init_map, "random_state", run_seed)
     _set_if_supported(defaults, init_map, "cv", 5)
     _set_if_supported(defaults, init_map, "mc_iters", 1)
     _set_if_supported(defaults, init_map, "mc_agg", "median")
-    _set_if_supported(defaults, init_map, "n_estimators", 2000)
-    _set_if_supported(defaults, init_map, "subforest_size", 4)
-    _set_if_supported(defaults, init_map, "max_samples", 0.45)
-    _set_if_supported(defaults, init_map, "min_samples_leaf", 20)
+    _set_if_supported(defaults, init_map, "n_estimators", forest_config.n_estimators)
+    _set_if_supported(defaults, init_map, "subforest_size", forest_config.subforest_size)
+    _set_if_supported(defaults, init_map, "max_samples", forest_config.max_samples)
+    _set_if_supported(defaults, init_map, "min_samples_leaf", forest_config.min_samples_leaf)
     _set_if_supported(defaults, init_map, "honest", True)
-    _set_if_supported(defaults, init_map, "min_balancedness_tol", 0.45)
+    _set_if_supported(
+        defaults,
+        init_map,
+        "min_balancedness_tol",
+        forest_config.min_balancedness_tol,
+    )
     _set_if_supported(defaults, init_map, "n_jobs", -1)
 
 
@@ -890,6 +875,9 @@ class _BaseRunDR:
                     "backend": self.BACKEND_NAME,
                     "n": int(df.shape[0]),
                     "run_seed": run_seed,
+                    "model_training_config": (
+                        model_training_config.MODEL_TRAINING_CONFIG.as_metadata()
+                    ),
                     "columns": col_meta,
                     "used_init_kwargs": defaults,
                     "spec_semantics_applied": sorted(list(required_keys)),

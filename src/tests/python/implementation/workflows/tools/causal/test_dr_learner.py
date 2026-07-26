@@ -394,10 +394,9 @@ class _LightweightValidateDR(_BaseValidateDR):
         )
         mu1 = mu0 + 0.8 + 0.5 * test_df["segment_score"].to_numpy(dtype=float)
         outcome = test_df["outcome"].to_numpy(dtype=float)
-        residual_correction = (
-            treatment * (outcome - mu1) / propensity
-            - (1.0 - treatment) * (outcome - mu0) / (1.0 - propensity)
-        )
+        residual_correction = treatment * (outcome - mu1) / propensity - (1.0 - treatment) * (
+            outcome - mu0
+        ) / (1.0 - propensity)
         dr_outcome = mu1 - mu0 + residual_correction
         return _HeldOutDRResult(
             dr_outcome=dr_outcome,
@@ -455,6 +454,8 @@ def test_fit_passes_numeric_categories_matching_encoded_treatment() -> None:
     _RecordingEstimator.reset()
     repo = _InMemoryModelsRepo()
     model = _TestDRModel(models_repo=repo, encoding_util=EncodingUtil())
+    user_id = uuid4()
+    conversation_id = uuid4()
     spec = _inference_ready_spec(
         plan_columns=[
             {
@@ -467,15 +468,24 @@ def test_fit_passes_numeric_categories_matching_encoded_treatment() -> None:
         ]
     )
 
+    command = _fit_command(df=_df(), inference_ready_spec=spec)
     result = model.execute(
-        user_id=uuid4(),
-        conversation_id=uuid4(),
-        command=_fit_command(df=_df(), inference_ready_spec=spec),
+        user_id=user_id,
+        conversation_id=conversation_id,
+        command=command,
     )
 
     assert isinstance(result, FitSuccess)
     assert _RecordingEstimator.last_init_kwargs is not None
     assert _RecordingEstimator.last_init_kwargs["categories"] == [0.0, 1.0]
+    record = repo.load_model(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        model_id=command.run_id,
+    )
+    assert record is not None
+    assert record.metadata["meta"]["model_training_config"]["run_seed"] == 1729
+    assert record.metadata["meta"]["model_training_config"]["outer_cv_cate_folds"] == 10
 
 
 def test_fit_sets_allow_missing_for_unhandled_covariate_missingness() -> None:
@@ -655,8 +665,7 @@ def test_cate_uses_transformation_plan_order_for_effect_modifiers() -> None:
     assert list(recorded_x.columns) == ["risk_score", "segment_score"]
 
 
-def test_validate_dr_returns_one_fold_aware_oof_row_for_every_patient(monkeypatch) -> None:
-    monkeypatch.setenv("PRECISION_MEDICINE_ENABLE_OUTER_CV_CATE", "2")
+def test_validate_dr_returns_one_fold_aware_oof_row_for_every_patient() -> None:
     repo = _InMemoryModelsRepo()
     model = _TestDRModel(models_repo=repo, encoding_util=EncodingUtil())
     validation_df = _validation_df()
@@ -673,6 +682,8 @@ def test_validate_dr_returns_one_fold_aware_oof_row_for_every_patient(monkeypatc
     )
     result = _LightweightValidateDR(
         run_dr=model._build_run_dr(),
+        n_jobs=1,
+        outer_cv_folds=2,
     ).execute(
         user_id=uuid4(),
         conversation_id=uuid4(),
@@ -770,11 +781,10 @@ def test_fit_held_out_dr_scores_uses_only_outer_training_nuisance_models(monkeyp
     expected_mu1 = np.full(4, np.mean([2.2, 2.6]))
     expected_propensity = np.full(4, 0.4)
     expected_outcome = np.array([1.1, 2.9, 1.4, 3.0])
-    expected_residual = (
-        expected_treatment * (expected_outcome - expected_mu1) / expected_propensity
-        - (1.0 - expected_treatment)
-        * (expected_outcome - expected_mu0)
-        / (1.0 - expected_propensity)
+    expected_residual = expected_treatment * (
+        expected_outcome - expected_mu1
+    ) / expected_propensity - (1.0 - expected_treatment) * (expected_outcome - expected_mu0) / (
+        1.0 - expected_propensity
     )
 
     np.testing.assert_array_equal(result.treatment_binary, expected_treatment)

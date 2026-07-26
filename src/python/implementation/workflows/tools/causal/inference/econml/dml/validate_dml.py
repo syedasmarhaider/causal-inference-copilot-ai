@@ -32,6 +32,9 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
     ValidateResult,
     ValidateSuccess,
 )
+from python.implementation.workflows.tools.causal.inference.econml import (
+    model_training_config,
+)
 from python.implementation.workflows.tools.causal.inference.econml.dml._base_run_dml import (
     _BaseRunDML,
     _configured_run_seed,
@@ -48,7 +51,6 @@ from python.implementation.workflows.tools.causal.inference.econml.utils import 
 
 log = get_logger(__name__)
 
-_OUTER_CV_ENV = "PRECISION_MEDICINE_ENABLE_OUTER_CV_CATE"
 _OUTER_CV_N_JOBS_ENV = "PRECISION_MEDICINE_OUTER_CV_CATE_N_JOBS"
 _INNER_DML_CV = 5
 _VALIDATION_GROUPS = 4
@@ -129,6 +131,7 @@ class _BaseValidateDML:
 
     run_dml: _BaseRunDML
     n_jobs: int | None = None
+    outer_cv_folds: int | None = None
     # Retained only for constructor compatibility with older dependency-injection
     # tests. The cross-fitted evaluator no longer fabricates DRTester state.
     dr_tester_cls: Any = DRTester
@@ -143,11 +146,7 @@ class _BaseValidateDML:
         started_at = now_utc()
         fit_command = command.fit_command
         try:
-            n_splits = resolve_outer_cv_folds()
-            if n_splits == 1:
-                raise ModelSpecError(
-                    f"{_OUTER_CV_ENV} must be set to an integer from 2 to 10 for VALIDATE."
-                )
+            n_splits = resolve_outer_cv_folds(configured=self.outer_cv_folds)
             effect_modifiers = fit_command.inference_ready_spec.get_effect_modifiers_order()
             if not effect_modifiers:
                 raise ModelSpecError("Outer-CV validation requires at least one effect modifier.")
@@ -167,7 +166,7 @@ class _BaseValidateDML:
                     random_state=_configured_run_seed(),
                 ).split(np.zeros(len(fit_command.df)), treatment_1d)
             )
-            n_jobs = n_splits
+            n_jobs = resolve_outer_cv_n_jobs(n_splits=n_splits, configured=self.n_jobs)
             log.info(
                 "%s outer-CV DR validation started",
                 self.run_dml.BACKEND_NAME,
@@ -192,11 +191,9 @@ class _BaseValidateDML:
                 validation_dataframe,
                 n_groups=_VALIDATION_GROUPS,
             )
-            dr_test_summary, gate_summary, validation_diagnostics = (
-                self._evaluate_cross_fitted_oof(
-                    validation_dataframe=validation_dataframe,
-                    treatment=treatment_1d,
-                )
+            dr_test_summary, gate_summary, validation_diagnostics = self._evaluate_cross_fitted_oof(
+                validation_dataframe=validation_dataframe,
+                treatment=treatment_1d,
             )
             warnings = [warning for result in results for warning in result.warnings]
             nuisance_diagnostics = [result.diagnostics for result in results]
@@ -555,10 +552,9 @@ class _BaseValidateDML:
                 }
             )
 
-        residual_correction = (
-            treatment_binary * (y_test_1d - mu1) / propensity_used
-            - (1.0 - treatment_binary) * (y_test_1d - mu0) / (1.0 - propensity_used)
-        )
+        residual_correction = treatment_binary * (y_test_1d - mu1) / propensity_used - (
+            1.0 - treatment_binary
+        ) * (y_test_1d - mu0) / (1.0 - propensity_used)
         dr_outcome = mu1 - mu0 + residual_correction
         if not np.all(np.isfinite(dr_outcome)):
             raise _ValidationFoldError("Held-out DR outcomes contain non-finite values.")
@@ -825,10 +821,7 @@ def _fold_adjusted_blp(
     outer_fold: np.ndarray,
 ) -> tuple[float, float, float]:
     folds = np.sort(np.unique(outer_fold))
-    fold_dummies = [
-        (outer_fold == fold).astype(float)
-        for fold in folds[1:]
-    ]
+    fold_dummies = [(outer_fold == fold).astype(float) for fold in folds[1:]]
     columns = [np.ones(len(cate_oof), dtype=float), cate_oof, *fold_dummies]
     design = np.column_stack(columns)
     fitted = OLS(dr_oof, design).fit(cov_type="HC3")
@@ -1064,8 +1057,7 @@ def _outcome_counts(y: np.ndarray) -> dict[str, int] | dict[str, float]:
     unique, counts = np.unique(values, return_counts=True)
     if len(unique) <= 20:
         return {
-            str(_json_scalar(key)): int(count)
-            for key, count in zip(unique, counts, strict=True)
+            str(_json_scalar(key)): int(count) for key, count in zip(unique, counts, strict=True)
         }
     return {
         "n": int(len(values)),
@@ -1075,10 +1067,7 @@ def _outcome_counts(y: np.ndarray) -> dict[str, int] | dict[str, float]:
 
 def _treatment_counts(treatment: np.ndarray) -> dict[str, int]:
     unique, counts = np.unique(np.asarray(treatment).reshape(-1), return_counts=True)
-    return {
-        str(_json_scalar(key)): int(count)
-        for key, count in zip(unique, counts, strict=True)
-    }
+    return {str(_json_scalar(key)): int(count) for key, count in zip(unique, counts, strict=True)}
 
 
 def _warning_detail_to_string(detail: dict[str, Any]) -> str:
@@ -1105,19 +1094,16 @@ def _json_array_or_none(value: Any) -> Any:
     return array.tolist()
 
 
-def resolve_outer_cv_folds() -> int:
-    raw_value = os.getenv(_OUTER_CV_ENV)
-    if raw_value is None:
-        return 1
-    try:
-        folds = int(raw_value.strip())
-    except ValueError as exc:
+def resolve_outer_cv_folds(*, configured: int | None = None) -> int:
+    folds = (
+        model_training_config.MODEL_TRAINING_CONFIG.outer_cv_cate_folds
+        if configured is None
+        else configured
+    )
+    if isinstance(folds, bool) or not isinstance(folds, int) or not 2 <= folds <= 10:
         raise ModelSpecError(
-            f"{_OUTER_CV_ENV} must be an integer from 2 to 10 when set. Received: {raw_value!r}."
-        ) from exc
-    if not 2 <= folds <= 10:
-        raise ModelSpecError(
-            f"{_OUTER_CV_ENV} must be an integer from 2 to 10 when set. Received: {raw_value!r}."
+            "Model training config outer_cv_cate_folds must be an integer from 2 to 10. "
+            f"Received: {folds!r}."
         )
     return folds
 

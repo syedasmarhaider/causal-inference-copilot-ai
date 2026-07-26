@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,6 +31,9 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
     FitSuccess,
 )
 from python.implementation.workflows.tools.causal.inference.causal_model import CausalResult
+from python.implementation.workflows.tools.causal.inference.econml import (
+    model_training_config,
+)
 from python.implementation.workflows.tools.causal.inference.econml.dml.shared_nuisance_models import (
     get_default_models_for_t_and_y as _get_default_models_for_t_and_y,
 )
@@ -51,11 +53,8 @@ from python.implementation.workflows.tools.causal.specs.causal_spec import Causa
 log = get_logger(__name__)
 
 # =============================================================================
-# Reproducibility and scientifically conservative DML defaults
+# Scientifically conservative DML defaults
 # =============================================================================
-
-_RUN_SEED_ENV = "PRECISION_MEDICINE_RUN_SEED"
-_MAX_SKLEARN_SEED = 2**32 - 1
 
 _DML_CV_FOLDS = 5
 _DML_MC_ITERS = 1
@@ -63,12 +62,6 @@ _DML_MC_AGG = "median"
 
 _SPARSE_LINEAR_DML_MAX_ITER = 10_000
 _SPARSE_LINEAR_DML_TOL = 1e-4
-
-_CAUSAL_FOREST_N_ESTIMATORS = 2_000
-_CAUSAL_FOREST_SUBFOREST_SIZE = 4
-_CAUSAL_FOREST_MAX_SAMPLES = 0.45
-_CAUSAL_FOREST_MIN_SAMPLES_LEAF = 20
-_CAUSAL_FOREST_MIN_BALANCEDNESS_TOL = 0.45
 
 
 def _shape_as_list(x: Any) -> list[int] | None:
@@ -164,46 +157,8 @@ def _set_if_supported(
 
 
 def _configured_run_seed() -> int | None:
-    """
-    Resolve the analysis seed from PRECISION_MEDICINE_RUN_SEED.
-
-    Examples:
-        PRECISION_MEDICINE_RUN_SEED=1729
-            Reproduce the primary manuscript analysis.
-
-        PRECISION_MEDICINE_RUN_SEED=2718
-            Run a prespecified seed-sensitivity analysis.
-
-        PRECISION_MEDICINE_RUN_SEED=none
-            Run an explicitly unseeded exploratory analysis.
-
-    The default is 1729 so production and manuscript executions are seeded
-    unless unseeded behavior is requested explicitly.
-    """
-    raw_value = os.getenv(_RUN_SEED_ENV)
-    if raw_value is None:
-        return None
-
-    normalized = raw_value.strip().lower()
-    if normalized in {"", "none", "null", "random", "unseeded"}:
-        return None
-
-    try:
-        seed = int(normalized)
-    except ValueError as exc:
-        raise ModelSpecError(
-            f"{_RUN_SEED_ENV} must be an integer or one of "
-            "{'none', 'null', 'random', 'unseeded'}. "
-            f"Received: {raw_value!r}."
-        ) from exc
-
-    if not 0 <= seed <= _MAX_SKLEARN_SEED:
-        raise ModelSpecError(
-            f"{_RUN_SEED_ENV} must be between 0 and {_MAX_SKLEARN_SEED}, "
-            f"inclusive. Received: {seed}."
-        )
-
-    return seed
+    """Return the application-wide run seed from code configuration."""
+    return model_training_config.MODEL_TRAINING_CONFIG.run_seed
 
 
 def set_dml_defaults(
@@ -261,30 +216,31 @@ def set_causal_forest_defaults(
     reduce Monte Carlo noise and avoid highly local, unstable CATE estimates.
     """
     set_dml_defaults(defaults, init_map, run_seed=run_seed)
+    forest_config = model_training_config.MODEL_TRAINING_CONFIG.causal_forest
 
     _set_if_supported(
         defaults,
         init_map,
         "n_estimators",
-        _CAUSAL_FOREST_N_ESTIMATORS,
+        forest_config.n_estimators,
     )
     _set_if_supported(
         defaults,
         init_map,
         "subforest_size",
-        _CAUSAL_FOREST_SUBFOREST_SIZE,
+        forest_config.subforest_size,
     )
     _set_if_supported(
         defaults,
         init_map,
         "max_samples",
-        _CAUSAL_FOREST_MAX_SAMPLES,
+        forest_config.max_samples,
     )
     _set_if_supported(
         defaults,
         init_map,
         "min_samples_leaf",
-        _CAUSAL_FOREST_MIN_SAMPLES_LEAF,
+        forest_config.min_samples_leaf,
     )
     _set_if_supported(defaults, init_map, "honest", True)
     _set_if_supported(defaults, init_map, "inference", True)
@@ -293,7 +249,7 @@ def set_causal_forest_defaults(
         defaults,
         init_map,
         "min_balancedness_tol",
-        _CAUSAL_FOREST_MIN_BALANCEDNESS_TOL,
+        forest_config.min_balancedness_tol,
     )
     _set_if_supported(defaults, init_map, "n_jobs", -1)
 
@@ -584,7 +540,9 @@ class _BaseRunDML:
                     "backend": self.BACKEND_NAME,
                     "n": int(df.shape[0]),
                     "run_seed": run_seed,
-                    "run_seed_env": _RUN_SEED_ENV,
+                    "model_training_config": (
+                        model_training_config.MODEL_TRAINING_CONFIG.as_metadata()
+                    ),
                     "dml_cross_fitting": {
                         "cv": defaults.get("cv"),
                         "mc_iters": defaults.get("mc_iters"),
