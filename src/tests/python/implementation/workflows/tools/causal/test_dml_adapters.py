@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import numpy as np
 import pandas as pd
 import pytest
-from econml.validate import DRTester
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 
 from python.domain.repo.models_repo import ModelRecord
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
@@ -29,6 +29,9 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
     ValidateCommand,
     ValidateSuccess,
 )
+from python.implementation.workflows.tools.causal.inference.econml.dml import (
+    validate_dml as validate_dml_module,
+)
 from python.implementation.workflows.tools.causal.inference.econml.dml.kernel_dml import (
     KernelDMLCausalModel,
 )
@@ -39,9 +42,11 @@ from python.implementation.workflows.tools.causal.inference.econml.dml.sparse_li
     SparseLinearDMLCausalModel,
 )
 from python.implementation.workflows.tools.causal.inference.econml.dml.validate_dml import (
+    _add_within_fold_ranking_columns,
     _BaseValidateDML,
-    _CATEOnCombinedFeatures,
     _exclusive_quantile_groups,
+    _HeldOutDRResult,
+    _ValidationFoldError,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
@@ -182,6 +187,28 @@ def _df(
     if segment_missing:
         df.loc[1, "segment_score"] = np.nan
     return df
+
+
+def _validation_df(row_count: int = 40) -> pd.DataFrame:
+    row = np.arange(row_count, dtype=float)
+    treatment_binary = np.arange(row_count) % 2
+    segment_score = np.linspace(-1.0, 1.0, row_count)
+    age = 30.0 + np.mod(row, 35.0)
+    income = 50_000.0 + 425.0 * row
+    baseline = 0.4 + 0.015 * age + 0.000004 * income + 0.3 * segment_score
+    treatment_effect = 0.8 + 0.5 * segment_score
+    outcome = baseline + treatment_binary * treatment_effect
+    return pd.DataFrame(
+        {
+            "treatment": np.where(treatment_binary == 1, "drug", "placebo"),
+            "patient_id": np.arange(1, row_count + 1),
+            "outcome": outcome,
+            "age": age,
+            "income": income,
+            "segment_score": segment_score,
+            "risk_score": np.linspace(1.0, 0.0, row_count),
+        }
+    )
 
 
 def _df_with_categorical_effect_modifier() -> pd.DataFrame:
@@ -351,35 +378,6 @@ class _RecordingFeaturizedEstimator:
         return None
 
 
-class _ColumnVectorEffectEstimator:
-    def effect(
-        self, X, T0=None, T1=None
-    ):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
-        rows = int(getattr(X, "shape", [0])[0])
-        return np.ones((rows, 1), dtype=float)
-
-
-def test_drtester_cate_adapter_flattens_column_vector_predictions() -> None:
-    adapter = _CATEOnCombinedFeatures(
-        estimator=_ColumnVectorEffectEstimator(),
-        effect_modifier_columns=["segment_score"],
-    )
-
-    result = adapter.effect(
-        pd.DataFrame(
-            {
-                "segment_score": [0.1, 0.2, 0.3],
-                "covariate": [10.0, 20.0, 30.0],
-            }
-        ),
-        T0=0,
-        T1=1,
-    )
-
-    np.testing.assert_array_equal(result, np.ones(3))
-    assert result.ndim == 1
-
-
 class _RecordingKernelEstimator:
     last_init_kwargs: ClassVar[dict[str, Any] | None] = None
     last_fit_payload: ClassVar[dict[str, Any] | None] = None
@@ -468,86 +466,71 @@ class _TestKernelDMLModel(KernelDMLCausalModel):
     INFO: ClassVar[str] = "test"
 
 
-class _FakeDRTester:
-    """Small source-compatible DRTester double that preserves indexing semantics."""
-
-    def __init__(
+class _LightweightValidateDML(_BaseValidateDML):
+    def _fit_held_out_dr_scores(
         self,
         *,
-        model_regression: Any,
-        model_propensity: Any,
-        cate: Any,
-        cv: int,
-    ) -> None:
-        if cate is None:
-            assert model_regression is None
-            assert model_propensity is None
-        else:
-            assert model_regression is not None
-            assert model_propensity is not None
-        assert cv == 5
-        self.cate = cate
-        self.dr_val_ = np.asarray([], dtype=float)
-        self.treatments = np.asarray([], dtype=np.int64)
+        command: FitCommand,
+        train_df: pd.DataFrame,
+        test_df: pd.DataFrame,
+        outer_fold: int,
+    ) -> _HeldOutDRResult:
+        _ = (command, train_df)
+        treatment = (test_df["treatment"].to_numpy() == "drug").astype(float)
+        propensity = np.full(len(test_df), 0.5, dtype=float)
+        mu0 = (
+            0.4
+            + 0.015 * test_df["age"].to_numpy(dtype=float)
+            + 0.000004 * test_df["income"].to_numpy(dtype=float)
+            + 0.3 * test_df["segment_score"].to_numpy(dtype=float)
+        )
+        mu1 = mu0 + 0.8 + 0.5 * test_df["segment_score"].to_numpy(dtype=float)
+        outcome = test_df["outcome"].to_numpy(dtype=float)
+        residual_correction = (
+            treatment * (outcome - mu1) / propensity
+            - (1.0 - treatment) * (outcome - mu0) / (1.0 - propensity)
+        )
+        dr_outcome = mu1 - mu0 + residual_correction
+        return _HeldOutDRResult(
+            dr_outcome=dr_outcome,
+            propensity=propensity,
+            propensity_used=propensity.copy(),
+            propensity_clipped=np.zeros(len(test_df), dtype=bool),
+            mu0=mu0,
+            mu1=mu1,
+            residual_correction=residual_correction,
+            treatment_binary=treatment,
+            warnings=[],
+            diagnostics={
+                "outer_fold": outer_fold,
+                "train_rows": len(train_df),
+                "held_out_rows": len(test_df),
+            },
+        )
 
-    def fit_nuisance(
-        self,
-        *,
-        Xval: Any,
-        Dval: Any,
-        yval: Any,
-        Xtrain: Any,
-        Dtrain: Any,
-        ytrain: Any,
-    ) -> None:
-        dval = np.asarray(Dval)
-        dtrain = np.asarray(Dtrain)
-        assert dval.dtype == np.dtype(np.int64)
-        assert dtrain.dtype == np.dtype(np.int64)
-        assert dval.ndim == dtrain.ndim == 1
-        assert len(Xval) == len(dval) == len(yval)
-        assert len(Xtrain) == len(dtrain) == len(ytrain)
-        assert np.asarray(Xval).shape[1] == np.asarray(Xtrain).shape[1] == 3
 
-        self.treatments = np.sort(np.unique(dval))
-        np.testing.assert_array_equal(np.unique(dtrain), self.treatments)
+class _ConstantPropensityModel(ClassifierMixin, BaseEstimator):
+    def __init__(self, treated_probability: float = 0.4) -> None:
+        self.treated_probability = treated_probability
 
-        # EconML's calculate_dr_outcomes performs equivalent direct column
-        # indexing. This intentionally raises IndexError if Dval remains float.
-        regression_predictions = np.zeros((len(dval), len(self.treatments)))
-        regression_predictions[np.arange(len(dval)), dval]
-        self.dr_val_ = np.arange(len(Xval), dtype=float).reshape(-1, 1)
-
-    def get_cate_preds(self, *, Xval: Any, Xtrain: Any) -> None:
-        base = self.treatments[0]
-        validation_predictions = [
-            self.cate.effect(X=Xval, T0=base, T1=treatment) for treatment in self.treatments[1:]
-        ]
-        training_predictions = [
-            self.cate.effect(X=Xtrain, T0=base, T1=treatment) for treatment in self.treatments[1:]
-        ]
-        assert all(len(prediction) == len(Xval) for prediction in validation_predictions)
-        assert all(len(prediction) == len(Xtrain) for prediction in training_predictions)
-
-    def evaluate_all(self, *, n_bootstrap: int) -> _FakeDRTester:
-        assert n_bootstrap == 1_000
-        if self.cate is None:
-            np.testing.assert_array_equal(self.dr_train_, self.dr_val_)
+    def fit(self, X: Any, y: Any) -> _ConstantPropensityModel:
+        _ = X
+        self.classes_ = np.sort(np.unique(np.asarray(y)))
         return self
 
-    def summary(self) -> pd.DataFrame:
-        return pd.DataFrame({"test_name": ["fake_dr_test"]})
+    def predict_proba(self, X: Any) -> np.ndarray:
+        treated = np.full(len(X), self.treated_probability, dtype=float)
+        return np.column_stack([1.0 - treated, treated])
 
 
-class _WrongRowCountDRTester(_FakeDRTester):
-    def fit_nuisance(self, **kwargs: Any) -> None:
-        super().fit_nuisance(**kwargs)
-        self.dr_val_ = np.append(self.dr_val_.reshape(-1), 999.0).reshape(-1, 1)
+class _MeanOutcomeModel(RegressorMixin, BaseEstimator):
+    def fit(self, X: Any, y: Any) -> _MeanOutcomeModel:
+        _ = X
+        self.mean_ = float(np.mean(np.asarray(y, dtype=float)))
+        return self
 
-
-class _ExplodingDRTester(_FakeDRTester):
-    def fit_nuisance(self, **_: Any) -> None:
-        raise IndexError("simulated DRTester treatment-index failure")
+    def predict(self, X: Any) -> np.ndarray:
+        return np.full(len(X), self.mean_, dtype=float)
 
 
 def _fit_command(
@@ -890,9 +873,91 @@ def test_causal_forest_dml_module_imports_cleanly() -> None:
     )
 
 
-@pytest.mark.parametrize("n_jobs", [1, 2])
-def test_validate_dml_returns_one_oof_row_for_every_patient(monkeypatch, n_jobs: int) -> None:
+def test_validate_dml_returns_one_fold_aware_oof_row_for_every_patient(monkeypatch) -> None:
     monkeypatch.setenv("PRECISION_MEDICINE_ENABLE_OUTER_CV_CATE", "2")
+    repo = _InMemoryModelsRepo()
+    model = _TestLinearDMLModel(models_repo=repo, encoding_util=EncodingUtil())
+    validation_df = _validation_df()
+    spec = _inference_ready_spec(
+        plan_columns=[
+            {
+                "column": "segment_score",
+                "role": "effect_modifier",
+                "encoding": {"preset": "num_standard"},
+            },
+            {"column": "income", "role": "covariate", "encoding": {"preset": "num_standard"}},
+            {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
+        ]
+    )
+    result = _LightweightValidateDML(
+        run_dml=model._build_run_dml(),
+    ).execute(
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        command=ValidateCommand(
+            fit_command=_fit_command(
+                model_name="linear_dml",
+                df=validation_df,
+                inference_ready_spec=spec,
+            )
+        ),
+    )
+
+    assert isinstance(result, ValidateSuccess)
+    oof = result.validation_dataframe
+    assert oof["effect_row"].tolist() == list(range(1, len(validation_df) + 1))
+    assert oof["outer_fold"].value_counts().to_dict() == {1: 20, 2: 20}
+    assert oof["cate_oof"].tolist() == [1.0] * len(validation_df)
+    assert oof["cate_quartile_within_fold"].value_counts().to_dict() == {
+        1: 10,
+        2: 10,
+        3: 10,
+        4: 10,
+    }
+    assert {
+        "treatment_oof",
+        "mu0_oof",
+        "mu1_oof",
+        "propensity_oof",
+        "propensity_used_oof",
+        "propensity_clipped_oof",
+        "dr_residual_correction_oof",
+        "dr_outcome_oof",
+        "cate_percentile_within_fold",
+        "cate_quartile_within_fold",
+    }.issubset(oof.columns)
+    assert np.isfinite(
+        oof[
+            [
+                "cate_oof",
+                "mu0_oof",
+                "mu1_oof",
+                "propensity_oof",
+                "dr_outcome_oof",
+            ]
+        ].to_numpy(dtype=float)
+    ).all()
+    assert result.dr_test_summary["evaluation_scope"].tolist() == ["fold_aware_oof"]
+    assert {
+        "blp_est",
+        "blp_se",
+        "blp_pval",
+        "cal_r_squared",
+        "qini_est",
+        "qini_se",
+        "qini_pval",
+        "autoc_est",
+        "autoc_se",
+        "autoc_pval",
+    }.issubset(result.dr_test_summary.columns)
+    assert result.meta["dr_evaluation_scope"] == "fold_aware_oof"
+    assert len(result.meta["gate_summary"]) == 4
+    assert sum(group["n"] for group in result.meta["gate_summary"]) == len(validation_df)
+    assert len(result.meta["dr_nuisance_diagnostics"]) == 2
+    assert repo._records == {}
+
+
+def test_fit_held_out_dr_scores_uses_only_outer_training_nuisance_models(monkeypatch) -> None:
     repo = _InMemoryModelsRepo()
     model = _TestLinearDMLModel(models_repo=repo, encoding_util=EncodingUtil())
     spec = _inference_ready_spec(
@@ -906,73 +971,99 @@ def test_validate_dml_returns_one_oof_row_for_every_patient(monkeypatch, n_jobs:
             {"column": "age", "role": "covariate", "encoding": {"preset": "num_standard"}},
         ]
     )
-    result = _BaseValidateDML(
-        run_dml=model._build_run_dml(),
-        n_jobs=n_jobs,
-        dr_tester_cls=_FakeDRTester,
-    ).execute(
-        user_id=uuid4(),
-        conversation_id=uuid4(),
-        command=ValidateCommand(
-            fit_command=_fit_command(
-                model_name="linear_dml",
-                df=_df(),
-                inference_ready_spec=spec,
-            )
-        ),
+    command = _fit_command(
+        model_name="linear_dml",
+        df=_df(),
+        inference_ready_spec=spec,
+    )
+    monkeypatch.setattr(
+        validate_dml_module,
+        "get_drtester_models_for_t_and_y",
+        lambda *args, **kwargs: (_MeanOutcomeModel(), _ConstantPropensityModel()),
     )
 
-    assert isinstance(result, ValidateSuccess)
-    assert result.validation_dataframe["effect_row"].tolist() == list(range(1, 9))
-    assert result.validation_dataframe["outer_fold"].value_counts().to_dict() == {1: 4, 2: 4}
-    assert result.validation_dataframe["cate_oof"].tolist() == [1.0] * 8
-    assert sorted(result.validation_dataframe["dr_outcome_oof"].tolist()) == [
-        0.0,
-        0.0,
-        1.0,
-        1.0,
-        2.0,
-        2.0,
-        3.0,
-        3.0,
-    ]
-    assert result.dr_test_summary["evaluation_scope"].tolist() == ["pooled_oof"]
-    assert result.dr_test_summary["test_name"].tolist() == ["fake_dr_test"]
-    assert "cal_r_squared" in result.dr_test_summary
-    assert repo._records == {}
+    result = _BaseValidateDML(
+        run_dml=model._build_run_dml(),
+    )._fit_held_out_dr_scores(
+        command=command,
+        train_df=_df().iloc[:4].reset_index(drop=True),
+        test_df=_df().iloc[4:].reset_index(drop=True),
+        outer_fold=1,
+    )
+
+    expected_treatment = np.array([0.0, 1.0, 0.0, 1.0])
+    expected_mu0 = np.full(4, np.mean([1.0, 1.3]))
+    expected_mu1 = np.full(4, np.mean([2.2, 2.6]))
+    expected_propensity = np.full(4, 0.4)
+    expected_outcome = np.array([1.1, 2.9, 1.4, 3.0])
+    expected_residual = (
+        expected_treatment * (expected_outcome - expected_mu1) / expected_propensity
+        - (1.0 - expected_treatment)
+        * (expected_outcome - expected_mu0)
+        / (1.0 - expected_propensity)
+    )
+
+    np.testing.assert_array_equal(result.treatment_binary, expected_treatment)
+    np.testing.assert_allclose(result.propensity, expected_propensity)
+    np.testing.assert_allclose(result.mu0, expected_mu0)
+    np.testing.assert_allclose(result.mu1, expected_mu1)
+    np.testing.assert_allclose(result.residual_correction, expected_residual)
+    np.testing.assert_allclose(
+        result.dr_outcome,
+        expected_mu1 - expected_mu0 + expected_residual,
+    )
+    assert result.diagnostics["train_rows"] == 4
+    assert result.diagnostics["held_out_rows"] == 4
 
 
-def test_pooled_oof_evaluation_runs_with_real_econml_drtester() -> None:
+def test_fold_aware_oof_evaluation_returns_metrics_gates_and_diagnostics() -> None:
     rng = np.random.default_rng(23)
     row_count = 120
     cate = np.linspace(-1.5, 1.5, row_count)
+    treatment = np.resize(np.array([0, 1]), row_count)
     validation_dataframe = pd.DataFrame(
         {
+            "outer_fold": np.repeat([1, 2], row_count // 2),
+            "treatment_oof": treatment,
             "cate_oof": cate,
             "dr_outcome_oof": 0.4 * cate + rng.normal(scale=0.7, size=row_count),
+            "propensity_oof": np.full(row_count, 0.5),
         }
+    )
+    validation_dataframe = _add_within_fold_ranking_columns(
+        validation_dataframe,
+        n_groups=4,
     )
     validator = _BaseValidateDML(
         run_dml=object(),  # type: ignore[arg-type]
-        dr_tester_cls=DRTester,
     )
 
-    summary = validator._evaluate_pooled_oof(
+    summary, gate_summary, diagnostics = validator._evaluate_cross_fitted_oof(
         validation_dataframe=validation_dataframe,
-        treatment=np.resize(np.array([0, 1]), row_count),
+        treatment=treatment,
     )
 
     assert len(summary) == 1
-    assert summary["evaluation_scope"].tolist() == ["pooled_oof"]
+    assert summary["evaluation_scope"].tolist() == ["fold_aware_oof"]
     assert {
         "blp_est",
+        "blp_se",
+        "blp_pval",
         "cal_r_squared",
         "qini_est",
+        "qini_se",
+        "qini_pval",
         "autoc_est",
+        "autoc_se",
+        "autoc_pval",
     }.issubset(summary.columns)
+    assert [group["quartile"] for group in gate_summary] == ["Q1", "Q2", "Q3", "Q4"]
+    assert sum(group["n"] for group in gate_summary) == row_count
+    assert diagnostics["blp_covariance"] == "HC3"
+    assert diagnostics["blp_fold_fixed_effects"] is True
 
 
-def test_pooled_oof_quartiles_assign_every_row_exactly_once() -> None:
+def test_fold_aware_oof_quartiles_assign_every_row_exactly_once() -> None:
     values = np.ones(121, dtype=float)
 
     groups = _exclusive_quantile_groups(values, n_groups=4)
@@ -981,20 +1072,9 @@ def test_pooled_oof_quartiles_assign_every_row_exactly_once() -> None:
     assert np.bincount(groups, minlength=4).tolist() == [31, 30, 30, 30]
 
 
-@pytest.mark.parametrize(
-    ("dr_tester_cls", "exception_message"),
-    [
-        (_WrongRowCountDRTester, "DRTester returned the wrong held-out row count"),
-        (_ExplodingDRTester, "simulated DRTester treatment-index failure"),
-    ],
-    ids=["wrong-dr-row-count", "drtester-index-error"],
-)
-def test_validate_dml_converts_drtester_contract_violations_to_failure_and_cleans_models(
+def test_validate_dml_rejects_wrong_held_out_row_count_and_cleans_temporary_model(
     monkeypatch,
-    dr_tester_cls: type[_FakeDRTester],
-    exception_message: str,
 ) -> None:
-    monkeypatch.setenv("PRECISION_MEDICINE_ENABLE_OUTER_CV_CATE", "2")
     repo = _InMemoryModelsRepo()
     model = _TestLinearDMLModel(models_repo=repo, encoding_util=EncodingUtil())
     spec = _inference_ready_spec(
@@ -1009,23 +1089,43 @@ def test_validate_dml_converts_drtester_contract_violations_to_failure_and_clean
         ]
     )
 
-    result = _BaseValidateDML(
-        run_dml=model._build_run_dml(),
-        n_jobs=1,
-        dr_tester_cls=dr_tester_cls,
-    ).execute(
-        user_id=uuid4(),
-        conversation_id=uuid4(),
-        command=ValidateCommand(
-            fit_command=_fit_command(
-                model_name="linear_dml",
-                df=_df(),
-                inference_ready_spec=spec,
-            )
-        ),
+    def wrong_row_count(self: _BaseValidateDML, **kwargs: Any) -> _HeldOutDRResult:
+        _ = self
+        rows = len(kwargs["test_df"]) + 1
+        values = np.zeros(rows, dtype=float)
+        return _HeldOutDRResult(
+            dr_outcome=values,
+            propensity=values,
+            propensity_used=values,
+            propensity_clipped=np.zeros(rows, dtype=bool),
+            mu0=values,
+            mu1=values,
+            residual_correction=values,
+            treatment_binary=values,
+            warnings=[],
+            diagnostics={},
+        )
+
+    monkeypatch.setattr(_BaseValidateDML, "_fit_held_out_dr_scores", wrong_row_count)
+    validator = _BaseValidateDML(run_dml=model._build_run_dml())
+    fit_command = _fit_command(
+        model_name="linear_dml",
+        df=_df(),
+        inference_ready_spec=spec,
     )
 
-    assert isinstance(result, CommandFailure)
-    assert result.error.code == "ESTIMATOR_ERROR"
-    assert exception_message in result.error.details["exception"]
+    with pytest.raises(
+        _ValidationFoldError,
+        match="Held-out DR construction returned the wrong row count",
+    ):
+        validator._run_fold(
+            user_id=uuid4(),
+            conversation_id=uuid4(),
+            command=ValidateCommand(fit_command=fit_command),
+            outer_fold=1,
+            train_indices=np.array([0, 1, 2, 3]),
+            test_indices=np.array([4, 5, 6, 7]),
+            progress_queue=None,
+        )
+
     assert repo._records == {}
