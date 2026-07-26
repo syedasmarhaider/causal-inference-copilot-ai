@@ -8,6 +8,8 @@ from uuid import UUID, uuid4
 import numpy as np
 import pandas as pd
 import pytest
+from econml.validate import DRTester
+from sklearn.linear_model import LogisticRegression, Ridge
 
 from python.domain.repo.models_repo import ModelRecord
 from python.implementation.workflows.tools.causal.common.inference_ready_causal_spec import (
@@ -27,6 +29,9 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
     ValidateCommand,
     ValidateSuccess,
 )
+from python.implementation.workflows.tools.causal.inference.econml.dr import (
+    drtester_nuisance_models as dr_nuisance,
+)
 from python.implementation.workflows.tools.causal.inference.econml.dr.dr_learner import (
     ForestDRLearnerCausalModel,
     LinearDRLearnerCausalModel,
@@ -35,6 +40,7 @@ from python.implementation.workflows.tools.causal.inference.econml.dr.dr_learner
 from python.implementation.workflows.tools.causal.inference.econml.dr.validate_dr import (
     _BaseValidateDR,
     _CATEOnCombinedFeatures,
+    _exclusive_quantile_groups,
 )
 from python.implementation.workflows.tools.causal.specs.causal_spec import CausalSpec
 from python.implementation.workflows.tools.common.model.data_summary import DatasetSummaryModel
@@ -381,8 +387,12 @@ class _FakeDRTester:
         cate: Any,
         cv: int,
     ) -> None:
-        assert model_regression is not None
-        assert model_propensity is not None
+        if cate is None:
+            assert model_regression is None
+            assert model_propensity is None
+        else:
+            assert model_regression is not None
+            assert model_propensity is not None
         assert cv == 5
         self.cate = cate
         self.dr_val_ = np.asarray([], dtype=float)
@@ -429,6 +439,8 @@ class _FakeDRTester:
 
     def evaluate_all(self, *, n_bootstrap: int) -> _FakeDRTester:
         assert n_bootstrap == 1_000
+        if self.cate is None:
+            np.testing.assert_array_equal(self.dr_train_, self.dr_val_)
         return self
 
     def summary(self) -> pd.DataFrame:
@@ -700,8 +712,131 @@ def test_validate_dr_returns_one_oof_row_for_every_patient(monkeypatch, n_jobs: 
         3.0,
         3.0,
     ]
-    assert result.dr_test_summary["outer_fold"].tolist() == [1, 2]
+    assert result.dr_test_summary["evaluation_scope"].tolist() == ["pooled_oof"]
+    assert result.dr_test_summary["test_name"].tolist() == ["fake_dr_test"]
+    assert "cal_r_squared" in result.dr_test_summary
+    assert result.meta["dr_evaluation_scope"] == "pooled_oof"
     assert repo._records == {}
+
+
+def test_drtester_factory_uses_dr_candidate_families(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    propensity_candidates = [LogisticRegression(max_iter=100)]
+    outcome_candidates = [Ridge()]
+    recorded: dict[str, Any] = {}
+
+    def build_propensity(**kwargs: Any) -> list[Any]:
+        recorded["propensity"] = kwargs
+        return propensity_candidates
+
+    def build_outcome(**kwargs: Any) -> list[Any]:
+        recorded["outcome"] = kwargs
+        return outcome_candidates
+
+    monkeypatch.setattr(dr_nuisance, "_build_propensity_candidates", build_propensity)
+    monkeypatch.setattr(dr_nuisance, "_build_regression_candidates", build_outcome)
+    preprocessor = object()
+
+    model_regression, model_propensity = dr_nuisance.get_drtester_models_for_t_and_y(
+        _causal_spec(),  # type: ignore[arg-type]
+        pre_XW=preprocessor,  # type: ignore[arg-type]
+        n_xw=3,
+        missingness=False,
+        random_state=23,
+    )
+
+    assert model_regression.candidates is outcome_candidates  # type: ignore[attr-defined]
+    assert len(model_propensity.candidates) == 1  # type: ignore[attr-defined]
+    assert model_propensity.candidates[0].model is propensity_candidates[0]  # type: ignore[attr-defined]
+    assert recorded["propensity"].pop("pre_XW") is preprocessor
+    assert recorded["propensity"] == {
+        "missingness_W": False,
+        "random_state": 23,
+        "n_jobs": 1,
+    }
+    assert recorded["outcome"].pop("pre_XW") is preprocessor
+    assert recorded["outcome"] == {
+        "n_xw": 3,
+        "discrete_outcome": False,
+        "missingness_W": False,
+        "random_state": 23,
+        "n_jobs": 1,
+    }
+
+
+def test_drtester_factory_probability_scores_binary_outcome_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    propensity_candidate = LogisticRegression(max_iter=100)
+    outcome_candidate = LogisticRegression(max_iter=100)
+
+    monkeypatch.setattr(
+        dr_nuisance,
+        "_build_propensity_candidates",
+        lambda **_: [propensity_candidate],
+    )
+    monkeypatch.setattr(
+        dr_nuisance,
+        "_build_regression_candidates",
+        lambda **_: [outcome_candidate],
+    )
+
+    class _BinaryOutcome:
+        kind = "binary"
+
+    class _BinarySpec:
+        outcome_spec = _BinaryOutcome()
+
+    model_regression, model_propensity = dr_nuisance.get_drtester_models_for_t_and_y(
+        _BinarySpec(),  # type: ignore[arg-type]
+        pre_XW=object(),  # type: ignore[arg-type]
+        n_xw=3,
+        missingness=False,
+        random_state=31,
+    )
+
+    assert model_regression.candidates[0].model is outcome_candidate  # type: ignore[attr-defined]
+    assert model_propensity.candidates[0].model is propensity_candidate  # type: ignore[attr-defined]
+
+
+def test_pooled_oof_evaluation_runs_with_real_econml_drtester() -> None:
+    rng = np.random.default_rng(29)
+    row_count = 120
+    cate = np.linspace(-1.5, 1.5, row_count)
+    validation_dataframe = pd.DataFrame(
+        {
+            "cate_oof": cate,
+            "dr_outcome_oof": 0.4 * cate + rng.normal(scale=0.7, size=row_count),
+        }
+    )
+    validator = _BaseValidateDR(
+        run_dr=object(),  # type: ignore[arg-type]
+        dr_tester_cls=DRTester,
+    )
+
+    summary = validator._evaluate_pooled_oof(
+        validation_dataframe=validation_dataframe,
+        treatment=np.resize(np.array([0, 1]), row_count),
+    )
+
+    assert len(summary) == 1
+    assert summary["evaluation_scope"].tolist() == ["pooled_oof"]
+    assert {
+        "blp_est",
+        "cal_r_squared",
+        "qini_est",
+        "autoc_est",
+    }.issubset(summary.columns)
+
+
+def test_pooled_oof_quartiles_assign_every_row_exactly_once() -> None:
+    values = np.ones(121, dtype=float)
+
+    groups = _exclusive_quantile_groups(values, n_groups=4)
+
+    assert groups.tolist() == sorted(groups.tolist())
+    assert np.bincount(groups, minlength=4).tolist() == [31, 30, 30, 30]
 
 
 @pytest.mark.parametrize(

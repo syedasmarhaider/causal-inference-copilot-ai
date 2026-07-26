@@ -28,12 +28,12 @@ from python.implementation.workflows.tools.causal.inference.causal_command impor
     ValidateResult,
     ValidateSuccess,
 )
-from python.implementation.workflows.tools.causal.inference.econml.dml.shared_nuisance_models import (
-    get_drtester_models_for_t_and_y,
-)
 from python.implementation.workflows.tools.causal.inference.econml.dr._base_run_dr import (
     _BaseRunDR,
     _configured_run_seed,
+)
+from python.implementation.workflows.tools.causal.inference.econml.dr.drtester_nuisance_models import (
+    get_drtester_models_for_t_and_y,
 )
 from python.implementation.workflows.tools.causal.inference.econml.utils import (
     ModelSpecError,
@@ -53,12 +53,53 @@ _INNER_DR_CV = 5
 @dataclass(frozen=True, slots=True)
 class _FoldResult:
     dataframe: pd.DataFrame
-    dr_test_summary: pd.DataFrame
     warnings: list[str]
 
 
 class _ValidationFoldError(RuntimeError):
     pass
+
+
+def _exclusive_quantile_groups(
+    values: np.ndarray,
+    *,
+    n_groups: int,
+) -> np.ndarray:
+    """Assign each row to exactly one stable, approximately equal-sized group."""
+    values_1d = np.asarray(values, dtype=float).reshape(-1)
+    n_rows = len(values_1d)
+    if n_groups < 2:
+        raise ValueError("Pooled OOF calibration requires at least two groups.")
+    if n_rows < n_groups:
+        raise _ValidationFoldError("Pooled OOF calibration requires at least one row per group.")
+
+    order = np.argsort(values_1d, kind="stable")
+    ordered_groups = np.minimum(
+        np.arange(n_rows, dtype=np.int64) * n_groups // n_rows,
+        n_groups - 1,
+    )
+    groups = np.empty(n_rows, dtype=np.int64)
+    groups[order] = ordered_groups
+    return groups
+
+
+def _exclusive_calibration_r_squared(
+    *,
+    cate_oof: np.ndarray,
+    dr_oof: np.ndarray,
+    n_groups: int,
+) -> float:
+    """Calculate EconML's calibration score with exclusive group membership."""
+    groups = _exclusive_quantile_groups(cate_oof, n_groups=n_groups)
+    counts = np.bincount(groups, minlength=n_groups).astype(float)
+    gate = np.bincount(groups, weights=dr_oof, minlength=n_groups) / counts
+    grouped_cate = np.bincount(groups, weights=cate_oof, minlength=n_groups) / counts
+    probabilities = counts / float(len(groups))
+    grouped_error = float(np.sum(np.abs(gate - grouped_cate) * probabilities))
+    baseline_error = float(np.sum(np.abs(gate - float(np.mean(dr_oof))) * probabilities))
+    if np.isclose(baseline_error, 0.0):
+        return float("nan")
+    return 1.0 - grouped_error / baseline_error
 
 
 class _CATEOnCombinedFeatures:
@@ -142,8 +183,9 @@ class _BaseValidateDR:
                 [result.dataframe for result in results], ignore_index=True
             ).sort_values("effect_row", kind="stable", ignore_index=True)
             _validate_oof_coverage(validation_dataframe, expected_rows=len(fit_command.df))
-            dr_test_summary = pd.concat(
-                [result.dr_test_summary for result in results], ignore_index=True
+            dr_test_summary = self._evaluate_pooled_oof(
+                validation_dataframe=validation_dataframe,
+                treatment=treatment_1d,
             )
             warnings = [warning for result in results for warning in result.warnings]
             log.info(
@@ -168,6 +210,7 @@ class _BaseValidateDR:
                     "row_count": len(validation_dataframe),
                     "validation_columns": list(validation_dataframe.columns),
                     "dr_test_columns": list(dr_test_summary.columns),
+                    "dr_evaluation_scope": "pooled_oof",
                 },
             )
         except ModelSpecError as exc:
@@ -316,12 +359,11 @@ class _BaseValidateDR:
                     "Temporary fold model was not available for DR validation."
                 )
             _emit_progress(progress_queue, "dr_validation_started", outer_fold, train_df, test_df)
-            dr_outcome, dr_summary = self._run_drtester(
+            dr_outcome = self._run_drtester(
                 command=fit_command,
                 train_df=train_df,
                 test_df=test_df,
                 fitted_estimator=record.model,
-                outer_fold=outer_fold,
             )
             if len(dr_outcome) != len(test_df):
                 raise _ValidationFoldError("DRTester returned the wrong held-out row count.")
@@ -337,7 +379,6 @@ class _BaseValidateDR:
                         "dr_outcome_oof": dr_outcome,
                     }
                 ),
-                dr_test_summary=dr_summary,
                 warnings=[*fit_result.warnings, *cate_result.warnings],
             )
         finally:
@@ -355,8 +396,7 @@ class _BaseValidateDR:
         train_df: pd.DataFrame,
         test_df: pd.DataFrame,
         fitted_estimator: Any,
-        outer_fold: int,
-    ) -> tuple[np.ndarray, pd.DataFrame]:
+    ) -> np.ndarray:
         spec = command.inference_ready_spec
         effect_modifiers = spec.get_effect_modifiers_order()
         covariates = spec.get_covariates_order()
@@ -385,9 +425,12 @@ class _BaseValidateDR:
             dense_output=True,
             drop_first_effect_modifier_onehot=self.run_dr.DROP_FIRST_EFFECT_MODIFIER_ONEHOT,
         )
+        xw_train = _combine_x_w(x_train, w_train)
+        xw_test = _combine_x_w(x_test, w_test)
         model_regression, model_propensity = get_drtester_models_for_t_and_y(
             spec.causal_spec,
             pre_XW=plan.pre_XW,
+            n_xw=_matrix_width(xw_train),
             missingness=spec.requires_allow_missing_for_covariates(),
             random_state=_configured_run_seed(),
         )
@@ -400,8 +443,6 @@ class _BaseValidateDR:
             ),
             cv=_INNER_DR_CV,
         )
-        xw_train = _combine_x_w(x_train, w_train)
-        xw_test = _combine_x_w(x_test, w_test)
         tester.fit_nuisance(
             Xval=xw_test,
             Dval=t_test,
@@ -410,10 +451,74 @@ class _BaseValidateDR:
             Dtrain=t_train,
             ytrain=y_train,
         )
-        tester.get_cate_preds(Xval=xw_test, Xtrain=xw_train)
+        return np.asarray(tester.dr_val_, dtype=float).reshape(-1)
+
+    def _evaluate_pooled_oof(
+        self,
+        *,
+        validation_dataframe: pd.DataFrame,
+        treatment: np.ndarray,
+    ) -> pd.DataFrame:
+        """Evaluate all matched held-out CATE/DR pairs as one OOF cohort.
+
+        The primary and nuisance predictions remain outer-fold held out. This
+        method only evaluates the completed vectors; it does not refit or alter
+        the primary DR learner.
+        """
+        cate_oof = np.asarray(
+            validation_dataframe["cate_oof"],
+            dtype=float,
+        ).reshape(-1)
+        dr_oof = np.asarray(
+            validation_dataframe["dr_outcome_oof"],
+            dtype=float,
+        ).reshape(-1)
+
+        if len(cate_oof) != len(dr_oof) or len(cate_oof) != len(treatment):
+            raise _ValidationFoldError("Pooled OOF evaluation received inconsistent row counts.")
+        if not np.all(np.isfinite(cate_oof)):
+            raise _ValidationFoldError("Pooled OOF CATE predictions contain non-finite values.")
+        if not np.all(np.isfinite(dr_oof)):
+            raise _ValidationFoldError("Pooled OOF DR outcomes contain non-finite values.")
+
+        treatments = np.sort(np.unique(np.asarray(treatment).reshape(-1)))
+        if len(treatments) != 2:
+            raise _ValidationFoldError(
+                "Pooled OOF DRTester evaluation currently requires binary treatment."
+            )
+
+        # DRTester has no public constructor for precomputed OOF vectors.
+        # Populate the evaluation state consumed by BLP, calibration, and
+        # uplift without fitting another primary CATE model.
+        tester = self.dr_tester_cls(
+            model_regression=None,
+            model_propensity=None,
+            cate=None,
+            cv=_INNER_DR_CV,
+        )
+        tester.Dval = np.asarray(treatment).reshape(-1)
+        tester.treatments = treatments
+        tester.n_treat = 1
+        tester.fit_on_train = True
+        tester.dr_val_ = dr_oof.reshape(-1, 1)
+        tester.dr_train_ = dr_oof.reshape(-1, 1)
+        tester.cate_preds_val_ = cate_oof.reshape(-1, 1)
+        # Pooled OOF scores define the empirical calibration and uplift
+        # thresholds. Every score was generated without its own row in fit.
+        tester.cate_preds_train_ = cate_oof.reshape(-1, 1)
+        tester.ate_val = np.asarray([float(np.mean(dr_oof))])
+
         summary = tester.evaluate_all(n_bootstrap=1_000).summary().copy()
-        summary.insert(0, "outer_fold", outer_fold)
-        return np.asarray(tester.dr_val_, dtype=float).reshape(-1), summary
+        summary["cal_r_squared"] = round(
+            _exclusive_calibration_r_squared(
+                cate_oof=cate_oof,
+                dr_oof=dr_oof,
+                n_groups=4,
+            ),
+            3,
+        )
+        summary.insert(0, "evaluation_scope", "pooled_oof")
+        return summary
 
 
 def resolve_outer_cv_folds() -> int:
@@ -503,6 +608,16 @@ def _combine_x_w(X: Any, W: Any) -> Any:
     if isinstance(X, pd.DataFrame) and isinstance(W, pd.DataFrame):
         return pd.concat([X.reset_index(drop=True), W.reset_index(drop=True)], axis=1)
     return np.hstack([np.asarray(X), np.asarray(W)])
+
+
+def _matrix_width(value: Any) -> int:
+    shape = getattr(value, "shape", None)
+    if shape is not None and len(shape) == 2:
+        return int(shape[1])
+    array = np.asarray(value)
+    if array.ndim != 2:
+        raise _ValidationFoldError("DRTester nuisance features must be a two-dimensional matrix.")
+    return int(array.shape[1])
 
 
 def _extract_cate(
